@@ -369,6 +369,7 @@ pub(super) fn classify_with(
         scripts_read: 0,
         rebuilt: 0,
         not_shell: 0,
+        unknown_language: 0,
         sed_scope: None,
         ran: Vec::new(),
         ran_unknown: false,
@@ -534,6 +535,10 @@ struct Classifier {
     /// Inside a file that is not a shell script (Python, JavaScript, ...):
     /// shell brace expansion does not apply to it.
     not_shell: usize,
+    /// #1028: inside text of unknown language that a file the action runs
+    /// will hold (sed-inserted lines, decoded payloads): only groups
+    /// attached to a glob pattern count as zsh qualifiers there.
+    unknown_language: usize,
     /// #841: the sed programs of the command line being judged, when a real
     /// shell parse of it is available.
     sed_scope: Option<SedScope>,
@@ -775,7 +780,18 @@ impl Classifier {
     /// Text that is itself a command line (a script file, a decoded payload,
     /// joined literals, patched lines).
     fn script(&mut self, text: &str, cwd: &str, depth: usize) {
+        // #1028: a `#!` line naming zsh makes it zsh, whatever ran it.
+        let zsh = text.starts_with("#!")
+            && text
+                .lines()
+                .next()
+                .is_some_and(|line| line.to_lowercase().contains("zsh"));
+        let unknown_language = std::mem::take(&mut self.unknown_language);
+        if !zsh {
+            self.unknown_language = unknown_language;
+        }
         self.command(&["sh".into(), "-c".into(), text.into()], cwd, depth);
+        self.unknown_language = unknown_language;
     }
 
     fn command(&mut self, command: &[String], cwd: &str, depth: usize) {
@@ -845,7 +861,8 @@ impl Classifier {
         // not read as commands.
         if self.rebuilt == 0
             && self.not_shell == 0
-            && (arithmetic.runs_unseen(command) || arithmetic.runs_qualifier_code(command))
+            && (arithmetic.runs_unseen(command)
+                || arithmetic.runs_qualifier_code(command, self.unknown_language > 0))
         {
             self.note(ProtectedActionKind::UnseenCode);
         }
@@ -1036,7 +1053,9 @@ impl Classifier {
                 }
             }
             if let Some(payload) = indirect::decoded_payload(word) {
+                self.unknown_language += 1;
                 self.script(&payload, &cwd, depth + 1);
+                self.unknown_language -= 1;
             }
         }
         self.scripts_of(simple, words, unseen, command.as_ref(), &cwd, depth);
@@ -1079,7 +1098,11 @@ impl Classifier {
                     } else {
                         Script::Required
                     };
+                    // #1028: run by its `#!` line, whose language the
+                    // text shows (`script` reads a zsh one in full).
+                    self.unknown_language += 1;
                     self.script_file(&file, cwd, depth, need);
+                    self.unknown_language -= 1;
                 }
             }
             return;

@@ -2685,6 +2685,23 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
         ("bash", "zsh -c \"print -l /*(e:'true':)\""),
         ("bash", "$SHELL -c \"print -l /*(+f)\""),
         ("sh", "exec zsh -c 'print -l /*(e:true:)'"),
+        // Review r1: any delimiter, sorting, quoted or patterned shell
+        // names, login shells, substitutions in double quotes, bash lines.
+        ("zsh", "print -l /*(eXtrueX)"),
+        ("zsh", "print -l /*(e9true9)"),
+        ("zsh", "print -l /*(e_true_)"),
+        ("zsh", "print -l /*(Ne\ntrue\n)"),
+        ("zsh", "print -l /*(oe:true:)"),
+        ("zsh", "print -l /*(o+f)"),
+        ("bash", "z\\sh -c \"print -l /*(e:true:)\""),
+        ("bash", "z''sh -c 'print -l /*(e:true:)'"),
+        ("bash", "/bin/z?h -c 'print -l /*(e:true:)'"),
+        ("bash", "sudo -s 'print -l /*(e:true:)'"),
+        ("zsh", "echo \"$(print -l /*(e:true:))\""),
+        ("zsh", "echo \"$(echo \")\") print -l /*(e:true:)\""),
+        ("zsh", "cat <<'E'\nit's\nE\nprint -l /*(e:true:)"),
+        ("bash", "print -l /*(e:'true':)"),
+        ("sh", "ls *(+f)"),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found != Some(UnseenCode) {
@@ -2696,13 +2713,39 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
         ("zsh", "echo $(( (2+1) * 3 ))"),
         ("zsh", "python3 -c \"print(1+2)\""),
         ("zsh", "diff <(echo a) <(echo b); f() { echo hi; }; f"),
-        // bash and sh have no glob qualifiers.
-        ("bash", "print -l /*(e:'true':)"),
-        ("sh", "ls *(+f)"),
+        // Quoted code given to other programs.
+        ("zsh", "python3 -c \"print('hello')\""),
+        ("bash", "python3 -c \"print('hello' + x)\""),
+        ("zsh", "git commit -m \"fix(test): e\""),
+        ("zsh", "node -e \"console.log('done')\""),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found.is_some() {
             wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+        }
+    }
+    // Script files a zsh runs or sources.
+    let root = tempfile::tempdir().expect("tempdir");
+    let cwd = root.path().to_string_lossy().into_owned();
+    std::fs::write(root.path().join("x"), "print -l /*(e:'true':)\n").expect("script");
+    std::fs::write(root.path().join("run.zsh"), "print ok\n").expect("script");
+    std::fs::write(
+        root.path().join("tool"),
+        "#!/bin/zsh\nprint -l /etc(e:true:)\n",
+    )
+    .expect("script");
+    for line in [
+        "zsh ./x",
+        "source ./x",
+        "zsh < x",
+        // Lines sed adds to a script the line runs.
+        "sed -i '' '$a\\\nprint -l /*(e:true:)\n' run.zsh; zsh run.zsh",
+        // A zsh script run by its `#!` line.
+        "./tool",
+    ] {
+        let found = classify_fixture(&shell_in(&cwd, &["zsh", "-c", line]));
+        if found != Some(UnseenCode) {
+            wrong.push(format!("file: {line:?} -> {found:?}"));
         }
     }
     assert_eq!(wrong, Vec::<String>::new());

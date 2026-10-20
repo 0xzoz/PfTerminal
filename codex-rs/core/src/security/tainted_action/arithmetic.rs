@@ -58,6 +58,13 @@ const FILLING_BUILTINS: &[&str] = &[
 const READ_DEFAULTS: &[&str] = &["REPLY", "MAPFILE"];
 const MATCH_DEFAULTS: &[&str] = &["BASH_REMATCH", "match", "MATCH"];
 /// Shells whose `test`/`[` evaluate `-eq` operands as arithmetic.
+/// Commands that may pass their operands to a shell besides the shells
+/// themselves (#1028): `eval`, sourcing, login shells and editors.
+const SHELL_RUNNERS: &[&str] = &[
+    "eval", "source", ".", "exec", "sudo", "su", "doas", "runuser", "script", "parallel", "watch",
+    "flock", "tmux", "screen", "emulate", "vim", "vi", "nvim", "emacs",
+];
+
 const KSH: &[&str] = &["ksh", "ksh93", "mksh", "pdksh", "oksh", "lksh"];
 /// Prefix of the nodes that stand for a group of values (`for a b in ...`),
 /// so the graph stays linear. A variable of that name only over-taints.
@@ -323,6 +330,15 @@ pub(super) struct Arithmetic {
     /// whose subscripts and `e`/`+` qualifiers the shell evaluates (#937,
     /// D57), decoded (`zsh -c $'print /*\\x28.[w])'`).
     qualifier_words: Vec<String>,
+    /// The line's argv, to tell its own shell invocation (`zsh -c`) from
+    /// shells it runs.
+    argv: Vec<String>,
+    /// Some simple command was noted.
+    noted: bool,
+    /// A command may pass quoted text to a shell (`zsh -c '...'`, `eval`,
+    /// `sudo -s`, a command named by an expansion or pattern), so quoted
+    /// text may hold glob qualifiers that run (#1028).
+    reaches_shell: bool,
 }
 
 impl Arithmetic {
@@ -331,6 +347,7 @@ impl Arithmetic {
     pub(super) fn new(text: &[String]) -> Self {
         let text: Vec<String> = text.iter().map(|arg| joined(arg)).collect();
         let mut arithmetic = Self {
+            argv: text.clone(),
             functions: text.iter().flat_map(|arg| functions(arg)).collect(),
             ksh: text.iter().any(|arg| {
                 arg.split(|ch: char| !(is_name_char(ch) || ch == '/'))
@@ -408,6 +425,34 @@ impl Arithmetic {
             })
             .collect();
         self.output_seen |= raw.iter().any(|word| command_output(word));
+        // The line's own invocation (`zsh -c`) is not a shell it runs.
+        let own = !self.noted && self.argv.starts_with(words);
+        self.noted = true;
+        if !own {
+            // A command named by an expansion, or by a pattern that may
+            // match a shell (`/bin/z?h`).
+            let dynamic = |name: &str| {
+                name.contains('$')
+                    || name.contains(shell::UNSEEN_OUTPUT)
+                    || name.contains(shell::ARITHMETIC_OUTPUT)
+                    || {
+                        let base = shell::basename(&name.to_lowercase()).to_string();
+                        base.contains(['*', '?', '['])
+                            && (base.len() > MAX_SUBSCRIPT
+                                || shell::SHELLS
+                                    .iter()
+                                    .chain(SHELL_RUNNERS)
+                                    .any(|shell| glob_matches(base.as_bytes(), shell.as_bytes())))
+                    }
+            };
+            self.reaches_shell |= words.iter().any(|word| {
+                let name = shell::basename(&word.to_lowercase()).to_string();
+                shell::SHELLS.contains(&name.as_str()) || SHELL_RUNNERS.contains(&name.as_str())
+            }) || indirect::command_word(words)
+                .map(|(_, name)| name)
+                .or_else(|| words.first().cloned())
+                .is_some_and(|name| dynamic(&name));
+        }
         self.qualifier_words.extend(
             words
                 .iter()
@@ -856,30 +901,41 @@ impl Arithmetic {
     }
 
     /// Whether the line may run code from a zsh glob qualifier (#1028):
-    /// an `e` qualifier (`*(e:'code':)`, `*(e'code')`) or a `+` one
-    /// (`*(+func)`), in any list `qualifier_lists` finds, with or without
-    /// command output on the line. Lines that run only another shell
-    /// (`bash -c`, `sh -c`) and never name zsh or `$SHELL` have no
-    /// qualifiers. `text` is the line's argv.
-    pub(super) fn runs_qualifier_code(&self, text: &[String]) -> bool {
-        let named = |arg: &String| {
-            let lower = arg.to_lowercase();
-            lower.contains("zsh") || lower.contains("shell")
-        };
-        let other_shell = text.first().is_some_and(|first| {
-            let name = shell::basename(&first.to_lowercase()).to_string();
-            name != "zsh" && shell::SHELLS.contains(&name.as_str())
-        });
-        if other_shell && !text.iter().any(named) {
-            return false;
-        }
-        let joined: Vec<String> = text.iter().map(|arg| joined(arg)).collect();
-        joined.iter().chain(&self.qualifier_words).any(|text| {
-            all_qualifier_lists(text).into_iter().any(|range| {
+    /// an `e` qualifier (`*(e:code:)`, `*(eXcodeX)`) or a `+` one
+    /// (`*(+func)`), with or without command output on the line. Groups
+    /// outside quotes always count, wherever the shell's quotes leave them;
+    /// quoted text counts too when a command may pass it to a shell, or
+    /// when the quotes cannot be read for sure (here-documents, a quote
+    /// left open, nested quotes in a substitution). `text` is the line's
+    /// argv; `unknown_language`: it is text a file will hold whose language
+    /// is not known (sed-inserted lines), where only groups after a pattern
+    /// count.
+    pub(super) fn runs_qualifier_code(&self, text: &[String], unknown_language: bool) -> bool {
+        let runs = |text: &str, structure: &str| {
+            all_qualifier_lists(structure).into_iter().any(|range| {
                 // A group left open may hold either.
-                range.is_empty() && range.start == text.len() || qualifier_runs_code(&text[range])
+                if range.is_empty() && range.start == text.len() {
+                    return true;
+                }
+                // In text of unknown language (`sum(x)` may be Python),
+                // only a group after a pattern (`*(`, `?(`, `](`, `)(`,
+                // `>(`) or `(#q` counts.
+                let after_pattern = range.start >= 2
+                    && matches!(
+                        text.as_bytes()[range.start - 2],
+                        b'*' | b'?' | b']' | b')' | b'>'
+                    );
+                (!unknown_language || after_pattern || text[range.clone()].starts_with('#'))
+                    && qualifier_runs_code(&text[range])
             })
-        })
+        };
+        text.iter()
+            .map(|arg| joined(arg))
+            .any(|text| match unquoted_view(&text) {
+                Some(view) if !self.reaches_shell => runs(&text, &view),
+                _ => runs(&text, &text),
+            })
+            || (self.reaches_shell && self.qualifier_words.iter().any(|word| runs(word, word)))
     }
 
     /// Whether the line evaluates, as arithmetic, a variable filled from
@@ -2493,17 +2549,200 @@ fn lists_attached(text: &str, skip_arithmetic: bool) -> Vec<Range<usize>> {
     lists
 }
 
-/// Whether a qualifier list may hold an `e` qualifier (`e` and a
-/// delimiter: `e:code:`, `e'code'`, `e{code}`) or a `+` one (`+name`,
+/// Whether a glob pattern (`*`, `?`, `[...]`, read loosely: a bracket
+/// class matches any character it lists or any at all when negated, has a
+/// range or is left open) matches a name. Pattern times name.
+fn glob_matches(pattern: &[u8], name: &[u8]) -> bool {
+    enum Token<'a> {
+        Star,
+        Any,
+        Class(&'a [u8]),
+        Byte(u8),
+    }
+    let mut tokens = Vec::new();
+    let mut at = 0;
+    while at < pattern.len() {
+        match pattern[at] {
+            b'*' => tokens.push(Token::Star),
+            b'?' => tokens.push(Token::Any),
+            b'[' => match pattern[at + 1..]
+                .iter()
+                .skip(1)
+                .position(|byte| *byte == b']')
+            {
+                Some(close) => {
+                    let class = &pattern[at + 1..at + 2 + close];
+                    let loose = class.contains(&b'-') || matches!(class.first(), Some(b'!' | b'^'));
+                    tokens.push(if loose {
+                        Token::Any
+                    } else {
+                        Token::Class(class)
+                    });
+                    at += close + 2;
+                }
+                None => {
+                    tokens.push(Token::Star);
+                    break;
+                }
+            },
+            byte => tokens.push(Token::Byte(byte)),
+        }
+        at += 1;
+    }
+    // matched[j]: the tokens so far match the first `j` bytes of the name.
+    let mut matched = vec![false; name.len() + 1];
+    matched[0] = true;
+    for token in &tokens {
+        let mut next = vec![false; name.len() + 1];
+        for j in 0..=name.len() {
+            next[j] = match token {
+                Token::Star => matched[j] || (j > 0 && next[j - 1]),
+                Token::Any => j > 0 && matched[j - 1],
+                Token::Class(class) => j > 0 && matched[j - 1] && class.contains(&name[j - 1]),
+                Token::Byte(byte) => j > 0 && matched[j - 1] && name[j - 1] == *byte,
+            };
+        }
+        matched = next;
+    }
+    matched[name.len()]
+}
+
+/// Text with its quoted parts blanked, so only groups the shell reads
+/// outside quotes keep their parentheses (#1028): `'...'`, `$'...'` and
+/// `"..."` are blanked, except command substitutions inside double quotes
+/// (`"$(print *(e:x:))"`), which stay. A comment is kept as written, read
+/// without quotes. `None` when the quotes cannot be read for sure: a quote
+/// left open, a here-document, or a double-quoted substitution or
+/// expansion whose end is not in the same quotes (`"$(echo ")")"`). Same
+/// length as the text. Linear.
+fn unquoted_view(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut view = bytes.to_vec();
+    let blank = |view: &mut Vec<u8>, from: usize, to: usize| {
+        for byte in &mut view[from..to] {
+            *byte = b' ';
+        }
+    };
+    let mut at = 0;
+    while at < bytes.len() {
+        let word_start = at == 0 || {
+            let before = bytes[at - 1];
+            before.is_ascii_whitespace() || b";&|(".contains(&before)
+        };
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'#' if word_start => {
+                at = bytes[at..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(bytes.len(), |end| at + end);
+            }
+            b'<' if bytes.get(at + 1) == Some(&b'<')
+                && bytes.get(at + 2) != Some(&b'<')
+                && (at == 0 || bytes[at - 1] != b'<') =>
+            {
+                return None;
+            }
+            b'\'' => {
+                let end = at + 1 + bytes[at + 1..].iter().position(|byte| *byte == b'\'')?;
+                blank(&mut view, at, end + 1);
+                at = end + 1;
+            }
+            b'$' if bytes.get(at + 1) == Some(&b'\'') => {
+                let mut end = at + 2;
+                loop {
+                    match bytes.get(end)? {
+                        b'\\' => end += 2,
+                        b'\'' => break,
+                        _ => end += 1,
+                    }
+                }
+                blank(&mut view, at, end + 1);
+                at = end + 1;
+            }
+            b'"' => {
+                let mut end = at + 1;
+                loop {
+                    match bytes.get(end)? {
+                        b'\\' => end += 2,
+                        b'"' => break,
+                        _ => end += 1,
+                    }
+                }
+                // Substitutions stay; everything else in the quotes is
+                // blanked. Their ends must be in these quotes.
+                let mut keep = vec![false; end - at];
+                let mut inner = at + 1;
+                while inner < end {
+                    match bytes[inner] {
+                        b'\\' => inner += 2,
+                        b'`' => {
+                            let close = inner
+                                + 1
+                                + bytes[inner + 1..end]
+                                    .iter()
+                                    .position(|byte| *byte == b'`')?;
+                            keep[inner - at..=close - at].fill(true);
+                            inner = close + 1;
+                        }
+                        b'$' if bytes.get(inner + 1) == Some(&b'(') => {
+                            let mut depth = 0_usize;
+                            let mut close = None;
+                            for (offset, byte) in bytes[inner + 1..end].iter().enumerate() {
+                                match byte {
+                                    b'(' => depth += 1,
+                                    b')' => {
+                                        depth -= 1;
+                                        if depth == 0 {
+                                            close = Some(inner + 1 + offset);
+                                            break;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let close = close?;
+                            keep[inner - at..=close - at].fill(true);
+                            inner = close + 1;
+                        }
+                        b'$' if bytes.get(inner + 1) == Some(&b'{') => {
+                            let close = inner
+                                + 2
+                                + bytes[inner + 2..end]
+                                    .iter()
+                                    .position(|byte| *byte == b'}')?;
+                            if bytes[inner + 2..close].contains(&b'{') {
+                                return None;
+                            }
+                            inner = close + 1;
+                        }
+                        _ => inner += 1,
+                    }
+                }
+                for (offset, kept) in keep.iter().enumerate() {
+                    if !kept {
+                        view[at + offset] = b' ';
+                    }
+                }
+                view[end] = b' ';
+                at = end + 1;
+            }
+            _ => at += 1,
+        }
+    }
+    String::from_utf8(view).ok()
+}
+
+/// Whether a qualifier list may hold an `e` qualifier (`e` and any
+/// delimiter: `e:code:`, `e'code'`, `eXcodeX`) or a `+` one (`+name`,
 /// `+'name'`), wherever in the list. Read without quotes. Linear.
 fn qualifier_runs_code(list: &str) -> bool {
     let bytes = list.as_bytes();
     bytes.iter().enumerate().any(|(at, byte)| {
         let next = bytes.get(at + 1).copied();
         match byte {
-            b'e' => next.is_some_and(|next| {
-                !(next.is_ascii_alphanumeric() || next.is_ascii_whitespace() || next == b'_')
-            }),
+            // Any character after `e` delimits its code (`eXcodeX`).
+            b'e' => next.is_some(),
             b'+' => next.is_some_and(|next| {
                 !(next.is_ascii_digit() || next.is_ascii_whitespace() || next == b')')
             }),
