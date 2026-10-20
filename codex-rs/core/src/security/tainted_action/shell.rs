@@ -5,6 +5,8 @@
 //! split into commands too. Command boundaries, pipes and substitutions are
 //! kept so wrappers, pipelines and code fed to an interpreter can be followed.
 
+use super::work;
+
 /// Shells whose `-c` argument is its own command line.
 pub(super) const SHELLS: &[&str] = &[
     "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "ash", "mksh", "yash",
@@ -89,6 +91,7 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
     let mut incomplete = false;
     let mut previous: Option<&str> = None;
     for arg in command {
+        work::step();
         // The script after a shell's `-c`/`-lc` is its own command line.
         let in_shell = lexer
             .current
@@ -114,6 +117,29 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
         incomplete,
         too_deep,
     }
+}
+
+/// Whether text may use bash's prompt transformation (`${v@P}`,
+/// `${a[0]@P}`, `${!r@P}`), which runs the command substitutions in the
+/// value (#1012): `@P` not followed by a name character, in the text as
+/// written (backslash-newlines joined) or with its quotes and backslashes
+/// removed (`${v@'P'}`). The lexed words (braces dropped, `$'...'` decoded,
+/// known variables substituted) are checked the same way by the caller.
+/// Read without quotes, so nested shells' scripts count. Linear.
+pub(super) fn prompt_expansion(text: &str) -> bool {
+    if !text.contains('P') {
+        return false;
+    }
+    let joined = text.replace("\\\n", "");
+    let bare: String = joined
+        .chars()
+        .filter(|ch| !matches!(ch, '\'' | '"' | '\\'))
+        .collect();
+    [joined.as_str(), bare.as_str()].iter().any(|text| {
+        text.match_indices("@P").any(|(at, _)| {
+            !text[at + 2..].starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+        })
+    })
 }
 
 /// `$IFS` and `${IFS}` separate words.
@@ -149,6 +175,7 @@ fn expand_braces(text: &str) -> (String, bool) {
     let mut quote = Quote::None;
     let mut escaped = false;
     for (index, &ch) in chars.iter().enumerate() {
+        work::step();
         let previous = index.checked_sub(1).map(|at| chars[at]);
         if escaped {
             escaped = false;
@@ -191,6 +218,7 @@ fn expand_braces(text: &str) -> (String, bool) {
             .iter()
             .position(|word| brace_alternatives(word).is_some())
         {
+            work::step();
             let alternatives = brace_alternatives(&words[position]).unwrap_or_default();
             words.splice(position..=position, alternatives);
             if words.len() > MAX_BRACE_EXPANSION {
@@ -202,6 +230,7 @@ fn expand_braces(text: &str) -> (String, bool) {
     };
     let mut has_quote = false;
     for (original, ch) in chars.iter().zip(masked.chars()) {
+        work::step();
         if ch.is_whitespace() {
             if !has_quote {
                 word = unmask(&word);
@@ -491,6 +520,7 @@ impl Lexer {
 
     fn finish(mut self) -> Vec<SimpleCommand> {
         while !self.open.is_empty() {
+            work::step();
             self.close_substitution(/*arithmetic_close*/ false);
         }
         self.finish_current();
@@ -501,6 +531,7 @@ impl Lexer {
         let chars: Vec<char> = arg.chars().collect();
         let mut index = 0;
         while index < chars.len() {
+            work::step();
             let ch = chars[index];
             let next = chars.get(index + 1).copied();
             match ch {
@@ -597,6 +628,7 @@ impl Lexer {
 fn arithmetic_expansion(chars: &[char], start: usize) -> bool {
     let mut braces = 0_usize;
     for (at, ch) in chars.iter().enumerate().skip(start) {
+        work::step();
         match ch {
             '\'' | '"' | '`' | '\\' | '(' => return false,
             '{' => braces += 1,
@@ -621,6 +653,7 @@ pub(super) fn ansi_c(chars: &[char], mut index: usize, word: &mut String) -> usi
         (value.and_then(char::from_u32), text.len())
     };
     while index < chars.len() {
+        work::step();
         match chars[index] {
             '\'' => return index + 1,
             '\\' if index + 1 < chars.len() => {

@@ -143,6 +143,10 @@ impl<D: SessionRuntimeDelegate> SessionRuntime<D> {
         Ok(())
     }
 
+    #[allow(
+        deprecated,
+        reason = "Rust 1.99 renames fetch_update to try_update, which is unstable on the argument-comment-lint nightly (nightly-2025-09-18)"
+    )]
     fn allocate_cell_id(&self) -> Result<CellId, Error> {
         self.inner
             .next_cell_id

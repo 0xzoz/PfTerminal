@@ -9,6 +9,7 @@ use std::path::Path;
 use codex_model_provider::selected_account_error;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::NamedProviderAccount;
+use codex_vault::ProviderAccountKind;
 use codex_vault::Vault;
 use codex_vault::VaultKeyStorage;
 use codex_vault::parse_provider_account_selection;
@@ -297,10 +298,13 @@ pub(crate) fn spawn_default_key_error(
     parent_id: &str,
     parent: &ModelProviderInfo,
 ) -> Option<String> {
-    spawn_default_key_error_with(config, child_id, child, (parent_id, parent), |name| {
-        std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
-            || crate::model_broker_auth::holds_environment_key(name)
-    })
+    spawn_default_key_error_with(
+        config,
+        child_id,
+        child,
+        (parent_id, parent),
+        environment_holds_key,
+    )
 }
 
 fn spawn_default_key_error_with(
@@ -310,6 +314,55 @@ fn spawn_default_key_error_with(
     parent: (&str, &ModelProviderInfo),
     environment_holds: impl Fn(&str) -> bool,
 ) -> Option<String> {
+    let (env_key, named) = default_key_gap(config, child, parent, environment_holds)?;
+    Some(format!(
+        "spawn_agent: `{child_id}` would run on its default account, which has no credential \
+         (`{env_key}` is not set and no default key is stored); accounts are selected per \
+         connection, and {named}. Spawn without the `model_provider`, `account` or \
+         `agent_type` that chose this connection and account to run on the parent's, or ask \
+         the user to add a default `{env_key}` (`/providers`). Do not retry on another \
+         account without the user's consent."
+    ))
+}
+
+/// #1074: the #689 check for an existing agent that is about to be resumed
+/// (or reloaded to receive a message) on `child` (runtime provider
+/// `child_id`), by a parent on `parent`. The agent ran on that connection
+/// before; when its default key has since gone, it is refused before it
+/// starts instead of failing at its next request with a sign-in error.
+pub(crate) fn resume_default_key_error(
+    config: &super::Config,
+    child_id: &str,
+    child: &ModelProviderInfo,
+    parent_id: &str,
+    parent: &ModelProviderInfo,
+) -> Option<String> {
+    let (env_key, named) =
+        default_key_gap(config, child, (parent_id, parent), environment_holds_key)?;
+    Some(format!(
+        "Resuming this agent: `{child_id}` would run on its default account, which has no \
+         credential (`{env_key}` is not set and no default key is stored); accounts are \
+         selected per connection, and {named}. Ask the user to add a default `{env_key}` \
+         (`/providers`) before resuming it, or do the work without this agent. Do not retry \
+         on another account without the user's consent."
+    ))
+}
+
+/// The default key is in the environment or held by the credential broker.
+fn environment_holds_key(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| !value.trim().is_empty())
+        || crate::model_broker_auth::holds_environment_key(name)
+}
+
+/// The default key variable `child` would run on and which named account
+/// makes it ambiguous, when that default key is nowhere (see
+/// [`spawn_default_key_error`]).
+fn default_key_gap(
+    config: &super::Config,
+    child: &ModelProviderInfo,
+    parent: (&str, &ModelProviderInfo),
+    environment_holds: impl Fn(&str) -> bool,
+) -> Option<(String, String)> {
     if child.account.is_some()
         || child.auth.is_some()
         || child.aws.is_some()
@@ -358,14 +411,7 @@ fn spawn_default_key_error_with(
             account.name
         )
     };
-    Some(format!(
-        "spawn_agent: `{child_id}` would run on its default account, which has no credential \
-         (`{env_key}` is not set and no default key is stored); accounts are selected per \
-         connection, and {named}. Spawn without the `model_provider`, `account` or \
-         `agent_type` that chose this connection and account to run on the parent's, or ask \
-         the user to add a default `{env_key}` (`/providers`). Do not retry on another \
-         account without the user's consent."
-    ))
+    Some((env_key.to_string(), named))
 }
 
 /// Splits `[<provider>:]<name>`; the provider defaults to the session's.
@@ -436,6 +482,37 @@ pub(crate) fn configured_account_names(codex_home: &Path, provider_id: &str) -> 
         .collect()
 }
 
+/// PF-84 (#1085): whether this home uses named OpenAI sign-in accounts: a
+/// named account holding a sign-in is enrolled in the vault, or the
+/// configuration (`[provider_accounts]`) puts a provider on one. Uses only
+/// account metadata, but an initialised vault is decrypted to read it (an
+/// uninitialised one is not touched). An unreadable vault counts as yes, so a
+/// home that may hold such accounts keeps their protections.
+pub(crate) fn uses_named_sign_in_accounts(
+    codex_home: &Path,
+    model_providers: &HashMap<String, ModelProviderInfo>,
+) -> bool {
+    if model_providers
+        .values()
+        .any(|provider| codex_model_provider::named_sign_in_account(provider).is_some())
+    {
+        return true;
+    }
+    let vault = Vault::new(codex_home.to_path_buf());
+    if vault.key_storage() == VaultKeyStorage::NotInitialized {
+        return false;
+    }
+    match vault.list_provider_accounts() {
+        Ok(accounts) => accounts
+            .iter()
+            .any(|account| account.kinds.contains(&ProviderAccountKind::ChatgptAuth)),
+        Err(error) => {
+            tracing::warn!(%error, "could not list named accounts; treating the home as using them");
+            true
+        }
+    }
+}
+
 /// API-key providers, `auth.command` providers (including Claude Plan),
 /// Amazon Bedrock without command auth (an AWS profile per account) and
 /// OpenAI sign-in providers (a ChatGPT or OpenAI API-key sign-in per account,
@@ -466,6 +543,52 @@ mod tests {
             ),
             ("plain".to_string(), ModelProviderInfo::default()),
         ])
+    }
+
+    /// #1085: only an enrolled named sign-in account, or a provider the
+    /// configuration puts on one, counts; another provider's named account
+    /// (a Z.AI key) does not.
+    #[test]
+    fn a_home_uses_named_sign_in_accounts_only_when_it_holds_or_selects_one() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut model_providers = providers();
+        assert!(!uses_named_sign_in_accounts(home.path(), &model_providers));
+
+        let vault = Vault::new(home.path().to_path_buf());
+        let work = codex_vault::ProviderAccountName::parse("work").expect("name");
+        vault
+            .create_provider_account("zai", &work, ProviderAccountKind::ApiKey, "test-zai-key")
+            .expect("add zai account");
+        assert!(!uses_named_sign_in_accounts(home.path(), &model_providers));
+        stamp_provider_account("zai", model_providers.get_mut("zai").expect("zai"), "work")
+            .expect("stamp zai");
+        assert!(!uses_named_sign_in_accounts(home.path(), &model_providers));
+
+        let mut selected = model_providers.clone();
+        stamp_provider_account(
+            "openai",
+            selected.get_mut("openai").expect("openai"),
+            "work",
+        )
+        .expect("stamp openai");
+        assert!(uses_named_sign_in_accounts(home.path(), &selected));
+
+        vault
+            .create_provider_account("openai", &work, ProviderAccountKind::ChatgptAuth, "{}")
+            .expect("add openai account");
+        assert!(uses_named_sign_in_accounts(home.path(), &model_providers));
+
+        // An unreadable vault counts as holding such accounts (fail closed).
+        let unreadable = tempfile::tempdir().expect("tempdir");
+        Vault::new(unreadable.path().to_path_buf())
+            .create_provider_account("zai", &work, ProviderAccountKind::ApiKey, "test-zai-key")
+            .expect("add zai account");
+        std::fs::write(
+            unreadable.path().join("secrets").join("local.age"),
+            b"not an age file",
+        )
+        .expect("corrupt the vault");
+        assert!(uses_named_sign_in_accounts(unreadable.path(), &providers()));
     }
 
     fn accounts(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
