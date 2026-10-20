@@ -58,13 +58,6 @@ const FILLING_BUILTINS: &[&str] = &[
 const READ_DEFAULTS: &[&str] = &["REPLY", "MAPFILE"];
 const MATCH_DEFAULTS: &[&str] = &["BASH_REMATCH", "match", "MATCH"];
 /// Shells whose `test`/`[` evaluate `-eq` operands as arithmetic.
-/// Commands that may pass their operands to a shell besides the shells
-/// themselves (#1028): `eval`, sourcing, login shells and editors.
-const SHELL_RUNNERS: &[&str] = &[
-    "eval", "source", ".", "exec", "sudo", "su", "doas", "runuser", "script", "parallel", "watch",
-    "flock", "tmux", "screen", "emulate", "vim", "vi", "nvim", "emacs",
-];
-
 const KSH: &[&str] = &["ksh", "ksh93", "mksh", "pdksh", "oksh", "lksh"];
 /// Prefix of the nodes that stand for a group of values (`for a b in ...`),
 /// so the graph stays linear. A variable of that name only over-taints.
@@ -330,15 +323,6 @@ pub(super) struct Arithmetic {
     /// whose subscripts and `e`/`+` qualifiers the shell evaluates (#937,
     /// D57), decoded (`zsh -c $'print /*\\x28.[w])'`).
     qualifier_words: Vec<String>,
-    /// The line's argv, to tell its own shell invocation (`zsh -c`) from
-    /// shells it runs.
-    argv: Vec<String>,
-    /// Some simple command was noted.
-    noted: bool,
-    /// A command may pass quoted text to a shell (`zsh -c '...'`, `eval`,
-    /// `sudo -s`, a command named by an expansion or pattern), so quoted
-    /// text may hold glob qualifiers that run (#1028).
-    reaches_shell: bool,
 }
 
 impl Arithmetic {
@@ -347,7 +331,6 @@ impl Arithmetic {
     pub(super) fn new(text: &[String]) -> Self {
         let text: Vec<String> = text.iter().map(|arg| joined(arg)).collect();
         let mut arithmetic = Self {
-            argv: text.clone(),
             functions: text.iter().flat_map(|arg| functions(arg)).collect(),
             ksh: text.iter().any(|arg| {
                 arg.split(|ch: char| !(is_name_char(ch) || ch == '/'))
@@ -425,34 +408,6 @@ impl Arithmetic {
             })
             .collect();
         self.output_seen |= raw.iter().any(|word| command_output(word));
-        // The line's own invocation (`zsh -c`) is not a shell it runs.
-        let own = !self.noted && self.argv.starts_with(words);
-        self.noted = true;
-        if !own {
-            // A command named by an expansion, or by a pattern that may
-            // match a shell (`/bin/z?h`).
-            let dynamic = |name: &str| {
-                name.contains('$')
-                    || name.contains(shell::UNSEEN_OUTPUT)
-                    || name.contains(shell::ARITHMETIC_OUTPUT)
-                    || {
-                        let base = shell::basename(&name.to_lowercase()).to_string();
-                        base.contains(['*', '?', '['])
-                            && (base.len() > MAX_SUBSCRIPT
-                                || shell::SHELLS
-                                    .iter()
-                                    .chain(SHELL_RUNNERS)
-                                    .any(|shell| glob_matches(base.as_bytes(), shell.as_bytes())))
-                    }
-            };
-            self.reaches_shell |= words.iter().any(|word| {
-                let name = shell::basename(&word.to_lowercase()).to_string();
-                shell::SHELLS.contains(&name.as_str()) || SHELL_RUNNERS.contains(&name.as_str())
-            }) || indirect::command_word(words)
-                .map(|(_, name)| name)
-                .or_else(|| words.first().cloned())
-                .is_some_and(|name| dynamic(&name));
-        }
         self.qualifier_words.extend(
             words
                 .iter()
@@ -900,42 +855,27 @@ impl Arithmetic {
         }
     }
 
-    /// Whether the line may run code from a zsh glob qualifier (#1028):
-    /// an `e` qualifier (`*(e:code:)`, `*(eXcodeX)`) or a `+` one
-    /// (`*(+func)`), with or without command output on the line. Groups
-    /// outside quotes always count, wherever the shell's quotes leave them;
-    /// quoted text counts too when a command may pass it to a shell, or
-    /// when the quotes cannot be read for sure (here-documents, a quote
-    /// left open, nested quotes in a substitution). `text` is the line's
-    /// argv; `unknown_language`: it is text a file will hold whose language
-    /// is not known (sed-inserted lines), where only groups after a pattern
-    /// count.
-    pub(super) fn runs_qualifier_code(&self, text: &[String], unknown_language: bool) -> bool {
-        let runs = |text: &str, structure: &str| {
-            all_qualifier_lists(structure).into_iter().any(|range| {
+    /// Whether the line may run code from a zsh glob qualifier (#1028): a
+    /// parenthesised group attached to a word that zsh would parse as
+    /// qualifiers reaching an `e` one (`*(e:code:)`, `*(eXcodeX)`), a `+`
+    /// one (`*(+func)`), a sort by either (`*(oe:code:)`) or an expansion
+    /// (`*($x)`, whose value zsh parses as qualifiers). Read without
+    /// quotes, and again without backslashes (`x=/\\(e:c:\\)` used by
+    /// `$~x`), so nested shells' scripts, `trap` and `functions[...]` text,
+    /// and values later expanded count; lexed (decoded) words count too.
+    /// With or without command output on the line. `text` is the line's
+    /// argv.
+    pub(super) fn runs_qualifier_code(&self, text: &[String]) -> bool {
+        let runs = |text: &str| {
+            all_qualifier_lists(text).into_iter().any(|range| {
                 // A group left open may hold either.
-                if range.is_empty() && range.start == text.len() {
-                    return true;
-                }
-                // In text of unknown language (`sum(x)` may be Python),
-                // only a group after a pattern (`*(`, `?(`, `](`, `)(`,
-                // `>(`) or `(#q` counts.
-                let after_pattern = range.start >= 2
-                    && matches!(
-                        text.as_bytes()[range.start - 2],
-                        b'*' | b'?' | b']' | b')' | b'>'
-                    );
-                (!unknown_language || after_pattern || text[range.clone()].starts_with('#'))
-                    && qualifier_runs_code(&text[range])
+                (range.is_empty() && range.start == text.len()) || qualifier_runs_code(&text[range])
             })
         };
         text.iter()
             .map(|arg| joined(arg))
-            .any(|text| match unquoted_view(&text) {
-                Some(view) if !self.reaches_shell => runs(&text, &view),
-                _ => runs(&text, &text),
-            })
-            || (self.reaches_shell && self.qualifier_words.iter().any(|word| runs(word, word)))
+            .chain(self.qualifier_words.iter().cloned())
+            .any(|text| runs(&text) || (text.contains('\\') && runs(&text.replace('\\', ""))))
     }
 
     /// Whether the line evaluates, as arithmetic, a variable filled from
@@ -2549,206 +2489,175 @@ fn lists_attached(text: &str, skip_arithmetic: bool) -> Vec<Range<usize>> {
     lists
 }
 
-/// Whether a glob pattern (`*`, `?`, `[...]`, read loosely: a bracket
-/// class matches any character it lists or any at all when negated, has a
-/// range or is left open) matches a name. Pattern times name.
-fn glob_matches(pattern: &[u8], name: &[u8]) -> bool {
-    enum Token<'a> {
-        Star,
-        Any,
-        Class(&'a [u8]),
-        Byte(u8),
-    }
-    let mut tokens = Vec::new();
+/// Whether zsh, parsing a group's text as glob qualifiers, may reach one
+/// that runs code before a character it rejects: `e` with any delimiter
+/// and non-empty code that closes,
+/// `+name`, `oe`/`o+` sorts, or an expansion (`$x`, a substitution that is
+/// not a neutral fact) whose value it would parse as qualifiers. Quotes
+/// and backslashes are removed first, as zsh does (`'e':x:`). Text zsh
+/// rejects (`print('hello')`: `h` is no qualifier) or reads as modifiers
+/// after `:` runs nothing. Linear.
+fn qualifier_runs_code(list: &str) -> bool {
+    let list: Vec<u8> = {
+        let mut bare = Vec::with_capacity(list.len());
+        let mut bytes = list.bytes();
+        while let Some(byte) = bytes.next() {
+            match byte {
+                b'\'' | b'"' => {}
+                b'\\' => bare.extend(bytes.next()),
+                byte => bare.push(byte),
+            }
+        }
+        bare
+    };
+    let list = list.as_slice();
+    // Past a delimited argument starting at `at` (the delimiter); `None`
+    // when it never closes.
+    let delimited = |at: usize| -> Option<usize> {
+        let open = *list.get(at)?;
+        let close = match open {
+            b'(' => b')',
+            b'[' => b']',
+            b'{' => b'}',
+            b'<' => b'>',
+            other => other,
+        };
+        list[at + 1..]
+            .iter()
+            .position(|byte| *byte == close)
+            .map(|end| at + 1 + end + 1)
+    };
+    let digits = |mut at: usize| {
+        let start = at;
+        while list.get(at).is_some_and(u8::is_ascii_digit) {
+            at += 1;
+        }
+        (at > start).then_some(at)
+    };
+    let sign = |at: usize| at + usize::from(matches!(list.get(at), Some(b'+' | b'-')));
     let mut at = 0;
-    while at < pattern.len() {
-        match pattern[at] {
-            b'*' => tokens.push(Token::Star),
-            b'?' => tokens.push(Token::Any),
-            b'[' => match pattern[at + 1..]
-                .iter()
-                .skip(1)
-                .position(|byte| *byte == b']')
-            {
-                Some(close) => {
-                    let class = &pattern[at + 1..at + 2 + close];
-                    let loose = class.contains(&b'-') || matches!(class.first(), Some(b'!' | b'^'));
-                    tokens.push(if loose {
-                        Token::Any
-                    } else {
-                        Token::Class(class)
-                    });
-                    at += close + 2;
+    if list.starts_with(b"#q") {
+        at = 2;
+    }
+    while at < list.len() {
+        let byte = list[at];
+        at = match byte {
+            // Code between delimiters: zsh rejects it left open, and empty
+            // code runs nothing.
+            b'e' => match delimited(at + 1) {
+                Some(next) if next > at + 3 => return true,
+                Some(next) => next,
+                None => return false,
+            },
+            // An arithmetic result is a number, which zsh rejects here.
+            b'$' if list[at..].starts_with(b"$((") => return false,
+            // A substitution's output: a neutral fact's (`$(date +%s)`) is
+            // not chosen by anyone; zsh parses it no further than its
+            // first rejected character.
+            b'$' if list.get(at + 1) == Some(&b'(') => {
+                return !only_facts(&String::from_utf8_lossy(&list[at..]));
+            }
+            b'`' => return !only_facts(&String::from_utf8_lossy(&list[at..])),
+            // A parameter's value.
+            b'$' => return true,
+            b'+' => {
+                return list
+                    .get(at + 1)
+                    .is_some_and(|next| next.is_ascii_alphabetic() || b"_{".contains(next));
+            }
+            b'o' | b'O' => match list.get(at + 1) {
+                Some(b'e') => match delimited(at + 2) {
+                    Some(next) if next > at + 4 => return true,
+                    Some(next) => next,
+                    None => return false,
+                },
+                Some(b'+') => {
+                    return list
+                        .get(at + 2)
+                        .is_some_and(|next| next.is_ascii_alphabetic() || b"_{".contains(next));
                 }
-                None => {
-                    tokens.push(Token::Star);
-                    break;
+                Some(b'n' | b'L' | b'l' | b'a' | b'm' | b'c' | b'd' | b'N') => at + 2,
+                _ => return false,
+            },
+            b'a' | b'm' | b'c' => {
+                let unit = at
+                    + 1
+                    + usize::from(matches!(
+                        list.get(at + 1),
+                        Some(b'M' | b'w' | b'h' | b'm' | b's')
+                    ));
+                match digits(sign(unit)) {
+                    Some(next) => next,
+                    None => return false,
+                }
+            }
+            b'L' => {
+                let unit = at
+                    + 1
+                    + usize::from(matches!(
+                        list.get(at + 1),
+                        Some(b'k' | b'K' | b'm' | b'M' | b'g' | b'G' | b't' | b'T' | b'p' | b'P')
+                    ));
+                match digits(sign(unit)) {
+                    Some(next) => next,
+                    None => return false,
+                }
+            }
+            b'l' => match digits(sign(at + 1)) {
+                Some(next) => next,
+                None => return false,
+            },
+            b'd' | b'Y' => match digits(at + 1) {
+                Some(next) => next,
+                None => return false,
+            },
+            b'u' | b'g' => match digits(at + 1) {
+                Some(next) => next,
+                None => match delimited(at + 1) {
+                    Some(next) => next,
+                    None => return false,
+                },
+            },
+            b'P' => match delimited(at + 1) {
+                Some(next) => next,
+                None => return false,
+            },
+            b'f' => match list.get(at + 1) {
+                Some(next) if next.is_ascii_punctuation() && !b"+-=".contains(next) => {
+                    match delimited(at + 1) {
+                        Some(next) => next,
+                        None => return false,
+                    }
+                }
+                _ => {
+                    let mut next = at + 1;
+                    while list
+                        .get(next)
+                        .is_some_and(|byte| b"01234567ugoa+-=rwxXst,".contains(byte))
+                    {
+                        next += 1;
+                    }
+                    next
                 }
             },
-            byte => tokens.push(Token::Byte(byte)),
-        }
-        at += 1;
-    }
-    // matched[j]: the tokens so far match the first `j` bytes of the name.
-    let mut matched = vec![false; name.len() + 1];
-    matched[0] = true;
-    for token in &tokens {
-        let mut next = vec![false; name.len() + 1];
-        for j in 0..=name.len() {
-            next[j] = match token {
-                Token::Star => matched[j] || (j > 0 && next[j - 1]),
-                Token::Any => j > 0 && matched[j - 1],
-                Token::Class(class) => j > 0 && matched[j - 1] && class.contains(&name[j - 1]),
-                Token::Byte(byte) => j > 0 && matched[j - 1] && name[j - 1] == *byte,
-            };
-        }
-        matched = next;
-    }
-    matched[name.len()]
-}
-
-/// Text with its quoted parts blanked, so only groups the shell reads
-/// outside quotes keep their parentheses (#1028): `'...'`, `$'...'` and
-/// `"..."` are blanked, except command substitutions inside double quotes
-/// (`"$(print *(e:x:))"`), which stay. A comment is kept as written, read
-/// without quotes. `None` when the quotes cannot be read for sure: a quote
-/// left open, a here-document, or a double-quoted substitution or
-/// expansion whose end is not in the same quotes (`"$(echo ")")"`). Same
-/// length as the text. Linear.
-fn unquoted_view(text: &str) -> Option<String> {
-    let bytes = text.as_bytes();
-    let mut view = bytes.to_vec();
-    let blank = |view: &mut Vec<u8>, from: usize, to: usize| {
-        for byte in &mut view[from..to] {
-            *byte = b' ';
-        }
-    };
-    let mut at = 0;
-    while at < bytes.len() {
-        let word_start = at == 0 || {
-            let before = bytes[at - 1];
-            before.is_ascii_whitespace() || b";&|(".contains(&before)
+            b'[' => match list[at..].iter().position(|byte| *byte == b']') {
+                Some(end) => at + end + 1,
+                None => return false,
+            },
+            b'%' => at + 1 + usize::from(matches!(list.get(at + 1), Some(b'b' | b'c'))),
+            // Modifiers follow; none of them runs code, but an expansion
+            // in them may still be read as qualifiers.
+            b':' => {
+                return list[at..].iter().any(|byte| matches!(byte, b'$' | b'`'))
+                    && !only_facts(&String::from_utf8_lossy(&list[at..]));
+            }
+            b'/' | b'.' | b'@' | b'=' | b'p' | b'*' | b'r' | b'w' | b'x' | b'A' | b'I' | b'E'
+            | b'R' | b'W' | b'X' | b's' | b'S' | b't' | b'F' | b'N' | b'D' | b'n' | b'M' | b'T'
+            | b'U' | b'G' | b'^' | b'-' | b',' | b'q' => at + 1,
+            _ => return false,
         };
-        match bytes[at] {
-            b'\\' => at += 2,
-            b'#' if word_start => {
-                at = bytes[at..]
-                    .iter()
-                    .position(|byte| *byte == b'\n')
-                    .map_or(bytes.len(), |end| at + end);
-            }
-            b'<' if bytes.get(at + 1) == Some(&b'<')
-                && bytes.get(at + 2) != Some(&b'<')
-                && (at == 0 || bytes[at - 1] != b'<') =>
-            {
-                return None;
-            }
-            b'\'' => {
-                let end = at + 1 + bytes[at + 1..].iter().position(|byte| *byte == b'\'')?;
-                blank(&mut view, at, end + 1);
-                at = end + 1;
-            }
-            b'$' if bytes.get(at + 1) == Some(&b'\'') => {
-                let mut end = at + 2;
-                loop {
-                    match bytes.get(end)? {
-                        b'\\' => end += 2,
-                        b'\'' => break,
-                        _ => end += 1,
-                    }
-                }
-                blank(&mut view, at, end + 1);
-                at = end + 1;
-            }
-            b'"' => {
-                let mut end = at + 1;
-                loop {
-                    match bytes.get(end)? {
-                        b'\\' => end += 2,
-                        b'"' => break,
-                        _ => end += 1,
-                    }
-                }
-                // Substitutions stay; everything else in the quotes is
-                // blanked. Their ends must be in these quotes.
-                let mut keep = vec![false; end - at];
-                let mut inner = at + 1;
-                while inner < end {
-                    match bytes[inner] {
-                        b'\\' => inner += 2,
-                        b'`' => {
-                            let close = inner
-                                + 1
-                                + bytes[inner + 1..end]
-                                    .iter()
-                                    .position(|byte| *byte == b'`')?;
-                            keep[inner - at..=close - at].fill(true);
-                            inner = close + 1;
-                        }
-                        b'$' if bytes.get(inner + 1) == Some(&b'(') => {
-                            let mut depth = 0_usize;
-                            let mut close = None;
-                            for (offset, byte) in bytes[inner + 1..end].iter().enumerate() {
-                                match byte {
-                                    b'(' => depth += 1,
-                                    b')' => {
-                                        depth -= 1;
-                                        if depth == 0 {
-                                            close = Some(inner + 1 + offset);
-                                            break;
-                                        }
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            let close = close?;
-                            keep[inner - at..=close - at].fill(true);
-                            inner = close + 1;
-                        }
-                        b'$' if bytes.get(inner + 1) == Some(&b'{') => {
-                            let close = inner
-                                + 2
-                                + bytes[inner + 2..end]
-                                    .iter()
-                                    .position(|byte| *byte == b'}')?;
-                            if bytes[inner + 2..close].contains(&b'{') {
-                                return None;
-                            }
-                            inner = close + 1;
-                        }
-                        _ => inner += 1,
-                    }
-                }
-                for (offset, kept) in keep.iter().enumerate() {
-                    if !kept {
-                        view[at + offset] = b' ';
-                    }
-                }
-                view[end] = b' ';
-                at = end + 1;
-            }
-            _ => at += 1,
-        }
     }
-    String::from_utf8(view).ok()
-}
-
-/// Whether a qualifier list may hold an `e` qualifier (`e` and any
-/// delimiter: `e:code:`, `e'code'`, `eXcodeX`) or a `+` one (`+name`,
-/// `+'name'`), wherever in the list. Read without quotes. Linear.
-fn qualifier_runs_code(list: &str) -> bool {
-    let bytes = list.as_bytes();
-    bytes.iter().enumerate().any(|(at, byte)| {
-        let next = bytes.get(at + 1).copied();
-        match byte {
-            // Any character after `e` delimits its code (`eXcodeX`).
-            b'e' => next.is_some(),
-            b'+' => next.is_some_and(|next| {
-                !(next.is_ascii_digit() || next.is_ascii_whitespace() || next == b')')
-            }),
-            _ => false,
-        }
-    })
+    false
 }
 
 /// Whether the `=` at `at` ends a word that assigns an array (`a=(`,

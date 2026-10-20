@@ -2672,7 +2672,7 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
     let mut wrong = Vec::new();
     for (shell, line) in [
         ("zsh", "print -l /*(e:'true':)"),
-        ("zsh", "print -l /*(e'true')"),
+        ("zsh", "print -l /*(e':true:')"),
         ("zsh", "print -l /*(.e:'true':)"),
         ("zsh", "print -l /*(e{true})"),
         ("zsh", "print -l /*(N+f)"),
@@ -2702,6 +2702,31 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
         ("zsh", "cat <<'E'\nit's\nE\nprint -l /*(e:true:)"),
         ("bash", "print -l /*(e:'true':)"),
         ("sh", "ls *(+f)"),
+        // Review r2: quotes before the group, substitutions in double
+        // quotes, comments, trap and function text, expansions read as
+        // qualifiers, escaped groups used by `$~x`, decoded payloads.
+        ("zsh", "print -l \"/etc\"(e:true:)"),
+        ("zsh", "print -l '/'(e:true:)"),
+        ("zsh", "print -l \"$d\"(e:true:)"),
+        ("zsh", "print \"$(: ')'; print -l /(e:true:))\""),
+        (
+            "zsh",
+            "print \"$(case a in a) print -l /(e:true:);; esac)\"",
+        ),
+        ("zsh", "print \"$(print \\); print -l /(e:true:))\""),
+        ("zsh", "print \"${x:-$(print -l /(e:true:))}\""),
+        ("zsh", "(true)#'\nprint -l /(e:true:)\n#'"),
+        (
+            "zsh",
+            "x=65; print ${(#)x} '\n' ; print -l /(e:true:) ; : \\'",
+        ),
+        ("zsh", "trap 'print -l /*(e:true:)' EXIT"),
+        ("zsh", "functions[f]='print -l /*(e:true:)'; f"),
+        ("zsh", "x='/(e:true:)'; print $~x"),
+        ("zsh", "x=/\\(e:true:\\); print $~x"),
+        ("zsh", "print -l a($x)"),
+        ("zsh", "print -l a(N$x)"),
+        ("zsh", "echo cHJpbnQgLWwgLyhlOnRydWU6KQ== | base64 -d | zsh"),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found != Some(UnseenCode) {
@@ -2716,7 +2741,14 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
         // Quoted code given to other programs.
         ("zsh", "python3 -c \"print('hello')\""),
         ("bash", "python3 -c \"print('hello' + x)\""),
-        ("zsh", "git commit -m \"fix(test): e\""),
+        ("zsh", "git commit -m \"fix(core): x\""),
+        // zsh rejects these as qualifiers before any code.
+        ("zsh", "print -l *.(jpeg|png)"),
+        (
+            "zsh",
+            "node -e \"console.log(process.version)\"; echo \"(self, tests)\"",
+        ),
+        ("zsh", "print -l a($(date +%s))"),
         ("zsh", "node -e \"console.log('done')\""),
     ] {
         let found = kind(&[shell, "-c", line]);

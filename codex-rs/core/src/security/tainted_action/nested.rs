@@ -486,9 +486,7 @@ impl Classifier {
             .flat_map(|reading| reading.texts.iter().cloned())
             .collect();
         for text in texts {
-            self.unknown_language += 1;
             self.script(&text, &sed.cwd, depth + 1);
-            self.unknown_language -= 1;
         }
     }
 
