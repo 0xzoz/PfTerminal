@@ -985,6 +985,24 @@ async fn ambiguous_unattributed_network_request_is_not_assigned_to_active_calls(
         ]),
     )
     .await;
+    // Hold the turn on the model once both commands have yielded, so it is
+    // still active when the test interrupts it. Without this the follow-up
+    // request found no response and ended the turn, about 1 s in, racing the
+    // interrupt below (#1134).
+    let _pending_model = mount_response_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            request_body_contains(request, "function_call_output")
+                && request_body_contains(request, "ambiguous-network-first")
+        },
+        sse_response(sse(vec![
+            ev_response_created("resp-ambiguous-network-held"),
+            ev_assistant_message("msg-ambiguous-network-held", "done"),
+            ev_completed("resp-ambiguous-network-held"),
+        ]))
+        .set_delay(Duration::from_secs(30)),
+    )
+    .await;
     submit_managed_network_turn(
         &test,
         "start two active commands",
