@@ -66,6 +66,95 @@ const GROUP: &str = "__corbanu_arithmetic_group_";
 const MAX_LIST_DEPTH: usize = 4;
 /// Longest `$NAME` prefix compared with the variables names are built from.
 const MAX_BUILDER_PREFIX: usize = 64;
+/// Commands that do not write variables named by their operands (or whose
+/// writes are handled on their own: `read`, `printf -v`, `declare`, `for`).
+const OPERAND_SAFE: &[&str] = &[
+    "((",
+    "[[",
+    "[",
+    "test",
+    "let",
+    "echo",
+    "printf",
+    "print",
+    ":",
+    "true",
+    "false",
+    "cd",
+    "pushd",
+    "popd",
+    "shift",
+    "exit",
+    "return",
+    "break",
+    "continue",
+    "unset",
+    "set",
+    "eval",
+    "for",
+    "select",
+    "foreach",
+    "while",
+    "until",
+    "if",
+    "elif",
+    "then",
+    "else",
+    "do",
+    "case",
+    "local",
+    "declare",
+    "typeset",
+    "export",
+    "readonly",
+    "integer",
+    "float",
+    "alias",
+    "source",
+    ".",
+    "noglob",
+    "nocorrect",
+    "time",
+    "exec",
+    "command",
+    "builtin",
+    "trap",
+    "kill",
+    "sleep",
+    "type",
+    "which",
+    "whence",
+    "read",
+    "mapfile",
+    "readarray",
+    "vared",
+    "getopts",
+    "sysread",
+    "zparseopts",
+];
+/// Builtins (bash, zsh and its modules) that write variables named by
+/// their operands.
+const VARIABLE_WRITERS: &[&str] = &[
+    "getln",
+    "zstyle",
+    "zformat",
+    "zregexparse",
+    "pcre_match",
+    "zstat",
+    "stat",
+    "strftime",
+    "zselect",
+    "ztcp",
+    "zsocket",
+    "zpty",
+    "zsystem",
+    "zcurses",
+    "compgen",
+    "wait",
+    "coproc",
+    "zparseopts",
+    "sysread",
+];
 /// Stands for the unseen output of a function substitution (`${ cmd; }`).
 const FUNCTION_SUBSTITUTION: &str = "__corbanu_function_substitution";
 /// Longest `${NAME[...]` subscript `defaults` looks through.
@@ -117,7 +206,22 @@ const INTEGER_SPECIALS: &[&str] = &[
     "TRY_BLOCK_INTERRUPT",
     "ZLE_RPROMPT_INDENT",
 ];
-const POSITIONAL: &[&str] = &["1", "2", "3", "4", "5", "6", "7", "8", "9", "@", "*"];
+const POSITIONAL: &[&str] = &[
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "@",
+    "*",
+    // zsh `argv[1]`, bash `BASH_ARGV[0]` (extdebug).
+    "argv",
+    "BASH_ARGV",
+];
 
 /// What one command line does with variables, gathered command by command.
 #[derive(Default)]
@@ -156,6 +260,13 @@ pub(super) struct Arithmetic {
     /// Variables appended to (`x+=ar`) or printed into (`printf -v`),
     /// which may now name any variable.
     appended: HashSet<String>,
+    /// Group nodes holding `$_` (alone they do not make the line tainted:
+    /// most lines leave command output in `$_`).
+    underscore: HashSet<String>,
+    /// Variables declared as namerefs (`declare -n r`).
+    namerefs: HashSet<String>,
+    /// Name operands of commands that may write them.
+    operands: HashSet<String>,
     /// The line uses a ksh/bash 5.3 function substitution (`${ cmd; }`,
     /// `${| cmd; }`), whose output the lexer cannot see.
     function_substitution: bool,
@@ -265,7 +376,7 @@ impl Arithmetic {
                         && !self.functions.contains(&name)
                         && !self.aliases.contains_key(&name) =>
                 {
-                    self.note_one(&raw[..index], &redirect[start..], None);
+                    self.note_one(&raw[..index], &redirect[start..], /*command*/ None);
                     start += index + 1;
                 }
                 command => {
@@ -302,6 +413,32 @@ impl Arithmetic {
         };
         let args = &words[index + 1..];
         let operand = |at: usize| !redirect.get(index + 1 + at).copied().unwrap_or(false);
+        // `$_` is the previous command's last word.
+        let last = self.group(words[*index..].last().cloned());
+        self.underscore.insert(last.clone());
+        self.assigned.push(("_".to_string(), last));
+        // Builtins and functions may write any variable they are given
+        // (zsh `zstyle -s`, `zformat -f`, `getln`): once the line is tainted,
+        // a name operand of a command not known to leave it alone may hold
+        // anything.
+        // `(( n + m ))` lexes as the command `n`: a word made only of
+        // arithmetic operators marks arithmetic rather than a command
+        // (known writers always count).
+        let arithmetic_like = args.iter().any(|word| {
+            !word.is_empty()
+                && word != "--"
+                && word.bytes().all(|byte| b"+-*/%<>=!&|^~?:,".contains(&byte))
+        });
+        if VARIABLE_WRITERS.contains(&name.as_str())
+            || (!OPERAND_SAFE.contains(&name.as_str()) && !arithmetic_like)
+        {
+            self.operands.extend(
+                args.iter()
+                    .enumerate()
+                    .filter(|(at, word)| operand(*at) && is_identifier(word))
+                    .map(|(_, word)| word.clone()),
+            );
+        }
         // `alias L='let v'`: the definition is judged as the command it
         // stands for, and later `L` commands as that command.
         if name == "alias" {
@@ -398,10 +535,27 @@ impl Arithmetic {
                         && word.starts_with(['-', '+'])
                         && word[1..].contains(['i', 'F', 'E'])
                 });
-            let nameref = args.iter().any(|word| {
-                word.len() > 1 && word.starts_with(['-', '+']) && word[1..].contains('n')
-            });
+            let flagged = |flags: &[char]| {
+                args.iter().any(|word| {
+                    word.len() > 1 && word.starts_with(['-', '+']) && word[1..].contains(flags)
+                })
+            };
+            let nameref = flagged(&['n']);
+            // Case conversion (`-l`, `-u`), justification (`-L`, `-R`,
+            // `-Z`) and zsh `-T` (joined with a separator) rebuild values.
+            let rebuilt = flagged(&['l', 'u', 'L', 'R', 'Z', 'T']);
             for word in args {
+                let declared = assignment(word)
+                    .map(|(name, _)| name)
+                    .or_else(|| is_identifier(word).then_some(word.as_str()));
+                if let Some(declared) = declared {
+                    if rebuilt {
+                        self.appended.insert(declared.to_string());
+                    }
+                    if nameref {
+                        self.namerefs.insert(declared.to_string());
+                    }
+                }
                 let Some((name, value)) = assignment(word) else {
                     if integer && is_identifier(word) {
                         self.integers.insert(word.clone());
@@ -520,12 +674,12 @@ impl Arithmetic {
         if self.unfollowed {
             return true;
         }
-        let tainted = self.tainted();
+        let (tainted, any) = self.tainted();
         // Operands the lexer cannot see, or a sourced file, may use them.
-        if (self.opaque || self.sources) && !tainted.is_empty() {
+        if (self.opaque || self.sources) && any {
             return true;
         }
-        let builds = |value: &str| !tainted.is_empty() && self.builds(value);
+        let builds = |value: &str| any && self.builds(value);
         let tainted_value = |value: &str| {
             command_output(value)
                 || builds(value)
@@ -533,12 +687,21 @@ impl Arithmetic {
         };
         if self.integers.iter().any(|name| tainted.contains(name))
             || self.evaluated.iter().any(|word| tainted_value(word))
-            || self.named.iter().any(|word| {
-                command_output(word)
-                    || builds(word)
-                    || references(word).any(|name| tainted.contains(name))
-                    || word.find('[').is_some_and(|at| tainted_value(&word[at..]))
-            })
+            || self
+                .named
+                .iter()
+                .chain(
+                    self.assigned
+                        .iter()
+                        .filter(|(name, _)| self.namerefs.contains(name))
+                        .map(|(_, value)| value),
+                )
+                .any(|word| {
+                    command_output(word)
+                        || builds(word)
+                        || references(word).any(|name| tainted.contains(name))
+                        || word.find('[').is_some_and(|at| tainted_value(&word[at..]))
+                })
         {
             return true;
         }
@@ -550,7 +713,7 @@ impl Arithmetic {
                 let bare = unquoted(region);
                 names(&bare).any(|name| tainted.contains(name))
                     || unseen_substitution(region)
-                    || (!tainted.is_empty() && {
+                    || (any && {
                         let (builders, unknown) = building(region);
                         unknown || !builders.is_empty()
                     })
@@ -560,7 +723,9 @@ impl Arithmetic {
 
     /// Variables whose value is unseen: set from command output, filled
     /// from input, or assigned a value that mentions such a variable.
-    fn tainted(&self) -> HashSet<String> {
+    /// Also whether the line is tainted by more than `$_`, which turns on
+    /// the checks for names built from fragments.
+    fn tainted(&self) -> (HashSet<String>, bool) {
         let mut tainted: HashSet<String> = self.filled.clone();
         if self.function_substitution {
             tainted.insert(FUNCTION_SUBSTITUTION.to_string());
@@ -579,8 +744,10 @@ impl Arithmetic {
         }
         // Once anything is tainted, a value built from name fragments may
         // name it.
-        if !tainted.is_empty() {
+        let any = tainted.iter().any(|name| !self.underscore.contains(name));
+        if any {
             tainted.extend(self.appended.iter().cloned());
+            tainted.extend(self.operands.iter().cloned());
             tainted.extend(FILLED_DEFAULTS.iter().map(|name| (*name).to_string()));
             // Allow-list: a value is clean only if it is made of numbers,
             // operators, bare names, arithmetic results and whole `$NAME`s
@@ -606,7 +773,7 @@ impl Arithmetic {
                 }
             }
         }
-        tainted
+        (tainted, any)
     }
 }
 
@@ -707,9 +874,14 @@ fn clean_form(value: &str, known: &HashSet<&str>) -> bool {
                 match next {
                     Some(b'?' | b'$' | b'!' | b'#') => {
                         at += 2;
-                        // `$#NAME` (`${#NAME}`): a length.
+                        // `$#NAME` (`${#NAME}`, `${#a[@]}`): a length.
                         while name_at(at) {
                             at += 1;
+                        }
+                        for subscript in ["[@]", "[*]"] {
+                            if value[at..].starts_with(subscript) {
+                                at += subscript.len();
+                            }
                         }
                     }
                     Some(ch) if ch.is_ascii_alphanumeric() || ch == b'_' => {
@@ -722,9 +894,21 @@ fn clean_form(value: &str, known: &HashSet<&str>) -> bool {
                                 end += 1;
                             }
                         }
-                        // `$a[*]`/`$a[@]` join elements with IFS.
-                        let joins =
-                            value[end..].starts_with("[*]") || value[end..].starts_with("[@]");
+                        // `$a[*]`/`$a[@]` join elements with IFS; zsh `$x:l`
+                        // modifies the value.
+                        let joins = value[end..].starts_with("[*]")
+                            || value[end..].starts_with("[@]")
+                            || (bytes.get(end) == Some(&b':')
+                                && bytes.get(end + 1).is_some_and(u8::is_ascii_alphabetic))
+                            // zsh `$a[1]r`: an element joined to name text.
+                            || (bytes.get(end) == Some(&b'[') && {
+                                let window = &bytes[end..bytes.len().min(end + MAX_SUBSCRIPT)];
+                                window.iter().position(|&byte| byte == b']').is_none_or(|close| {
+                                    bytes.get(end + close + 1).is_some_and(|&byte| {
+                                        is_name_char(byte as char) || byte == b'$'
+                                    })
+                                })
+                            });
                         if !known.contains(&value[start..end])
                             || joins
                             || bytes.get(end) == Some(&b'$')
@@ -791,7 +975,27 @@ fn building(text: &str) -> (Vec<String>, bool) {
                 let len = text[at + 1..]
                     .find(|ch: char| !is_name_char(ch))
                     .unwrap_or(text.len() - at - 1);
-                (at + 1 + len, Some(&text[at + 1..at + 1 + len]), false)
+                let mut end = at + 1 + len;
+                // zsh `$x:l`, `$x:t` (modifiers) transform the value.
+                let mut transforms = bytes.get(end) == Some(&b':')
+                    && bytes.get(end + 1).is_some_and(u8::is_ascii_alphabetic);
+                // zsh `$a[1]r`, `$x[1,2]`: the subscript is part of it.
+                if bytes.get(end) == Some(&b'[') {
+                    let window = &bytes[end..bytes.len().min(end + MAX_SUBSCRIPT)];
+                    match window.iter().position(|&byte| byte == b']') {
+                        Some(close) => end += close + 1,
+                        None => transforms = true,
+                    }
+                }
+                (end, Some(&text[at + 1..at + 1 + len]), transforms)
+            }
+            // zsh `$^x`, `$=x`, `$~x` change how the value expands.
+            b'^' | b'=' | b'~'
+                if bytes
+                    .get(at + 2)
+                    .is_some_and(|&byte| is_name_char(byte as char) || byte == b'{') =>
+            {
+                return (builders, true);
             }
             ch if ch.is_ascii_digit() || matches!(ch, b'@' | b'*') => {
                 (at + 2, Some(&text[at + 1..at + 2]), false)
