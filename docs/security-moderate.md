@@ -128,21 +128,20 @@ untrusted content) apply at once in every session of this Corbanu Terminal,
 and grants and "for session" approvals end. A command, file edit or MCP tool
 call whose approval prompt was still open is decided again under the new
 level, so you're asked again where it needs approval; an answer to the old
-prompt isn't used, and a retry outside the sandbox that was being approved
-(or was due) isn't run (#1001). A command or file edit that carried extra
+prompt isn't used, and a retry outside the sandbox that was being approved (or
+was due) isn't run (#1001). A command or file edit that carried extra
 permissions (ones it asked for, or grants made before the change) isn't
 decided again: it doesn't run, and the agent can ask again (#1001, #1057).
 Other Corbanu Terminals running on the same Corbanu home take them within
 about a second and say so, as they do with the kill switch. The credential
 broker starts at the next start (in each of them); press `r` to restart right
-away. Your `config.toml` isn't changed. If you confirm before the window's
-own session has started, that session starts under Core's Moderate rules too
-(#1047). In a window whose
-sessions run on an app server outside Corbanu Terminal (a remote server or the
-local daemon), Moderate reaches that server only if it runs on this Corbanu
-home, as it reaches another Corbanu Terminal; Corbanu Terminal starts against
-such a server only under Permissive, so the level picker doesn't offer
-"restart now" there.
+away. Your `config.toml` isn't changed. If you confirm before the window's own
+session has started, that session starts under Core's Moderate rules too
+(#1047). In a window whose sessions run on an app server outside Corbanu
+Terminal (a remote server or the local daemon), Moderate reaches that server
+only if it runs on this Corbanu home, as it reaches another Corbanu Terminal;
+Corbanu Terminal starts against such a server only under Permissive, so the
+level picker doesn't offer "restart now" there.
 
 Choosing Permissive or Aggressive from Moderate shows what changes first.
 Back to Permissive takes effect when you restart; until then Moderate stays
