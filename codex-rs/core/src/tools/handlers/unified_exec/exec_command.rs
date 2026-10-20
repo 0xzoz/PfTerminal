@@ -449,6 +449,7 @@ impl ExecCommandHandler {
         let user_namespace = crate::security::user_namespaces::denial_explanation(
             session.as_ref(),
             turn.as_ref(),
+            &context.call_id,
             output.exit_code,
             &output_text,
         );

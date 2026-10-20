@@ -134,7 +134,10 @@ own a command is root over its own files: it could open the placeholders the
 sandbox hides the vault store and other denied files with, and mount over
 paths, so a nested `corbanu exec` wouldn't be recognised as nested. The rule
 covers every process in Corbanu's Linux sandbox, bubblewrap's own included.
-No grant or approval lifts it; Permissive is unchanged. Contained Claude
+No grant or approval lifts it under Aggressive, or where the launch enforces
+Aggressive; under Moderate a person can allow it for one command whose
+request to run outside the sandbox they approve, with a warning (D27, see
+[Moderate](security-moderate.md#limits)). Permissive is unchanged. Contained Claude
 panes get the rule too (#891). Commands that run without Corbanu's sandbox
 (an external sandbox) and a remote Linux executor used from macOS or Windows
 aren't covered.
