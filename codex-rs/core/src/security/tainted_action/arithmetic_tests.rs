@@ -765,3 +765,21 @@ fn review_6_fallback_stays_linear() {
     assert!(only_facts(&"$(date +%s)".repeat(20_000)));
     assert!(start.elapsed() < std::time::Duration::from_secs(20));
 }
+
+/// #1028: the qualifier reading stays linear on many quoted groups, long
+/// subscripts and long delimited arguments.
+#[test]
+fn qualifier_code_reading_stays_linear() {
+    let start = std::time::Instant::now();
+    let arithmetic = Arithmetic::new(&[]);
+    for text in [
+        "a(x') ".repeat(100_000),
+        "a(\"x) ".repeat(100_000),
+        format!("a([{}", "[".repeat(200_000)),
+        format!("a(P:{}", "x".repeat(200_000)),
+        format!("a({})", "N".repeat(200_000)),
+    ] {
+        let _ = arithmetic.runs_qualifier_code(&[text]);
+    }
+    assert!(start.elapsed() < std::time::Duration::from_secs(20));
+}
