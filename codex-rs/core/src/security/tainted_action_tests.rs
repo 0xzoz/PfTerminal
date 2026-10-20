@@ -2760,6 +2760,11 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
         ("zsh", "print -l /(f?644+f)"),
         ("zsh", "print -l /(fau+ra+f)"),
         ("zsh", "print -l /(f644o+f)"),
+        // Review r5: a subshell in a substitution, non-ASCII names, units.
+        ("zsh", "f(){ true }; print -l /usr($((print -r -- +f) ))"),
+        ("zsh", "é(){ true; }; print -l /usr(+é)"),
+        ("zsh", "print -l /usr(md+0e:'print x':)"),
+        ("zsh", "print -l /usr(Lk+0e:'print x':)"),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found != Some(UnseenCode) {

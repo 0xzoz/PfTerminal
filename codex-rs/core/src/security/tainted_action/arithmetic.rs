@@ -2517,6 +2517,9 @@ fn neutral_expansions(list: &[u8]) -> Option<Vec<u8>> {
             at += 1;
             continue;
         }
+        // Where the inner group of `$((` closes, to tell arithmetic
+        // (`$((1))`) from a subshell in a substitution (`$((cmd) )`).
+        let mut inner_close = None;
         let end = if list[at] == b'`' {
             at + 1 + list[at + 1..].iter().position(|byte| *byte == b'`')? + 1
         } else {
@@ -2527,6 +2530,9 @@ fn neutral_expansions(list: &[u8]) -> Option<Vec<u8>> {
                     b'(' => depth += 1,
                     b')' => {
                         depth -= 1;
+                        if depth == 1 && inner_close.is_none() {
+                            inner_close = Some(at + 1 + offset);
+                        }
                         if depth == 0 {
                             end = Some(at + 1 + offset + 1);
                             break;
@@ -2537,10 +2543,14 @@ fn neutral_expansions(list: &[u8]) -> Option<Vec<u8>> {
             }
             end?
         };
+        let arithmetic = arithmetic && inner_close == Some(end - 2);
         let span = &list[at..end];
         let neutral = if arithmetic {
             // Its own expansions are read like any other.
             !span[3..].contains(&b'$') && !span.contains(&b'`')
+        } else if span.starts_with(b"$((") {
+            // A subshell in a substitution (`$((cmd) )`).
+            false
         } else {
             only_facts(&String::from_utf8_lossy(span))
         };
@@ -2662,9 +2672,9 @@ fn qualifier_runs_code(list: &str) -> bool {
                 None => return false,
             },
             b'+' => {
-                return list
-                    .get(at + 1)
-                    .is_some_and(|next| next.is_ascii_alphanumeric() || b"_{$`".contains(next));
+                return list.get(at + 1).is_some_and(|next| {
+                    next.is_ascii_alphanumeric() || !next.is_ascii() || b"_{$`".contains(next)
+                });
             }
             b'o' | b'O' => match list.get(at + 1) {
                 Some(b'e') => match delimited(at + 2) {
@@ -2674,7 +2684,7 @@ fn qualifier_runs_code(list: &str) -> bool {
                 },
                 Some(b'+') => {
                     return list.get(at + 2).is_some_and(|next| {
-                        next.is_ascii_alphanumeric() || b"_{$`".contains(next)
+                        next.is_ascii_alphanumeric() || !next.is_ascii() || b"_{$`".contains(next)
                     });
                 }
                 Some(b'n' | b'L' | b'l' | b'a' | b'm' | b'c' | b'd' | b'N') => at + 2,
@@ -2685,7 +2695,7 @@ fn qualifier_runs_code(list: &str) -> bool {
                     + 1
                     + usize::from(matches!(
                         list.get(at + 1),
-                        Some(b'M' | b'w' | b'h' | b'm' | b's')
+                        Some(b'M' | b'w' | b'd' | b'h' | b'm' | b's')
                     ));
                 match digits(sign(unit)) {
                     Some(next) => next,
