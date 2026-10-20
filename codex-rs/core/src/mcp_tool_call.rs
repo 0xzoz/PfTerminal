@@ -367,30 +367,47 @@ struct ApprovalModes {
     without_approve: AppToolApproval,
 }
 
-/// D52 (#1001): whether a person approved this tool for good while Aggressive
-/// was in force, as the Corbanu home records. Only for a connector, or a
-/// server the user's own config defines (not a project, which could define
-/// another server under the same name, nor a plugin).
-async fn approved_under_aggressive(
-    step_context: &StepContext,
+/// D52 (#1001): whether this tool's Aggressive record may be trusted: it is
+/// a connector, or a server the user's own config defines and nothing else
+/// changes (no project layer mentions it, even partly; not a plugin's).
+fn aggressive_record_scope(
+    config: &Config,
     invocation: &McpInvocation,
     metadata: &McpToolApprovalMetadata,
-    prepared_call: &PreparedMcpCall,
-) -> bool {
-    let Some(key) =
-        session_mcp_tool_approval_key(invocation, Some(metadata), AppToolApproval::Auto)
-    else {
-        return false;
-    };
-    let config = &step_context.turn.config;
+    plugin_id: Option<&str>,
+) -> Option<McpToolApprovalKey> {
+    let key = session_mcp_tool_approval_key(invocation, Some(metadata), AppToolApproval::Auto)?;
     let scoped = if key.server == CODEX_APPS_MCP_SERVER_NAME {
         key.connector_id.is_some()
     } else {
-        prepared_call.plugin_id().is_none()
-            && project_mcp_tool_approval_config_folder(config, &key.server).is_none()
+        plugin_id.is_none()
+            && !project_layer_mentions_mcp_server(config, &key.server)
             && user_mcp_server_is_configured(config, &key.server).unwrap_or(false)
     };
-    scoped && aggressive::approved(config.codex_home.as_path(), &key).await
+    scoped.then_some(key)
+}
+
+/// Whether a project config layer mentions `server` under `mcp_servers`, as
+/// a whole definition or only some fields (layers merge deeply), or has an
+/// `mcp_servers` value that is not a table.
+fn project_layer_mentions_mcp_server(config: &Config, server: &str) -> bool {
+    config
+        .config_layer_stack
+        .layers_high_to_low()
+        .into_iter()
+        .filter(|layer| matches!(layer.name, ConfigLayerSource::Project { .. }))
+        .any(|layer| {
+            match layer
+                .config
+                .as_table()
+                .and_then(|table| table.get("mcp_servers"))
+            {
+                None => false,
+                Some(servers) => servers
+                    .as_table()
+                    .is_none_or(|servers| servers.contains_key(server)),
+            }
+        })
 }
 
 /// Whether an MCP call runs, and under which approval, or why not.
@@ -442,9 +459,15 @@ async fn decide_mcp_tool_call(
 
     // D52 (#1001): under Aggressive, an "always approve" setting not saved
     // under it is suspended: the tool is decided as without it.
+    let config = &step_context.turn.config;
+    let record_key =
+        aggressive_record_scope(config, invocation, metadata, prepared_call.plugin_id());
     let always_allow_suspended = approval_mode.configured == AppToolApproval::Approve
         && sess.services.model_client().live_level_is_aggressive()
-        && !approved_under_aggressive(step_context, invocation, metadata, prepared_call).await;
+        && !match &record_key {
+            Some(key) => aggressive::approved(config.codex_home.as_path(), key).await,
+            None => false,
+        };
     let approval_mode = if always_allow_suspended {
         approval_mode.without_approve
     } else {
@@ -489,6 +512,7 @@ async fn decide_mcp_tool_call(
                 decision,
                 policy: approval_policy,
                 shown_under: approval_shown_under,
+                record_under_aggressive: record_key.is_some(),
             },
             None,
         ),
@@ -667,6 +691,7 @@ async fn handle_approved_mcp_tool_call(
                         decision,
                         policy,
                         shown_under,
+                        record_under_aggressive,
                     } = &approval_application
                     {
                         let session_approval_key = session_mcp_tool_approval_key(
@@ -690,6 +715,7 @@ async fn handle_approved_mcp_tool_call(
                             session_approval_key,
                             persistent_approval_key,
                             *shown_under,
+                            *record_under_aggressive,
                         )
                         .await;
                     }
@@ -1306,6 +1332,9 @@ enum McpToolApprovalApplication {
         policy: McpToolApprovalPolicy,
         /// #945: the policy marker the approval prompt was shown under.
         shown_under: Option<(u64, u64)>,
+        /// D52: whether "don't ask again" under Aggressive may be recorded
+        /// for this tool (see [`aggressive_record_scope`]).
+        record_under_aggressive: bool,
     },
 }
 
@@ -2313,6 +2342,7 @@ async fn apply_mcp_tool_approval_decision(
     session_approval_key: Option<McpToolApprovalKey>,
     persistent_approval_key: Option<McpToolApprovalKey>,
     shown_under: Option<(u64, u64)>,
+    record_under_aggressive: bool,
 ) {
     let lasting = matches!(
         decision,
@@ -2340,6 +2370,7 @@ async fn apply_mcp_tool_approval_decision(
         McpToolApprovalDecision::AcceptAndRemember => {
             if let Some(key) = persistent_approval_key {
                 if under_aggressive
+                    && record_under_aggressive
                     && let Err(err) =
                         aggressive::record(turn_context.config.codex_home.as_path(), key.clone())
                             .await

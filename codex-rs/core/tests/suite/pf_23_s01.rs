@@ -571,6 +571,40 @@ async fn issue_1001_aggressive_suspends_mcp_always_approve() -> anyhow::Result<(
         .expect("a record for another server definition does not apply");
     answer(&test, &question, "Cancel").await;
 
+    // The same record for the server the user's own config defines applies:
+    // the call runs unasked under Aggressive.
+    let home = Arc::new(TempDir::new()?);
+    std::fs::write(
+        home.path().join("mcp-approvals-aggressive.json"),
+        r#"{"tools":[{"server":"rmcp","connector_id":null,"tool_name":"sync"}]}"#,
+    )?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "[mcp_servers.rmcp]\ncommand = {:?}\ndefault_tools_approval_mode = \"approve\"\n",
+            stdio_server_bin()?
+        ),
+    )?;
+    let (test, captured) = start_turn_in(
+        Some(home),
+        SecurityLevel::Aggressive,
+        AskForApproval::OnRequest,
+        vec![sync_step("call-sync-1"), done_step()],
+        |config| {
+            config
+                .features
+                .disable(Feature::ToolCallMcpElicitation)
+                .expect("disable MCP elicitation");
+        },
+    )
+    .await?;
+    assert!(
+        next_question(&test).await.is_none(),
+        "recorded under Aggressive for the user's own server: runs unasked"
+    );
+    let output = output_text(&captured.requests()[1], "call-sync-1");
+    assert!(!output.contains("cancelled"), "{output}");
+
     let (test, captured) = approve_turn(SecurityLevel::Permissive).await?;
     assert!(next_question(&test).await.is_none(), "runs unasked");
     let output = output_text(&captured.requests()[1], "call-sync-1");
