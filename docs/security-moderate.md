@@ -124,8 +124,10 @@ The kill switch (`/security` → `g`) works under every level.
   compare with). A `.git` that was missing at a look and is back as a
   different one is looked at in full: its config, hooks and remotes are
   reported as new, also after `git init` or a fresh clone there (not a
-  worktree git adds again for the same repository); the same one moved
-  back is compared with the last look. New config and hooks are checked
+  worktree git adds again for the same repository), and approving a
+  command in that project doesn't lift the rules until you remove them or
+  restart Corbanu Terminal; the same one moved back is compared with the
+  last look. New config and hooks are checked
   only in a repository's own git folder, not in its worktrees' or
   submodules'. A session that works in more than 16 repositories forgets
   the oldest; its next look there reports only links, steps and hard links.
