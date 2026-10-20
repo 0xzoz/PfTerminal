@@ -409,3 +409,54 @@ fn review_3_allow_list_and_new_sources() {
         assert!(!runs_unseen(line), "{line}");
     }
 }
+
+/// Review 4: `$_`, zsh modifiers and subscripts, builtins that write named
+/// variables, positional aliases, case conversion and late namerefs.
+#[test]
+fn review_4_routes() {
+    for (shell, line) in [
+        ("bash", ": \"$(cat notes)\"; echo $((_))"),
+        ("bash", "v=$(cat notes); : \"$v\"; echo $((_))"),
+        ("zsh", "var=$(cat notes); x=VAR; m=$x:l; echo $((m))"),
+        ("zsh", "var=$(cat notes); x=var.c; m=$x:r; echo $((m))"),
+        ("zsh", "var=$(cat notes); a=(va); m=$a[1]r; echo $((m))"),
+        ("zsh", "var=$(cat notes); x=vaxx; m=$x[1,2]r; echo $((m))"),
+        ("zsh", "var=$(cat notes); x=/v/var; echo $(( $x:t ))"),
+        ("zsh", "var=$(cat notes); x=VAR; [[ $x:l -eq 1 ]]"),
+        (
+            "zsh",
+            "v=$(cat notes); zstyle :x y \"$v\"; zstyle -s :x y m; echo $((m))",
+        ),
+        (
+            "zsh",
+            "v=$(cat notes); zformat -f m \"%a\" \"a:$v\"; echo $((m))",
+        ),
+        (
+            "zsh",
+            "v=$(cat notes); print -z -- \"$v\"; getln m; echo $((m))",
+        ),
+        (
+            "zsh",
+            "var=$(cat notes); typeset -T M m a; m=(v r); echo $((M))",
+        ),
+        ("zsh", "set -- \"$(cat notes)\"; echo $((argv[1]))"),
+        ("zsh", "f(){ echo $((argv[1])); }; f \"$(cat notes)\""),
+        (
+            "bash",
+            "shopt -s extdebug; f(){ echo $((BASH_ARGV[0])); }; f \"$(cat notes)\"",
+        ),
+        ("ksh", "var=$(cat notes); typeset -l m=VAR; echo $((m))"),
+        ("bash", "var=$(cat notes); declare -u m; m=var; echo $((m))"),
+        ("bash", "v=$(cat notes); declare -n r; r=$v; echo $r"),
+    ] {
+        assert!(runs_unseen_in(shell, line), "{shell}: {line}");
+    }
+    for line in [
+        "out=$(cmd); arr=(1 2); n=${#arr[@]}; echo $((n-1))",
+        "out=$(cmd); n=1; m=2; (( n + m )); (( n - m )); echo $(( n * m ))",
+        "out=$(cmd); git checkout -; cat - notes; i=0; ((i++))",
+        ": \"$(date)\"; i=0; ((i++))",
+    ] {
+        assert!(!runs_unseen(line), "{line}");
+    }
+}

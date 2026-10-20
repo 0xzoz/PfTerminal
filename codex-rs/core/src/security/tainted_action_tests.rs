@@ -2495,6 +2495,10 @@ fn issue_937_review_2_routes() {
         "var=$(cat notes); set -- va r; IFS=; m=\"$*\"; echo $((m))",
         "v=${ cat notes; }; echo $((v))",
         "v=$(cat notes); declare -n r=$v; echo $r",
+        // Review 4.
+        ": \"$(cat notes)\"; echo $((_))",
+        "v=$(cat notes); declare -n r; r=$v; echo $r",
+        "var=$(cat notes); declare -u m; m=var; echo $((m))",
     ];
     let zsh = [
         "x=VAR; var=$(cat notes); echo $(( 1 + ${(L)x} ))",
@@ -2503,6 +2507,13 @@ fn issue_937_review_2_routes() {
         "v=$(cat notes); [[ $v = (#b)(*) ]]; echo $((match[1]))",
         "v=$(cat notes); KEYTIMEOUT=$v",
         "zmodload zsh/mapfile; v=$mapfile[notes]; echo $((v))",
+        // Review 4.
+        "var=$(cat notes); x=VAR; m=$x:l; echo $((m))",
+        "var=$(cat notes); a=(va); m=$a[1]r; echo $((m))",
+        "v=$(cat notes); zstyle :x y \"$v\"; zstyle -s :x y m; echo $((m))",
+        "v=$(cat notes); print -z -- \"$v\"; getln m; echo $((m))",
+        "var=$(cat notes); typeset -T M m a; m=(v r); echo $((M))",
+        "set -- \"$(cat notes)\"; echo $((argv[1]))",
     ];
     let mut wrong = Vec::new();
     for shell in ["bash", "zsh"] {
@@ -2539,6 +2550,8 @@ fn issue_937_review_2_everyday_lines_still_run() {
             "v=$(echo 5); echo $((v+1))",
             "v=$(cat f); n=3; m=$n; k=$((m+1)); rc=$?; echo $(( n + m + k + rc ))",
             "v=$(cat f); w=${#v}; ((w > 2)) && echo long",
+            "out=$(cmd); arr=(1 2); n=${#arr[@]}; echo $((n-1))",
+            "out=$(cmd); n=1; m=2; (( n + m )); echo $(( n * m ))",
             &format!("echo \"${{a[{}é]}}\"", "x".repeat(254)),
         ] {
             let found = kind(&[shell, "-c", line]);
