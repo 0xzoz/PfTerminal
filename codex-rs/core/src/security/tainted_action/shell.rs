@@ -84,12 +84,25 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
 
 /// Whether text may use bash's prompt transformation (`${v@P}`,
 /// `${a[0]@P}`, `${!r@P}`), which runs the command substitutions in the
-/// value (#1012). Read without quotes, so a nested shell's script counts;
-/// a backslash-newline joins lines first. Linear.
+/// value (#1012): `@P` not followed by a name character, in the text as
+/// written (backslash-newlines joined) or with its quotes and backslashes
+/// removed (`${v@'P'}`). The lexed words (braces dropped, `$'...'` decoded,
+/// known variables substituted) are checked the same way by the caller.
+/// Read without quotes, so nested shells' scripts count. Linear.
 pub(super) fn prompt_expansion(text: &str) -> bool {
-    let text = text.replace("\\\n", "");
-    text.find("${")
-        .is_some_and(|first| text[first..].contains("@P}"))
+    if !text.contains('P') {
+        return false;
+    }
+    let joined = text.replace("\\\n", "");
+    let bare: String = joined
+        .chars()
+        .filter(|ch| !matches!(ch, '\'' | '"' | '\\'))
+        .collect();
+    [joined.as_str(), bare.as_str()].iter().any(|text| {
+        text.match_indices("@P").any(|(at, _)| {
+            !text[at + 2..].starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+        })
+    })
 }
 
 /// `$IFS` and `${IFS}` separate words.
