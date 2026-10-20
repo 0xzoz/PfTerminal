@@ -762,3 +762,119 @@ fn a_path_another_run_was_about_to_make_is_recorded_as_used() {
     assert!(uses(&record, &pending, &pending));
     assert!(!uses(&record, &sibling, &sibling));
 }
+
+/// #745: a placeholder this run made that is still there but changed (a
+/// folder another run made a placeholder in, which its cleanup could then
+/// not remove) stays recorded, so a later sweep reports it instead of it
+/// being forgotten; one that is gone is dropped.
+#[test]
+fn a_changed_placeholder_stays_recorded_after_the_run() {
+    let mut setup = Setup::new();
+    let folder = setup.base.join("home/.git");
+    let file = setup.base.join("home/.pfterminal");
+    let planned = [
+        Planned {
+            kind: Kind::Directory,
+            path: &folder,
+            real: &folder,
+            makes: true,
+        },
+        Planned {
+            kind: Kind::File,
+            path: &file,
+            real: &file,
+            makes: true,
+        },
+    ];
+    setup.journal.register(&planned, &[]);
+    tick();
+    std::fs::write(folder.join("hooks"), "").expect("another run's placeholder");
+    std::fs::remove_file(&file).expect("its cleanup");
+    setup.journal.leave();
+    setup.journal.finish();
+    let records = setup.records();
+    assert_eq!(records.len(), 1);
+    let record = setup.journal.read(&records[0]).expect("record");
+    assert!(matches!(
+        record.entries.as_slice(),
+        [Entry::Made { path, .. }] if *path == folder
+    ));
+
+    // (A sweep then reports it and leaves it: see
+    // `a_placeholder_filled_replaced_or_changed_since_is_kept`.)
+}
+
+/// #745: another run's recorded placeholder (made, or about to be made) is
+/// named as one; any other path is not.
+#[test]
+fn another_runs_recorded_placeholder_is_named_as_one() {
+    let mut setup = Setup::new();
+    let made = setup.base.join("home/.git");
+    let pending = setup.base.join("home/.codex");
+    setup.made_by(ended(), &made, Kind::Directory);
+    setup.write(
+        ended(),
+        vec![Entry::Pending {
+            kind: Kind::Directory,
+            path: pending.clone(),
+            real: pending.clone(),
+        }],
+    );
+    assert!(setup.journal.recorded_by_another_run(&made, None));
+    assert!(setup.journal.recorded_by_another_run(&pending, None));
+    let other = setup.base.join("home/.agents");
+    assert!(!setup.journal.recorded_by_another_run(&other, Some(&other)));
+}
+
+/// #607: the record says what was made at a path: what is there now is
+/// recorded otherwise when it is another file (the person replaced it), or
+/// (`exact`) when it changed since; a path no record names is not.
+#[test]
+fn a_replaced_or_changed_placeholder_is_recorded_otherwise() {
+    let mut setup = Setup::new();
+    let path = setup.base.join("home/.pfterminal");
+    setup.made_by(ended(), &path, Kind::File);
+    let status = |path: &Path| {
+        crate::placeholder_registry::find_without_links(path)
+            .expect("find")
+            .expect("there")
+            .status
+    };
+    let made = status(&path);
+    for exact in [false, true] {
+        assert!(!setup.journal.recorded_otherwise(&path, &path, &made, exact));
+    }
+
+    tick();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    let changed = status(&path);
+    assert!(
+        !setup
+            .journal
+            .recorded_otherwise(&path, &path, &changed, /*exact*/ false)
+    );
+    assert!(
+        setup
+            .journal
+            .recorded_otherwise(&path, &path, &changed, /*exact*/ true)
+    );
+
+    std::fs::remove_file(&path).expect("removed");
+    std::fs::write(&path, "").expect("the person's own");
+    let replaced = status(&path);
+    for exact in [false, true] {
+        assert!(
+            setup
+                .journal
+                .recorded_otherwise(&path, &path, &replaced, exact)
+        );
+    }
+
+    let other = setup.base.join("home/other");
+    std::fs::write(&other, "").expect("other");
+    assert!(
+        !setup
+            .journal
+            .recorded_otherwise(&other, &other, &status(&other), true)
+    );
+}
