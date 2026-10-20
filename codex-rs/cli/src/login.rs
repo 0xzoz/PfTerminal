@@ -528,7 +528,8 @@ async fn load_config_or_exit(cli_config_overrides: CliConfigOverrides) -> Config
 /// REG-02: `login status` for an API-key login shows no part of the key,
 /// only that one is configured and, when the home's vault has a fingerprint
 /// salt, the per-home fingerprint a named OpenAI account holding the same key
-/// shows in /providers.
+/// shows in /providers. Reading the salt decrypts an existing vault, which
+/// can read the OS keychain, as /providers does.
 fn api_key_status(codex_home: &Path, api_key: &str) -> String {
     match default_api_key_fingerprint(codex_home, api_key) {
         Some(fingerprint) => {
@@ -538,7 +539,7 @@ fn api_key_status(codex_home: &Path, api_key: &str) -> String {
     }
 }
 
-/// Reads the vault only when it exists; never creates it or its salt.
+/// Reads the vault only when it exists; never creates it or writes its data.
 fn default_api_key_fingerprint(codex_home: &Path, api_key: &str) -> Option<String> {
     let vault = Vault::new(codex_home.to_path_buf());
     if vault.key_storage() == VaultKeyStorage::NotInitialized {
@@ -546,7 +547,7 @@ fn default_api_key_fingerprint(codex_home: &Path, api_key: &str) -> Option<Strin
     }
     let sign_in = Zeroizing::new(serde_json::json!({ "OPENAI_API_KEY": api_key }).to_string());
     vault
-        .sign_in_fingerprint("openai", &sign_in)
+        .sign_in_fingerprint(crate::named_login::OPENAI_PROVIDER_ID, &sign_in)
         .inspect_err(|error| tracing::warn!(%error, "could not fingerprint the API key"))
         .ok()
         .flatten()
@@ -563,7 +564,6 @@ mod tests {
 
     use super::api_key_status;
     use super::clear_existing_auth_before_login;
-    use codex_vault::ProviderAccountKind;
     use codex_vault::ProviderAccountName;
     use codex_vault::Vault;
 
@@ -597,6 +597,7 @@ mod tests {
 
     /// REG-02: no part of the key, with or without a vault; the
     /// fingerprint is the one a named OpenAI account holding the key has.
+    /// Runs under the isolated test runner (`CORBANU_TEST_NO_NATIVE_KEYRING=1`).
     #[test]
     fn api_key_status_shows_no_part_of_the_key() {
         let key = "sk-proj-1234567890ABCDE";
@@ -610,12 +611,19 @@ mod tests {
             "status never creates a vault"
         );
 
+        // A named OpenAI account holding the same key, saved as a real
+        // API-key sign-in.
+        codex_login::login_named_account_with_api_key(
+            codex_home.path(),
+            &codex_login::NamedChatgptAccount {
+                provider_id: "openai".to_string(),
+                name: "work".to_string(),
+            },
+            key,
+        )
+        .expect("sign in work");
         let vault = Vault::new(codex_home.path().to_path_buf());
         let work = ProviderAccountName::parse("work").expect("name");
-        let sign_in = serde_json::json!({ "OPENAI_API_KEY": key }).to_string();
-        vault
-            .write_provider_account("openai", &work, ProviderAccountKind::ChatgptAuth, &sign_in)
-            .expect("write account");
         let fingerprint = vault
             .provider_account_fingerprint("openai", &work)
             .expect("fingerprint")
@@ -628,5 +636,16 @@ mod tests {
         for fragment in ["sk-proj", "ABCDE", "1234567890"] {
             assert!(!status.contains(fragment), "{status}");
         }
+
+        // An unreadable vault: the plain line, still no part of the key.
+        std::fs::write(
+            codex_home.path().join("secrets").join("local.age"),
+            b"not an age file",
+        )
+        .expect("corrupt the vault");
+        assert_eq!(
+            api_key_status(codex_home.path(), key),
+            "Logged in using an API key - API key configured"
+        );
     }
 }
