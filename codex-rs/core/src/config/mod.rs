@@ -190,6 +190,7 @@ pub use provider_accounts::apply_recorded_provider_account;
 pub(crate) use provider_accounts::configured_account_names;
 pub use provider_accounts::default_login_restriction_error;
 pub use provider_accounts::other_provider_account_error;
+pub(crate) use provider_accounts::restore_recorded_agent_account;
 pub(crate) use provider_accounts::resume_default_key_error;
 pub use provider_accounts::session_account_error;
 pub(crate) use provider_accounts::spawn_default_key_error;

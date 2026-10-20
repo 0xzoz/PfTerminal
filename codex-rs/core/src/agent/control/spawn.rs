@@ -135,6 +135,23 @@ fn latest_runtime_from_model_context(
     (model, model_provider, reasoning_effort)
 }
 
+/// #1129: the account (`default` included) the newest turn context recorded,
+/// while named accounts were on, when it ran on `provider_id`.
+fn recorded_account_from_model_context<'a>(
+    history: &'a [RolloutItem],
+    provider_id: &str,
+) -> Option<&'a str> {
+    history.iter().rev().find_map(|item| match item {
+        RolloutItem::TurnContext(turn_context) => Some(
+            turn_context
+                .provider_account
+                .as_deref()
+                .filter(|_| turn_context.model_provider.as_deref() == Some(provider_id)),
+        ),
+        _ => None,
+    })?
+}
+
 impl AgentControl {
     /// Restore persisted V2 agent identities without reopening their runtimes.
     pub(crate) async fn restore_v2_agent_metadata(
@@ -412,7 +429,7 @@ impl AgentControl {
         } else {
             stored_thread.model_provider.clone()
         };
-        let stored_provider = config
+        let mut stored_provider = config
             .model_providers
             .get(&stored_provider_id)
             .cloned()
@@ -421,6 +438,16 @@ impl AgentControl {
                     "cannot resume agent {thread_id}: persisted provider `{stored_provider_id}` is not configured"
                 ))
             })?;
+        // #1129: back on the account it ran on, or refused.
+        if let Some(recorded) = recorded_account_from_model_context(&history, &stored_provider_id) {
+            crate::config::restore_recorded_agent_account(
+                &config,
+                &stored_provider_id,
+                &mut stored_provider,
+                recorded,
+            )
+            .map_err(CodexErr::InvalidRequest)?;
+        }
         // #1074: refused before it starts when its connection has no
         // credential of its own (#689).
         if let Some(message) = crate::config::resume_default_key_error(
@@ -1116,7 +1143,7 @@ impl AgentControl {
 
     async fn resume_single_agent_from_rollout(
         &self,
-        config: Config,
+        mut config: Config,
         thread_id: ThreadId,
         session_source: SessionSource,
     ) -> CodexResult<(ThreadId, MultiAgentVersion)> {
@@ -1139,6 +1166,35 @@ impl AgentControl {
         let history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
             .await?
             .ok_or(CodexErr::ThreadNotFound(thread_id))?;
+        // #1129: an agent that ran on another account of its parent's
+        // provider is resumed on that account, or refused.
+        if let Some(recorded) =
+            recorded_account_from_model_context(&history, &config.model_provider_id)
+        {
+            let parent = config.model_provider.clone();
+            let mut provider = parent.clone();
+            crate::config::restore_recorded_agent_account(
+                &config,
+                &config.model_provider_id,
+                &mut provider,
+                recorded,
+            )
+            .map_err(CodexErr::InvalidRequest)?;
+            if provider.account != parent.account {
+                // #1074: its own connection's credential, checked again now
+                // that it may run on the default account.
+                if let Some(message) = crate::config::resume_default_key_error(
+                    &config,
+                    &config.model_provider_id,
+                    &provider,
+                    &config.model_provider_id,
+                    &parent,
+                ) {
+                    return Err(CodexErr::InvalidRequest(message));
+                }
+                config.model_provider = provider;
+            }
+        }
         let initial_history = InitialHistory::Resumed(ResumedHistory {
             conversation_id: thread_id,
             history: Arc::new(history),

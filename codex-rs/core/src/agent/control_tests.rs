@@ -2091,6 +2091,204 @@ async fn ensure_v2_agent_loaded_refuses_a_connection_without_its_own_credential(
     );
 }
 
+/// #1129: a `zai` connection that never reaches the network, with an
+/// account `work` configured in `home` and its default account selected.
+fn issue1129_zai_with_work_account(
+    codex_home: &std::path::Path,
+) -> codex_model_provider_info::ModelProviderInfo {
+    codex_vault::Vault::new(codex_home.to_path_buf())
+        .write_provider_account(
+            "zai",
+            &codex_vault::ProviderAccountName::parse("work").expect("name"),
+            codex_vault::ProviderAccountKind::ApiKey,
+            "canary-1129-work",
+        )
+        .expect("write account");
+    let mut zai = codex_model_provider_info::ModelProviderInfo::create_zai_provider();
+    zai.base_url = Some("http://127.0.0.1:9/v1".to_string());
+    zai.env_key = Some("CORBANU_TEST_1129_ZAI_KEY".to_string());
+    zai.request_max_retries = Some(0);
+    zai.stream_max_retries = Some(0);
+    zai
+}
+
+fn issue1129_remove_work_account(codex_home: &std::path::Path) {
+    let removed = codex_vault::Vault::new(codex_home.to_path_buf())
+        .remove_provider_account(
+            "zai",
+            &codex_vault::ProviderAccountName::parse("work").expect("name"),
+        )
+        .expect("remove account");
+    assert!(removed);
+}
+
+const ISSUE1129_REFUSAL: &str = "Resuming this agent: it ran on account `work` of `zai`, and \
+     account `work` of provider `zai` is not configured";
+
+/// Shuts `thread_id` down and unloads it, as residency eviction does.
+async fn issue1129_unload(harness: &AgentControlHarness, thread_id: ThreadId) {
+    let thread = harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("thread should be loaded");
+    thread.shutdown_and_wait().await.expect("shut down");
+    assert!(harness.manager.remove_thread(&thread_id).await.is_some());
+}
+
+async fn issue1129_loaded_account(
+    harness: &AgentControlHarness,
+    thread_id: ThreadId,
+) -> Option<String> {
+    harness
+        .manager
+        .get_thread(thread_id)
+        .await
+        .expect("thread should be loaded")
+        .config_snapshot()
+        .await
+        .provider_account
+}
+
+/// #1129: a V2 agent spawned on account `work` while `zai` selects its
+/// default account is reloaded on `work`; once `work` is gone the reload is
+/// refused instead of moving the agent to the default account.
+#[tokio::test]
+async fn issue1129_v2_reload_restores_the_recorded_account_or_refuses() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    let _ = config.features.enable(Feature::NamedAccounts);
+    let zai = issue1129_zai_with_work_account(config.codex_home.as_path());
+    config
+        .model_providers
+        .insert("zai".to_string(), zai.clone());
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, _parent_thread) = harness.start_paginated_thread().await;
+    let mut child_config = harness.config.clone();
+    child_config.model_provider = zai;
+    crate::config::stamp_provider_account("zai", &mut child_config.model_provider, "work")
+        .expect("stamp");
+    child_config.model_provider_id = "zai".to_string();
+    child_config.model = Some("glm-5.2".to_string());
+    let child = harness
+        .control
+        .spawn_agent_with_metadata(
+            child_config,
+            text_input("hello child"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(AgentPath::try_from("/root/worker").expect("agent path")),
+                agent_nickname: None,
+                agent_role: None,
+                agent_class: None,
+            })),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn_agent should succeed")
+        .thread_id;
+    let child_thread = harness.manager.get_thread(child).await.expect("child");
+    wait_for_initial_turn_to_finish(&child_thread).await;
+    child_thread
+        .inject_response_items(vec![assistant_message(
+            "child persisted",
+            Some(MessagePhase::FinalAnswer),
+        )])
+        .await
+        .expect("child rollout should persist with v2 metadata");
+    assert_eq!(
+        issue1129_loaded_account(&harness, child).await,
+        Some("zai:work".to_string())
+    );
+    issue1129_unload(&harness, child).await;
+
+    harness
+        .control
+        .ensure_v2_agent_loaded(harness.config.clone(), child)
+        .await
+        .expect("the agent should reload");
+    assert_eq!(
+        issue1129_loaded_account(&harness, child).await,
+        Some("zai:work".to_string())
+    );
+
+    issue1129_unload(&harness, child).await;
+    issue1129_remove_work_account(harness.config.codex_home.as_path());
+    let error = harness
+        .control
+        .ensure_v2_agent_loaded(harness.config.clone(), child)
+        .await
+        .expect_err("the reload should be refused");
+    assert!(error.to_string().starts_with(ISSUE1129_REFUSAL), "{error}");
+    assert!(harness.manager.get_thread(child).await.is_err());
+}
+
+/// #1129: a V1 child spawned on account `work` of its parent's provider is
+/// resumed on `work`, not on the parent's default account; once `work` is
+/// gone the resume is refused.
+#[tokio::test]
+async fn issue1129_v1_resume_restores_the_recorded_account_or_refuses() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::NamedAccounts);
+    let zai = issue1129_zai_with_work_account(config.codex_home.as_path());
+    config
+        .model_providers
+        .insert("zai".to_string(), zai.clone());
+    config.model_provider = zai;
+    config.model_provider_id = "zai".to_string();
+    config.model = Some("glm-5.2".to_string());
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let mut child_config = harness.config.clone();
+    crate::config::stamp_provider_account("zai", &mut child_config.model_provider, "work")
+        .expect("stamp");
+    let child = harness
+        .control
+        .spawn_agent(
+            child_config,
+            text_input("hello child"),
+            /*session_source*/ None,
+        )
+        .await
+        .expect("child spawn should succeed");
+    let child_thread = harness.manager.get_thread(child).await.expect("child");
+    wait_for_initial_turn_to_finish(&child_thread).await;
+    persist_thread_for_tree_resume(&child_thread, "persist before resume").await;
+    let _ = harness
+        .control
+        .shutdown_live_agent(child)
+        .await
+        .expect("child shutdown should succeed");
+
+    let resumed = harness
+        .control
+        .resume_agent_from_rollout(harness.config.clone(), child, SessionSource::Exec)
+        .await
+        .expect("resume should succeed");
+    assert_eq!(
+        issue1129_loaded_account(&harness, resumed).await,
+        Some("zai:work".to_string())
+    );
+    let _ = harness
+        .control
+        .shutdown_live_agent(resumed)
+        .await
+        .expect("resumed child shutdown should succeed");
+
+    issue1129_remove_work_account(harness.config.codex_home.as_path());
+    let error = harness
+        .control
+        .resume_agent_from_rollout(harness.config.clone(), child, SessionSource::Exec)
+        .await
+        .expect_err("the resume should be refused");
+    assert!(error.to_string().starts_with(ISSUE1129_REFUSAL), "{error}");
+    assert!(harness.manager.get_thread(child).await.is_err());
+}
+
 #[tokio::test]
 async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
     let (home, mut config) = test_config().await;
