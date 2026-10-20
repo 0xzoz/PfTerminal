@@ -80,7 +80,8 @@ changed.
 Choosing Permissive or Aggressive from Moderate shows what changes first.
 Back to Permissive takes effect when you restart; until then Moderate stays
 on. Aggressive applies Core's stricter rules at once when its preflight
-passes (the `protected_mode_preflight` feature), and the rest at the restart.
+passes (the `protected_mode_preflight` feature), also in the other Corbanu
+Terminals running on the home (#919), and the rest at the restart.
 The kill switch (`/security` → `g`) works under every level.
 
 ## Limits
