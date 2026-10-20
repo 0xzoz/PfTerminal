@@ -181,19 +181,22 @@ pub(crate) fn take_env_var(name: &str) -> Option<Zeroizing<Vec<u8>>> {
     windows_env::wipe_heap_copies(name, patterns, &own);
     // #974: a heap's memory can hold a stale copy outside every block its
     // walk reports (likely a C runtime start-up copy, its name partly
-    // overwritten),
-    // so each heap's allocations are swept whole. An environment block
+    // overwritten), so each heap's allocations are swept whole, each heap
+    // locked meanwhile. An environment block
     // Windows replaced when the environment grew stays in the process
     // parameters' allocation, inside the process heap on current Windows.
-    let mut allocations = windows_env::heap_allocations();
+    let mut allocations: Vec<(Option<isize>, usize)> = windows_env::heap_allocations()
+        .into_iter()
+        .map(|(heap, base)| (Some(heap), base))
+        .collect();
     if let Some(base) =
         windows_env::process_parameters_allocation().and_then(windows_env::allocation_base)
-        && !allocations.contains(&base)
+        && !allocations.iter().any(|(_, known)| *known == base)
     {
-        allocations.push(base);
+        allocations.push((None, base));
     }
-    for base in allocations {
-        windows_env::wipe_copies_in_allocation(base, name, patterns, &own);
+    for (heap, base) in allocations {
+        windows_env::wipe_copies_in_allocation(base, name, patterns, &own, heap);
     }
     tracing::debug!(
         "environment sweep for one handed-over variable took {} ms",
@@ -345,9 +348,10 @@ mod windows_env {
     /// Most heap allocations [`heap_allocations`] returns.
     const MAX_HEAP_ALLOCATIONS: usize = 256;
 
-    /// The allocations holding this process's heaps: the allocation of
-    /// every region (segment) a heap walk reports, without duplicates.
-    pub(super) fn heap_allocations() -> Vec<usize> {
+    /// The allocations holding this process's heaps, each with its heap:
+    /// the allocation of every region (segment) a heap walk reports, without
+    /// duplicates.
+    pub(super) fn heap_allocations() -> Vec<(isize, usize)> {
         use windows_sys::Win32::System::Memory::GetProcessHeaps;
         use windows_sys::Win32::System::Memory::HeapLock;
         use windows_sys::Win32::System::Memory::HeapUnlock;
@@ -359,7 +363,7 @@ mod windows_env {
         let count = unsafe { GetProcessHeaps(heaps.len() as u32, heaps.as_mut_ptr()) } as usize;
         heaps.truncate(count.min(heaps.len()));
         // Filled while a heap is locked, so nothing is allocated meanwhile.
-        let mut bases = [0_usize; MAX_HEAP_ALLOCATIONS];
+        let mut bases = [(0_isize, 0_usize); MAX_HEAP_ALLOCATIONS];
         let mut found = 0;
         let mut truncated = false;
         for heap in heaps {
@@ -371,14 +375,17 @@ mod windows_env {
             let mut entry: PROCESS_HEAP_ENTRY = unsafe { std::mem::zeroed() };
             // SAFETY: the heap is locked for the walk.
             while unsafe { HeapWalk(heap, &mut entry) } != 0 {
-                if entry.wFlags & PROCESS_HEAP_REGION == 0 || found == bases.len() {
-                    truncated |= found == bases.len();
+                if entry.wFlags & PROCESS_HEAP_REGION == 0 {
                     continue;
                 }
                 if let Some(base) = allocation_base(entry.lpData as usize)
-                    && !bases[..found].contains(&base)
+                    && !bases[..found].iter().any(|(_, known)| *known == base)
                 {
-                    bases[found] = base;
+                    if found == bases.len() {
+                        truncated = true;
+                        continue;
+                    }
+                    bases[found] = (heap, base);
                     found += 1;
                 }
             }
@@ -403,14 +410,23 @@ mod windows_env {
     /// is read with `ReadProcessMemory` and written with
     /// `WriteProcessMemory`, which fail instead of faulting if a region
     /// changes meanwhile; only bytes that equal a whole value are written.
+    ///
+    /// `heap`, when the allocation is a heap's, is locked during the scan,
+    /// so its blocks are not split, merged or handed out meanwhile. The
+    /// low-fragmentation front end allocates without that lock: a stale copy
+    /// in a free slot can still be handed to another thread between the
+    /// re-read of a match and its overwrite (two system calls).
     pub(super) fn wipe_copies_in_allocation(
         address: usize,
         name: &str,
         values: &[&[u8]],
         keep: &[(usize, usize)],
+        heap: Option<isize>,
     ) {
         use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
         use windows_sys::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+        use windows_sys::Win32::System::Memory::HeapLock;
+        use windows_sys::Win32::System::Memory::HeapUnlock;
         use windows_sys::Win32::System::Memory::MEM_COMMIT;
         use windows_sys::Win32::System::Memory::MEMORY_BASIC_INFORMATION;
         use windows_sys::Win32::System::Memory::PAGE_EXECUTE_READWRITE;
@@ -519,6 +535,9 @@ mod windows_env {
         own.push(allocation(recheck.as_ptr(), recheck.capacity()));
         // SAFETY: a pseudo-handle for this process.
         let process = unsafe { GetCurrentProcess() };
+        // Everything the scan uses is allocated by now.
+        // SAFETY: a heap of this process, unlocked below if locked here.
+        let locked = heap.filter(|heap| unsafe { HeapLock(*heap) } != 0);
         for (base, end) in regions {
             let mut offset = base;
             while offset < end {
@@ -596,6 +615,10 @@ mod windows_env {
                 }
                 offset += chunk;
             }
+        }
+        if let Some(heap) = locked {
+            // SAFETY: locked above.
+            unsafe { HeapUnlock(heap) };
         }
     }
 

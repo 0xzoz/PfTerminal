@@ -241,7 +241,13 @@ fn pf_27_s09_entries_outside_the_heaps_are_overwritten() {
         .encode_utf16()
         .flat_map(u16::to_le_bytes)
         .collect();
-    super::windows_env::wipe_copies_in_allocation(page as usize, &name, &[&wide], &[]);
+    super::windows_env::wipe_copies_in_allocation(
+        page as usize,
+        &name,
+        &[&wide],
+        &[],
+        /*heap*/ None,
+    );
     drop((taken, wide));
     assert!(super::windows_env::process_parameters_allocation().is_some());
 
@@ -269,7 +275,10 @@ fn sec_974_stale_copies_without_their_name_are_overwritten_in_an_allocation() {
     let unmask =
         |masked: &[u8]| Zeroizing::new(masked.iter().map(|byte| byte ^ 0x5a).collect::<Vec<u8>>());
     let mask = |plain: &str| plain.bytes().map(|byte| byte ^ 0x5a).collect::<Vec<u8>>();
-    let key = mask(&format!("sk-sec974-stale-{:016x}", rand::random::<u64>()));
+    let key = mask(&Zeroizing::new(format!(
+        "sk-sec974-stale-{:016x}",
+        rand::random::<u64>()
+    )));
     let placeholder = mask("dummy-key-974");
     let name = format!("SEC_974_STALE_{}", std::process::id());
     // SAFETY: two fresh private pages, released below.
@@ -288,7 +297,10 @@ fn sec_974_stale_copies_without_their_name_are_overwritten_in_an_allocation() {
         unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), page.add(offset), bytes.len()) };
     };
     let wide = |plain: &[u8]| -> Zeroizing<Vec<u8>> {
-        Zeroizing::new(plain.iter().flat_map(|byte| [*byte, 0]).collect())
+        // Sized up front, so no reallocation leaves a partial copy behind.
+        let mut wide = Zeroizing::new(Vec::with_capacity(plain.len() * 2));
+        wide.extend(plain.iter().flat_map(|byte| [*byte, 0]));
+        wide
     };
     // Read back masked, so the test keeps no plain copy.
     let read = |offset: usize, len: usize| -> Vec<u8> {
@@ -326,6 +338,7 @@ fn sec_974_stale_copies_without_their_name_are_overwritten_in_an_allocation() {
         &name,
         &[&plain_wide, &plain, &placeholder_plain],
         &[kept],
+        /*heap*/ None,
     );
     drop((plain, plain_wide, placeholder_plain));
     let left = [
@@ -366,10 +379,15 @@ fn sec_974_heap_allocations_include_every_heap() {
     let base = |address: usize| super::windows_env::allocation_base(address).expect("allocation");
     // SAFETY: this process's default heap.
     let process_heap = unsafe { GetProcessHeap() } as usize;
+    let has = |address: usize| {
+        allocations
+            .iter()
+            .any(|(_, allocation)| *allocation == base(address))
+    };
     let found = (
-        allocations.contains(&base(process_heap)),
-        allocations.contains(&base(private as usize)),
-        allocations.contains(&base(block as usize)),
+        has(process_heap),
+        has(private as usize),
+        has(block as usize),
     );
     // The private heap is left alive: a concurrent sweep in this process
     // could otherwise lock a destroyed heap handle.
