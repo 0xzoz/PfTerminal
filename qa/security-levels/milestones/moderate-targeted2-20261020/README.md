@@ -36,8 +36,9 @@ Quoted in [design/designer-packet/decisions.md](design/designer-packet/decisions
 ## Design and freeze
 
 - **Amendment v4:** a fresh read-only code-blind designer (Opus 5.5 High) amended only MOD-15 and MOD-28, from the frozen
-  cases, amendments v2 and v3, the decisions and 10 new screens of this candidate captured on the host in a disposable
-  profile ([design/designer-packet/](design/designer-packet/), [design/designer-output.md](design/designer-output.md)).
+  cases, amendments v2 and v3, the decisions and 11 new screens of this candidate (00-09 and 09b) captured on the host in a
+  disposable profile; a 12th raw capture, `10-outside-edit-prompt` (the agent declined an edit outside the project, no prompt), was
+  not given to the designer and is kept only in `design/host-capture/screens-raw/` ([design/designer-packet/](design/designer-packet/), [design/designer-output.md](design/designer-output.md)).
   MOD-15: amendment v3's R-2 carve-out no longer applies; the refusal text shown in the command's cell is judged.
   MOD-28: a bounded search for a session approval (P1-P3); with none, the "accepted under D40" outcome.
 - **Review:** a separate fresh read-only reviewer: VERDICT: CHANGES; its final version is frozen word for word
@@ -78,10 +79,14 @@ Signed integration build of main `8bf182de43` (INSTALL.json; has #900, #949 and 
   (D40 accepts this). Its "the action prompts again" result was not judged; whether saved rules keep working after
   revoke is not tested.
 - The same model family is executor and product.
-- MOD-15's item 1 was read with the agent's file reader ("Read README.md"), not `cat`; the case only needs it as
-  untrusted content, which the product log confirms (taint_generation 1).
 - The MOD-15 executor's report names a screen file `mod15-item2-captured.txt` that does not exist; the item 2 cell is in
   `mod15-item2-end.txt` and `mod15-item2-turn.txt` (and `pty.raw.gz`).
+- Frozen-file erratum (not edited, to keep the freeze): `design/FROZEN.sha256` lists its own path, with the hash of the
+  file while it was being written, so that one line cannot verify; every other line verifies (`shasum -a 256 -c`).
+- Asserted, not shown by a raw artifact in the record: the VM lock times and the freeze push `c28aa47cd3` (from the
+  integrator's log and git history).
+- Relay `session_error` timeouts (correction to `common/effective-policy.txt`, which calls them idle; see
+  [common/effective-policy-addendum.txt](common/effective-policy-addendum.txt)).
 - Designer launch: a first background launch at 03:26:19Z died before sending any request (empty events file); it was
   relaunched in a tmux session at 03:30:42Z ([design/sessions.txt](design/sessions.txt)). Not counted as a round.
 
@@ -90,7 +95,7 @@ Signed integration build of main `8bf182de43` (INSTALL.json; has #900, #949 and 
 - #1035: the revoke confirmation says "All active authority revoked in this session" while its review says it ends
   authority "in every session of this Corbanu Terminal".
 - #1036: the inspector's top line read "Moderate degraded: status observed 33s ago; press r" while it was open, with
-  nothing else suggesting a degraded level.
+  nothing else suggesting a degraded level (Q01; the same stale line also appeared in Q02's inspector screen).
 
 ## Review budget
 
