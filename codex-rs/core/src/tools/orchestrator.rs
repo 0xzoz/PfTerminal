@@ -194,7 +194,9 @@ impl ToolOrchestrator {
                 .live_level_is_aggressive(),
         };
         // The first round is decided under the handler's policy, so a
-        // transition committed from here on is noticed by it too.
+        // transition committed from here on is noticed by it too. A basis
+        // without a marker (the policy not initialized then; not in real
+        // sessions) notices nothing, as before.
         let mut first_under = self.handler_basis.and_then(|basis| basis.marker);
         if tool_ctx.session.services.transition_since(first_under) {
             tracing::info!(
@@ -202,7 +204,14 @@ impl ToolOrchestrator {
                 call_id = %tool_ctx.call_id,
                 "security transition after the handler read its grants"
             );
-            stale_refusal(tool, req, tool_ctx, aggressive_at_start).await?;
+            stale_refusal(
+                tool,
+                req,
+                tool_ctx,
+                aggressive_at_start,
+                /*before_decided*/ true,
+            )
+            .await?;
             first_under = None;
         }
         let mut asked_again = false;
@@ -229,7 +238,14 @@ impl ToolOrchestrator {
                         call_id = %tool_ctx.call_id,
                         "approval answered after a security transition; not used"
                     );
-                    stale_refusal(tool, req, tool_ctx, aggressive_at_start).await?;
+                    stale_refusal(
+                        tool,
+                        req,
+                        tool_ctx,
+                        aggressive_at_start,
+                        /*before_decided*/ false,
+                    )
+                    .await?;
                     // The note is for a person who saw the earlier prompt.
                     asked_again = person_asked;
                 }
@@ -1406,12 +1422,13 @@ enum Round<Out> {
 /// grant read) went stale must not be decided again: the transition switched
 /// Aggressive on, so its exec-policy decision is stale, or (D51) it carries
 /// permissions read from grants the transition ended. A new call reads them
-/// again.
+/// again. `before_decided`: the transition came before anyone was asked.
 async fn stale_refusal<Rq, Out, T>(
     tool: &T,
     req: &Rq,
     tool_ctx: &ToolCtx,
     aggressive_at_start: bool,
+    before_decided: bool,
 ) -> Result<(), ToolError>
 where
     T: ToolRuntime<Rq, Out>,
@@ -1423,9 +1440,17 @@ where
         .live_level_is_aggressive()
         != aggressive_at_start
     {
-        STALE_AGGRESSIVE_REFUSAL
+        if before_decided {
+            PREPARED_BEFORE_AGGRESSIVE_REFUSAL
+        } else {
+            STALE_AGGRESSIVE_REFUSAL
+        }
     } else if tool.additional_permissions(req).is_some() {
-        STALE_PERMISSIONS_REFUSAL
+        if before_decided {
+            PREPARED_PERMISSIONS_REFUSAL
+        } else {
+            STALE_PERMISSIONS_REFUSAL
+        }
     } else {
         return Ok(());
     };
@@ -1447,6 +1472,17 @@ pub(crate) const STALE_AGGRESSIVE_REFUSAL: &str = "Not run: the security policy 
 pub(crate) const STALE_PERMISSIONS_REFUSAL: &str = "Not run: the security policy changed while \
      this was being approved, and the permissions it asked for or was granted were for the \
      earlier policy, so the approval was not used. Ask again if it is still needed.";
+
+/// #1057: why a run prepared before Aggressive was switched on did not run.
+pub(crate) const PREPARED_BEFORE_AGGRESSIVE_REFUSAL: &str = "Not run: security level \
+     Aggressive was switched on while this was being prepared, before it was decided. Ask \
+     again if it is still needed; it will be decided under Aggressive.";
+
+/// #1057: why a run carrying permissions read before a transition did not
+/// run.
+pub(crate) const PREPARED_PERMISSIONS_REFUSAL: &str = "Not run: the security policy changed \
+     while this was being prepared, and the permissions it asked for or was granted were for \
+     the earlier policy. Ask again if it is still needed.";
 
 /// D50: why a retry outside the sandbox did not happen.
 const STALE_RETRY_NOTE: &str = "The security level changed while this command ran or its \

@@ -494,7 +494,7 @@ async fn issue_1057_grants_read_before_a_transition_are_not_used() {
         .await;
         assert_eq!(
             result,
-            Err(STALE_PERMISSIONS_REFUSAL.to_string()),
+            Err(PREPARED_PERMISSIONS_REFUSAL.to_string()),
             "{transition:?}"
         );
         assert_eq!(probe.asked, Vec::<Option<String>>::new(), "nobody asked");
@@ -515,7 +515,7 @@ async fn issue_1057_aggressive_switched_on_after_the_handler_is_refused() {
         ..Case::default()
     })
     .await;
-    assert_eq!(result, Err(STALE_AGGRESSIVE_REFUSAL.to_string()));
+    assert_eq!(result, Err(PREPARED_BEFORE_AGGRESSIVE_REFUSAL.to_string()));
     assert_eq!(probe.asked, Vec::<Option<String>>::new());
     assert_eq!(probe.runs, 0);
 }
