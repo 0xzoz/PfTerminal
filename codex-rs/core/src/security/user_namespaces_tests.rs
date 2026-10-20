@@ -137,6 +137,6 @@ fn d48_allowed_only_while_nothing_changed_since_the_warning() {
             policy: PolicyBinding::Unbound,
             level: moderate,
         },
-        0
+        /*warned_at*/ 0
     ));
 }

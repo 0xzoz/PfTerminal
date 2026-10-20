@@ -232,13 +232,13 @@ fn d48_shells_and_path_lookup_resolve_only_system_programs() {
         assert_eq!(known_with(&script, Some(path)), expected, "{path:?}");
     }
     // No PATH known (a remote run): system paths only.
-    assert_eq!(known_with(&script, None), None);
+    assert_eq!(known_with(&script, /*path*/ None), None);
     assert_eq!(
-        known_with(&shell("/usr/bin/podman info"), None),
+        known_with(&shell("/usr/bin/podman info"), /*path*/ None),
         Some("podman")
     );
     assert_eq!(
-        known_with(&argv(&["/usr/bin/podman"]), None),
+        known_with(&argv(&["/usr/bin/podman"]), /*path*/ None),
         Some("podman")
     );
     // A system program this run can write (a grant for that one file) isn't

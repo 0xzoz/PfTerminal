@@ -98,7 +98,7 @@ fn turn_rule_at(session: &Session, turn: &TurnContext) -> Option<(user_namespace
 /// which that approval lifts Moderate's protected-file rules, #239), and the
 /// kill switch off.
 fn one_command_way(state: &PostTaintState) -> bool {
-    still_offered(state, 0)
+    still_offered(state, /*warned_at*/ 0)
 }
 
 /// Whether a person warned at taint generation `warned_at` may still allow
