@@ -770,10 +770,13 @@ async fn apply_patch_cli_does_not_write_through_symlink_escape_outside_workspace
     std::fs::create_dir_all(outside_dir.as_path())?;
 
     let harness_work_dir = work_dir.clone();
+    // The crate folder that holds `work` and `outside` is the workspace root.
     let harness = apply_patch_harness_with(move |builder| {
-        builder.with_config(move |config| {
-            config.cwd = harness_work_dir;
-        })
+        builder
+            .with_config_folder(std::env::current_dir().expect("current dir"))
+            .with_config(move |config| {
+                config.cwd = harness_work_dir;
+            })
     })
     .await?;
     let original_contents = "original outside content\n";
@@ -836,10 +839,13 @@ async fn apply_patch_cli_preserves_existing_hard_link_outside_workspace() -> Res
     std::fs::create_dir_all(outside_dir.as_path())?;
 
     let harness_work_dir = work_dir.clone();
+    // The crate folder that holds `work` and `outside` is the workspace root.
     let harness = apply_patch_harness_with(move |builder| {
-        builder.with_config(move |config| {
-            config.cwd = harness_work_dir;
-        })
+        builder
+            .with_config_folder(std::env::current_dir().expect("current dir"))
+            .with_config(move |config| {
+                config.cwd = harness_work_dir;
+            })
     })
     .await?;
     let outside_file = outside_dir.join("victim.txt");

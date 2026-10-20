@@ -941,6 +941,13 @@ fn normalize_string(value: &str) -> String {
     }
 
     let mut text = value.to_string();
+    // Each run's workspace root is its own temporary folder.
+    normalize_between(
+        &mut text,
+        "<workspace_roots>",
+        "</workspace_roots>",
+        "<ROOTS>",
+    );
     normalize_tmp_prefix_before_marker(&mut text, "/skills/");
     normalize_tmp_prefix_before_marker(&mut text, "\\skills\\");
 
@@ -1001,6 +1008,18 @@ fn is_uuid_like(value: &str) -> bool {
             .iter()
             .enumerate()
             .all(|(idx, byte)| [8, 13, 18, 23].contains(&idx) || byte.is_ascii_hexdigit())
+}
+
+fn normalize_between(text: &mut String, open: &str, close: &str, replacement: &str) {
+    let mut search_start = 0;
+    while let Some(relative_start) = text[search_start..].find(open) {
+        let body_start = search_start + relative_start + open.len();
+        let Some(relative_end) = text[body_start..].find(close) else {
+            break;
+        };
+        text.replace_range(body_start..body_start + relative_end, replacement);
+        search_start = body_start + replacement.len() + close.len();
+    }
 }
 
 fn normalize_tmp_prefix_before_marker(text: &mut String, marker: &str) {
