@@ -61,6 +61,13 @@ const PROTECTED_CODEX_HOME_ENTRIES: &[&str] = &[
     // #651: the database init lock (#586); a command holding it would stall
     // every new launch on this home.
     super::preflight::DB_INIT_LOCK,
+    // #1107: the rest of what Corbanu keeps beside the databases
+    // (`preflight::DATABASE_FOLDER_ENTRIES`), as in a separate database
+    // folder: the GPU controller's lock, pending accounting records and the
+    // databases recovery set aside.
+    "gpu-controller.lock",
+    "accounting-pending",
+    "db-backups",
 ];
 
 /// The entries of [`PROTECTED_CODEX_HOME_ENTRIES`] that are directories. On
@@ -74,6 +81,8 @@ const PROTECTED_CODEX_HOME_DIRS: &[&str] = &[
     "log",
     "sessions",
     "archived_sessions",
+    "accounting-pending",
+    "db-backups",
 ];
 
 /// Credential files under `$HOME` that tools read for the user: CLI tokens
