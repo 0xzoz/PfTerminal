@@ -68,6 +68,7 @@ use tokio_util::sync::CancellationToken;
 
 mod clients_tests;
 mod pairing_tests;
+mod rpc_serialization_tests;
 
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 const TEST_REMOTE_CONTROL_URL: &str = "http://127.0.0.1:1/backend-api/wham/remote/control";
@@ -326,6 +327,7 @@ async fn managed_disable_overrides_startup_and_persisted_enablement() {
     assert_eq!(
         remote_handle
             .enable_ephemeral()
+            .await
             .expect_err("managed requirements should reject ephemeral enable"),
         RemoteControlEnableError::DisabledByRequirements(RemoteControlDisabledByRequirements)
     );
@@ -420,6 +422,7 @@ pub(super) fn remote_control_handle_with_current_enrollment(
         pairing_persistence_key: watch::channel(None).0,
         pairing_persistence_key_required: false,
         auth_manager,
+        desired_state_stored_hook: None,
     }
 }
 
@@ -439,6 +442,7 @@ async fn ephemeral_enable_preserves_durable_preference() {
 
     remote_handle
         .enable_ephemeral()
+        .await
         .expect("ephemeral enable should succeed");
     assert_eq!(
         *remote_handle.desired_state_tx.borrow(),
@@ -452,6 +456,7 @@ async fn ephemeral_enable_preserves_durable_preference() {
         .send_replace(RemoteControlDesiredState::Disabled);
     remote_handle
         .enable_ephemeral()
+        .await
         .expect("ephemeral enable should succeed");
     assert_eq!(
         *remote_handle.desired_state_tx.borrow(),
@@ -1124,6 +1129,7 @@ async fn remote_control_start_reports_missing_state_db_as_disabled_when_enabled(
     assert_eq!(
         remote_handle
             .enable_ephemeral()
+            .await
             .expect_err("enable should fail"),
         RemoteControlEnableError::Unavailable(super::RemoteControlUnavailable)
     );

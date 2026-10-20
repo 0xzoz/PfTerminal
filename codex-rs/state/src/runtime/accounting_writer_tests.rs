@@ -590,6 +590,11 @@ async fn an_adopted_retry_waits_for_its_predecessor() -> anyhow::Result<()> {
 /// admission, a thread-metadata write and its usage - never adds up to more
 /// than about a second (a few on loaded Windows runners, still well short of
 /// the hold), nothing fails, and every record ends up in the ledger.
+///
+/// The bounds hold when the test has the four cores its runtime uses: Bazel
+/// reserves them (`cpu:4` in state's BUILD.bazel) and so does nextest
+/// (`threads-required`). Scheduled as a one-core test beside compiles on a
+/// 4-core Windows runner, its waits stretched past the bound (#905).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ten_sessions_on_one_home_wait_briefly_and_lose_no_record() -> anyhow::Result<()> {
     const SESSIONS: usize = 10;

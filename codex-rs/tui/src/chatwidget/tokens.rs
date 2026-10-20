@@ -3263,3 +3263,7 @@ impl ChatWidget {
 #[cfg(test)]
 #[path = "tokens_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tokens/code_review_tests.rs"]
+mod code_review_tests;
