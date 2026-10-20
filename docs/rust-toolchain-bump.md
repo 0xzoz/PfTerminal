@@ -27,11 +27,12 @@ These are the known places. Search for the old version as a backstop:
        lockfile and fails while it is stale.
     2. `python3 .github/scripts/rust_toolchain_bazel_sha256s.py` regenerates
        the `RUST_TOOLCHAIN_SHA256S` block in `MODULE.bazel`. Without it the
-       gnullvm toolchain downloads have no checksum.
+       rules_rust toolchain downloads (the gnullvm and nightly sets) have no
+       checksum.
     3. `just bazel-lock-update` again, then `just bazel-lock-check` and the
        script's `--check`. (A PR unit test fails if a declared version has no
        pins; the nightly Bazel job runs the full `--check`.)
-- CI and dev images: `.devcontainer/Dockerfile.secure` (`RUST_TOOLCHAIN`),
+- Dev environments: `.devcontainer/Dockerfile.secure` (`RUST_TOOLCHAIN`),
   `.devcontainer/devcontainer.secure.json`,
   `codex-rs/scripts/setup-windows.ps1` (`$toolchain`) and
   `.codex/environments/environment.toml` (`cargo +<version>`).
@@ -48,9 +49,10 @@ These are the known places. Search for the old version as a backstop:
 
 Then:
 
-- `just fmt`, and clippy with `-D warnings` on macOS and on Linux (glitch),
-  with and without `developer-accounting`. Fix new lints in the code;
-  allow one only with a `reason`.
+- `just fmt`, and clippy with `-D warnings` on macOS and on Linux (glitch, the
+  team's Linux build box), with and without
+  `--features codex-core/developer-accounting,codex-tui/developer-accounting`.
+  Fix new lints in the code; allow one only with a `reason`.
 - Rerun snapshot tests: new compilers can change `Debug` output.
 - Dispatch `rust-ci-full` and the nightly cold Bazel jobs on the branch
   before merging. A cold Bazel cache after a bump has filled the runners'
@@ -63,23 +65,25 @@ a nightly, not stable. Move it when it blocks new std APIs or every few stable
 bumps (#1030). The date appears in:
 
 - `tools/argument-comment-lint/rust-toolchain`, `wrapper_common.py`,
-    `src/bin/argument-comment-lint.rs` (library file names) and the README;
+  `src/bin/argument-comment-lint.rs` (library file names) and the README;
 - `rust-ci.yml`, `rust-ci-full.yml` and `rust-release-argument-comment-lint.yml`
-    (library file names too);
+  (the last also has library file names);
 - the three `nightly/<date>` entries in `MODULE.bazel`; then update the
-    lockfile and checksums as above;
+  lockfile and checksums as above;
 - any `#[allow(..., reason = "...")]` in `codex-rs` that names the nightly
-    (`rg -F nightly-<date> codex-rs`): remove it once the nightly moves.
+  (`rg -F nightly-<date> codex-rs`): remove it once the nightly moves.
 
 Picking the nightly:
 
 - Use the nightly of a rust-clippy "rustup" sync commit (its
-    `rust-toolchain.toml`) and pin `clippy_utils` to that commit.
+  `rust-toolchain.toml`) and pin `clippy_utils` to that commit, then refresh
+  `tools/argument-comment-lint/Cargo.lock` (`cargo update -p clippy_utils`;
+  CI builds with `--locked`).
 - Use a dylint version that builds on that nightly. Pin `dylint_linting` and
-    `dylint_testing` exactly, and match the workflows' `CARGO_DYLINT_VERSION`
-    and `DYLINT_LINK_VERSION`.
+  `dylint_testing` exactly, and match the workflows' `CARGO_DYLINT_VERSION`
+  and `DYLINT_LINK_VERSION`.
 - The whole workspace must compile and pass on it, on Linux and macOS:
-    `python3 tools/argument-comment-lint/run.py -- --keep-going`. Nightlies from
-    2026-09-01 on break `allocative` 0.3.6 (its `impl Allocative for !`
-    conflicts with `Infallible`), so the lint stays on 2026-08-23 until that is
-    fixed.
+  `python3 tools/argument-comment-lint/run.py -- --keep-going`. Nightlies from
+  2026-09-01 on break `allocative` 0.3.6 (its `impl Allocative for !`
+  conflicts with `Infallible`), so the lint stays on 2026-08-23 until that is
+  fixed.
