@@ -1019,3 +1019,45 @@ fn issue_943_a_worktree_git_file_made_again_as_a_folder() {
     held.sort();
     assert_eq!(held, shown(&[git.join("config"), git.join("hooks")]));
 }
+
+/// #943 review r5: the same, where a command's own look (`finish`, with its
+/// git folders found again) is the first to see the remade `.git`: later
+/// looks (`recheck`) walk it too, and what is new there afterwards is
+/// reported.
+#[test]
+fn issue_943_a_remade_git_folder_seen_first_by_a_command() {
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let old = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &old, "Moderate"), None);
+    std::fs::remove_file(worktree.join(".git")).expect("removed");
+    assert_eq!(kinds(&check(thread, &old)), Vec::<String>::new());
+    let git = worktree.join(".git");
+    for folder in ["objects", "refs/heads", "hooks"] {
+        std::fs::create_dir_all(git.join(folder)).expect("git folder");
+    }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(git.join("config"), "[core]\n\tfsmonitor = /tmp/run-me\n").expect("config");
+    let fresh = repos(&[worktree.as_path()]);
+    let git = git.canonicalize().expect("canonical");
+    assert_eq!(
+        kinds(&check(thread, &fresh)),
+        vec![format!("config {}", git.join("config").display())]
+    );
+    // The next command's look walks the new git folder, not the old ones.
+    let (message, _) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    assert_eq!(message, None);
+    std::fs::write(git.join("config.worktree"), "[core]\n").expect("config.worktree");
+    assert_eq!(
+        kinds(&check(thread, &fresh)),
+        vec![format!("config {}", git.join("config.worktree").display())]
+    );
+}

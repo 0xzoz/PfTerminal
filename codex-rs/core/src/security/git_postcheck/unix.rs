@@ -988,12 +988,17 @@ fn slot_of(thread: ThreadId, repo: &Repo, used: bool) -> Slot {
         if used || !state.used.contains_key(&repo.dot_git) {
             state.used.insert(repo.dot_git.clone(), uses);
         }
-        state
+        let (stored, slot) = state
             .repos
             .entry(repo.dot_git.clone())
-            .or_insert_with(|| (repo.clone(), Slot::default()))
-            .1
-            .clone()
+            .or_insert_with(|| (repo.clone(), Slot::default()));
+        // #943 review r5: where a command runs there, its git folders as
+        // found now (a `.git` made again may be another kind) are what later
+        // looks (`recheck`) walk.
+        if used && stored.git_dirs != repo.git_dirs {
+            *stored = repo.clone();
+        }
+        slot.clone()
     })
 }
 
