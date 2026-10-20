@@ -261,6 +261,19 @@ settings to keep every command in it. Where the sandbox can't start (for
 example Linux without user namespaces), commands fail under Moderate instead
 of running outside it.
 
+## Remembered approvals
+
+Approvals you saved for good under a less strict level don't apply under
+Aggressive: you're asked instead, and the prompt says why. They're kept and
+apply again at a less strict level. This covers "don't ask again" command
+rules (#626) and MCP tools set to always be allowed, by "Allow and don't ask
+me again" or in a config file, an administrator's included (#1001): such a
+tool is decided as if it had no "always allow" setting (by you, or by your
+approvals reviewer or hooks, as usual). One you choose while Aggressive is on applies
+under it too; Corbanu records MCP ones in `mcp-approvals-aggressive.json` in
+its home, for connectors and for servers your own config defines (not one a
+project or plugin defines).
+
 ## Other Corbanu Terminals on the same home
 
 When you confirm Aggressive, other Corbanu Terminals running on the same

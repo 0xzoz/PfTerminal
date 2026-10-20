@@ -2407,7 +2407,7 @@ async fn approve_mode_skips_when_annotations_do_not_require_approval() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Approve),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2485,7 +2485,7 @@ async fn guardian_mode_skips_auto_when_annotations_do_not_require_approval() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2546,7 +2546,7 @@ async fn permission_request_hook_allows_mcp_tool_call() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2615,7 +2615,7 @@ async fn permission_request_hook_uses_hook_tool_name_without_metadata() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2704,7 +2704,7 @@ async fn permission_request_hook_runs_after_remembered_mcp_approval() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2792,7 +2792,7 @@ async fn guardian_mode_mcp_denial_returns_rationale_message() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2860,7 +2860,7 @@ async fn prompt_mode_waits_for_approval_when_annotations_do_not_require_approval
                 &metadata,
                 &approval_config(&turn_context),
                 McpToolApprovalPolicy::for_server(AppToolApproval::Prompt),
-                /*asked_again*/ false,
+                /*note*/ None,
             )
             .await
         })
@@ -2920,7 +2920,7 @@ async fn full_access_mode_skips_mcp_tool_approval_for_all_approval_modes() {
             &metadata,
             &approval_config(&turn_context),
             McpToolApprovalPolicy::for_server(approval_mode),
-            /*asked_again*/ false,
+            /*note*/ None,
         )
         .await;
 
@@ -3011,7 +3011,7 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
             &metadata,
             &approval_config(&turn_context),
             McpToolApprovalPolicy::for_server(AppToolApproval::Approve),
-            /*asked_again*/ false,
+            /*note*/ None,
         )
         .await;
 
@@ -3071,6 +3071,7 @@ async fn issue_945_mcp_for_session_answer_after_a_level_change_is_not_remembered
             Some(key.clone()),
             /*persistent_approval_key*/ None,
             shown_under,
+            /*record_under_aggressive*/ true,
         )
         .await;
         assert!(
@@ -3087,6 +3088,7 @@ async fn issue_945_mcp_for_session_answer_after_a_level_change_is_not_remembered
         Some(key.clone()),
         /*persistent_approval_key*/ None,
         session.services.authority_marker(),
+        /*record_under_aggressive*/ true,
     )
     .await;
     assert!(mcp_tool_approval_is_remembered(&session, &key).await);
@@ -3129,6 +3131,7 @@ fn accepted() -> McpCallOutcome {
             decision: McpToolApprovalDecision::Accept,
             policy: McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
             shown_under: None,
+            record_under_aggressive: false,
         },
         /*decided_under*/ None,
     )
@@ -3253,7 +3256,7 @@ async fn issue_1001_ask(
                 &metadata,
                 &approval_config(&turn_context),
                 McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-                asked_again,
+                asked_again.then_some(MCP_ASKED_AGAIN_NOTE),
             )
             .await
         }
@@ -3410,5 +3413,133 @@ fn issue_1011_prompt_options_limit_lasting_answers_to_what_was_offered() {
     assert_eq!(
         session_only.limit(McpToolApprovalDecision::AcceptForSession),
         McpToolApprovalDecision::AcceptForSession
+    );
+}
+
+/// D52 (#1001): "Allow and don't ask me again" chosen while Aggressive is in
+/// force is recorded in the Corbanu home, so the tool's "always approve"
+/// applies under Aggressive; chosen under a less strict level it is not.
+#[tokio::test]
+async fn issue_1001_dont_ask_again_under_aggressive_is_recorded() {
+    let (session, turn_context) = make_session_and_context().await;
+    let codex_home = turn_context.config.codex_home.to_path_buf();
+    std::fs::create_dir_all(&codex_home).expect("home");
+    let key = |tool: &str| McpToolApprovalKey {
+        server: "custom_server".to_string(),
+        connector_id: None,
+        tool_name: tool.to_string(),
+    };
+    let remember = async |tool: &str, record_under_aggressive| {
+        apply_mcp_tool_approval_decision(
+            &session,
+            &turn_context,
+            &McpToolApprovalDecision::AcceptAndRemember,
+            Some(key(tool)),
+            Some(key(tool)),
+            session.services.authority_marker(),
+            record_under_aggressive,
+        )
+        .await;
+    };
+
+    remember("permissive_tool", /*record_under_aggressive*/ true).await;
+    assert!(!aggressive::approved(&codex_home, &key("permissive_tool")).await);
+
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_level(codex_security_policy::SecurityLevel::Aggressive);
+    session.services.replace_model_client(client);
+    remember("aggressive_tool", /*record_under_aggressive*/ true).await;
+    assert!(aggressive::approved(&codex_home, &key("aggressive_tool")).await);
+    assert!(!aggressive::approved(&codex_home, &key("permissive_tool")).await);
+    // A tool outside the record's scope (a project's or a plugin's server):
+    // not recorded.
+    remember("project_tool", /*record_under_aggressive*/ false).await;
+    assert!(!aggressive::approved(&codex_home, &key("project_tool")).await);
+}
+
+/// D52 (#1001): the Aggressive record is trusted only for a server the
+/// user's own config defines and no project layer mentions, even with only
+/// some fields (layers merge deeply), and not for a plugin's server.
+#[tokio::test]
+async fn issue_1001_aggressive_record_scope_excludes_project_and_plugin_servers() {
+    use codex_config::ConfigLayerEntry;
+    use codex_config::ConfigLayerStack;
+    use codex_config::ConfigRequirements;
+    use codex_config::ConfigRequirementsToml;
+    let (_session, turn_context) = make_session_and_context().await;
+    let home = tempdir().expect("home");
+    let project = tempdir().expect("project");
+    let toml = |text: &str| toml::from_str::<toml::Value>(text).expect("toml");
+    let config_with = |project_layer: &str| {
+        let mut config = (*turn_context.config).clone();
+        config.config_layer_stack = ConfigLayerStack::new(
+            vec![
+                ConfigLayerEntry::new(
+                    ConfigLayerSource::User {
+                        file: AbsolutePathBuf::from_absolute_path(home.path().join("config.toml"))
+                            .expect("absolute"),
+                        profile: None,
+                    },
+                    toml(
+                        r#"
+[mcp_servers.docs]
+command = "docs-server"
+"#,
+                    ),
+                ),
+                ConfigLayerEntry::new(
+                    ConfigLayerSource::Project {
+                        dot_codex_folder: AbsolutePathBuf::from_absolute_path(project.path())
+                            .expect("absolute"),
+                    },
+                    toml(project_layer),
+                ),
+            ],
+            ConfigRequirements::default(),
+            ConfigRequirementsToml::default(),
+        )
+        .expect("layers");
+        config
+    };
+    let invocation = McpInvocation {
+        server: "docs".to_string(),
+        tool: "search".to_string(),
+        arguments: None,
+    };
+    let metadata = approval_metadata(
+        /*connector_id*/ None, /*connector_name*/ None,
+        /*connector_description*/ None, /*tool_title*/ None,
+        /*tool_description*/ None,
+    );
+    let scope = |config: &Config, plugin_id| {
+        aggressive_record_scope(config, &invocation, &metadata, plugin_id).is_some()
+    };
+
+    assert!(
+        scope(&config_with(""), /*plugin_id*/ None),
+        "the user's own"
+    );
+    assert!(
+        !scope(&config_with(""), Some("plugin@market")),
+        "a plugin's server"
+    );
+    assert!(
+        !scope(
+            &config_with("[mcp_servers.docs]\nargs = [\"--other\"]\n"),
+            /*plugin_id*/ None
+        ),
+        "a project changes some of its fields"
+    );
+    assert!(
+        !scope(&config_with("mcp_servers = 3\n"), /*plugin_id*/ None),
+        "a project's mcp_servers is not a table"
+    );
+    assert!(
+        scope(
+            &config_with("[mcp_servers.other]\ncommand = \"other\"\n"),
+            /*plugin_id*/ None
+        ),
+        "a project defines another server"
     );
 }

@@ -505,6 +505,113 @@ async fn issue_1001_mcp_approval_after_a_level_change_is_asked_again() -> anyhow
     Ok(())
 }
 
+/// D52 (#1001): under Aggressive an MCP server's "always approve" setting
+/// (saved outside Aggressive) is suspended: the call is asked about, and the
+/// question says why. Under Permissive it runs unasked, as before.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_1001_aggressive_suspends_mcp_always_approve() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let approve_turn = |level| {
+        start_turn(
+            level,
+            AskForApproval::OnRequest,
+            vec![sync_step("call-sync-1"), done_step()],
+            |config| {
+                // `default_tools_approval_mode = "approve"`.
+                insert_rmcp_server(config).expect("rmcp server");
+                config
+                    .features
+                    .disable(Feature::ToolCallMcpElicitation)
+                    .expect("disable MCP elicitation");
+            },
+        )
+    };
+
+    let (test, captured) = approve_turn(SecurityLevel::Aggressive).await?;
+    let question = next_question(&test)
+        .await
+        .expect("the suspended setting does not run the call unasked");
+    assert!(
+        question.questions[0].question.contains(
+            "set to always be allowed, but that setting was not applied because security level \
+             Aggressive is on"
+        ),
+        "{}",
+        question.questions[0].question
+    );
+    answer(&test, &question, "Cancel").await;
+    assert!(next_question(&test).await.is_none());
+    let output = output_text(&captured.requests()[1], "call-sync-1");
+    assert!(output.contains("user cancelled MCP tool call"), "{output}");
+
+    // A record that the person approved `rmcp/sync` for good under
+    // Aggressive is not honoured for a server their own config does not
+    // define (here the runtime config adds it, as a project or plugin could).
+    let home = Arc::new(TempDir::new()?);
+    std::fs::write(
+        home.path().join("mcp-approvals-aggressive.json"),
+        r#"{"tools":[{"server":"rmcp","connector_id":null,"tool_name":"sync"}]}"#,
+    )?;
+    let (test, _captured) = start_turn_in(
+        Some(home),
+        SecurityLevel::Aggressive,
+        AskForApproval::OnRequest,
+        vec![sync_step("call-sync-1"), done_step()],
+        |config| {
+            insert_rmcp_server(config).expect("rmcp server");
+            config
+                .features
+                .disable(Feature::ToolCallMcpElicitation)
+                .expect("disable MCP elicitation");
+        },
+    )
+    .await?;
+    let question = next_question(&test)
+        .await
+        .expect("a record for another server definition does not apply");
+    answer(&test, &question, "Cancel").await;
+
+    // The same record for the server the user's own config defines applies:
+    // the call runs unasked under Aggressive.
+    let home = Arc::new(TempDir::new()?);
+    std::fs::write(
+        home.path().join("mcp-approvals-aggressive.json"),
+        r#"{"tools":[{"server":"rmcp","connector_id":null,"tool_name":"sync"}]}"#,
+    )?;
+    std::fs::write(
+        home.path().join("config.toml"),
+        format!(
+            "[mcp_servers.rmcp]\ncommand = {:?}\ndefault_tools_approval_mode = \"approve\"\n",
+            stdio_server_bin()?
+        ),
+    )?;
+    let (test, captured) = start_turn_in(
+        Some(home),
+        SecurityLevel::Aggressive,
+        AskForApproval::OnRequest,
+        vec![sync_step("call-sync-1"), done_step()],
+        |config| {
+            config
+                .features
+                .disable(Feature::ToolCallMcpElicitation)
+                .expect("disable MCP elicitation");
+        },
+    )
+    .await?;
+    assert!(
+        next_question(&test).await.is_none(),
+        "recorded under Aggressive for the user's own server: runs unasked"
+    );
+    let output = output_text(&captured.requests()[1], "call-sync-1");
+    assert!(!output.contains("cancelled"), "{output}");
+
+    let (test, captured) = approve_turn(SecurityLevel::Permissive).await?;
+    assert!(next_question(&test).await.is_none(), "runs unasked");
+    let output = output_text(&captured.requests()[1], "call-sync-1");
+    assert!(!output.contains("cancelled"), "{output}");
+    Ok(())
+}
+
 /// Typing a vault command into a running shell after untrusted content asks
 /// the human; with approvals off it is refused; ordinary typing is unchanged.
 /// The shell starts after the untrusted content, inside the protected-path
