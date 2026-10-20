@@ -456,6 +456,18 @@ jobs:
           target: ${{ matrix.target }}
           cache-scope: bazel-${{ github.job }}
 
+      # Same as the test job (#636): a toolchain bump misses the exact
+      # repository cache and these cold builds then filled the disk (#1027).
+      - name: Free runner disk space (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          df -h /
+          for dir in /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost; do
+            if [[ -d "$dir" ]]; then sudo rm -r -- "$dir"; fi
+          done
+          df -h /
+
       - name: bazel build --config=clippy lint targets
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
@@ -550,6 +562,18 @@ jobs:
         with:
           target: ${{ matrix.target }}
           cache-scope: bazel-${{ github.job }}
+
+      # Same as the test job (#636): a toolchain bump misses the exact
+      # repository cache and these cold builds then filled the disk (#1027).
+      - name: Free runner disk space (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          df -h /
+          for dir in /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost; do
+            if [[ -d "$dir" ]]; then sudo rm -r -- "$dir"; fi
+          done
+          df -h /
 
       - name: bazel build verify-release-build targets
         env:
