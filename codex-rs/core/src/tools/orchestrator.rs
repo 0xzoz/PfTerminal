@@ -520,7 +520,7 @@ impl ToolOrchestrator {
                     [
                         Some(action.approval_reason()),
                         protected_read_note.clone(),
-                        kept_read_note.map(str::to_string),
+                        kept_read_note,
                         stays_sandboxed.map(str::to_string),
                         user_namespaces_note,
                     ]
@@ -2080,17 +2080,18 @@ where
         .map(|note| (note, justification))
 }
 
-/// #841: under Moderate, for a protected action after untrusted content that
-/// reads files the secretless launch contract keeps unreadable at every
-/// level (Corbanu's sign-in, vault, config, history): approving cannot
-/// unlock them, and the person is told so before answering.
+/// #841, #1077: under Moderate, for a protected action after untrusted
+/// content that reads a file the secretless launch contract keeps unreadable
+/// at every level (a CLI token, the keychains, or Corbanu's sign-in, vault,
+/// config or history): approving cannot unlock it, and the person is told
+/// which file and what it is before answering.
 async fn moderate_kept_read_note<Rq, Out, T>(
     tool: &T,
     req: &Rq,
     tool_ctx: &ToolCtx,
     turn_ctx: &crate::session::turn_context::TurnContext,
     action: &crate::security::tainted_action::PostTaintAction,
-) -> Option<&'static str>
+) -> Option<String>
 where
     T: ToolRuntime<Rq, Out>,
 {
@@ -2119,14 +2120,13 @@ where
         _ => return None,
     };
     let cwd = cwd.to_abs_path().ok()?;
-    crate::security::protected_reads::moderate_kept_read_in_command(
+    crate::security::protected_reads::moderate_kept_read_note_for_command(
         &tool_ctx.session,
         turn_ctx,
         &command,
         cwd.as_path(),
     )
     .await
-    .then_some(crate::security::protected_reads::MODERATE_KEPT_READ_NOTE)
 }
 
 /// PF-25-S01: offer the human a grant for this exact command while its
