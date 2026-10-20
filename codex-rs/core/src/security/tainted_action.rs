@@ -546,8 +546,6 @@ fn has_flag(word: &str, flag: &str) -> bool {
     }
 }
 
-/// Where the shell is while it runs a script: the folder, the previous one
-/// (`cd -`) and the `pushd` stack.
 /// Bytes of variable values left to substitute (#1065): any value, then
 /// only small ones once that runs out.
 struct Budget {
@@ -555,6 +553,8 @@ struct Budget {
     small_left: usize,
 }
 
+/// Where the shell is while it runs a script: the folder, the previous one
+/// (`cd -`) and the `pushd` stack.
 struct Folders {
     cwd: String,
     previous: String,

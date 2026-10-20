@@ -3081,6 +3081,8 @@ fn issue_1065_review_1_limits() {
             format!("cd /tmp;{} echo ok", " sed -n p f;".repeat(100)),
             None,
         ),
+        // Review r4: files a long pipeline writes.
+        (format!("{}cat", "exec >f|".repeat(5000)), Some(UnseenCode)),
         // Command lines lexed in all: decoded payloads.
         (format!("echo{}", decoded.repeat(5000)), Some(UnseenCode)),
         (format!("echo{}", decoded.repeat(50)), None),
