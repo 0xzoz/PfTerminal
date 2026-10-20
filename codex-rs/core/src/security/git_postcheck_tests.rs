@@ -1227,6 +1227,9 @@ fn issue_943_a_worktree_added_again_on_a_reused_inode() {
             .ino();
         std::fs::remove_file(worktree.join(".git")).expect("removed");
         assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+        // A later command: file systems stamp creation times with a coarse
+        // clock (ext4: a few milliseconds).
+        std::thread::sleep(Duration::from_millis(50));
         std::fs::write(worktree.join(".git"), &text).expect("added again");
         std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
         std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
