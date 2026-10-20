@@ -3,6 +3,7 @@
 mod comment_parser;
 
 extern crate rustc_ast;
+extern crate rustc_attr_ir;
 extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_lint;
@@ -13,14 +14,14 @@ extern crate rustc_span;
 use clippy_utils::diagnostics::span_lint_and_help;
 use clippy_utils::diagnostics::span_lint_and_sugg;
 use clippy_utils::fn_def_id;
-use clippy_utils::is_res_lang_ctor;
 use clippy_utils::peel_blocks;
+use clippy_utils::res::MaybeDef as _;
 use clippy_utils::source::snippet;
 use rustc_ast::LitKind;
+use rustc_attr_ir::lang_items::LangItem;
 use rustc_errors::Applicability;
 use rustc_hir::Expr;
 use rustc_hir::ExprKind;
-use rustc_hir::LangItem;
 use rustc_hir::UnOp;
 use rustc_hir::def::DefKind;
 use rustc_lint::LateContext;
@@ -40,10 +41,10 @@ pub fn register_lints(_sess: &rustc_session::Session, lint_store: &mut rustc_lin
         ARGUMENT_COMMENT_MISMATCH,
         UNCOMMENTED_ANONYMOUS_LITERAL_ARGUMENT,
     ]);
-    lint_store.register_late_pass(|_| Box::new(ArgumentCommentLint));
+    lint_store.register_late_lint_pass(Box::new(|_| Box::new(ArgumentCommentLint)));
 }
 
-rustc_session::declare_lint! {
+rustc_lint::declare_lint! {
     /// ### What it does
     ///
     /// Checks `/*param*/` argument comments and verifies that the comment
@@ -83,7 +84,7 @@ rustc_session::declare_lint! {
     "argument comment does not match the resolved parameter name"
 }
 
-rustc_session::declare_lint! {
+rustc_lint::declare_lint! {
     /// ### What it does
     ///
     /// Requires a `/*param*/` comment before anonymous literal-like
@@ -132,7 +133,7 @@ enum CallKind {
     Method { name: String },
 }
 
-rustc_session::impl_lint_pass!(
+rustc_lint::impl_lint_pass!(
     ArgumentCommentLint => [ARGUMENT_COMMENT_MISMATCH, UNCOMMENTED_ANONYMOUS_LITERAL_ARGUMENT]
 );
 
@@ -267,7 +268,8 @@ fn is_anonymous_literal_like(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
         ),
         ExprKind::Unary(UnOp::Neg, inner) => matches!(peel_blocks(inner).kind, ExprKind::Lit(_)),
         ExprKind::Path(qpath) => {
-            is_res_lang_ctor(cx, cx.qpath_res(&qpath, expr.hir_id), LangItem::OptionNone)
+            let res = cx.qpath_res(&qpath, expr.hir_id);
+            res.ctor_parent(cx).is_lang_item(cx, LangItem::OptionNone)
         }
         _ => false,
     }
