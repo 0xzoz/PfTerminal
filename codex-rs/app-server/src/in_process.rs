@@ -268,7 +268,7 @@ pub struct InProcessClientHandle {
     event_rx: mpsc::UnboundedReceiver<InProcessServerEvent>,
     runtime_handle: tokio::task::JoinHandle<()>,
     #[cfg(test)]
-    _test_codex_home: Option<tempfile::TempDir>,
+    _test_folder: Option<tempfile::TempDir>,
 }
 
 impl InProcessClientHandle {
@@ -754,7 +754,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
         event_rx,
         runtime_handle,
         #[cfg(test)]
-        _test_codex_home: None,
+        _test_folder: None,
     })
 }
 
@@ -781,6 +781,7 @@ mod tests {
             std::fs::create_dir_all(dir).expect("test folder");
         }
         ConfigBuilder::default()
+            .loader_overrides(codex_config::LoaderOverrides::without_managed_config_for_tests())
             .codex_home(codex_home)
             .harness_overrides(ConfigOverrides {
                 cwd: Some(cwd),
@@ -826,7 +827,7 @@ mod tests {
             channel_capacity,
         };
         let mut client = start(args).await.expect("in-process runtime should start");
-        client._test_codex_home = Some(test_folder);
+        client._test_folder = Some(test_folder);
         client
     }
 
@@ -900,7 +901,7 @@ mod tests {
             client: InProcessClientSender { client_tx },
             event_rx,
             runtime_handle,
-            _test_codex_home: None,
+            _test_folder: None,
         };
 
         client

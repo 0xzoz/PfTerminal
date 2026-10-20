@@ -229,6 +229,7 @@ async fn build_test_config(codex_home: &Path, cwd: &Path, server_uri: &str) -> R
     )?;
 
     Ok(ConfigBuilder::default()
+        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
         .codex_home(codex_home.to_path_buf())
         .harness_overrides(ConfigOverrides {
             cwd: Some(cwd.to_path_buf()),

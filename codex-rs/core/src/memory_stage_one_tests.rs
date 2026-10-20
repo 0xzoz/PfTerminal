@@ -996,6 +996,7 @@ async fn memory_extraction_respects_and_records_the_provider_request_throttle() 
         mut session,
         turn_context,
         home: _home,
+        cwd: _cwd,
     } = fixture;
     session.services.agent_control = session
         .services

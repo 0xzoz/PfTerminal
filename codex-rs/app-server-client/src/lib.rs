@@ -1137,6 +1137,7 @@ mod tests {
             std::fs::create_dir_all(dir).expect("test folder");
         }
         ConfigBuilder::default()
+            .loader_overrides(codex_config::LoaderOverrides::without_managed_config_for_tests())
             .codex_home(codex_home)
             .harness_overrides(ConfigOverrides {
                 cwd: Some(cwd),
@@ -1148,7 +1149,7 @@ mod tests {
     }
 
     struct TestClient {
-        _codex_home: TempDir,
+        _test_folder: TempDir,
         client: InProcessAppServerClient,
     }
 
@@ -1200,7 +1201,7 @@ mod tests {
         .expect("in-process app-server client should start");
 
         TestClient {
-            _codex_home: test_folder,
+            _test_folder: test_folder,
             client,
         }
     }

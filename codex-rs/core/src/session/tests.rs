@@ -1715,8 +1715,13 @@ async fn reload_user_config_layer_updates_base_and_selected_profile_layers() {
     .expect("write base user config");
     std::fs::write(&profile_config_path, "model = \"profile-old\"\n")
         .expect("write profile user config");
+    let session_cwd = session.get_config().await.cwd.to_path_buf();
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(session_cwd),
+            ..Default::default()
+        })
         .loader_overrides(LoaderOverrides {
             user_config_path: Some(profile_config_path.abs()),
             user_config_profile: Some("work".parse().expect("profile-v2 name")),
@@ -4711,7 +4716,9 @@ fn write_test_provider_auth(codex_home: &Path) {
 /// A temporary working folder for helpers whose callers keep no folder, as
 /// `make_session_and_context`: commands the session runs need it to exist
 /// after the helper returns, so it isn't removed. It stays in the test run's
-/// temporary folder (`just test` gives each run its own and removes it).
+/// temporary folder: `just test` gives each run its own and removes it, while
+/// a plain `cargo test` or `cargo nextest` run leaves several hundred empty
+/// ones in the system's.
 pub(crate) fn kept_test_cwd() -> PathBuf {
     tempfile::Builder::new()
         .prefix("codex-test-cwd-")

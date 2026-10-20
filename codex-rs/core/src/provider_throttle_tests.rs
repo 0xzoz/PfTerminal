@@ -260,6 +260,7 @@ pub(crate) struct RateLimitedSession {
     pub(crate) session: crate::session::session::Session,
     pub(crate) turn_context: TurnContext,
     pub(crate) home: tempfile::TempDir,
+    pub(crate) cwd: tempfile::TempDir,
 }
 
 impl RateLimitedSession {
@@ -295,6 +296,7 @@ impl RateLimitedSession {
             session,
             turn_context,
             home,
+            cwd: test_cwd,
         }
     }
 
