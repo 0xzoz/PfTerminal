@@ -1293,7 +1293,23 @@ impl SecurityLevelPicker {
                     }
                 }
                 if let Some(report) = &outcome.core {
-                    lines.extend(wrap(&core_outcome_line(report)));
+                    // #1015: beside "when it starts here", "from the next
+                    // start" would read as the restart only.
+                    lines.extend(wrap(&if level == ChosenLevel::Aggressive
+                        && self.core.thread.is_none()
+                        && report.approvals.is_some()
+                        && report.kind == LevelChangeKind::Stricter
+                        && !report.live
+                        && !report.other_sessions
+                        && report.not_saved.is_none()
+                    {
+                        format!(
+                            "Core's level is {} for every session that starts from now on.",
+                            name(report.next_start)
+                        )
+                    } else {
+                        core_outcome_line(report)
+                    }));
                     // #919: other processes on the home take it from the
                     // saved state (not when it could not be saved).
                     if level == ChosenLevel::Aggressive

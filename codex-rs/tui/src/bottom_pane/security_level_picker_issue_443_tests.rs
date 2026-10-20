@@ -566,6 +566,7 @@ fn issue_1015_saved_not_held_and_not_saved_claims_nothing() {
     let saved = text(&picker);
     for absent in [
         "from the next start",
+        "for every session that starts",
         "applies now",
         "Core's Aggressive protections and",
         "stays Permissive.",
