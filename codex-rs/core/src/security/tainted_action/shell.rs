@@ -42,7 +42,15 @@ pub(super) struct Lexed {
     pub(super) commands: Vec<SimpleCommand>,
     /// A brace expression had too many alternatives to expand.
     pub(super) incomplete: bool,
+    /// Substitutions nested past `MAX_SUBSTITUTION_DEPTH`; the deeper ones
+    /// were read as words (#1020).
+    pub(super) too_deep: bool,
 }
+
+/// How deeply substitutions (`$(`, `<(`, `>(`, backticks) are read inside
+/// each other. Deeper text fails closed, so the reader stays linear in the
+/// text times this depth (#1020).
+pub(super) const MAX_SUBSTITUTION_DEPTH: usize = 32;
 
 pub(super) fn basename(word: &str) -> &str {
     word.trim_end_matches('/')
@@ -76,9 +84,11 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
         lexer.arg(&expanded);
         lexer.flush();
     }
+    let too_deep = lexer.too_deep;
     Lexed {
         commands: lexer.finish(),
         incomplete,
+        too_deep,
     }
 }
 
@@ -250,6 +260,8 @@ struct Lexer {
     /// Open groups and the pipe that feeds every command inside them.
     groups: Vec<(Group, Option<usize>)>,
     redirect: Redirect,
+    /// A substitution opened past `MAX_SUBSTITUTION_DEPTH`.
+    too_deep: bool,
 }
 
 impl Lexer {
@@ -343,6 +355,10 @@ impl Lexer {
     }
 
     fn open_substitution(&mut self, backtick: bool, output: bool, process: bool) {
+        if self.open.len() >= MAX_SUBSTITUTION_DEPTH {
+            self.too_deep = true;
+            return;
+        }
         let outer = std::mem::replace(
             &mut self.current,
             SimpleCommand {
@@ -371,15 +387,16 @@ impl Lexer {
             return;
         };
         let inner: Vec<usize> = (open.first..self.done.len()).collect();
-        // The commands at this level (not inside a nested substitution).
+        // The commands at this level (not inside a nested substitution),
+        // found in one pass over what the inner commands are fed by.
+        let nested: std::collections::HashSet<usize> = inner
+            .iter()
+            .flat_map(|other| self.done[*other].fed_by.iter().copied())
+            .collect();
         let top: Vec<usize> = inner
             .iter()
             .copied()
-            .filter(|index| {
-                !inner
-                    .iter()
-                    .any(|other| self.done[*other].fed_by.contains(index))
-            })
+            .filter(|index| !nested.contains(index))
             .collect();
         let spliced = match top.as_slice() {
             _ if open.output || open.process => None,
