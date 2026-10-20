@@ -2666,6 +2666,10 @@ fn issue_937_review_6_fallback_routes() {
 /// #1020: the shell reader stops nesting substitutions past a depth, so deep
 /// nesting stays fast, and the line asks.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn issue_1020_deep_substitutions_stay_fast_and_ask() {
     use ProtectedActionKind::*;
     let lex = |text: &str| shell::simple_commands(&["bash".into(), "-c".into(), text.into()]);
@@ -2755,6 +2759,10 @@ fn issue_1020_deep_substitutions_stay_fast_and_ask() {
 
 /// #1020: a line nesting `$(` 400 deep took about 6 s to read on main.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn issue_1020_deep_nesting_is_classified_quickly() {
     let start = std::time::Instant::now();
     let found = script(&format!("echo {}", "$(".repeat(400)));
