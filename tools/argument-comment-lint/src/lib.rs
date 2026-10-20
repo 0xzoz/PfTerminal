@@ -3,7 +3,6 @@
 mod comment_parser;
 
 extern crate rustc_ast;
-extern crate rustc_attr_ir;
 extern crate rustc_errors;
 extern crate rustc_hir;
 extern crate rustc_lint;
@@ -18,11 +17,11 @@ use clippy_utils::peel_blocks;
 use clippy_utils::res::MaybeDef as _;
 use clippy_utils::source::snippet;
 use rustc_ast::LitKind;
-use rustc_attr_ir::lang_items::LangItem;
 use rustc_errors::Applicability;
 use rustc_hir::Expr;
 use rustc_hir::ExprKind;
 use rustc_hir::UnOp;
+use rustc_hir::attrs::lang_items::LangItem;
 use rustc_hir::def::DefKind;
 use rustc_lint::LateContext;
 use rustc_lint::LateLintPass;

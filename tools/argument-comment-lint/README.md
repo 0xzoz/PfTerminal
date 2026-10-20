@@ -88,9 +88,13 @@ rustup toolchain install nightly-2026-08-23 \
   --component rust-src
 ```
 
-The checked-in DotSlash file lives at `tools/argument-comment-lint/argument-comment-lint`.
-`run-prebuilt-linter.py` resolves that file via `dotslash` and is the path used by
-targeted package runs such as `just argument-comment-lint -p codex-core`.
+The checked-in DotSlash file lives at `tools/argument-comment-lint/argument-comment-lint`
+and `run-prebuilt-linter.py` resolves it via `dotslash`. It still points at
+upstream's `rust-v0.117.0-alpha.2` package, built for `nightly-2025-09-18`,
+which can't lint code that uses newer std APIs such as `Atomic*::try_update`.
+Until a Corbanu package for the current nightly is published (#1130), targeted
+package runs such as `just argument-comment-lint -p codex-core` build the lint
+from source with `run.py` (install `cargo-dylint` and `dylint-link` as above).
 Repo-wide runs now go through a native Bazel aspect that invokes a custom
 `rustc_driver` and reuses Bazel-managed Rust dependency metadata instead of
 spawning `cargo dylint` once per crate. The source-build path remains available
