@@ -376,6 +376,10 @@ impl ProtectedRuntime {
         Ok(())
     }
 
+    #[allow(
+        deprecated,
+        reason = "Rust 1.99 renames fetch_update to try_update, which is unstable on the argument-comment-lint nightly (nightly-2025-09-18)"
+    )]
     fn observe_time(&self, now_unix_seconds: i64) -> Result<(), ProtectedRuntimeError> {
         self.last_observed_unix_seconds
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |previous| {
