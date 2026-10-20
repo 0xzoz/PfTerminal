@@ -484,7 +484,7 @@ developer-accounting, signed with Travis's Developer ID (<code>codesign --force 
 <li><code>78dd811d6e</code> (10-19 18:46Z, at the restart; #930);</li>
 <li><code>8bf182de43</code> (10-20 03:14Z; the merge of #871; also the qual-mod3 candidate, with #900, #949 and #962);</li>
 <li><code>8c73c8ea80</code> (09:26Z; adds #926, #986, #1014, #1019–#1053, #1024, #1025/#1050 and #1051);</li>
-<li><code>bfa6f7da57</code> (12:12Z; adds #1059, #1060, #1062, #1066–#1071, #1075, #1076, #1078, #1081 and #1083).</li>
+<li><code>bfa6f7da57</code> (12:12Z; adds #1059, #1060, #1062, #1066, #1067, #1068, #1069, #1071, #1075, #1076, #1078, #1081 and #1083).</li>
 </ul>
 Previous binaries next to the real one in <code>integration-package-dev/bin/</code>: <code>corbanu.prev-8c73c8ea80</code>, <code>corbanu.prev-8bf182de43</code>,
 <code>corbanu.prev-78dd811d6e</code>, <code>corbanu.prev-90d2fc2329</code>. Older ones are in <code>.codex-work/integration-build-20260922a/old-binaries/</code>.</li>
@@ -841,7 +841,7 @@ Travis's local model (mlx-serve, refusals removed) as the product's model.
 <ul>
 <li><b>MOD-21 passed.</b></li>
 <li><b>MOD-09 failed item 7.</b> Protected launch keeps CLI-token files such as <code>~/.aws/credentials</code> closed even after approval, but the prompt still offered “Yes, proceed”
-(#1077). Item 5 failed too: an image-tool read of <code>~/.netrc</code> was refused only in the log, with nothing on screen (also #1077). Every protection held.</li>
+(#1077). Item 5 failed too: an image-tool read of <code>~/.netrc</code> was refused only in the log, with nothing on screen (#1087). Every protection held.</li>
 <li>With these results the 34 cases would be 31 passed / 1 failed / 2 accepted. The sign-off stands either way; how MOD-09 counts is <b>D72</b> (rec: accept as intended, fix
 the wording). small-fix6 is fixing #1077 and the image-tool refusal display.</li>
 </ul></li>
@@ -1288,8 +1288,8 @@ add a <b>Tart</b> evaluation to the queue (#864), after the current priorities a
 <code>$HOME/.corbanu-workers/mon.sh ci-1002 gpc-finish2 sec-937c pf84-ga2 small-fix6 tui-fix1 tart-par1</code>. Session <code>watchdog</code> runs <code>watchdog.sh</code>
 (its last relaunch was sec-891 at 10-16 14:01:51Z, during the 429 stop). The stray session <code>f905</code> (an idle bash left from flake-905 on 10-16) can be killed once confirmed
 idle. Nobody holds <code>$W/vm-macos3.lock</code>; <code>tart-par1</code> runs one Tart VM at a time. <b>8 sessions against the 6 cap</b>: launch nothing until fewer than 6 run.</p>
-<div><b>Request files:</b> none waiting at 12:20Z. The newest were gpc-finish2 request5 (granted 11:13Z: merge #1070 without r8), sec-937c request2 (granted 11:18Z; plus 11:36Z: the second of #1061/#1072
-may merge without review if its conflict is test-file-only with an identical patch-id) and ci-1002 (granted 11:18Z). Section 3 lists all requests and grants since #933.</div>
+<div><b>Request files:</b> none waiting at 12:20Z. The newest were gpc-finish2 request5 (granted 11:11Z: merge #1070 without r8), sec-937c request2 (granted 11:16Z; plus 11:36Z: the second of #1061/#1072
+may merge without review if its conflict is test-file-only with an identical patch-id) and ci-1002 (granted 11:16Z). Section 3 lists all requests and grants since #933.</div>
 <table><tr><th>Worker</th><th>Started (UTC)</th><th>What it is doing</th><th>Open work / watch for</th></tr>
 <tr><td>ci-1002</td><td>10-20 03:40</td><td>#1002: Rust 1.95.0 → 1.99.1 in one deliberate PR and no more Dependabot toolchain bumps; the cargo-deny advisory RUSTSEC-2026-0374.</td>
 <td>#1088 (deny record) merged 12:05Z. PR #1027 (toolchain): by grant, merge main into it, run one merge-commit-only r6, and merge on APPROVE and green.</td></tr>
