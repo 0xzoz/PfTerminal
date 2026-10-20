@@ -27,6 +27,7 @@ use shell::basename;
 use std::collections::HashMap;
 use std::path::Path;
 
+mod arithmetic;
 mod indirect;
 mod invocation;
 mod nested;
@@ -797,6 +798,7 @@ impl Classifier {
             .filter_map(|command| command.pipe_from)
             .collect();
         if (lexed.incomplete && self.not_shell == 0 && self.rebuilt == 0)
+            || lexed.too_deep
             || indirect::opaque_execution(&lexed.commands)
         {
             self.note(ProtectedActionKind::UnseenCode);
@@ -821,8 +823,10 @@ impl Classifier {
         }
         let mut lexed_seds = 0;
         let mut lexed_shells = 0;
+        let mut arithmetic = arithmetic::Arithmetic::new(command);
         for (index, simple) in lexed.commands.iter().enumerate() {
             let (words, unseen) = substitute(simple, &variables);
+            arithmetic.note(simple, &words);
             lexed_seds += sed::positions(&words).len();
             lexed_shells += nested::shell_commands(&words);
             let feeds_pipe = pipe_sources.contains(&index);
@@ -835,6 +839,11 @@ impl Classifier {
                 &mut variables,
                 depth,
             );
+        }
+        // #937: arithmetic on a variable filled from command output or
+        // `read` runs the substitutions in its value, like `eval`.
+        if self.rebuilt == 0 && self.not_shell == 0 && arithmetic.runs_unseen(command) {
+            self.note(ProtectedActionKind::UnseenCode);
         }
         self.path(&folders.cwd);
         // Strings assembled from literals by inline code (`'~/.co' + 'dex'`).

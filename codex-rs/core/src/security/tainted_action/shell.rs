@@ -14,6 +14,22 @@ const MAX_BRACE_EXPANSION: usize = 64;
 /// Placeholder for the output of a substitution the classifier cannot see.
 /// Holds a control character, so no variable or word can spell it.
 pub(super) const UNSEEN_OUTPUT: &str = "\u{1}unseen-output\u{1}";
+/// Placeholder for an arithmetic expansion's number (`$((i + 1))`). It holds
+/// [`UNSEEN_OUTPUT`], so every check for unseen output treats it the same;
+/// only the arithmetic check (#937) tells it apart from command output. Its
+/// own control character brackets it, so no neighbouring text can complete
+/// or absorb it.
+pub(super) const ARITHMETIC_OUTPUT: &str = "\u{2}\u{1}unseen-output\u{1}\u{2}";
+
+/// A character of the command text as a word holds it: the placeholders'
+/// control characters are replaced, so text can never spell a placeholder.
+pub(super) fn literal_char(ch: char) -> char {
+    if matches!(ch, '\u{1}' | '\u{2}') {
+        char::REPLACEMENT_CHARACTER
+    } else {
+        ch
+    }
+}
 
 #[derive(Debug, Default)]
 pub(super) struct SimpleCommand {
@@ -34,6 +50,12 @@ pub(super) struct SimpleCommand {
     pub(super) here_string: Option<usize>,
     /// Indexes of the words its output is redirected to (`> file`, `>> file`).
     pub(super) writes_to: Vec<usize>,
+    /// Indexes of the words holding what a lookup printed (`$(readlink x)`
+    /// stands for `x`, but prints whatever the link holds).
+    pub(super) looked_up: Vec<usize>,
+    /// Its text held a backslash, which the words no longer show
+    /// (`printf 'a\x24'` decodes it).
+    pub(super) escaped: bool,
 }
 
 /// Lexed simple commands, in the order they finish (a substitution comes
@@ -42,7 +64,17 @@ pub(super) struct Lexed {
     pub(super) commands: Vec<SimpleCommand>,
     /// A brace expression had too many alternatives to expand.
     pub(super) incomplete: bool,
+    /// Substitutions nested past `MAX_SUBSTITUTION_DEPTH`; the deeper ones
+    /// were read without linking their output (#1020).
+    pub(super) too_deep: bool,
 }
+
+/// How deeply substitutions (`$(`, `<(`, `>(`, backticks) are read inside
+/// each other. A deeper one's commands are still read and judged by name,
+/// and the command it interrupts keeps its words around an unseen value,
+/// but its output is not spliced in or linked, and the line fails closed. The reader stays linear in the text times this
+/// depth squared (#1020).
+pub(super) const MAX_SUBSTITUTION_DEPTH: usize = 32;
 
 pub(super) fn basename(word: &str) -> &str {
     word.trim_end_matches('/')
@@ -76,9 +108,11 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
         lexer.arg(&expanded);
         lexer.flush();
     }
+    let too_deep = lexer.too_deep;
     Lexed {
         commands: lexer.finish(),
         incomplete,
+        too_deep,
     }
 }
 
@@ -215,12 +249,19 @@ enum Start {
 struct Open {
     outer: SimpleCommand,
     outer_word: String,
+    /// The outer word already holds a lookup's output.
+    outer_looked_up: bool,
     first: usize,
     backtick: bool,
     /// `>(...)`: the substitution reads the outer command's output.
     output: bool,
     /// `<(...)`: the outer command gets a file name, not the text.
     process: bool,
+    /// Opened by `$((`: arithmetic when it also closes with `))`.
+    arithmetic: bool,
+    /// Past `MAX_SUBSTITUTION_DEPTH`: its commands are read, but not
+    /// linked to the command it interrupts or spliced into its words.
+    skip: bool,
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -246,10 +287,16 @@ struct Lexer {
     done: Vec<SimpleCommand>,
     current: SimpleCommand,
     word: String,
+    /// The word being built holds a lookup's output.
+    looked_up: bool,
     open: Vec<Open>,
     /// Open groups and the pipe that feeds every command inside them.
     groups: Vec<(Group, Option<usize>)>,
     redirect: Redirect,
+    /// A substitution opened past `MAX_SUBSTITUTION_DEPTH`.
+    too_deep: bool,
+    /// Open substitutions that are not past `MAX_SUBSTITUTION_DEPTH`.
+    real_open: usize,
 }
 
 impl Lexer {
@@ -261,6 +308,9 @@ impl Lexer {
                 Redirect::HereString => self.current.here_string = index,
                 Redirect::Stdout => self.current.writes_to.extend(index),
                 Redirect::None => {}
+            }
+            if std::mem::take(&mut self.looked_up) {
+                self.current.looked_up.push(self.current.words.len());
             }
             let word = std::mem::take(&mut self.word);
             self.current.words.push(word);
@@ -342,7 +392,13 @@ impl Lexer {
         self.current.pipe_from = self.group_pipe();
     }
 
-    fn open_substitution(&mut self, backtick: bool, output: bool, process: bool) {
+    fn open_substitution(&mut self, backtick: bool, output: bool, process: bool, arithmetic: bool) {
+        let skip = self.real_open >= MAX_SUBSTITUTION_DEPTH;
+        if skip {
+            self.too_deep = true;
+        } else {
+            self.real_open += 1;
+        }
         let outer = std::mem::replace(
             &mut self.current,
             SimpleCommand {
@@ -352,34 +408,52 @@ impl Lexer {
             },
         );
         let outer_word = std::mem::take(&mut self.word);
+        let outer_looked_up = std::mem::take(&mut self.looked_up);
         self.open.push(Open {
             outer,
             outer_word,
+            outer_looked_up,
             first: self.done.len(),
             backtick,
             output,
             process,
+            arithmetic,
+            skip,
         });
     }
 
     /// Close the innermost substitution and continue the command it
     /// interrupted. `echo`/`printf` output is spliced into the word; any
     /// other output is a placeholder the classifier cannot see through.
-    fn close_substitution(&mut self) {
+    /// `arithmetic_close`: this `)` is followed by another (`$((...))`).
+    fn close_substitution(&mut self, arithmetic_close: bool) {
         self.finish_current();
         let Some(open) = self.open.pop() else {
             return;
         };
+        if open.skip {
+            // The command it interrupted continues; what it printed is
+            // unseen.
+            self.current = open.outer;
+            self.word = open.outer_word;
+            self.looked_up = open.outer_looked_up;
+            if !open.output {
+                self.word.push_str(UNSEEN_OUTPUT);
+            }
+            return;
+        }
+        self.real_open -= 1;
         let inner: Vec<usize> = (open.first..self.done.len()).collect();
-        // The commands at this level (not inside a nested substitution).
+        // The commands at this level (not inside a nested substitution),
+        // found in one pass over what the inner commands are fed by.
+        let nested: std::collections::HashSet<usize> = inner
+            .iter()
+            .flat_map(|other| self.done[*other].fed_by.iter().copied())
+            .collect();
         let top: Vec<usize> = inner
             .iter()
             .copied()
-            .filter(|index| {
-                !inner
-                    .iter()
-                    .any(|other| self.done[*other].fed_by.contains(index))
-            })
+            .filter(|index| !nested.contains(index))
             .collect();
         let spliced = match top.as_slice() {
             _ if open.output || open.process => None,
@@ -401,15 +475,23 @@ impl Lexer {
             self.current.fed_by.extend(inner);
         }
         self.word = open.outer_word;
+        self.looked_up = open.outer_looked_up;
         if !open.output {
-            self.word
-                .push_str(spliced.as_deref().unwrap_or(UNSEEN_OUTPUT));
+            // Not literal text: the output of a lookup or of `cd X && pwd`.
+            self.looked_up |= spliced.is_some()
+                && !matches!(top.as_slice(), [only] if fact_output(&self.done[*only]));
+            let unseen = if open.arithmetic && arithmetic_close {
+                ARITHMETIC_OUTPUT
+            } else {
+                UNSEEN_OUTPUT
+            };
+            self.word.push_str(spliced.as_deref().unwrap_or(unseen));
         }
     }
 
     fn finish(mut self) -> Vec<SimpleCommand> {
         while !self.open.is_empty() {
-            self.close_substitution();
+            self.close_substitution(/*arithmetic_close*/ false);
         }
         self.finish_current();
         self.done
@@ -431,6 +513,10 @@ impl Lexer {
                         /*backtick*/ false,
                         /*output*/ ch == '>',
                         /*process*/ ch == '<',
+                        /*arithmetic*/
+                        ch == '$'
+                            && chars.get(index + 2) == Some(&'(')
+                            && arithmetic_expansion(&chars, index + 3),
                     );
                     index += 2;
                     continue;
@@ -439,21 +525,23 @@ impl Lexer {
                 '\\' if next == Some('\n') => index += 1,
                 '`' => {
                     if self.open.last().is_some_and(|open| open.backtick) {
-                        self.close_substitution();
+                        self.close_substitution(/*arithmetic_close*/ false);
                     } else {
                         self.open_substitution(
                             /*backtick*/ true, /*output*/ false, /*process*/ false,
+                            /*arithmetic*/ false,
                         );
                     }
                 }
                 ')' if self.open.last().is_some_and(|open| !open.backtick) => {
-                    self.close_substitution();
+                    self.close_substitution(/*arithmetic_close*/ next == Some(')'));
                 }
                 '{' if self.word.is_empty() && next.is_none_or(char::is_whitespace) => {
                     self.open_bracket();
                 }
                 '}' if self.word.is_empty() => self.close_bracket(),
-                '\'' | '"' | '\\' | '{' | '}' => {}
+                '\\' => self.current.escaped = true,
+                '\'' | '"' | '{' | '}' => {}
                 '<' if next == Some('<') && chars.get(index + 2) == Some(&'<') => {
                     self.flush();
                     self.redirect = Redirect::HereString;
@@ -495,11 +583,29 @@ impl Lexer {
                 }
                 ';' | '&' | '\n' => self.start(Start::Plain),
                 ch if ch.is_whitespace() || matches!(ch, '<' | '>' | ',') => self.flush(),
-                ch => self.word.push(ch),
+                ch => self.word.push(literal_char(ch)),
             }
             index += 1;
         }
     }
+}
+
+/// Whether the `$((` before `start` is certainly an arithmetic expansion:
+/// it closes with `))` and holds nothing that could make bash or zsh read it
+/// as a command substitution instead (`$(((1));cat f)`, `$((echo '))';cat f) )`).
+/// When unsure, `false`: its value then counts as command output.
+fn arithmetic_expansion(chars: &[char], start: usize) -> bool {
+    let mut braces = 0_usize;
+    for (at, ch) in chars.iter().enumerate().skip(start) {
+        match ch {
+            '\'' | '"' | '`' | '\\' | '(' => return false,
+            '{' => braces += 1,
+            '}' => braces = braces.saturating_sub(1),
+            ')' => return braces == 0 && chars.get(at + 1) == Some(&')'),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Decode a bash `$'...'` string starting at `index` (after the quote)
@@ -533,7 +639,7 @@ pub(super) fn ansi_c(chars: &[char], mut index: usize, word: &mut String) -> usi
                     other => Some(other),
                 };
                 if let Some(ch) = simple {
-                    word.push(ch);
+                    word.push(literal_char(ch));
                     continue;
                 }
                 let (decoded, used) = match escape {
@@ -547,10 +653,10 @@ pub(super) fn ansi_c(chars: &[char], mut index: usize, word: &mut String) -> usi
                     }
                 };
                 index += used;
-                word.extend(decoded);
+                word.extend(decoded.map(literal_char));
             }
             ch => {
-                word.push(ch);
+                word.push(literal_char(ch));
                 index += 1;
             }
         }
@@ -567,15 +673,20 @@ pub(super) fn substitution_output(words: &[String]) -> Option<String> {
     }
     let (first, rest) = words.split_first()?;
     let operand = rest.iter().rev().find(|word| !word.starts_with('-'));
+    // A fact's arguments must be literal: `date +"$v"` and
+    // `git rev-parse --no-revs "$v"` print them back.
+    let literal = rest
+        .iter()
+        .all(|word| !word.contains('$') && !word.contains('`') && !word.contains(UNSEEN_OUTPUT));
     match basename(&first.to_lowercase()) {
         "which" | "dirname" | "basename" | "realpath" | "readlink" => operand.cloned(),
         "command" if rest.first().is_some_and(|word| word == "-v") => operand.cloned(),
         "pwd" => Some("$PWD".to_string()),
-        "date" | "uname" | "whoami" | "hostname" | "id" | "nproc" | "getconf" => {
+        "date" | "uname" | "whoami" | "hostname" | "id" | "nproc" | "getconf" if literal => {
             Some("value".to_string())
         }
         // The repository root is at or above the working folder.
-        "git" if rest.first().is_some_and(|word| word == "rev-parse") => Some(
+        "git" if literal && rest.first().is_some_and(|word| word == "rev-parse") => Some(
             if rest.iter().any(|word| word == "--show-toplevel") {
                 "$PWD"
             } else {
@@ -585,6 +696,26 @@ pub(super) fn substitution_output(words: &[String]) -> Option<String> {
         ),
         _ => None,
     }
+}
+
+/// Whether the substitution's spliced output is literal text or a neutral
+/// fact (`echo x`, `date`, `pwd`), not something a lookup found.
+fn fact_output(command: &SimpleCommand) -> bool {
+    let words = &command.words;
+    // `printf`/`echo -e`/zsh `echo` decode escapes (`\x24`) and `printf`
+    // joins operands (`%s%s`), so what they print is not the text shown.
+    let decodes = command.escaped
+        || words.first().is_some_and(|first| {
+            basename(&first.to_lowercase()) == "printf"
+                && words[1..].iter().any(|word| word.contains('%'))
+        });
+    (literal_output(words).is_some() && !decodes)
+        || words.first().is_some_and(|first| {
+            matches!(
+                basename(&first.to_lowercase()),
+                "date" | "uname" | "whoami" | "hostname" | "id" | "nproc" | "getconf"
+            )
+        })
 }
 
 /// What `echo`/`printf` with these words prints, if that is all they are.

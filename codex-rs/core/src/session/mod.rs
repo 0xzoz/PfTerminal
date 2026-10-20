@@ -3322,6 +3322,7 @@ impl Session {
                 &response,
                 &environment.environment_id,
                 originating_turn_state.as_ref(),
+                shown_under,
             )
             .await;
             return Ok(Some(response));
@@ -3535,6 +3536,7 @@ impl Session {
                     &response,
                     &entry.environment.environment_id,
                     originating_turn_state.as_ref(),
+                    entry.shown_under,
                 )
                 .await;
                 entry.tx_response.send(response).ok();
@@ -3689,11 +3691,15 @@ impl Session {
         }
     }
 
-    async fn record_granted_request_permissions_for_turn(
+    /// Records a grant answered to a request shown under `granted_under`.
+    /// D51 (#1001): it holds only while no security transition is committed
+    /// (see [`crate::state::GrantedPermissions`]).
+    pub(crate) async fn record_granted_request_permissions_for_turn(
         &self,
         response: &RequestPermissionsResponse,
         environment_id: &str,
         originating_turn_state: Option<&Arc<Mutex<crate::state::TurnState>>>,
+        granted_under: Option<(u64, u64)>,
     ) {
         if response.permissions.is_empty() {
             return;
@@ -3703,15 +3709,31 @@ impl Session {
             PermissionGrantScope::Turn => {
                 if let Some(turn_state) = originating_turn_state {
                     let mut ts = turn_state.lock().await;
-                    ts.record_granted_permissions(environment_id, permissions);
-                    if response.strict_auto_review {
-                        ts.enable_strict_auto_review();
+                    // Read under the lock: a later grant is never recorded
+                    // under an earlier marker.
+                    let current = self.services.authority_marker();
+                    let recorded = ts.record_granted_permissions(
+                        environment_id,
+                        permissions,
+                        granted_under,
+                        current,
+                    );
+                    // D51: strict auto-review comes with the grant and ends
+                    // with it.
+                    if recorded && response.strict_auto_review {
+                        ts.enable_strict_auto_review(current);
                     }
                 }
             }
             PermissionGrantScope::Session => {
                 let mut state = self.state.lock().await;
-                state.record_granted_permissions(environment_id, permissions);
+                let current = self.services.authority_marker();
+                state.record_granted_permissions(
+                    environment_id,
+                    permissions,
+                    granted_under,
+                    current,
+                );
             }
         }
     }
@@ -3727,8 +3749,8 @@ impl Session {
         let granted = {
             let active = self.active_turn.lock().await;
             let active = active.as_ref()?;
-            let ts = active.turn_state.lock().await;
-            ts.granted_permissions(environment_id)
+            let mut ts = active.turn_state.lock().await;
+            ts.granted_permissions(environment_id, self.services.authority_marker())
         };
         self.usable_grant(granted).await
     }
@@ -3805,7 +3827,7 @@ impl Session {
             return false;
         };
         let ts = active.turn_state.lock().await;
-        ts.strict_auto_review_enabled()
+        ts.strict_auto_review_enabled(self.services.authority_marker())
     }
 
     pub(crate) async fn granted_session_permissions(
@@ -3813,8 +3835,8 @@ impl Session {
         environment_id: &str,
     ) -> Option<AdditionalPermissionProfile> {
         let granted = {
-            let state = self.state.lock().await;
-            state.granted_permissions(environment_id)
+            let mut state = self.state.lock().await;
+            state.granted_permissions(environment_id, self.services.authority_marker())
         };
         self.usable_grant(granted).await
     }

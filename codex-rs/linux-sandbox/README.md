@@ -167,9 +167,10 @@ commands that would enter the bubblewrap path.
   (`<home>/sandbox-placeholders`, written crash-safely: temporary file,
   sync, rename, sync of the folder) with what it made: device, inode, mode,
   owner, size, modification and change times (#348). Each run also records
-  the paths it uses (its placeholders and every empty file or folder it
-  mounts at). At the start of each sandboxed run, the records of runs that
-  have ended (another boot, or a pid that is gone or was reused) are swept:
+  the paths it uses (its placeholders, and the empty files and folders it
+  mounts at that another run recorded making). At the start of each run
+  that uses bubblewrap, the records of runs that have ended (another boot,
+  or a pid that is gone or was reused) are swept:
   a recorded placeholder is removed only when it is still exactly what was
   made, reached without following a link, no live run's record uses it,
   and it is not a mount point in any of the user's processes (a run that
@@ -189,7 +190,18 @@ commands that would enter the bubblewrap path.
   cannot open; a run waits at most 10 seconds for it, then goes on without
   the record.
   A placeholder made by a run that then fails before bubblewrap starts is
-  recorded and swept like any other. Without
+  recorded and swept like any other. A protected path missing in another
+  run's empty placeholder folder (a `.git` it made, which a later policy
+  takes for a repository's and protects its hooks and config in) gets no
+  placeholder of its own there: the folder is held read-only instead, as
+  when it is protected itself, so it stays as made and its maker's cleanup
+  or the next sweep removes it (#745). A placeholder still there but
+  changed when its run's cleanup came to it (a folder not empty then) stays
+  in that run's record, so the next sweep reports it. Where the record says
+  what was made, the temporary folder's registry and a run's cleanup no
+  longer remove a placeholder the person replaced with their own empty file
+  or folder (including while a command ran), and remove another run's only
+  as made (#607). Without
   a usable record folder (a read-only home, as in a nested sandbox) nothing
   is recorded, as before.
 - When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default, but

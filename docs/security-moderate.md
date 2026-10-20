@@ -67,6 +67,38 @@ Not available yet: financial preview and approvals, isolated retrieval,
 screened search, brokered browser login, quarantine, the untrusted-content
 detectors and Agent Sweep.
 
+## Command output in shell arithmetic
+
+Shell arithmetic runs code hidden in a variable's value (`a[$(cmd)]`), so
+after untrusted content a command line that puts command output or input
+into arithmetic counts as code you haven't seen and asks first, for example
+`v=$(cat notes); echo $((v))` (#937). Corbanu can't follow every way a value
+reaches arithmetic, so on a line that holds command output (`$(...)`,
+backquotes, `read`) it also asks when arithmetic reads anything not shown
+to be a number on that line. These lines ask, although most are harmless:
+
+- variables from the environment or positional parameters:
+  `out=$(cmd); echo $((HOME_COUNT + $1))`
+- `eval` or `alias` anywhere on the line: `out=$(cmd); eval "echo hi"`
+- text operands of a numeric `printf`: `v=$(cmd); printf '%d' "$v"`
+- `${!arr[@]}` loops and associative-array literal keys:
+  `out=$(cmd); for k in "${!m[@]}"; do echo $k; done`
+- a parenthesised group attached to a word with a name or command output in
+  it, because zsh reads such a group as glob qualifiers, whose subscripts are
+  arithmetic and whose `e` and `+` qualifiers run code (D57). Quoted text
+  counts too, since a nested shell may run it:
+  `w=$(cmd); print -l /*(.[w])`, `out=$(cmd); grep -E '(foo|bar)' f`,
+  `out=$(cmd); git commit -m "fix(core): x"`,
+  `out=$(cmd); python3 -c "print('hi')"`, and regular expressions such as
+  `'([a-z]+)'`
+
+Counters and plain uses still run without asking:
+`out=$(cmd); for ((i=0; i<3; i++)); do echo $i; done`,
+`out=$(cmd); n=$(date +%s); echo $((n + 1))`, `out=$(cmd); ls *(/)`,
+`out=$(cmd); arr=(1 2); diff <(echo a) <(echo b)`. Splitting such a line
+in two (the output on one, the arithmetic or pattern on the next) avoids
+the prompt.
+
 ## Choosing, restarting and going back
 
 When you confirm Moderate, Core's rules (the sandbox, protected files and
@@ -92,6 +124,47 @@ The kill switch (`/security` → `g`) works under every level.
 - If your own settings turn the sandbox off (full access), commands that the
   protected-file rules don't cover run without one. Choose a sandbox in your
   settings to keep every command in it.
+- With full access in your own settings, commands can also write the
+  project's `.git`, except its hooks and config (with a sandbox setting `.git`
+  stays read-only). A command could leave something there that your own git
+  later follows outside the sandbox (#874): a link such as
+  `.git/COMMIT_EDITMSG` to a file elsewhere (or to `.git/config`), which your
+  next `git commit` writes; a hard link; rebase or cherry-pick steps whose
+  `exec` lines, or a merge strategy that isn't git's own, run when you
+  continue; a remote in `.git/remotes`; config or a hooks folder where there
+  was none; or a replaced `.git`. On macOS and Linux, Corbanu looks at `.git`
+  before a session's first such command (and reports links, steps and hard
+  links already there), after each one, before each later command and at
+  the end of each turn, and warns you about anything new, with the command
+  that removes it. It removes nothing itself. Below `objects`, `lfs` and
+  `annex` it looks only at their own entries: git reads the files below and
+  puts new ones in place, it doesn't write through them. Links inside a
+  hooks folder are left alone (git runs hooks, it doesn't write through
+  them). Until you remove what it found, and while it can't look at all of
+  `.git` (a folder it can't read, or too many entries), approving a command
+  in that project doesn't lift the protected-file rules (nor run it outside
+  the sandbox, nor let it create user namespaces), in any session of this
+  Corbanu Terminal. Some setups of your own hold them too until you remove
+  them: a layout made of links (`git new-workdir`, Android's `repo`), a
+  `config.worktree` that `git sparse-checkout` adds, or a hooks folder a
+  hook installer creates where there was none. On Linux the sandbox leaves
+  empty files and folders in place while a command runs: a new config file or
+  hooks folder that is empty is reported (in any session) once something is
+  put in it, and an empty `.git` folder replaced by another empty one isn't
+  reported. It doesn't watch in between: a process a command left running can
+  change `.git` after the last look, even while an approved command runs, and
+  what it changes after a turn ends is found at the next command, not before
+  you run git yourself. It watches the repositories of the folders agent
+  commands run in (a command's own working folder, `workdir`, too): not a
+  repository a command reaches elsewhere (`git -C`, a `cd` in the command or
+  in a shell it left running, a program the zsh-fork shell starts in another
+  folder), not one a command creates and fills in one go (nothing was there to
+  compare with), and not a `.git` removed in one command and made again in a
+  later one (it gets a first look, which reports only links, steps and hard
+  links). New config and hooks are checked only in a repository's own git
+  folder, not in its worktrees' or submodules'. A session that works in more
+  than 16 repositories forgets the oldest; its next look there reports only
+  links, steps and hard links.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder
@@ -171,7 +244,7 @@ The kill switch (`/security` → `g`) works under every level.
   the `PATH` it gives the command). You are asked every
   time, by you only, with the same warning: not "for the session", a saved
   rule, a hook or the automatic reviewer, and also where the automatic
-  reviewer would otherwise answer, so approving that request always allows
+  reviewer would otherwise answer, so approving that request allows
   user namespaces for it (decline, and ask the agent to run it without
   leaving the sandbox, to run it without them). Approving lifts nothing
   else: the protected-file rules stay, unless the command is also a
@@ -179,7 +252,9 @@ The kill switch (`/security` → `g`) works under every level.
   lifts them for that run as before. If more untrusted content arrives
   before it starts, it isn't allowed. A known tool can itself run any
   program inside the namespace (`unshare -r sh -c '…'`, `podman run`),
-  so read the whole command. The allowance covers the approved process and
+  so read the whole command. Nor is it given while Corbanu's check of the
+  project's `.git` holds the protected-file rules (see above), even where
+  the prompt warned of it. The allowance covers the approved process and
   everything it starts or is given while it runs, also after untrusted
   content arrives: an interactive program such as a shell keeps it for
   every command typed into it later. The run still stays in the sandbox

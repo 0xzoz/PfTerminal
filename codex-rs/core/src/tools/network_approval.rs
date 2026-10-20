@@ -292,6 +292,10 @@ impl PendingApprovalDecision {
 struct PendingHostApproval {
     decision: SyncOnceLock<PendingApprovalDecision>,
     notify: Notify,
+    /// #1054: how many requests have joined this prompt, so tests can order
+    /// an answer after a waiter is certain to receive it.
+    #[cfg(test)]
+    joined_waiters: tokio::sync::watch::Sender<usize>,
 }
 
 impl PendingHostApproval {
@@ -299,10 +303,14 @@ impl PendingHostApproval {
         Self {
             decision: SyncOnceLock::new(),
             notify: Notify::new(),
+            #[cfg(test)]
+            joined_waiters: tokio::sync::watch::Sender::new(0),
         }
     }
 
     async fn wait_for_decision(&self) -> PendingApprovalDecision {
+        #[cfg(test)]
+        self.joined_waiters.send_modify(|joined| *joined += 1);
         loop {
             let notified = self.notify.notified();
             if let Some(decision) = self.decision.get() {
