@@ -395,6 +395,29 @@ async fn decide_mcp_tool_call(
         }
     }
 
+    // D52 (#1001): under Aggressive, an "always approve" setting not saved
+    // under it is suspended: the tool is asked about as usual.
+    let always_allow_suspended = approval_mode == AppToolApproval::Approve
+        && sess.services.model_client().live_level_is_aggressive()
+        && !match session_mcp_tool_approval_key(invocation, Some(metadata), AppToolApproval::Auto) {
+            Some(key) => {
+                aggressive::approved(step_context.turn.config.codex_home.as_path(), &key).await
+            }
+            None => false,
+        };
+    let approval_mode = if always_allow_suspended {
+        AppToolApproval::Auto
+    } else {
+        approval_mode
+    };
+    let note = [
+        asked_again.then_some(MCP_ASKED_AGAIN_NOTE),
+        always_allow_suspended.then_some(aggressive::SUSPENDED_NOTE),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ");
     let approval_policy = if prepared_call.is_selected_plugin_server() {
         McpToolApprovalPolicy::for_selected_plugin(approval_mode)
     } else {
@@ -412,7 +435,7 @@ async fn decide_mcp_tool_call(
         metadata,
         prepared_call.config(),
         approval_policy,
-        asked_again,
+        (!note.is_empty()).then_some(note.as_str()),
     )
     .await
     else {
@@ -1533,7 +1556,7 @@ pub(crate) fn is_mcp_tool_approval_question_id(question_id: &str) -> bool {
         .is_some_and(|suffix| suffix.starts_with('_'))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 struct McpToolApprovalKey {
     server: String,
     connector_id: Option<String>,
@@ -1562,7 +1585,7 @@ async fn maybe_request_mcp_tool_approval(
     metadata: &McpToolApprovalMetadata,
     config: &codex_mcp::McpConfig,
     policy: McpToolApprovalPolicy,
-    asked_again: bool,
+    note: Option<&str>,
 ) -> Option<McpToolApprovalDecision> {
     let turn_context = &step_context.turn;
     let approvals_reviewer = connectors::mcp_approvals_reviewer_from_layers(
@@ -1677,18 +1700,16 @@ async fn maybe_request_mcp_tool_approval(
             .as_ref()
             .map(|rendered_template| rendered_template.question.as_str()),
     );
-    // D50 (#1001): a prompt asked again says why.
-    let asked_again_note = |text: &str| format!("{MCP_ASKED_AGAIN_NOTE} {text}");
-    if asked_again {
-        question.question = asked_again_note(&question.question);
-    }
-    let message_override = rendered_template.as_ref().map(|rendered_template| {
-        if asked_again {
-            asked_again_note(&rendered_template.elicitation_message)
-        } else {
-            rendered_template.elicitation_message.clone()
-        }
-    });
+    // D50, D52 (#1001): a prompt asked again, or about a tool whose "always
+    // approve" setting is suspended, says why.
+    let with_note = |text: &str| match note {
+        Some(note) => format!("{note} {text}"),
+        None => text.to_string(),
+    };
+    question.question = with_note(&question.question);
+    let message_override = rendered_template
+        .as_ref()
+        .map(|rendered_template| with_note(&rendered_template.elicitation_message));
     if tool_call_mcp_elicitation_enabled {
         let request_id = rmcp::model::RequestId::String(
             format!("{MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX}_{call_id}").into(),
@@ -2257,6 +2278,10 @@ async fn apply_mcp_tool_approval_decision(
         decision,
         McpToolApprovalDecision::AcceptForSession | McpToolApprovalDecision::AcceptAndRemember
     );
+    // D52 (#1001): "don't ask again" chosen while Aggressive is in force
+    // also applies under it. Read before the marker: the marker only moves
+    // forward, so an unchanged marker means this was the level at the prompt.
+    let under_aggressive = sess.services.model_client().live_level_is_aggressive();
     // #945: answered after a security transition, for a stale prompt: it
     // approves this call once and stores nothing.
     if lasting && sess.services.transition_since(shown_under) {
@@ -2274,6 +2299,16 @@ async fn apply_mcp_tool_approval_decision(
         }
         McpToolApprovalDecision::AcceptAndRemember => {
             if let Some(key) = persistent_approval_key {
+                if under_aggressive
+                    && let Err(err) =
+                        aggressive::record(turn_context.config.codex_home.as_path(), key.clone())
+                            .await
+                {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to record an MCP tool approved under Aggressive"
+                    );
+                }
                 maybe_persist_mcp_tool_approval(sess, turn_context, key, shown_under).await;
             } else if let Some(key) = session_approval_key {
                 remember_mcp_tool_approval(sess, key, shown_under).await;
@@ -2536,6 +2571,9 @@ async fn notify_mcp_tool_call_skip(
     .await;
     Err(message)
 }
+
+#[path = "mcp_tool_call_aggressive.rs"]
+mod aggressive;
 
 #[cfg(test)]
 #[path = "mcp_tool_call_tests.rs"]

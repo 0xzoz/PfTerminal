@@ -2407,7 +2407,7 @@ async fn approve_mode_skips_when_annotations_do_not_require_approval() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Approve),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2485,7 +2485,7 @@ async fn guardian_mode_skips_auto_when_annotations_do_not_require_approval() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2546,7 +2546,7 @@ async fn permission_request_hook_allows_mcp_tool_call() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2615,7 +2615,7 @@ async fn permission_request_hook_uses_hook_tool_name_without_metadata() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2704,7 +2704,7 @@ async fn permission_request_hook_runs_after_remembered_mcp_approval() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2792,7 +2792,7 @@ async fn guardian_mode_mcp_denial_returns_rationale_message() {
         &metadata,
         &approval_config(&turn_context),
         McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-        /*asked_again*/ false,
+        /*note*/ None,
     )
     .await;
 
@@ -2860,7 +2860,7 @@ async fn prompt_mode_waits_for_approval_when_annotations_do_not_require_approval
                 &metadata,
                 &approval_config(&turn_context),
                 McpToolApprovalPolicy::for_server(AppToolApproval::Prompt),
-                /*asked_again*/ false,
+                /*note*/ None,
             )
             .await
         })
@@ -2920,7 +2920,7 @@ async fn full_access_mode_skips_mcp_tool_approval_for_all_approval_modes() {
             &metadata,
             &approval_config(&turn_context),
             McpToolApprovalPolicy::for_server(approval_mode),
-            /*asked_again*/ false,
+            /*note*/ None,
         )
         .await;
 
@@ -3011,7 +3011,7 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
             &metadata,
             &approval_config(&turn_context),
             McpToolApprovalPolicy::for_server(AppToolApproval::Approve),
-            /*asked_again*/ false,
+            /*note*/ None,
         )
         .await;
 
@@ -3253,7 +3253,7 @@ async fn issue_1001_ask(
                 &metadata,
                 &approval_config(&turn_context),
                 McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-                asked_again,
+                asked_again.then_some(MCP_ASKED_AGAIN_NOTE),
             )
             .await
         }
@@ -3411,4 +3411,41 @@ fn issue_1011_prompt_options_limit_lasting_answers_to_what_was_offered() {
         session_only.limit(McpToolApprovalDecision::AcceptForSession),
         McpToolApprovalDecision::AcceptForSession
     );
+}
+
+/// D52 (#1001): "Allow and don't ask me again" chosen while Aggressive is in
+/// force is recorded in the Corbanu home, so the tool's "always approve"
+/// applies under Aggressive; chosen under a less strict level it is not.
+#[tokio::test]
+async fn issue_1001_dont_ask_again_under_aggressive_is_recorded() {
+    let (session, turn_context) = make_session_and_context().await;
+    let codex_home = turn_context.config.codex_home.to_path_buf();
+    std::fs::create_dir_all(&codex_home).expect("home");
+    let key = |tool: &str| McpToolApprovalKey {
+        server: "custom_server".to_string(),
+        connector_id: None,
+        tool_name: tool.to_string(),
+    };
+    let remember = async |tool: &str| {
+        apply_mcp_tool_approval_decision(
+            &session,
+            &turn_context,
+            &McpToolApprovalDecision::AcceptAndRemember,
+            Some(key(tool)),
+            Some(key(tool)),
+            session.services.authority_marker(),
+        )
+        .await;
+    };
+
+    remember("permissive_tool").await;
+    assert!(!aggressive::approved(&codex_home, &key("permissive_tool")).await);
+
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_level(codex_security_policy::SecurityLevel::Aggressive);
+    session.services.replace_model_client(client);
+    remember("aggressive_tool").await;
+    assert!(aggressive::approved(&codex_home, &key("aggressive_tool")).await);
+    assert!(!aggressive::approved(&codex_home, &key("permissive_tool")).await);
 }
