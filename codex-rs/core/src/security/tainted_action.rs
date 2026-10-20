@@ -797,7 +797,13 @@ impl Classifier {
             .iter()
             .filter_map(|command| command.pipe_from)
             .collect();
+        // #1012: bash `${v@P}` expands the value as a prompt, running the
+        // substitutions in it, like `eval`. Also in non-shell and rebuilt
+        // text, which may reach a shell (`os.system`); the lexed words are
+        // checked below.
         if (lexed.incomplete && self.not_shell == 0 && self.rebuilt == 0)
+            || command.iter().any(|arg| shell::prompt_expansion(arg))
+            || lexed.too_deep
             || indirect::opaque_execution(&lexed.commands)
         {
             self.note(ProtectedActionKind::UnseenCode);
@@ -825,6 +831,11 @@ impl Classifier {
         let mut arithmetic = arithmetic::Arithmetic::new(command);
         for (index, simple) in lexed.commands.iter().enumerate() {
             let (words, unseen) = substitute(simple, &variables);
+            // Decoded, quote-removed and with known variables substituted:
+            // `eval "echo \${v@"P"}"`, `$'\x40'`, `p=@P; eval "echo \${v$p}"`.
+            if words.iter().any(|word| shell::prompt_expansion(word)) {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
             arithmetic.note(simple, &words);
             lexed_seds += sed::positions(&words).len();
             lexed_shells += nested::shell_commands(&words);

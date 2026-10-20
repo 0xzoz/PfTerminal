@@ -21,7 +21,7 @@ use std::time::UNIX_EPOCH;
 /// incomplete (and holds, see `held_for`).
 const MAX_ENTRIES: usize = 50_000;
 const MAX_DEPTH: usize = 16;
-const MAX_REPOS: usize = 8;
+pub(super) const MAX_REPOS: usize = 8;
 const MAX_REPOS_PER_THREAD: usize = 16;
 const MAX_THREADS: usize = 64;
 /// New, empty config files and hooks folders remembered (`Global::empty_new`).
@@ -88,6 +88,18 @@ impl Repo {
         }
         probes
     }
+}
+
+/// [`repos`] of `folders`, and beyond the cap the repository of `also`
+/// (#943 item 11: the folder a command runs in, its `workdir`).
+pub(crate) fn repos_and(folders: &[&Path], also: Option<&Path>) -> Vec<Repo> {
+    let mut found = repos(folders);
+    for repo in also.map_or_else(Vec::new, |also| repos(&[also])) {
+        if !found.iter().any(|known| known.dot_git == repo.dot_git) {
+            found.push(repo);
+        }
+    }
+    found
 }
 
 /// The repositories `folders` are in (the nearest `.git` at or above each,
@@ -388,6 +400,9 @@ struct Snapshot {
     /// (`is_empty_stub`), still there and empty: reported once something
     /// is in them, whatever `Global::empty_new` holds meanwhile.
     empty_new: HashSet<PathBuf>,
+    /// The git folders this look walked (#943 review r6); empty in a
+    /// baseline.
+    git_dirs: Vec<PathBuf>,
 }
 
 impl Snapshot {
@@ -401,12 +416,14 @@ impl Snapshot {
             incomplete: None,
             went_missing: false,
             empty_new: HashSet::new(),
+            git_dirs: Vec::new(),
         }
     }
 }
 
 fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
     let mut snapshot = Snapshot::empty(&DotGit::read(&repo.dot_git));
+    snapshot.git_dirs = repo.git_dirs.clone();
     let home = dirs::home_dir().and_then(|home| std::fs::canonicalize(home).ok());
     if repo
         .git_dirs
@@ -988,12 +1005,17 @@ fn slot_of(thread: ThreadId, repo: &Repo, used: bool) -> Slot {
         if used || !state.used.contains_key(&repo.dot_git) {
             state.used.insert(repo.dot_git.clone(), uses);
         }
-        state
+        let (stored, slot) = state
             .repos
             .entry(repo.dot_git.clone())
-            .or_insert_with(|| (repo.clone(), Slot::default()))
-            .1
-            .clone()
+            .or_insert_with(|| (repo.clone(), Slot::default()));
+        // #943 review r5: where a command runs there, its git folders as
+        // found now (a `.git` made again may be another kind) are what later
+        // looks (`recheck`) walk.
+        if used && stored.git_dirs != repo.git_dirs {
+            *stored = repo.clone();
+        }
+        slot.clone()
     })
 }
 
@@ -1036,9 +1058,11 @@ pub(crate) fn recheck(
         ),
         level,
     );
-    // Held for a command in the project it runs in.
-    let watched: Vec<PathBuf> = self::repos(folders)
-        .into_iter()
+    // Held for a command in the project it runs in. Each folder on its own,
+    // so no cap leaves one out (#943 item 11: the command's `workdir` added).
+    let watched: Vec<PathBuf> = folders
+        .iter()
+        .flat_map(|folder| self::repos(&[folder]))
         .flat_map(|repo| repo.git_dirs)
         .collect();
     (message, held_for(&watched))
@@ -1063,17 +1087,78 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         // Gone (a worktree removed, a scratch clone deleted): nothing to
         // follow. Should the same one come back, it is compared with the
         // last look; a new one there gets a first look.
-        if DotGit::read(&repo.dot_git) == DotGit::Missing {
+        let now = DotGit::read(&repo.dot_git);
+        if now == DotGit::Missing {
             if let Some(prev) = snapshot.as_mut() {
                 prev.went_missing = true;
             }
             incomplete.push((repo.git_dirs.clone(), None));
             continue;
         }
+        // Made again or replaced (#943 reviews r4, r6): it may be another
+        // kind (a worktree's or submodule's `.git` file replaced by a folder,
+        // or the reverse) or name other git folders, so they are worked out
+        // again, also for later looks.
+        let remade_repo = snapshot
+            .as_ref()
+            .filter(|prev| prev.dot_git != now)
+            .and_then(|_| repo_at(repo.dot_git.clone()))
+            .filter(|fresh| fresh.git_dirs != repo.git_dirs);
+        if let Some(fresh) = &remade_repo {
+            with_global(|global| {
+                if let Some((stored, _)) = global
+                    .threads
+                    .get_mut(&thread)
+                    .and_then(|state| state.repos.get_mut(&fresh.dot_git))
+                {
+                    *stored = fresh.clone();
+                }
+            });
+        }
+        // Replaced in place (no look saw it missing): this look also walks
+        // the git folders it named before, where something may have been
+        // left meanwhile.
+        let replaced_repo = remade_repo
+            .as_ref()
+            .filter(|_| snapshot.as_ref().is_some_and(|prev| !prev.went_missing))
+            .map(|fresh| {
+                let mut both = fresh.clone();
+                for dir in &repo.git_dirs {
+                    if !both.git_dirs.contains(dir) {
+                        both.git_dirs.push(dir.clone());
+                    }
+                }
+                both
+            });
+        let repo = replaced_repo
+            .as_ref()
+            .or(remade_repo.as_ref())
+            .unwrap_or(repo);
         // The last look stays until this one is done (a panic keeps it).
         let prev = snapshot.as_ref();
-        let mut cur = walk(repo, prev);
-        let prev = prev.filter(|prev| !(prev.went_missing && prev.dot_git != cur.dot_git));
+        // Made again: what the old one had isn't carried into this look.
+        let mut cur = walk(
+            repo,
+            prev.filter(|prev| !(prev.went_missing && prev.dot_git != now)),
+        );
+        // Missing at the last look and back as a different one: a full
+        // look, not a first look (#943). Likewise where the git folders
+        // differ from those the last look walked (review r6: replaced as
+        // another kind, or a `gitdir:` file pointed elsewhere), still
+        // reported as replaced where it was.
+        let remade = prev
+            .filter(|prev| {
+                (prev.went_missing && prev.dot_git != cur.dot_git)
+                    || (!prev.git_dirs.is_empty() && prev.git_dirs != repo.git_dirs)
+            })
+            .map(|prev| {
+                let mut baseline = remade_baseline(repo, prev, &cur);
+                if !prev.went_missing {
+                    baseline.dot_git = prev.dot_git.clone();
+                }
+                baseline
+            });
+        let prev = remade.as_ref().or(prev);
         let remembered: HashSet<PathBuf> = with_global(|global| {
             global
                 .empty_new
@@ -1164,6 +1249,83 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         global.held.extend(held);
     });
     findings
+}
+
+/// What a `.git` made again (missing at the last look, now a different one)
+/// is compared with: the last look's folders that are still the same ones,
+/// and empty ones for its own git folders that aren't, so that config,
+/// hooks, remotes and steps there are reported as new (empty ones once
+/// filled). A worktree's `commondir` naming its common folder, still the
+/// same one, isn't new (`git worktree add` again).
+fn remade_baseline(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Snapshot {
+    let mut baseline = Snapshot::empty(&cur.dot_git);
+    baseline.empty_new = prev.empty_new.clone();
+    for (dir, folder) in &cur.folders {
+        if let Some(old) = prev
+            .folders
+            .get(dir)
+            .filter(|old| old.dev == folder.dev && old.ino == folder.ino)
+        {
+            baseline.folders.insert(dir.clone(), old.clone());
+        }
+    }
+    baseline.states = prev
+        .states
+        .iter()
+        .filter(|(path, _)| {
+            path.parent()
+                .is_some_and(|dir| baseline.folders.contains_key(dir))
+        })
+        .map(|(path, read)| (path.clone(), read.clone()))
+        .collect();
+    let kept: Vec<&PathBuf> = repo
+        .git_dirs
+        .iter()
+        .filter(|dir| baseline.folders.contains_key(*dir))
+        .collect();
+    for dir in &repo.git_dirs {
+        if baseline.folders.contains_key(dir) {
+            continue;
+        }
+        let commondir = cur
+            .folders
+            .get(dir)
+            .and_then(|folder| folder.entries.get(OsStr::new("commondir")))
+            .filter(|entry| entry.kind == Kind::File && entry.nlink == 1)
+            .filter(|_| {
+                read_small(&dir.join("commondir"))
+                    .and_then(|common| plain_commondir(dir, &common))
+                    .is_some_and(|common| kept.contains(&&common))
+            });
+        let entries = commondir
+            .map(|entry| (OsString::from("commondir"), entry.clone()))
+            .into_iter()
+            .collect();
+        baseline.folders.insert(
+            dir.clone(),
+            Folder {
+                dev: 0,
+                ino: 0,
+                ctime: 0,
+                settled: false,
+                role: Role::GitDir,
+                entries,
+            },
+        );
+    }
+    baseline
+}
+
+/// The folder a `commondir` names, as `git worktree add` writes it (`../..`
+/// or a real path), without following links: git follows its text each
+/// time it runs, where a link could lead elsewhere later.
+fn plain_commondir(dir: &Path, text: &str) -> Option<PathBuf> {
+    let text = text.trim_end_matches(['\n', '\r']);
+    if text == "../.." {
+        return dir.parent()?.parent().map(Path::to_path_buf);
+    }
+    let path = Path::new(text);
+    (path.is_absolute() && std::fs::canonicalize(path).ok()? == path).then(|| path.to_path_buf())
 }
 
 /// What any session (a sub-agent's too) found in the git folders `watched`
