@@ -734,12 +734,56 @@ fn a_path_another_run_made_is_recorded_as_used_and_nothing_else() {
 }
 
 #[test]
+fn a_child_of_a_pending_placeholder_folder_is_recorded_as_used() {
+    let mut setup = Setup::new();
+    let pending = setup.base.join("home/pending");
+    let prefix_sibling = setup.base.join("home/pending2");
+    let child = pending.join("child");
+    let sibling_child = prefix_sibling.join("child");
+    std::fs::create_dir(&pending).expect("pending folder");
+    std::fs::create_dir(&prefix_sibling).expect("prefix sibling folder");
+    std::fs::write(&child, "").expect("child");
+    std::fs::write(&sibling_child, "").expect("sibling child");
+    setup.write(
+        this_run_with_start(Some(7)),
+        vec![Entry::Pending {
+            kind: Kind::Directory,
+            path: pending.clone(),
+            real: pending.clone(),
+        }],
+    );
+    let pending_name = setup.records().pop().expect("pending record name");
+    let pending_record = setup.journal.read(&pending_name).expect("pending record");
+    setup.journal.register(
+        &[],
+        &[
+            (child.clone(), child.clone()),
+            (sibling_child.clone(), sibling_child.clone()),
+        ],
+    );
+    let own = format!("{}.rec", setup.journal.name);
+    let record = setup.journal.read(&own).expect("record");
+    assert_eq!(
+        record.entries,
+        vec![Entry::Uses {
+            path: child.clone(),
+            real: child,
+        }]
+    );
+    assert!(uses(&record, &pending, &pending));
+    assert!(!uses(&record, &prefix_sibling, &prefix_sibling));
+    assert_eq!(setup.journal.read(&pending_name), Some(pending_record));
+}
+
+#[test]
 fn a_path_another_run_was_about_to_make_is_recorded_as_used() {
     let mut setup = Setup::new();
     let pending = setup.base.join("home/pending");
     let sibling = setup.base.join("home/sibling");
+    let prefix_sibling = setup.base.join("home/pending2");
     std::fs::write(&pending, "").expect("bubblewrap made it");
     std::fs::write(&sibling, "").expect("sibling");
+    std::fs::write(&prefix_sibling, "").expect("prefix sibling");
     // Another run's record (another start time than this process's): it
     // was about to make the placeholder when it was recorded.
     setup.write(
@@ -755,10 +799,19 @@ fn a_path_another_run_was_about_to_make_is_recorded_as_used() {
         &[
             (pending.clone(), pending.clone()),
             (sibling.clone(), sibling.clone()),
+            (prefix_sibling.clone(), prefix_sibling.clone()),
         ],
     );
     let own = format!("{}.rec", setup.journal.name);
     let record = setup.journal.read(&own).expect("record");
     assert!(uses(&record, &pending, &pending));
     assert!(!uses(&record, &sibling, &sibling));
+    assert!(!uses(&record, &prefix_sibling, &prefix_sibling));
+    assert_eq!(
+        record.entries,
+        vec![Entry::Uses {
+            path: pending.clone(),
+            real: pending,
+        }]
+    );
 }
