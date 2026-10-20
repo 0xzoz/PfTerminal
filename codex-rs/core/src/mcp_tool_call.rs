@@ -174,22 +174,33 @@ pub(crate) async fn handle_mcp_tool_call(
     let metadata = mcp_tool_metadata(&prepared_call);
     let item_metadata = McpToolCallItemMetadata::from_tool_metadata(&server, Some(&metadata));
     let runtime_config = prepared_call.config();
-    let app_tool_policy = if server == CODEX_APPS_MCP_SERVER_NAME {
-        let annotations = metadata.annotations.as_ref();
-        AppToolPolicyEvaluator::new(&runtime_config.config_layer_stack).policy(AppToolPolicyInput {
-            connector_id: metadata.connector_id.as_deref(),
-            tool_name: &tool_name,
-            tool_title: metadata.tool_title.as_deref(),
-            destructive_hint: annotations.and_then(|annotations| annotations.destructive_hint),
-            open_world_hint: annotations.and_then(|annotations| annotations.open_world_hint),
-        })
-    } else {
-        AppToolPolicy::default()
+    let annotations = metadata.annotations.as_ref();
+    let app_tool_policy_input = AppToolPolicyInput {
+        connector_id: metadata.connector_id.as_deref(),
+        tool_name: &tool_name,
+        tool_title: metadata.tool_title.as_deref(),
+        destructive_hint: annotations.and_then(|annotations| annotations.destructive_hint),
+        open_world_hint: annotations.and_then(|annotations| annotations.open_world_hint),
     };
-    let approval_mode = if server == CODEX_APPS_MCP_SERVER_NAME {
-        app_tool_policy.approval
+    let (app_tool_policy, approval_without_approve) = if server == CODEX_APPS_MCP_SERVER_NAME {
+        let evaluator = AppToolPolicyEvaluator::new(&runtime_config.config_layer_stack);
+        (
+            evaluator.policy(app_tool_policy_input),
+            evaluator.approval_without_approve(app_tool_policy_input),
+        )
     } else {
-        prepared_call.tool_approval_mode()
+        (
+            AppToolPolicy::default(),
+            prepared_call.tool_approval_mode_without_approve(),
+        )
+    };
+    let approval_mode = ApprovalModes {
+        configured: if server == CODEX_APPS_MCP_SERVER_NAME {
+            app_tool_policy.approval
+        } else {
+            prepared_call.tool_approval_mode()
+        },
+        without_approve: approval_without_approve,
     };
 
     let connector_id = metadata.connector_id.clone();
@@ -348,6 +359,40 @@ where
     }
 }
 
+/// A tool's approval mode, and the one it would have without any `approve`
+/// setting (D52).
+#[derive(Clone, Copy)]
+struct ApprovalModes {
+    configured: AppToolApproval,
+    without_approve: AppToolApproval,
+}
+
+/// D52 (#1001): whether a person approved this tool for good while Aggressive
+/// was in force, as the Corbanu home records. Only for a connector, or a
+/// server the user's own config defines (not a project, which could define
+/// another server under the same name, nor a plugin).
+async fn approved_under_aggressive(
+    step_context: &StepContext,
+    invocation: &McpInvocation,
+    metadata: &McpToolApprovalMetadata,
+    prepared_call: &PreparedMcpCall,
+) -> bool {
+    let Some(key) =
+        session_mcp_tool_approval_key(invocation, Some(metadata), AppToolApproval::Auto)
+    else {
+        return false;
+    };
+    let config = &step_context.turn.config;
+    let scoped = if key.server == CODEX_APPS_MCP_SERVER_NAME {
+        key.connector_id.is_some()
+    } else {
+        prepared_call.plugin_id().is_none()
+            && project_mcp_tool_approval_config_folder(config, &key.server).is_none()
+            && user_mcp_server_is_configured(config, &key.server).unwrap_or(false)
+    };
+    scoped && aggressive::approved(config.codex_home.as_path(), &key).await
+}
+
 /// Whether an MCP call runs, and under which approval, or why not.
 enum McpCallOutcome {
     /// With the policy marker it was decided under (set by
@@ -368,7 +413,7 @@ async fn decide_mcp_tool_call(
     hook_tool_name: &HookToolName,
     metadata: &McpToolApprovalMetadata,
     prepared_call: &PreparedMcpCall,
-    approval_mode: AppToolApproval,
+    approval_mode: ApprovalModes,
     asked_again: bool,
 ) -> McpCallOutcome {
     // PF-23-S01: after untrusted content, a protected MCP call needs a fresh
@@ -396,19 +441,14 @@ async fn decide_mcp_tool_call(
     }
 
     // D52 (#1001): under Aggressive, an "always approve" setting not saved
-    // under it is suspended: the tool is asked about as usual.
-    let always_allow_suspended = approval_mode == AppToolApproval::Approve
+    // under it is suspended: the tool is decided as without it.
+    let always_allow_suspended = approval_mode.configured == AppToolApproval::Approve
         && sess.services.model_client().live_level_is_aggressive()
-        && !match session_mcp_tool_approval_key(invocation, Some(metadata), AppToolApproval::Auto) {
-            Some(key) => {
-                aggressive::approved(step_context.turn.config.codex_home.as_path(), &key).await
-            }
-            None => false,
-        };
+        && !approved_under_aggressive(step_context, invocation, metadata, prepared_call).await;
     let approval_mode = if always_allow_suspended {
-        AppToolApproval::Auto
+        approval_mode.without_approve
     } else {
-        approval_mode
+        approval_mode.configured
     };
     let note = [
         asked_again.then_some(MCP_ASKED_AGAIN_NOTE),

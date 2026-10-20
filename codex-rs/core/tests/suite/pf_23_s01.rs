@@ -544,6 +544,33 @@ async fn issue_1001_aggressive_suspends_mcp_always_approve() -> anyhow::Result<(
     let output = output_text(&captured.requests()[1], "call-sync-1");
     assert!(output.contains("user cancelled MCP tool call"), "{output}");
 
+    // A record that the person approved `rmcp/sync` for good under
+    // Aggressive is not honoured for a server their own config does not
+    // define (here the runtime config adds it, as a project or plugin could).
+    let home = Arc::new(TempDir::new()?);
+    std::fs::write(
+        home.path().join("mcp-approvals-aggressive.json"),
+        r#"{"tools":[{"server":"rmcp","connector_id":null,"tool_name":"sync"}]}"#,
+    )?;
+    let (test, _captured) = start_turn_in(
+        Some(home),
+        SecurityLevel::Aggressive,
+        AskForApproval::OnRequest,
+        vec![sync_step("call-sync-1"), done_step()],
+        |config| {
+            insert_rmcp_server(config).expect("rmcp server");
+            config
+                .features
+                .disable(Feature::ToolCallMcpElicitation)
+                .expect("disable MCP elicitation");
+        },
+    )
+    .await?;
+    let question = next_question(&test)
+        .await
+        .expect("a record for another server definition does not apply");
+    answer(&test, &question, "Cancel").await;
+
     let (test, captured) = approve_turn(SecurityLevel::Permissive).await?;
     assert!(next_question(&test).await.is_none(), "runs unasked");
     let output = output_text(&captured.requests()[1], "call-sync-1");

@@ -30,44 +30,61 @@ struct Recorded {
     tools: Vec<McpToolApprovalKey>,
 }
 
-/// Serializes read-modify-write of [`FILE`] within this process.
+/// Serializes read-modify-write of [`FILE`] within this process. Two
+/// processes on one home may still race; a lost update only means the person
+/// is asked again under Aggressive.
 static WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-async fn read(codex_home: &Path) -> Recorded {
+/// The record, or an error when it exists but cannot be read.
+async fn read(codex_home: &Path) -> std::io::Result<Recorded> {
     match tokio::fs::read(codex_home.join(FILE)).await {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .inspect_err(|err| {
-                tracing::warn!("MCP approvals saved under Aggressive not read: {err}");
-            })
-            .unwrap_or_default(),
-        Err(_) => Recorded::default(),
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(std::io::Error::other),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Recorded::default()),
+        Err(err) => Err(err),
     }
 }
 
 /// Whether a person approved `key` for good while Aggressive was in force.
 /// A missing or unreadable record says no.
 pub(super) async fn approved(codex_home: &Path, key: &McpToolApprovalKey) -> bool {
-    read(codex_home).await.tools.contains(key)
+    match read(codex_home).await {
+        Ok(recorded) => recorded.tools.contains(key),
+        Err(err) => {
+            tracing::warn!("MCP approvals saved under Aggressive not read: {err}");
+            false
+        }
+    }
 }
 
 /// Records that a person approved `key` for good while Aggressive was in
-/// force.
+/// force. A record that exists but cannot be read is left alone (an error).
 #[expect(
     clippy::await_holding_invalid_type,
     reason = "the record's read-modify-write must not interleave within this process"
 )]
 pub(super) async fn record(codex_home: &Path, key: McpToolApprovalKey) -> std::io::Result<()> {
     let _guard = WRITE_LOCK.lock().await;
-    let mut recorded = read(codex_home).await;
+    let mut recorded = read(codex_home).await?;
     if recorded.tools.contains(&key) {
         return Ok(());
     }
     recorded.tools.push(key);
     let bytes = serde_json::to_vec_pretty(&recorded).map_err(std::io::Error::other)?;
-    let path = codex_home.join(FILE);
-    let temporary = codex_home.join(format!("{FILE}.tmp"));
-    tokio::fs::write(&temporary, bytes).await?;
-    tokio::fs::rename(&temporary, &path).await
+    let codex_home = codex_home.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        // A temporary file of its own in the same folder, synced, then
+        // renamed into place: a reader sees the old record or the new one.
+        let mut temporary = tempfile::NamedTempFile::new_in(&codex_home)?;
+        temporary.write_all(&bytes)?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(codex_home.join(FILE))
+            .map(drop)
+            .map_err(|err| err.error)
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 #[cfg(test)]

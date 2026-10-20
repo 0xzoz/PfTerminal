@@ -22,7 +22,12 @@ async fn issue_1001_recorded_tools_are_approved_and_others_not() {
     let text = std::fs::read_to_string(home.path().join(FILE)).expect("file");
     assert_eq!(text.matches("\"search\"").count(), 1, "{text}");
 
-    // An unreadable record approves nothing.
+    // An unreadable record approves nothing, and is not replaced.
     std::fs::write(home.path().join(FILE), "not json").expect("write");
     assert!(!approved(home.path(), &key("search")).await);
+    assert!(record(home.path(), key("write")).await.is_err());
+    assert_eq!(
+        std::fs::read_to_string(home.path().join(FILE)).expect("file"),
+        "not json"
+    );
 }
