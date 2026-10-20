@@ -1108,6 +1108,7 @@ mod tests {
     use codex_app_server_protocol::ToolRequestUserInputParams;
     use codex_app_server_protocol::ToolRequestUserInputQuestion;
     use codex_core::config::ConfigBuilder;
+    use codex_core::config::ConfigOverrides;
     use codex_core::init_state_db;
     use codex_uds::UnixListener;
     use codex_utils_absolute_path::AbsolutePathBuf;
@@ -1127,29 +1128,23 @@ mod tests {
     use tokio_tungstenite::tungstenite::handshake::server::Response as WebSocketResponse;
     use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
 
-    async fn build_test_config() -> Config {
-        match ConfigBuilder::default().build().await {
-            Ok(config) => config,
-            Err(_) => Config::load_default_with_cli_overrides(Vec::new())
-                .await
-                .expect("default config should load"),
+    /// A test config whose home and working folder are both in `folder`, a
+    /// temporary folder: without them it would be built for `CODEX_HOME` and
+    /// the test process's own folder, the crate's source tree (#1138).
+    async fn build_test_config(folder: &Path) -> Config {
+        let (codex_home, cwd) = (folder.join("home"), folder.join("cwd"));
+        for dir in [&codex_home, &cwd] {
+            std::fs::create_dir_all(dir).expect("test folder");
         }
-    }
-
-    async fn build_test_config_for_codex_home(codex_home: &Path) -> Config {
-        match ConfigBuilder::default()
-            .codex_home(codex_home.to_path_buf())
+        ConfigBuilder::default()
+            .codex_home(codex_home)
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(cwd),
+                ..Default::default()
+            })
             .build()
             .await
-        {
-            Ok(config) => config,
-            Err(_) => Config::load_default_with_cli_overrides_for_codex_home(
-                codex_home.to_path_buf(),
-                Vec::new(),
-            )
-            .await
-            .expect("default config should load"),
-        }
+            .expect("test config should load")
     }
 
     struct TestClient {
@@ -1175,8 +1170,8 @@ mod tests {
         session_source: SessionSource,
         channel_capacity: usize,
     ) -> TestClient {
-        let codex_home = TempDir::new().expect("temp dir");
-        let config = Arc::new(build_test_config_for_codex_home(codex_home.path()).await);
+        let test_folder = TempDir::new().expect("temp dir");
+        let config = Arc::new(build_test_config(test_folder.path()).await);
         let state_db = init_state_db(config.as_ref())
             .await
             .expect("state db should initialize for in-process test");
@@ -1205,7 +1200,7 @@ mod tests {
         .expect("in-process app-server client should start");
 
         TestClient {
-            _codex_home: codex_home,
+            _codex_home: test_folder,
             client,
         }
     }
@@ -2379,7 +2374,8 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_start_args_forward_environment_manager_and_openai_form_capability() {
-        let config = Arc::new(build_test_config().await);
+        let test_folder = TempDir::new().expect("temp dir");
+        let config = Arc::new(build_test_config(test_folder.path()).await);
         let environment_manager = Arc::new(
             EnvironmentManager::create_for_tests(
                 Some("ws://127.0.0.1:8765".to_string()),
@@ -2440,7 +2436,8 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_start_args_use_remote_thread_config_loader_when_configured() {
-        let mut config = build_test_config().await;
+        let test_folder = TempDir::new().expect("temp dir");
+        let mut config = build_test_config(test_folder.path()).await;
         config.experimental_thread_config_endpoint = Some("not-a-valid-endpoint".to_string());
 
         let runtime_args = InProcessClientStartArgs {

@@ -277,7 +277,9 @@ impl RateLimitedSession {
             .mount(&server)
             .await;
         let home = tempfile::tempdir().expect("tempdir");
-        let mut config = crate::session::tests::build_test_config(home.path()).await;
+        let test_cwd = tempfile::tempdir().expect("create test cwd");
+        let mut config =
+            crate::session::tests::build_test_config(home.path(), test_cwd.path()).await;
         config.model_provider = ModelProviderInfo {
             request_max_retries: Some(0),
             stream_max_retries: Some(0),

@@ -525,7 +525,8 @@ async fn pf_60_s03_stage_one_extraction_records_its_own_turn() -> anyhow::Result
         .await;
 
     let home = tempfile::tempdir()?;
-    let mut config = crate::session::tests::build_test_config(home.path()).await;
+    let test_cwd = tempfile::tempdir()?;
+    let mut config = crate::session::tests::build_test_config(home.path(), test_cwd.path()).await;
     config.model_provider = codex_model_provider_info::ModelProviderInfo {
         request_max_retries: Some(0),
         stream_max_retries: Some(0),
