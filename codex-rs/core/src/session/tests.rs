@@ -1385,6 +1385,85 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
     Ok(())
 }
 
+/// D52 (#1001): while Aggressive is in force, the managed proxy's allowlist
+/// leaves out the network allow rules saved under a less strict level; a host
+/// allowed while Aggressive was in force stays. Outside Aggressive both apply.
+#[tokio::test]
+async fn issue_1001_aggressive_proxy_leaves_out_allow_rules_saved_outside_it() -> anyhow::Result<()>
+{
+    let permission_profile = PermissionProfile::workspace_write();
+    let network_spec = crate::config::NetworkProxySpec::from_config_and_constraints(
+        NetworkProxyConfig::default(),
+        /*requirements*/ None,
+        &permission_profile,
+    )?;
+    let session = make_session_with_config(move |config| {
+        config
+            .permissions
+            .set_permission_profile(permission_profile)
+            .expect("test setup should allow permission profile");
+        config.permissions.network = Some(network_spec);
+    })
+    .await?;
+    let codex_home = session.codex_home().await.to_path_buf();
+    std::fs::create_dir_all(&codex_home)?;
+    for (host, approved_under) in [
+        (
+            "aggressive.example",
+            crate::exec_policy::ApprovedUnder::Aggressive,
+        ),
+        (
+            "permissive.example",
+            crate::exec_policy::ApprovedUnder::LessStrict,
+        ),
+    ] {
+        session
+            .services
+            .exec_policy
+            .append_network_rule_and_update(
+                &codex_home,
+                host,
+                NetworkRuleProtocol::Https,
+                Decision::Allow,
+                Some("Allowed by you".to_string()),
+                approved_under,
+            )
+            .await?;
+    }
+    let allowed = async || -> anyhow::Result<Vec<String>> {
+        session
+            .refresh_managed_network_proxy_for_current_permission_profile()
+            .await;
+        let proxy = session
+            .services
+            .network_proxy
+            .load_full()
+            .expect("a managed proxy");
+        let mut allowed = proxy
+            .proxy()
+            .current_cfg()
+            .await?
+            .allowed_domains()
+            .unwrap_or_default();
+        allowed.sort();
+        Ok(allowed)
+    };
+
+    assert_eq!(
+        allowed().await?,
+        vec![
+            "aggressive.example".to_string(),
+            "permissive.example".to_string(),
+        ]
+    );
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_level(codex_security_policy::SecurityLevel::Aggressive);
+    session.services.replace_model_client(client);
+    assert_eq!(allowed().await?, vec!["aggressive.example".to_string()]);
+    Ok(())
+}
+
 #[tokio::test]
 async fn workspace_write_turns_continue_to_expose_managed_network_proxy() -> anyhow::Result<()> {
     let permission_profile = PermissionProfile::workspace_write();
@@ -6766,21 +6845,22 @@ async fn record_granted_request_permissions_for_turn_uses_originating_turn() {
             },
             codex_exec_server::LOCAL_ENVIRONMENT_ID,
             Some(&originating_turn_state),
+            session.services.authority_marker(),
         )
         .await;
 
     assert_eq!(
-        originating_turn_state
-            .lock()
-            .await
-            .granted_permissions(codex_exec_server::LOCAL_ENVIRONMENT_ID),
+        originating_turn_state.lock().await.granted_permissions(
+            codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            session.services.authority_marker(),
+        ),
         Some(requested_permissions.into())
     );
     assert_eq!(
-        current_turn_state
-            .lock()
-            .await
-            .granted_permissions(codex_exec_server::LOCAL_ENVIRONMENT_ID),
+        current_turn_state.lock().await.granted_permissions(
+            codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            session.services.authority_marker(),
+        ),
         None
     );
     assert_eq!(
@@ -6813,16 +6893,20 @@ async fn request_permission_grants_are_environment_keyed() {
             },
             "remote",
             Some(&originating_turn_state),
+            session.services.authority_marker(),
         )
         .await;
 
     {
-        let turn_state = originating_turn_state.lock().await;
+        let mut turn_state = originating_turn_state.lock().await;
         assert_eq!(
-            turn_state.granted_permissions("remote"),
+            turn_state.granted_permissions("remote", session.services.authority_marker()),
             Some(requested_permissions.clone().into())
         );
-        assert_eq!(turn_state.granted_permissions("local"), None);
+        assert_eq!(
+            turn_state.granted_permissions("local", session.services.authority_marker()),
+            None
+        );
     }
 
     session
@@ -6834,6 +6918,7 @@ async fn request_permission_grants_are_environment_keyed() {
             },
             "remote",
             /*originating_turn_state*/ None,
+            session.services.authority_marker(),
         )
         .await;
 
@@ -6866,6 +6951,7 @@ async fn enable_strict_auto_review_for_turn_uses_originating_turn() {
             },
             codex_exec_server::LOCAL_ENVIRONMENT_ID,
             Some(&originating_turn_state),
+            session.services.authority_marker(),
         )
         .await;
 
@@ -6873,7 +6959,7 @@ async fn enable_strict_auto_review_for_turn_uses_originating_turn() {
         originating_turn_state
             .lock()
             .await
-            .strict_auto_review_enabled()
+            .strict_auto_review_enabled(session.services.authority_marker())
     );
 }
 
@@ -14214,17 +14300,8 @@ async fn issue_245_a_grant_stored_before_the_rules_applied_drops_protected_paths
     let auth = turn.config.codex_home.join("auth.json");
     let notes_only = additional(vec![entry(notes.as_path())]);
     let grant = additional(vec![entry(notes.as_path()), entry(auth.as_path())]);
-    session
-        .state
-        .lock()
-        .await
-        .record_granted_permissions(&environment_id, grant.clone());
-    // Permissive: as stored.
-    assert_eq!(
-        session.granted_session_permissions(&environment_id).await,
-        Some(grant)
-    );
-
+    // The session's policy tree is in place before the grant (D51, #1001:
+    // grants end at a security transition); the rules apply later.
     let control = session
         .services
         .agent_control
@@ -14235,6 +14312,18 @@ async fn issue_245_a_grant_stored_before_the_rules_applied_drops_protected_paths
             /*inherits_from_spawn_parent*/ false,
         )
         .expect("policy");
+    session.state.lock().await.record_granted_permissions(
+        &environment_id,
+        grant.clone(),
+        /*granted_under*/ None,
+        session.services.authority_marker(),
+    );
+    // Permissive: as stored.
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        Some(grant)
+    );
+
     let client = (*session.services.model_client())
         .clone()
         .with_ingress_policy(SecurityLevel::Moderate, control.effective_security_policy())
@@ -14285,11 +14374,8 @@ async fn issue_524_a_grant_is_checked_against_the_current_folder_too() {
             glob_scan_max_depth: None,
         }),
     };
-    session
-        .state
-        .lock()
-        .await
-        .record_granted_permissions(&environment_id, grant);
+    // The session's policy tree is in place before the grant (D51, #1001:
+    // grants end at a security transition); the rules apply later.
     let control = session
         .services
         .agent_control
@@ -14300,6 +14386,17 @@ async fn issue_524_a_grant_is_checked_against_the_current_folder_too() {
             /*inherits_from_spawn_parent*/ false,
         )
         .expect("policy");
+    session.state.lock().await.record_granted_permissions(
+        &environment_id,
+        grant.clone(),
+        /*granted_under*/ None,
+        session.services.authority_marker(),
+    );
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        Some(grant),
+        "held before the rules apply"
+    );
     let client = (*session.services.model_client())
         .clone()
         .with_ingress_policy(SecurityLevel::Moderate, control.effective_security_policy())

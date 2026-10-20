@@ -1,6 +1,6 @@
 ---
 title: "Accounting follow-ups after PF-60"
-status: active
+status: completed
 change_class: product-initiative
 priority: P1
 owner: "Codex accounting lane; Travis Good accepts"
@@ -8,10 +8,10 @@ parallel_sprint_limit: 1
 integration_owner: "Codex coordinator"
 activation_authority: "Travis Good"
 activation_basis: "Travis, 2026-10-10: accept PF-60-S04's remaining gaps on condition that each is carried into a future sprint. Travis, 2026-10-14 (decision 29): start PF-60-S06 to S10 after the Moderate picker sprint. Activated in slot 2, freed when the coordinator's worker closed the provider-onboarding plan (PF-84 sprints all archived); Travis confirmed that closing on 2026-10-14 (#574)."
-target_release: "TBD"
+target_release: "None: closed without a release; /cost stays developer-only"
 deadline: "TBD (S07's Sol promotion end landed in #762 before 2026-11-21)"
 created: 2026-10-10
-updated: 2026-10-16
+updated: 2026-10-20
 product_spec:
   file: docs/corbanu-product-spec.md
   heading: "Product measurement"
@@ -32,22 +32,36 @@ implementation_worktrees:
   - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s10"
     branch: "qa/pf60-s10-acceptance"
     base_commit: "395ac0adcd96f4970220e569a1608141a3e748f3"
+  - path: "/Volumes/CorbanuDrive/Corbanu/worktrees/acc-tart1"
+    branch: "qa/acc-tart1-followup-acceptance"
+    base_commit: "ab854bb7a6"
 ---
 
 # Accounting follow-ups after PF-60
 
 Policy: repository-root `AGENTS.md`. Lifecycle: [plans](../index.md). Predecessor:
 [PF-60 accounting](../completed/main-2026-10-10-portfolio-agent-cost-accounting.md), completed 2026-10-10.
-**Active** from 2026-10-14 in slot 2 (Travis's decision); one sprint at a time.
+Active from 2026-10-14 in slot 2 (Travis's decision); one sprint at a time. **Completed 2026-10-20** without a
+release: the follow-up live run is recorded, and slot 2 is free.
 
 **Status 2026-10-16:** all five sprints accepted by Travis and archived (S06 2026-10-14; S07–S09 2026-10-15; S10
-2026-10-16, 29 passed / 1 failed / 7 blocked of 37, decision D24). One item remains before the plan can be completed and
-its slot freed: the follow-up isolated live run Travis set on 2026-10-16 (D25, D3, D16; see
-[Dependencies](#dependencies-decisions-and-blockers)).
+2026-10-16, 29 passed / 1 failed / 7 blocked of 37, decision D24). The last item, the follow-up isolated live run Travis set on 2026-10-16
+(D25, D3, D16), is recorded below.
+
+**Status 2026-10-20:** the follow-up live run ran on Tart (D34) and is recorded in
+[followups-live-20261020](../../../qa/portfolio/agent-cost-accounting/followups-live-20261020/README.md): 25 cases,
+18 passed, 2 failed, 5 blocked. Travis's acceptance of the run is pending.
+- All three D25 gaps are closed: ACC-06 `/review` cost, Request IDs re-read after reopens, and the `side:` screen.
+- D16: the realtime session passed. It cost about $0.005, but app-server text warm-ups bring the check to about
+  $0.063 (one warm-up is probable, from the shakedown). That is over the $0.05 cap; see #1045.
+- D3: real Moonshot cache reads are shown at the conversation level. The per-request technical screens were not
+  reached, so three cases are blocked.
+- Three new issues, not carried here (Travis to place): #1038, editing the first message sends an unlabelled warm-up;
+  #1039, the `/review`-in-`/side` refusal text is erased; #1045, the realtime path's paid text warm-up.
 
 ## Activation record
 
-- Status: **active** from 2026-10-14, slot 2. Created 2026-10-10 as a draft when PF-60 closed to free slot 2 for PF-84.
+- Status: **completed** 2026-10-20 (active from 2026-10-14, slot 2). Created 2026-10-10 as a draft when PF-60 closed to free slot 2 for PF-84.
 - Activation: Travis, 2026-10-14 (decision 29 of that day's list): start S06–S10 after the Moderate picker sprint
   (done: #764, #781). All three slots were full; the coordinator's worker closed the
   [provider-onboarding plan](../completed/main-2026-10-14-unified-provider-auth.md), whose PF-84 sprints were all
@@ -111,6 +125,7 @@ here and in the sprint before it becomes `ready`.
 | Codex worker `pf60-next` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s08` | `pf60-s08/cost-clarity-reopen-warmup` | `45916ab64ef7faf4a5525a8dbdbfd4f706dd9f79` | PF-60-S08 (lane `accounting`) |
 | Codex worker `pf60-next` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s09` | `pf60-s09/verification-paths` | `643838f2f4ed87dfe71be24f983a6dcc91709faa` | PF-60-S09 (lane `accounting`) |
 | Codex worker `pf60-s10` | `/Volumes/CorbanuDrive/Corbanu/worktrees/pf60-s10` | `qa/pf60-s10-acceptance` | `395ac0adcd96f4970220e569a1608141a3e748f3` | PF-60-S10 (record only, under `qa/`) |
+| Codex worker `acc-tart1` | `/Volumes/CorbanuDrive/Corbanu/worktrees/acc-tart1` | `qa/acc-tart1-followup-acceptance` | `ab854bb7a6` | Follow-up live run (record only, under `qa/`) |
 
 ## Useful code references
 
@@ -197,7 +212,7 @@ Finished-feature docs change only if Travis authorises shipping `/cost`; until t
   D25 re-check the S10 gaps in #898's acceptance run, not a full S10 re-run; D26 accept S10's wording-only r3 fail;
   D3 one real Moonshot cache read (under $0.01) and D16 one real OpenAI realtime session (under $0.05) in that run;
   D14 ledger format 6; D15 fix #889 item 1 (wrong account grouping).
-- **Remaining before completion:** one isolated live run with ACC-06 (#898, fixed by #917), the Request-ID checks of
+- **Done 2026-10-20 (acc-tart1):** the follow-up live run ([record](../../../qa/portfolio/agent-cost-accounting/followups-live-20261020/README.md)). **Was remaining before completion:** one isolated live run with ACC-06 (#898, fixed by #917), the Request-ID checks of
   ACC-11/14/18, ACC-15's `side:` screen, the Moonshot cache read and the realtime session. Then complete the plan
   (no release) and free slot 2. Not carried here: #368's BigModel and DeepSeek 2027 items, #824 (WebRTC), #889, #912,
   #913, #814's rare cases.
@@ -215,8 +230,10 @@ None yet. Carried from PF-60: collection is developer-only; a release needs Trav
 - [x] Every item (i)–(viii) is closed by an accepted sprint or by Travis's recorded decision (2026-10-14 to 2026-10-16).
 - [x] S10's isolated acceptance: Travis accepted it as recorded on 2026-10-16 (D24). The checker stops at the first
       unresolved case (ACC-04), as expected; the gaps go to one follow-up live run (D25).
-- [ ] Linked issues are closed or re-filed with a reason: #396, #400–#404 and #786 closed with the archive (#786's two
+- [x] Linked issues are closed or re-filed with a reason: #396, #400–#404 and #786 closed with the archive (#786's two
       remaining rare cases are tracked in #814); #368 kept open for BigModel and DeepSeek's 2027 dates; #824 for WebRTC.
 - [x] PF-60-S05's waiver (b) is discharged by S10's isolated run (Travis's acceptance, D24; dated addendum in the
       archived S05 record).
-- [ ] The follow-up isolated live run (D25, D3, D16) is recorded; then the plan moves to `completed/`.
+- [x] The follow-up isolated live run (D25, D3, D16) is recorded: acc-tart1 on Tart, 2026-10-20,
+      [record](../../../qa/portfolio/agent-cost-accounting/followups-live-20261020/README.md) (18/2/5 of 25; Travis's
+      acceptance pending; new issues #1038, #1039 and #1045 left for Travis to place). The plan moved to `completed/`.

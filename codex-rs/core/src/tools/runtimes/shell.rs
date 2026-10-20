@@ -236,6 +236,12 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
         Some(req.cwd.clone())
     }
 
+    fn local_search_path<'a>(&self, req: &'a ShellRequest) -> Option<&'a str> {
+        (!req.turn_environment.environment.is_remote())
+            .then(|| req.env.get("PATH").map(String::as_str))
+            .flatten()
+    }
+
     fn network_approval_spec(
         &self,
         req: &ShellRequest,
