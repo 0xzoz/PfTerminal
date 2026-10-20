@@ -101,7 +101,9 @@ pub(crate) struct TurnState {
     /// D51 (#1001): bound to the policy marker they were granted under.
     granted_permissions: super::GrantedPermissions,
     /// D51 (#1001): the policy marker strict auto-review was turned on
-    /// under, with the grant it came with; it ends with that grant.
+    /// under, with the grant it came with; it ends with that grant. Ending it
+    /// also ends the automatic review of commands that would run unasked:
+    /// deliberately, as the new level's approval rules then govern.
     strict_auto_review_under: Option<super::AuthorityMarker>,
     pub(crate) tool_calls: u64,
     pub(crate) has_memory_citation: bool,

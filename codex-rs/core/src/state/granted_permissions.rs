@@ -21,7 +21,9 @@ pub(crate) struct GrantedPermissions {
 }
 
 impl GrantedPermissions {
-    /// Drops every grant made under another policy than `current`.
+    /// Drops every grant made under another policy than `current`. Grants
+    /// recorded before the session's policy tree was set up (no marker) end
+    /// when it is: conservative, and a real session sets it up first.
     fn fence(&mut self, current: AuthorityMarker) {
         if self.policy != current {
             self.by_environment_id.clear();
@@ -91,7 +93,7 @@ mod tests {
         assert!(!grants.record("local", network(), before, after));
         assert_eq!(grants.get("local", after), None);
         // No marker when the request was shown: kept, as #945 counts it.
-        assert!(grants.record("local", network(), None, after));
+        assert!(grants.record("local", network(), /*granted_under*/ None, after));
         assert_eq!(grants.get("local", after), Some(network()));
         assert_eq!(grants.get("remote", after), None);
     }
