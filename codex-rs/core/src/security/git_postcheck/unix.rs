@@ -208,15 +208,77 @@ fn times(meta: &std::fs::Metadata) -> (i128, i128) {
 /// freed inode number can come back for the next file or folder, on Linux
 /// at once; the creation time tells them apart). Not on macOS, which doesn't
 /// hand out a freed one at once and moves a file's creation time back with
-/// its modification time (`touch -t`, `rsync -t`).
-fn born(meta: &std::fs::Metadata) -> Option<i128> {
-    if cfg!(target_os = "macos") {
+/// its modification time (`touch -t`, `rsync -t`). Not on an overlay file
+/// system either (#943 follow-up 19): git's first write in a container
+/// copies the folder up from the image's layer, with a new creation time
+/// and the same inode number.
+pub(super) fn born(path: &Path, meta: &std::fs::Metadata) -> Option<i128> {
+    if cfg!(target_os = "macos") || on_overlay(path, meta) {
         return None;
     }
     meta.created()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|since| since.as_nanos() as i128)
+}
+
+/// Devices seen not to be overlay file systems, checked once each. Only
+/// that answer is remembered: a device number freed by an unmount can come
+/// back for another file system, and a stale "not overlay" only compares
+/// creation times where they would have been ignored.
+#[cfg(target_os = "linux")]
+static NOT_OVERLAY: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(Mutex::default);
+#[cfg(target_os = "linux")]
+const MAX_DEVICES: usize = 256;
+
+/// Whether `path`, still the file or folder `meta` describes, is on an
+/// overlay file system. Anything that can't be told counts as not.
+#[cfg(target_os = "linux")]
+fn on_overlay(path: &Path, meta: &std::fs::Metadata) -> bool {
+    use std::os::fd::AsRawFd;
+
+    const OVERLAYFS_SUPER_MAGIC: i64 = 0x794c_7630;
+    let lock = || NOT_OVERLAY.lock().unwrap_or_else(PoisonError::into_inner);
+    if lock().contains(&meta.dev()) {
+        return false;
+    }
+    // Opened without following a link or reading it, and checked to be the
+    // same one, so a swap since `meta` can't borrow another's file system.
+    let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+    else {
+        return false;
+    };
+    let same = file
+        .metadata()
+        .is_ok_and(|now| now.dev() == meta.dev() && now.ino() == meta.ino());
+    if !same {
+        return false;
+    }
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `file` is an open descriptor and `stat` is written by the call.
+    if unsafe { libc::fstatfs(file.as_raw_fd(), stat.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: `fstatfs` succeeded, so it filled `stat`.
+    let stat = unsafe { stat.assume_init() };
+    // `f_type`'s type differs between C libraries.
+    #[allow(clippy::unnecessary_cast)]
+    let overlay = stat.f_type as i64 == OVERLAYFS_SUPER_MAGIC;
+    if !overlay {
+        let mut not_overlay = lock();
+        if not_overlay.len() < MAX_DEVICES {
+            not_overlay.insert(meta.dev());
+        }
+    }
+    overlay
+}
+
+#[cfg(not(target_os = "linux"))]
+fn on_overlay(_path: &Path, _meta: &std::fs::Metadata) -> bool {
+    false
 }
 
 fn now_nanos() -> i128 {
@@ -391,12 +453,12 @@ impl DotGit {
             Kind::Dir => DotGit::Folder {
                 dev: meta.dev(),
                 ino: meta.ino(),
-                born: born(&meta),
+                born: born(path, &meta),
             },
             Kind::File => DotGit::File {
                 dev: meta.dev(),
                 ino: meta.ino(),
-                born: born(&meta),
+                born: born(path, &meta),
                 text: read_small(path),
             },
             Kind::Link => DotGit::Link {
@@ -496,7 +558,7 @@ fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
             old.settled
                 && old.dev == meta.dev()
                 && old.ino == meta.ino()
-                && old.born == born(&meta)
+                && old.born == born(&dir, &meta)
                 && old.ctime == ctime
         }) {
             Some(old) => old.clone(),
@@ -643,7 +705,7 @@ fn list(dir: &Path, meta: &std::fs::Metadata, old: Option<&Folder>) -> Option<Fo
     Some(Folder {
         dev: meta.dev(),
         ino: meta.ino(),
-        born: born(meta),
+        born: born(dir, meta),
         ctime,
         settled: times(&after).1 == ctime && settled(ctime),
         role: Role::Plain,
