@@ -342,8 +342,10 @@ impl TestCodexBuilder {
     }
 
     /// Build the config for the session's own working folder, which becomes
-    /// its workspace root, as in a real session (#1098). By default the
-    /// session runs outside its workspace roots.
+    /// its workspace root, as in a real session (#1098); this replaces
+    /// [`Self::with_config_folder`]. By default the session runs outside its
+    /// workspace roots. For a local session only: a remote test environment's
+    /// folder is not on this machine.
     pub fn with_session_cwd_as_workspace_root(mut self) -> Self {
         self.session_cwd_is_workspace_root = true;
         self
@@ -823,7 +825,8 @@ impl TestCodexBuilder {
         // writable root of sandboxed commands. Build it for this temporary
         // folder, not the test process's own working folder (the crate's
         // source tree, e.g. `codex-rs/core`). The session still runs in
-        // `cwd_override`, which stays outside the workspace roots as before.
+        // `cwd_override`, which then stays outside the workspace roots, unless
+        // the test builds it for `cwd_override` itself.
         let config_folder = if self.session_cwd_is_workspace_root {
             cwd_override.to_path_buf()
         } else {

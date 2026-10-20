@@ -1345,6 +1345,7 @@ async fn issue_442_permissive_is_unchanged() -> anyhow::Result<()> {
     let sandboxed = output_text(&requests[requests.len() - 3], "call-sandboxed");
     assert!(sandboxed.contains("codex=1"), "{sandboxed}");
     assert!(sandboxed.contains("agents=1"), "{sandboxed}");
+    assert!(sandboxed.contains("Operation not permitted"), "{sandboxed}");
     assert!(sandboxed.contains("env=0"), "{sandboxed}");
     assert!(!sandboxed.contains("Security level"), "{sandboxed}");
     let approved = output_text(&requests[requests.len() - 2], "call-approved");
