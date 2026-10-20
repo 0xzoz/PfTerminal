@@ -84,6 +84,13 @@ fn this_run() -> Owner {
     own_owner()
 }
 
+fn this_run_with_start(start: Option<u64>) -> Owner {
+    Owner {
+        start,
+        ..this_run()
+    }
+}
+
 /// Waits past the file system's timestamp granularity, so a file made now
 /// cannot have the times of one made just before.
 fn tick() {
@@ -571,11 +578,9 @@ fn a_mount_point_in_any_of_this_users_namespaces_is_found() {
     assert_eq!(unescape_mount_point(br"/a\040b\134c"), b"/a b\\c".to_vec());
     assert_eq!(unescape_mount_point(br"/plain\x"), br"/plain\x".to_vec());
     // This process's own `/proc` is a mount point; a fresh folder is not.
-    let mut mounts = None;
-    assert!(mounted_anywhere(&mut mounts, &[Path::new("/proc")]));
+    assert!(mounted_anywhere(&[Path::new("/proc")]));
     let dir = tempfile::TempDir::new().expect("tempdir");
-    assert!(!mounted_anywhere(&mut mounts, &[dir.path()]));
-    assert!(mounts.is_some_and(|points| points.is_some()), "read once");
+    assert!(!mounted_anywhere(&[dir.path()]));
 }
 
 #[test]
@@ -732,7 +737,11 @@ fn a_path_another_run_made_is_recorded_as_used_and_nothing_else() {
 fn a_path_another_run_was_about_to_make_is_recorded_as_used() {
     let mut setup = Setup::new();
     let pending = setup.base.join("home/pending");
+    let sibling = setup.base.join("home/sibling");
     std::fs::write(&pending, "").expect("bubblewrap made it");
+    std::fs::write(&sibling, "").expect("sibling");
+    // Another run's record (another start time than this process's): it
+    // was about to make the placeholder when it was recorded.
     setup.write(
         this_run_with_start(Some(7)),
         vec![Entry::Pending {
@@ -741,17 +750,15 @@ fn a_path_another_run_was_about_to_make_is_recorded_as_used() {
             real: pending.clone(),
         }],
     );
-    setup
-        .journal
-        .register(&[], &[(pending.clone(), pending.clone())]);
+    setup.journal.register(
+        &[],
+        &[
+            (pending.clone(), pending.clone()),
+            (sibling.clone(), sibling.clone()),
+        ],
+    );
     let own = format!("{}.rec", setup.journal.name);
     let record = setup.journal.read(&own).expect("record");
     assert!(uses(&record, &pending, &pending));
-}
-
-fn this_run_with_start(start: Option<u64>) -> Owner {
-    Owner {
-        start,
-        ..this_run()
-    }
+    assert!(!uses(&record, &sibling, &sibling));
 }

@@ -252,7 +252,15 @@ fn the_command_cannot_write_the_record() {
         &setup.tmp("locker"),
     );
     let locks = String::from_utf8_lossy(&output.stdout);
-    for step in ["read", "write"] {
+    // Root could read it whatever its mode; the read-only bind still stops
+    // writing.
+    // SAFETY: `geteuid` has no preconditions.
+    let steps: &[&str] = if unsafe { libc::geteuid() } == 0 {
+        &["write"]
+    } else {
+        &["read", "write"]
+    };
+    for step in steps {
         assert!(
             locks.contains(&format!("{step}=")) && !locks.contains(&format!("{step}=0")),
             "the command cannot open the lock file ({step}): {locks}"
