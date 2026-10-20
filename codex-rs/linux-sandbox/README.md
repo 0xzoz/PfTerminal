@@ -115,10 +115,51 @@ commands that would enter the bubblewrap path.
   - a credential file appears (the credential watcher cuts the lifeline).
   This applies on every security level that runs bubblewrap, Permissive
   included. The supervisor lists its children through `/proc`; without
-  `/proc` an orphaned PID 1 is not found. Commands run without bubblewrap
-  (full disk write access without managed-proxy routing, legacy Landlock)
-  are unchanged, and so is the short `/proc` mount probe, which runs only
-  `true`.
+  `/proc` an orphaned PID 1 is not found. The short `/proc` mount probe,
+  which runs only `true`, is unchanged.
+- Commands run without bubblewrap (full disk write access without
+  managed-proxy routing, legacy Landlock) run under the same supervisor
+  (#1006), so they cannot leave a process behind either. The helper no
+  longer execs the command: the supervisor starts it, restricted as before,
+  in the helper's process group and session (the terminal's foreground
+  group, if it was), with the signal mask and `SIGCHLD` action the helper
+  was started with, then moves to a session of its own before the command
+  runs. Without a PID namespace, the supervisor stops what is left by
+  killing its children, which takes in every orphaned process (it is a
+  subreaper), and repeating until none is left. It does that when the
+  command exits, when the helper exits or is killed (a process-group kill
+  included) and when the helper's parent exits (a pidfd; without one,
+  `PR_SET_PDEATHSIG` kills the helper). The helper and the supervisor then
+  exit as the command did, and keep the helper's standard streams open
+  until then, as on the bubblewrap path. Signals:
+  - one sent to the helper's process group (as Corbanu sends them) or by
+    the terminal reaches the command directly; the helper ignores it;
+  - `SIGHUP`, `SIGINT`, `SIGQUIT` and `SIGTERM` that reach the helper are
+    relayed to the command once it has moved to a process group of its own
+    (an interactive shell does; one arriving shortly before or while it
+    moves may reach it twice), and so is a terminal hangup's `SIGHUP`,
+    which goes to the session leader (now the helper) alone; ones sent
+    before the command started are sent to it as it starts;
+  - a catchable signal sent to the helper's pid alone no longer reaches the
+    command (one of these four does if sent before the helper forks the
+    supervisor or once the command has left the group); `SIGKILL` to the
+    helper stops it.
+
+  The command's parent is now the supervisor, and the command no longer
+  leads its session or group (`setsid()` now succeeds). The terminal's stop
+  signals still do not stop a command that stays in the helper's group, as
+  before. Limits: this guards against a command that daemonizes, not a
+  hostile one (it runs as the same user, outside a PID namespace, and could
+  kill the supervisor); a process that changed its real user (`sudo`, which
+  needs `no_new_privs` unset: possible on the full disk path only, without
+  network or user-namespace restrictions) cannot be killed, and it and the
+  processes still under it are left running (the orphans it leaves are
+  stopped, and while it keeps leaving them the helper keeps stopping them
+  and does not exit); processes started through a service manager
+  outside the command's process tree (`systemd --user`, an existing tmux
+  server) are not its descendants; a process stuck in the kernel delays the
+  helper's exit until it dies, as on the bubblewrap path; and without
+  `/proc` the supervisor cannot list what is left.
 - When bubblewrap is active and a protected path inside a writable root is
   missing, the helper makes the empty placeholder bubblewrap mounts over
   (`O_EXCL`, so never over an existing file) and records it, before making
