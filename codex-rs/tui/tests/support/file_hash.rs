@@ -24,9 +24,11 @@ pub(crate) fn sha256_file(path: &Path) -> Result<String> {
         if !output.status.success() {
             continue;
         }
+        // GNU tools put a `\` before the hash when they escape the name.
         if let Some(hash) = std::str::from_utf8(&output.stdout)
             .ok()
             .and_then(|text| text.split_whitespace().next())
+            .map(|hash| hash.strip_prefix('\\').unwrap_or(hash))
             && hash.len() == 64
             && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
         {
@@ -51,18 +53,19 @@ mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
 
+    /// Also for names the system tool escapes (a backslash) or splits on.
     #[test]
     fn sha256_file_matches_the_in_process_hash() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("binary");
         let content = (0..3_000_000_u32)
             .map(|index| (index % 251) as u8)
             .collect::<Vec<_>>();
-        fs::write(&path, &content)?;
-        assert_eq!(
-            sha256_file(&path)?,
-            format!("{:x}", Sha256::digest(&content))
-        );
+        let expected = format!("{:x}", Sha256::digest(&content));
+        for name in ["binary", "with space", "back\\slash"] {
+            let path = dir.path().join(name);
+            fs::write(&path, &content)?;
+            assert_eq!(sha256_file(&path)?, expected, "{name}");
+        }
         Ok(())
     }
 }
