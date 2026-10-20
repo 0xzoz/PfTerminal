@@ -2995,3 +2995,43 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
     }
     assert_eq!(wrong, Vec::<String>::new());
 }
+
+/// #1065: the classifier's work on variable values is bounded. A value
+/// doubled on each step (`a=$a$a`) or used many times would grow without
+/// bound; past `MAX_SUBSTITUTED_BYTES` substituted bytes the line asks.
+/// Inputs stay small (at most 16 MiB on a build without the cap).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1065_substituted_values_are_capped() {
+    use ProtectedActionKind::*;
+    let doubled = |steps: usize| format!("a=x;{} echo ok", " a=$a$a;".repeat(steps));
+    // Step k substitutes 2^k bytes, 2^(n+1) - 2 in all: 20 steps pass 1 MiB.
+    assert_eq!(script(&doubled(24)), Some(UnseenCode));
+    assert_eq!(script(&doubled(20)), Some(UnseenCode));
+    assert_eq!(script(&doubled(19)), None);
+    // Many uses of one value, in one word or many.
+    let value = "y".repeat(4096);
+    assert_eq!(
+        script(&format!("a={value}; echo{}", " $a".repeat(300))),
+        Some(UnseenCode)
+    );
+    assert_eq!(
+        script(&format!("a={value}; echo {}", "$a".repeat(300))),
+        Some(UnseenCode)
+    );
+    assert_eq!(
+        script(&format!("a={value}; echo{}", " $a".repeat(200))),
+        None
+    );
+    // In zsh, and in a nested shell's script.
+    assert_eq!(kind(&["zsh", "-c", &doubled(24)]), Some(UnseenCode));
+    assert_eq!(
+        script(&format!("sh -c '{}'", doubled(24))),
+        Some(UnseenCode)
+    );
+    // Everyday lines stay quiet.
+    assert_eq!(script("p=$HOME/bin; PATH=$p:$PATH; echo $p $p"), None);
+}

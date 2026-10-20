@@ -341,6 +341,10 @@ const MAX_DEPTH: usize = 4;
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 /// Script files one classification reads; more fail closed.
 const MAX_SCRIPT_FILES: usize = 16;
+/// Bytes of variable values one command line substitutes (#1065): a value
+/// doubled on each step (`a=$a$a`) or used many times would otherwise grow
+/// without bound. More fail closed.
+const MAX_SUBSTITUTED_BYTES: usize = 1024 * 1024;
 /// Magic numbers of executables, which are not read as scripts.
 const BINARY_MAGIC: &[&[u8]] = &[
     b"\x7fELF",
@@ -829,8 +833,12 @@ impl Classifier {
         let mut lexed_seds = 0;
         let mut lexed_shells = 0;
         let mut arithmetic = arithmetic::Arithmetic::new(command);
+        let mut budget = MAX_SUBSTITUTED_BYTES;
         for (index, simple) in lexed.commands.iter().enumerate() {
-            let (words, unseen) = substitute(simple, &variables);
+            let (words, unseen) = substitute(simple, &variables, &mut budget);
+            if budget == 0 {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
             // Decoded, quote-removed and with known variables substituted:
             // `eval "echo \${v@"P"}"`, `$'\x40'`, `p=@P; eval "echo \${v$p}"`.
             if words.iter().any(|word| shell::prompt_expansion(word)) {
@@ -1281,9 +1289,12 @@ fn is_special_parameter(name: &str) -> bool {
 /// reads them (`$a$b` is `a` then `b`), and for each word whether it holds a
 /// value the classifier cannot see: a variable never assigned in this action
 /// (other than special parameters) or one set from an unseen substitution.
+/// `budget` is the bytes of values left to substitute; a value that does
+/// not fit is unseen output and sets the budget to zero (#1065).
 fn substitute(
     command: &SimpleCommand,
     variables: &HashMap<String, String>,
+    budget: &mut usize,
 ) -> (Vec<String>, Vec<bool>) {
     command
         .words
@@ -1303,9 +1314,15 @@ fn substitute(
                 };
                 let name = &after[..len];
                 match variables.get(name) {
-                    Some(value) if len > 0 => {
+                    Some(value) if len > 0 && value.len() < *budget => {
+                        *budget -= value.len();
                         unseen |= value.contains(shell::UNSEEN_OUTPUT);
                         out.push_str(value);
+                    }
+                    Some(_) if len > 0 => {
+                        *budget = 0;
+                        unseen = true;
+                        out.push_str(shell::UNSEEN_OUTPUT);
                     }
                     _ => {
                         unseen |= len > 0 && !is_special_parameter(name);
