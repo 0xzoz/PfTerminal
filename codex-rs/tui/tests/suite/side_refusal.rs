@@ -34,7 +34,7 @@ async fn tmux_review_refusal_in_side_conversation_stays_visible() -> Result<()> 
     let codex = codex_binary(&repo_root)?;
     let codex_home = tempdir()?;
     let server = MockServer::start().await;
-    let turns = responses::mount_sse_once(
+    let _turn = responses::mount_sse_once(
         &server,
         responses::sse(vec![
             responses::ev_response_created("resp-side-refusal"),
@@ -90,18 +90,25 @@ async fn tmux_review_refusal_in_side_conversation_stays_visible() -> Result<()> 
         "still in the side conversation:\n{screen}"
     );
     // A settled frame shows it (it used to vanish on the next draw), and the
-    // refused command sent nothing.
-    assert_eq!(
-        turns.requests().len(),
-        1,
-        "only the first turn reached the model"
-    );
+    // refused command sent nothing. Count at the server: the one-shot mock
+    // stops recording once it has matched, so it could not see a second request.
+    let model_requests = server
+        .received_requests()
+        .await
+        .context("wiremock request recording")?
+        .into_iter()
+        .filter(|request| {
+            request.method == wiremock::http::Method::POST
+                && request.url.path().ends_with("/responses")
+        })
+        .count();
+    assert_eq!(model_requests, 1, "only the first turn reached the model");
 
     pane.send_key(TmuxKey::CtrlC)?;
     pane.wait_stable_until(
         "back on the main thread",
         Duration::from_secs(/*secs*/ 15),
-        |screen| !screen.contains("Side from main thread"),
+        |screen| !screen.contains("Side from main thread") && screen.contains(REPLY),
     )?;
     pane.send_literal("/exit")?;
     pane.wait_stable_contains("/exit", Duration::from_secs(/*secs*/ 5))?;
