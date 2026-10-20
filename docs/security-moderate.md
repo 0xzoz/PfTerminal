@@ -146,25 +146,30 @@ The kill switch (`/security` → `g`) works under every level.
   the sandbox, nor let it create user namespaces), in any session of this
   Corbanu Terminal. Some setups of your own hold them too until you remove
   them: a layout made of links (`git new-workdir`, Android's `repo`), a
-  `config.worktree` that `git sparse-checkout` adds, or a hooks folder a
-  hook installer creates where there was none. On Linux the sandbox leaves
-  empty files and folders in place while a command runs: a new config file or
-  hooks folder that is empty is reported (in any session) once something is
-  put in it, and an empty `.git` folder replaced by another empty one isn't
-  reported. It doesn't watch in between: a process a command left running can
-  change `.git` after the last look, even while an approved command runs, and
-  what it changes after a turn ends is found at the next command, not before
-  you run git yourself. It watches the repositories of the folders agent
-  commands run in (a command's own working folder, `workdir`, too): not a
-  repository a command reaches elsewhere (`git -C`, a `cd` in the command or
-  in a shell it left running, a program the zsh-fork shell starts in another
-  folder), not one a command creates and fills in one go (nothing was there to
-  compare with), and not a `.git` removed in one command and made again in a
-  later one (it gets a first look, which reports only links, steps and hard
-  links). New config and hooks are checked only in a repository's own git
-  folder, not in its worktrees' or submodules'. A session that works in more
-  than 16 repositories forgets the oldest; its next look there reports only
-  links, steps and hard links.
+  `config.worktree` that `git sparse-checkout` adds, or a hooks folder a hook
+  installer creates where there was none. On Linux the sandbox leaves empty
+  files and folders in place while a command runs: a new config file or hooks
+  folder that is empty is reported (in any session) once something is put in
+  it, and an empty `.git` folder replaced by another empty one isn't reported.
+  It doesn't watch in between: a process a command left running can change
+  `.git` after the last look, even while an approved command runs, and what it
+  changes after a turn ends is found at the next command, not before you run
+  git yourself. It watches the repositories of the folders agent commands run
+  in (a command's own working folder, `workdir`, too): not a repository a
+  command reaches elsewhere (`git -C`, a `cd` in the command or in a shell it
+  left running, a program the zsh-fork shell starts in another folder), not
+  one a command creates and fills in one go (nothing was there to compare
+  with). A `.git` that was missing at a look and is back as a different one is
+  looked at in full: its config, hooks and remotes are reported as new, also
+  after `git init` or a fresh clone there (not a worktree git adds again for
+  the same repository), and approving a command in that project doesn't lift
+  the rules until you remove them or restart Corbanu Terminal; the same one
+  moved back is compared with the last look. Where a worktree's or submodule's
+  `.git` is replaced by another kind, or pointed at other git folders, check
+  its config and hooks yourself before you run git there. New config and hooks
+  are checked only in a repository's own git folder, not in its worktrees' or
+  submodules'. A session that works in more than 16 repositories forgets the
+  oldest; its next look there reports only links, steps and hard links.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder

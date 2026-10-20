@@ -2771,6 +2771,68 @@ fn issue_1020_deep_nesting_is_classified_quickly() {
     assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
 }
 
+/// #1012: bash `${v@P}` runs the command substitutions in the value, like
+/// `eval`, so after untrusted content it is code the user hasn't seen.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1012_prompt_transformation_is_unseen_code() {
+    use ProtectedActionKind::*;
+    let mut wrong = Vec::new();
+    for line in [
+        "v=$(cat notes); echo \"${v@P}\"",
+        "echo ${v@P}",
+        "printf '%s\\n' \"${a[0]@P}\"",
+        "echo ${!r@P}",
+        "echo \"${@@P}\"",
+        "echo ${x:-${v@P}}",
+        "bash -c 'echo \"${v@P}\"'",
+        "echo ${v@\\\nP}",
+        // Review r1: quote splitting, escapes, decoding and assembly.
+        "v=$(cat notes); eval 'echo \"${v@'P'}\"'",
+        "eval \"echo \\${v@\"P\"}\"",
+        "eval echo \\$\\{v@P\\}",
+        "export v=$(cat notes); bash <<< \"echo \\${v@\"P\"}\"",
+        "eval $'echo \"${v\\x40P}\"'",
+        "bash <<< $'echo ${v\\x40P}'",
+        "p=@P; eval \"echo \\${v$p}\"",
+        "a='${v@'; b='P}'; bash -c \"echo \\\"$a$b\\\"\"",
+        "V=$(cat notes) python3 -c \"import os; os.system('echo \\\"\\${V@' + 'P}\\\"')\"",
+    ] {
+        let found = kind(&["bash", "-c", line]);
+        if found != Some(UnseenCode) {
+            wrong.push(format!("{line:?} -> {found:?}"));
+        }
+    }
+    for line in [
+        "echo ${v@Q} ${v@U} ${v@a}",
+        "echo user@Pivotal.example grep -r @Param src",
+    ] {
+        let found = kind(&["bash", "-c", line]);
+        if found.is_some() {
+            wrong.push(format!("{line:?} -> {found:?}"));
+        }
+    }
+    // Script files a shell or an interpreter runs.
+    let root = tempfile::tempdir().expect("tempdir");
+    let cwd = root.path().to_string_lossy().into_owned();
+    std::fs::write(root.path().join("x.sh"), "echo \"${v@P}\"\n").expect("script");
+    std::fs::write(
+        root.path().join("tool.py"),
+        "import os\nos.system('echo \"${V@P}\"')\n",
+    )
+    .expect("script");
+    for line in ["v=$(cat notes) bash x.sh", "V=$(cat notes) python3 tool.py"] {
+        let found = classify_fixture(&shell_in(&cwd, &["bash", "-c", line]));
+        if found != Some(UnseenCode) {
+            wrong.push(format!("{line:?} -> {found:?}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
 /// #1028: zsh `e` and `+` glob qualifiers run code the classifier does not
 /// read as commands, so after untrusted content they ask, with or without
 /// command output on the line.
