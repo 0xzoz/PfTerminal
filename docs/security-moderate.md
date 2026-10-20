@@ -133,9 +133,9 @@ prompt isn't used, and a retry outside the sandbox that was being approved
 permissions (ones it asked for, or grants made before the change) isn't
 decided again: it doesn't run, and the agent can ask again (#1001, #1057).
 Other Corbanu Terminals running on the same Corbanu home take them within
-about a second and say so, as they do with the kill switch. The credential broker starts at the next start
-(in each of them); press `r` to restart right away. Your `config.toml` isn't
-changed.
+about a second and say so, as they do with the kill switch. The credential
+broker starts at the next start (in each of them); press `r` to restart right
+away. Your `config.toml` isn't changed.
 
 Choosing Permissive or Aggressive from Moderate shows what changes first.
 Back to Permissive takes effect when you restart; until then Moderate stays
