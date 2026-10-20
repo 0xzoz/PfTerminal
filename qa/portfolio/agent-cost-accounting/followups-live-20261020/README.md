@@ -116,8 +116,8 @@ copied into the guest over SSH ([candidate/](candidate/candidate-manifest.md)).
 
   All four exited 0.
 - **Shakedown:** a separate clone ran before the freeze (01:49–01:54Z) to test the port. It sent one Z.AI smoke turn
-  and no Moonshot request. The relay did refuse its realtime start, but before that the realtime driver's app-server
-  thread opened one real OpenAI Responses WebSocket (01:54:12Z, about 1 s, the same pattern as group R's GPT-6 Sol
+  and no Moonshot request. The relay refused its realtime start, but about 75 ms later the realtime driver's app-server
+  thread still opened one real OpenAI Responses WebSocket (01:54:12Z, about 1 s, the same pattern as group R's GPT-6 Sol
   warm-up). That was probably one billed warm-up of about $0.03; the relay doesn't log WebSocket usage
   ([addendum](common/effective-policy-addendum.txt)). Its three harness fixes are listed in effective-policy.txt; its
   logs are in [shakedown/common/](shakedown/common/).
@@ -187,7 +187,9 @@ copied into the guest over SSH ([candidate/](candidate/candidate-manifest.md)).
 - The lock release and UTM's end state are shown by a host check after the run
   ([common/host-end-check.txt](common/host-end-check.txt)); `tart-run.sh down` printed "lock released" to its terminal,
   outside its captured log.
-- FUP-10's intermediate Request-ID audits (amendment 12, after FUP-12 and FUP-14) were not done; only the final audit
-  and earlier single reads exist.
+- FUP-10's intermediate Request-ID audits (amendment 12) were partial after FUP-09 (R4's ID was not read until the final
+  audit) and not done after FUP-12 and FUP-14; only the final audit and earlier single reads exist.
+- The frozen designer-session.md says the packet has eight S06–S08 screens; there are nine (13 screens in all, as
+  stated above).
 - Two explanations are the integrator's, made after the run, and are not part of the code-blind evidence: #1038's
   cause comes from reading the code, and #1039's refusal text comes from the raw terminal output.

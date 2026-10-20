@@ -14,7 +14,7 @@
  },
  "dispositions": {
   "path": "dispositions.md",
-  "sha256": "0c0aad9128c27eb99c2f6178d450f612b23fe7ecc82814edb1c733ac4d3d0256"
+  "sha256": "f782146d89e450e206200b75d1ff270d578c7e08ec01fdba35d8591a4ac36f04"
  },
  "cases": [
   {
@@ -317,7 +317,7 @@
    "id": "FUP-05",
    "priority": "blocker",
    "disposition": "passed",
-   "summary": "D25 / ACC-15 re-check: one /side turn raised X by exactly one request; its technical page, captured in fup05-r2-attempt-1.txt, shows Thread X and 'Turn: side:01a15723-...'; exact subtotal 0.00242508.",
+   "summary": "D25 / ACC-15 re-check: one /side turn raised X by exactly one request; its technical page, captured in group-Z/fup05-r2-attempt-40.txt (in group-Z.tar.gz; also screens.jsonl from 02:30:16Z), shows Thread X and 'Turn: side:01a15723-...'; exact subtotal 0.00242508.",
    "candidate_sha256": "e72003067f9316f2805b4344041d111409611c6d0730fe268c46bf95225bdaa3",
    "method": "tmux",
    "execution": {
@@ -2058,11 +2058,19 @@
   }
  ],
  "review_budget": {
-  "used": 2,
+  "used": 4,
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "8606e3b10d9c4622701225791f2d25a081e8b1427f5dd4ddce38ee7bd88f9d53"
+   "sha256": "478388f7b4f6f2f84633dc56a98ef97dcb43fe2c2688e2ba39af2a5b80eebf12"
+  }
+ },
+ "evidence_check": {
+  "agent": "01a157e2-17e7-7000-8edc-68542fa9b504",
+  "verdict": "fail",
+  "artifact": {
+   "path": "review/evidence-check-r2.md",
+   "sha256": "21467e4cf2ea530a97e477a40d50ff3b8caead866fde2d4f001a5a219c57c286"
   }
  }
 }
