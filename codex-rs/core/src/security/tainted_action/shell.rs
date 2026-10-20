@@ -164,9 +164,23 @@ pub(super) fn glob_substitution(text: &str) -> bool {
         .to_ascii_lowercase();
     option.contains("globsubst")
         || option.contains("argv0")
+        // `ARGV${:-0}`, `${:-ARGV}0`, `ARGV{0,}`: a name the reader cannot
+        // complete (not `argv[1]`, a subscript).
+        || option.match_indices("argv").any(|(at, _)| {
+            option[at + "argv".len()..].starts_with(['$', '{', '}', '*', '?', '(', '`'])
+        })
         || [joined.as_str(), bare.as_str()]
             .iter()
-            .any(|text| substitutes_globs(text) || writes_options(text))
+            .any(|text| substitutes_globs(text) || writes_options(text) || assigns_named(text))
+}
+
+/// `${(P)n::=on}`: a `${(` flag group with any later `P` and `=` may
+/// assign the variable a value names (`options` included). Linear.
+fn assigns_named(text: &str) -> bool {
+    let (Some(flag), Some(assign)) = (text.rfind('P'), text.rfind('=')) else {
+        return false;
+    };
+    text.find("${(").is_some_and(|at| flag > at && assign > at)
 }
 
 /// `$~x`, `${~x}`, `$^~x`, or a `${(flags)...}` with any `~` after it on

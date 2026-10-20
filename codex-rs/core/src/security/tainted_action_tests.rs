@@ -2979,6 +2979,36 @@ fn issue_1084_glob_substitution_is_unseen_code() {
         // zmv globs its pattern as `${~pat}`.
         ("zsh", "autoload zmv; zmv -n \"$(cat notes)\" x"),
         ("zsh", "p=$(cat notes); zmv -p echo -- $p x"),
+        // Review r7: `options` through a variable holding its name, `(P)`
+        // assignments, `ARGV0` spelled through an expansion.
+        (
+            "zsh",
+            "n=options; zstyle :c s $(cat opts); zstyle -a :c s $n; x=$(cat notes); print -l $x",
+        ),
+        (
+            "zsh",
+            "n=opt; m=ions; cat opts | read -A $n$m; print -l $(cat notes)",
+        ),
+        (
+            "zsh",
+            "n=options; : ${(PAA)n::=$(cat opts)}; print -l $(cat notes)",
+        ),
+        (
+            "zsh",
+            "n=$(cat name); : ${(P)n::=$(cat opts)}; print -l $(cat notes)",
+        ),
+        (
+            "zsh",
+            "export ARGV${:-0}=sh; zsh -c 'setopt noshglob bareglobqual; IFS=; x=$(cat notes); print -l $x'",
+        ),
+        (
+            "zsh",
+            "typeset -x ARG${:-V0}=sh; zsh -c 'x=$(cat notes); print -l $x'",
+        ),
+        (
+            "zsh",
+            "export A$'RGV'0=sh; zsh -c 'x=$(cat notes); print -l $x'",
+        ),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found != Some(UnseenCode) {

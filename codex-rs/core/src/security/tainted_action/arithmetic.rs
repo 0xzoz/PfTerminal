@@ -424,7 +424,12 @@ impl Arithmetic {
             .iter()
             .chain(&raw)
             .any(|word| shell::glob_substitution(word))
-            || renames_shell(&raw);
+            || renames_shell(&raw)
+            // A name built by expansion (`n=options; read -A $n`).
+            || simple.words.iter().zip(words).any(|(raw, word)| {
+                work::step();
+                raw != word && word.to_ascii_lowercase().contains("options")
+            });
         self.qualifier_words.extend(
             words
                 .iter()
@@ -579,6 +584,18 @@ impl Arithmetic {
             self.sources = true;
         }
         if sets_unnamed_options(name, args) {
+            self.glob_subst = true;
+        }
+        // `export ARG${:-V0}=sh`: a declared name the reader cannot
+        // complete may be `ARGV0` or `options`.
+        if DECLARING_BUILTINS.contains(&name)
+            && args.iter().any(|word| {
+                work::step();
+                let declared = word.split('=').next().unwrap_or(word);
+                !word.starts_with(['-', '+'])
+                    && (declared.contains(['$', '`']) || declared.contains(shell::UNSEEN_OUTPUT))
+            })
+        {
             self.glob_subst = true;
         }
         if matches!(
