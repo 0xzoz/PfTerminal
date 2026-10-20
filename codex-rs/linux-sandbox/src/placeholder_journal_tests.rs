@@ -758,7 +758,7 @@ fn a_child_of_a_pending_placeholder_folder_is_recorded_as_used() {
         &[],
         &[
             (child.clone(), child.clone()),
-            (sibling_child.clone(), sibling_child.clone()),
+            (sibling_child.clone(), sibling_child),
         ],
     );
     let own = format!("{}.rec", setup.journal.name);
