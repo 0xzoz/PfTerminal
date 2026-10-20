@@ -3000,3 +3000,154 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
     }
     assert_eq!(wrong, Vec::<String>::new());
 }
+
+/// #1065: the classifier's work on variable values is bounded. A value
+/// doubled on each step (`a=$a$a`) or used many times would grow without
+/// bound; past `MAX_SUBSTITUTED_BYTES` substituted bytes the line asks.
+/// Inputs stay small (at most 16 MiB on a build without the cap).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1065_substituted_values_are_capped() {
+    use ProtectedActionKind::*;
+    let doubled = |steps: usize| format!("a=x;{} echo ok", " a=$a$a;".repeat(steps));
+    // Step k substitutes 2^k bytes, 2^(n+1) - 2 in all: 20 steps pass 1 MiB.
+    assert_eq!(script(&doubled(24)), Some(UnseenCode));
+    assert_eq!(script(&doubled(20)), Some(UnseenCode));
+    assert_eq!(script(&doubled(19)), None);
+    // Many uses of one value, in one word or many.
+    let value = "y".repeat(4096);
+    assert_eq!(
+        script(&format!("a={value}; echo{}", " $a".repeat(300))),
+        Some(UnseenCode)
+    );
+    assert_eq!(
+        script(&format!("a={value}; echo {}", "$a".repeat(300))),
+        Some(UnseenCode)
+    );
+    assert_eq!(
+        script(&format!("a={value}; echo{}", " $a".repeat(200))),
+        None
+    );
+    // In zsh, and in a nested shell's script.
+    assert_eq!(kind(&["zsh", "-c", &doubled(24)]), Some(UnseenCode));
+    assert_eq!(
+        script(&format!("sh -c '{}'", doubled(24))),
+        Some(UnseenCode)
+    );
+    // Everyday lines stay quiet.
+    assert_eq!(script("p=$HOME/bin; PATH=$p:$PATH; echo $p $p"), None);
+}
+
+/// #1065 review 1: the budget holds for the whole classification, a line
+/// past it still names what it reaches, and folders and nested text are
+/// bounded too. Inputs stay small (at most about 6 MB of words).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1065_review_1_limits() {
+    use ProtectedActionKind::*;
+    use base64::Engine as _;
+    let exhaust = format!("p=x;{}", " p=$p$p;".repeat(20));
+    let long = format!("{USER_HOME}/.codex/{}/../auth.json", "k".repeat(80));
+    let pushes = |count: usize| format!("pushd /tmp;{} echo ok", " pushd .;".repeat(count));
+    let decoded = " ZWNobyBoZWxsbyB3b3JsZA=="; // "echo hello world"
+    let payload = base64::engine::general_purpose::STANDARD
+        .encode(format!("echo {}", "a".repeat(600 * 1024)));
+    let cases = [
+        // Small values are still substituted past the budget, and a large
+        // one is judged on its own.
+        (format!("v=vault; {exhaust} corbanu $v get k"), Some(Vault)),
+        (
+            format!("x=.co; y=dex; {exhaust} cat ~/$x$y/auth.json"),
+            Some(Credentials),
+        ),
+        (format!("c={long}; cat $c"), Some(Credentials)),
+        (format!("c={long}; {exhaust} cat $c"), Some(Credentials)),
+        // The folder stack and folder names.
+        (pushes(63), None),
+        (pushes(64), Some(UnseenCode)),
+        (
+            format!("cd /{}; echo ok", "a".repeat(5000)),
+            Some(UnseenCode),
+        ),
+        ("cd /tmp/x && pushd /tmp && popd; echo ok".to_string(), None),
+        (format!("cd /{}; echo ok", "a".repeat(1000)), None),
+        // Review r3: sed calls one reading collects.
+        (
+            format!("cd /tmp;{} echo ok", " sed -n p f;".repeat(5000)),
+            Some(UnseenCode),
+        ),
+        (
+            format!("cd /tmp;{} echo ok", " sed -n p f;".repeat(100)),
+            None,
+        ),
+        // Review r4: files a long pipeline writes.
+        (format!("{}cat", "exec >f|".repeat(5000)), Some(UnseenCode)),
+        // Command lines lexed in all: decoded payloads.
+        (format!("echo{}", decoded.repeat(5000)), Some(UnseenCode)),
+        (format!("echo{}", decoded.repeat(50)), None),
+        // Bytes lexed in all: seven copies of a 600 KiB payload through
+        // braces.
+        (format!("echo {payload}{{,,,,,,}}"), Some(UnseenCode)),
+    ];
+    let mut wrong = Vec::new();
+    for (line, expected) in cases {
+        let found = script(&line);
+        if found != expected {
+            let shown: String = line.chars().take(60).collect();
+            wrong.push(format!("{shown:?}... -> {found:?}, want {expected:?}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #1065 review 2: a large value skipped on many uses is judged once, and
+/// small values past the budget build at most a bounded value. Counted by
+/// command lines and bytes lexed, not by time.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1065_review_2_large_values_are_judged_once() {
+    use ProtectedActionKind::*;
+    let counts = |line: &str| {
+        let classifier = classified(
+            &shell_in("/work", &["bash", "-lc", line]),
+            Path::new(HOME),
+            Some(Path::new(USER_HOME)),
+        );
+        (
+            classifier.found,
+            classifier.classified_lines,
+            classifier.classified_bytes,
+        )
+    };
+    // The third use of a 400 KiB value runs the budget out.
+    let value = "y".repeat(400 * 1024);
+    let uses = |count: usize| format!("a={value}; : {}", "$a".repeat(count));
+    let (few, many) = (counts(&uses(3)), counts(&uses(1500)));
+    assert_eq!((few.0, many.0), (Some(UnseenCode), Some(UnseenCode)));
+    assert_eq!(many.1, few.1);
+    // Only the longer line is lexed again, not the value per use.
+    assert!(many.2 - few.2 <= 8 * 1497 * 2, "{few:?} {many:?}");
+    // A value built from small ones past the budget, then used many times.
+    let small = "x".repeat(64);
+    let built = |count: usize| {
+        format!(
+            "x={small}; p=y;{} b={}; : {}",
+            " p=$p$p;".repeat(20),
+            "$x".repeat(10_000),
+            "$b".repeat(count)
+        )
+    };
+    let (few, many) = (counts(&built(3)), counts(&built(1000)));
+    assert_eq!((few.0, many.0), (Some(UnseenCode), Some(UnseenCode)));
+    assert_eq!(many.1, few.1);
+    assert!(many.2 - few.2 <= 8 * 997 * 2, "{few:?} {many:?}");
+}

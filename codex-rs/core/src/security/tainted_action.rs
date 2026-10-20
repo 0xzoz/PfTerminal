@@ -25,6 +25,7 @@ use paths::Homes;
 use shell::SimpleCommand;
 use shell::basename;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 
 mod arithmetic;
@@ -342,6 +343,24 @@ const MAX_DEPTH: usize = 4;
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 /// Script files one classification reads; more fail closed.
 const MAX_SCRIPT_FILES: usize = 16;
+/// Bytes of variable values one classification substitutes (#1065): a
+/// value doubled on each step (`a=$a$a`) or used many times would otherwise
+/// grow without bound. Past it the line asks, and values up to
+/// `MAX_SMALL_VALUE` bytes are still substituted, up to the same number of
+/// bytes again, so the line still names what it reaches; a larger value is
+/// judged once on its own.
+const MAX_SUBSTITUTED_BYTES: usize = 1024 * 1024;
+const MAX_SMALL_VALUE: usize = 64;
+/// Bytes of command text, and command lines, one classification lexes in
+/// all, nested scripts, decoded payloads and script files included (#1065);
+/// more fail closed.
+const MAX_CLASSIFIED_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CLASSIFIED_LINES: usize = 4096;
+/// Folders `pushd` may stack, and bytes of a folder name the classifier
+/// follows (#1065); past them the line asks and the folder stays. The
+/// stack is shared, not copied, by the readings of quoted text.
+const MAX_FOLDER_STACK: usize = 64;
+const MAX_FOLDER_BYTES: usize = 1024;
 /// Magic numbers of executables, which are not read as scripts.
 const BINARY_MAGIC: &[&[u8]] = &[
     b"\x7fELF",
@@ -364,6 +383,11 @@ pub(super) fn classify_with(
     codex_home: &Path,
     user_home: Option<&Path>,
 ) -> Option<ProtectedActionKind> {
+    classified(action, codex_home, user_home).found
+}
+
+/// The classifier after judging the action, with its counters.
+fn classified(action: &ApprovalAction, codex_home: &Path, user_home: Option<&Path>) -> Classifier {
     let mut classifier = Classifier {
         homes: Homes::new(codex_home, user_home),
         found: None,
@@ -375,6 +399,12 @@ pub(super) fn classify_with(
         ran_unknown: false,
         written: Vec::new(),
         nested_scripts: 0,
+        substitution_budget: Budget {
+            left: MAX_SUBSTITUTED_BYTES,
+            small_left: MAX_SUBSTITUTED_BYTES,
+        },
+        classified_bytes: 0,
+        classified_lines: 0,
     };
     match action {
         ApprovalAction::Shell { command, cwd, .. }
@@ -417,7 +447,7 @@ pub(super) fn classify_with(
     if classifier.homes.exhausted() {
         classifier.note(ProtectedActionKind::UnseenCode);
     }
-    classifier.found
+    classifier
 }
 
 fn path_text(path: &PathUri) -> String {
@@ -520,12 +550,21 @@ fn has_flag(word: &str, flag: &str) -> bool {
     }
 }
 
+/// Bytes of variable values left to substitute (#1065): any value, then
+/// only small ones once that runs out.
+struct Budget {
+    left: usize,
+    small_left: usize,
+}
+
 /// Where the shell is while it runs a script: the folder, the previous one
 /// (`cd -`) and the `pushd` stack.
 struct Folders {
     cwd: String,
     previous: String,
-    stack: Vec<String>,
+    stack: std::rc::Rc<Vec<String>>,
+    /// A `cd`/`pushd` past the folder limits was not followed (#1065).
+    unfollowed: bool,
 }
 
 struct Classifier {
@@ -550,6 +589,11 @@ struct Classifier {
     written: Vec<Option<String>>,
     /// #885: nested shell scripts judged so far.
     nested_scripts: usize,
+    /// #1065: bytes of variable values left to substitute.
+    substitution_budget: Budget,
+    /// #1065: bytes of command text, and command lines, lexed so far.
+    classified_bytes: usize,
+    classified_lines: usize,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
@@ -792,8 +836,15 @@ impl Classifier {
             self.note(ProtectedActionKind::UnseenCode);
             return;
         }
-        // A command line too long to classify fails closed.
-        if command.iter().map(String::len).sum::<usize>() > MAX_COMMAND_BYTES {
+        // A command line too long to classify fails closed, as does more
+        // text in all than one classification lexes.
+        let bytes = command.iter().map(String::len).sum::<usize>();
+        self.classified_bytes = self.classified_bytes.saturating_add(bytes);
+        self.classified_lines += 1;
+        if bytes > MAX_COMMAND_BYTES
+            || self.classified_bytes > MAX_CLASSIFIED_BYTES
+            || self.classified_lines > MAX_CLASSIFIED_LINES
+        {
             self.note(ProtectedActionKind::UnseenCode);
             return;
         }
@@ -819,7 +870,8 @@ impl Classifier {
         let mut folders = Folders {
             cwd: cwd.to_string(),
             previous: cwd.to_string(),
-            stack: Vec::new(),
+            stack: std::rc::Rc::default(),
+            unfollowed: false,
         };
         let mut variables: HashMap<String, String> = HashMap::new();
         for (name, value) in [
@@ -838,9 +890,32 @@ impl Classifier {
         let mut lexed_seds = 0;
         let mut lexed_shells = 0;
         let mut arithmetic = arithmetic::Arithmetic::new(command);
+        // Values too large to substitute, judged once each (by name and
+        // length) while the lexing limits allow.
+        let mut judged: HashSet<(String, usize)> = HashSet::new();
         for (index, simple) in lexed.commands.iter().enumerate() {
             work::step();
-            let (words, unseen) = substitute(simple, &variables);
+            let (words, unseen, skipped) =
+                substitute(simple, &variables, &mut self.substitution_budget);
+            if self.substitution_budget.left == 0 {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
+            for name in skipped {
+                work::step();
+                let Some(value) = variables.get(&name) else {
+                    continue;
+                };
+                if !judged.insert((name, value.len())) {
+                    continue;
+                }
+                if value.len() > MAX_COMMAND_BYTES
+                    || self.classified_bytes.saturating_add(value.len()) > MAX_CLASSIFIED_BYTES
+                {
+                    self.note(ProtectedActionKind::UnseenCode);
+                    continue;
+                }
+                self.script(value, &folders.cwd, depth + 1);
+            }
             // Decoded, quote-removed and with known variables substituted:
             // `eval "echo \${v@"P"}"`, `$'\x40'`, `p=@P; eval "echo \${v$p}"`.
             if words.iter().any(|word| shell::prompt_expansion(word)) {
@@ -864,9 +939,10 @@ impl Classifier {
         // `read` runs the substitutions in its value, like `eval`.
         // #1028: zsh `e`/`+` glob qualifiers run code the classifier does
         // not read as commands.
-        if self.rebuilt == 0
+        if (self.rebuilt == 0
             && self.not_shell == 0
-            && (arithmetic.runs_unseen(command) || arithmetic.runs_qualifier_code(command))
+            && (arithmetic.runs_unseen(command) || arithmetic.runs_qualifier_code(command)))
+            || folders.unfollowed
         {
             self.note(ProtectedActionKind::UnseenCode);
         }
@@ -1185,12 +1261,18 @@ impl Classifier {
             ("cd", None) => self.homes.user_home().map(str::to_string),
             ("cd", Some(target)) if target == "-" => Some(folders.previous.clone()),
             ("cd" | "pushd", Some(target)) => Some(self.homes.resolve(target, &folders.cwd)),
-            ("popd", _) => folders.stack.pop(),
+            ("popd", _) => std::rc::Rc::make_mut(&mut folders.stack).pop(),
             _ => None,
         };
         if let Some(next) = next {
+            if next.len() > MAX_FOLDER_BYTES
+                || (name == "pushd" && folders.stack.len() >= MAX_FOLDER_STACK)
+            {
+                folders.unfollowed = true;
+                return;
+            }
             if name == "pushd" {
-                folders.stack.push(folders.cwd.clone());
+                std::rc::Rc::make_mut(&mut folders.stack).push(folders.cwd.clone());
             }
             folders.previous = std::mem::replace(&mut folders.cwd, next);
             variables.insert("PWD".to_string(), folders.cwd.clone());
@@ -1301,11 +1383,16 @@ fn is_special_parameter(name: &str) -> bool {
 /// reads them (`$a$b` is `a` then `b`), and for each word whether it holds a
 /// value the classifier cannot see: a variable never assigned in this action
 /// (other than special parameters) or one set from an unseen substitution.
+/// `budget` is the bytes of values left to substitute (#1065); a value
+/// that does not fit is unseen output, runs the budget out, and is
+/// returned by name.
 fn substitute(
     command: &SimpleCommand,
     variables: &HashMap<String, String>,
-) -> (Vec<String>, Vec<bool>) {
-    command
+    budget: &mut Budget,
+) -> (Vec<String>, Vec<bool>, HashSet<String>) {
+    let mut skipped = HashSet::new();
+    let (words, unseen): (Vec<String>, Vec<bool>) = command
         .words
         .iter()
         .map(|word| {
@@ -1324,9 +1411,28 @@ fn substitute(
                 };
                 let name = &after[..len];
                 match variables.get(name) {
-                    Some(value) if len > 0 => {
+                    Some(value) if len > 0 && value.len() < budget.left => {
+                        budget.left -= value.len();
                         unseen |= value.contains(shell::UNSEEN_OUTPUT);
                         out.push_str(value);
+                    }
+                    Some(value)
+                        if len > 0
+                            && value.len() <= MAX_SMALL_VALUE
+                            && value.len() <= budget.small_left =>
+                    {
+                        budget.left = 0;
+                        budget.small_left -= value.len();
+                        unseen |= value.contains(shell::UNSEEN_OUTPUT);
+                        out.push_str(value);
+                    }
+                    Some(_) if len > 0 => {
+                        budget.left = 0;
+                        unseen = true;
+                        if !skipped.contains(name) {
+                            skipped.insert(name.to_string());
+                        }
+                        out.push_str(shell::UNSEEN_OUTPUT);
                     }
                     _ => {
                         unseen |= len > 0 && !is_special_parameter(name);
@@ -1339,7 +1445,8 @@ fn substitute(
             out.push_str(rest);
             (out, unseen)
         })
-        .unzip()
+        .unzip();
+    (words, unseen, skipped)
 }
 
 /// The level as other product messages name it ("security level Moderate").
