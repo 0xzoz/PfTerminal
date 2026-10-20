@@ -1161,7 +1161,12 @@ impl Session {
                 return;
             }
         };
-        let current_exec_policy = self.services.exec_policy.current();
+        // D52 (#1001): under Aggressive, network allow rules saved outside it
+        // are suspended.
+        let current_exec_policy = self
+            .services
+            .exec_policy
+            .current_for(self.services.model_client().live_level_is_aggressive());
         let spec = match spec.with_exec_policy_network_rules(current_exec_policy.as_ref()) {
             Ok(spec) => spec,
             Err(err) => {
@@ -2936,6 +2941,13 @@ impl Session {
             }
         }
 
+        // D52 (#1001): one allowed while Aggressive is in force applies under
+        // Aggressive too (the others are suspended there).
+        let approved_under = if self.services.model_client().live_level_is_aggressive() {
+            crate::exec_policy::ApprovedUnder::Aggressive
+        } else {
+            crate::exec_policy::ApprovedUnder::LessStrict
+        };
         self.services
             .exec_policy
             .append_network_rule_and_update(
@@ -2944,6 +2956,7 @@ impl Session {
                 execpolicy_amendment.protocol,
                 execpolicy_amendment.decision,
                 Some(execpolicy_amendment.justification),
+                approved_under,
             )
             .await
             .map_err(|err| {
