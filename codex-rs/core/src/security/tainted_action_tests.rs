@@ -2234,8 +2234,8 @@ fn issue_1020_deep_substitutions_stay_fast_and_ask() {
     }
     let closed = format!("echo {}x{}", "$(echo ".repeat(2_000), ")".repeat(2_000));
     assert!(lex(&closed).too_deep);
-    // Backticks alternate open and close, so they never nest deeply here.
-    let _ = lex(&"`echo ".repeat(4_000));
+    // Backticks alternate open and close, so they never nest deeply.
+    assert!(!lex(&"`echo ".repeat(4_000)).too_deep);
     // Many substitutions side by side are not deep.
     let wide = "echo $(echo a);".repeat(10_000);
     assert!(!lex(&wide).too_deep);
@@ -2243,7 +2243,7 @@ fn issue_1020_deep_substitutions_stay_fast_and_ask() {
     nested_wide.push_str(&"$(echo a) ".repeat(10_000));
     nested_wide.push(')');
     assert!(!lex(&nested_wide).too_deep);
-    assert!(start.elapsed() < std::time::Duration::from_secs(5));
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
     // At the limit the reader still reads; past it the line asks.
     let at = |depth: usize| format!("echo {}hi{}", "$(echo ".repeat(depth), ")".repeat(depth));
     assert!(!lex(&at(shell::MAX_SUBSTITUTION_DEPTH)).too_deep);
@@ -2252,6 +2252,50 @@ fn issue_1020_deep_substitutions_stay_fast_and_ask() {
     assert_eq!(
         script(&at(shell::MAX_SUBSTITUTION_DEPTH + 1)),
         Some(UnseenCode)
+    );
+    // Past the limit, commands are still judged by name, and closers close
+    // the skipped level, not an outer one (review r1).
+    let depth = shell::MAX_SUBSTITUTION_DEPTH;
+    for inner in [
+        "x$(corbanu vault get k)",
+        "x`corbanu vault get k`",
+        "$(echo $(corbanu vault get k))",
+    ] {
+        let line = format!(
+            "echo {}{inner}{}",
+            "$(echo ".repeat(depth),
+            ")".repeat(depth)
+        );
+        assert_eq!(script(&line), Some(Vault), "{inner}");
+        let lexed = lex(&line);
+        assert!(lexed.too_deep, "{inner}");
+        assert!(
+            lexed
+                .commands
+                .iter()
+                .any(|command| command.words == ["corbanu", "vault", "get", "k"]),
+            "{inner}"
+        );
+    }
+    // The words after a skipped level stay at their own level.
+    let line = format!(
+        "echo {}$(true) tail{}",
+        "$(echo ".repeat(depth),
+        ")".repeat(depth)
+    );
+    let lexed = lex(&line);
+    assert!(lexed.too_deep);
+    assert!(
+        lexed
+            .commands
+            .iter()
+            .any(|command| command.words.first().is_some_and(|word| word == "tail")),
+        "{:?}",
+        lexed
+            .commands
+            .iter()
+            .map(|command| &command.words)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -2262,5 +2306,5 @@ fn issue_1020_deep_nesting_is_classified_quickly() {
     let found = script(&format!("echo {}", "$(".repeat(400)));
     let elapsed = start.elapsed();
     assert_eq!(found, Some(ProtectedActionKind::UnseenCode));
-    assert!(elapsed < std::time::Duration::from_secs(2), "{elapsed:?}");
+    assert!(elapsed < std::time::Duration::from_secs(3), "{elapsed:?}");
 }

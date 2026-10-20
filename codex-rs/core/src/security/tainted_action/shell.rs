@@ -43,13 +43,15 @@ pub(super) struct Lexed {
     /// A brace expression had too many alternatives to expand.
     pub(super) incomplete: bool,
     /// Substitutions nested past `MAX_SUBSTITUTION_DEPTH`; the deeper ones
-    /// were read as words (#1020).
+    /// were read as plain command lists (#1020).
     pub(super) too_deep: bool,
 }
 
 /// How deeply substitutions (`$(`, `<(`, `>(`, backticks) are read inside
-/// each other. Deeper text fails closed, so the reader stays linear in the
-/// text times this depth (#1020).
+/// each other. A deeper one is read as a plain list of commands: they are
+/// still judged by name, but not spliced into the words around them, and
+/// the line fails closed. The reader stays linear in the text times this
+/// depth squared (#1020).
 pub(super) const MAX_SUBSTITUTION_DEPTH: usize = 32;
 
 pub(super) fn basename(word: &str) -> &str {
@@ -262,6 +264,11 @@ struct Lexer {
     redirect: Redirect,
     /// A substitution opened past `MAX_SUBSTITUTION_DEPTH`.
     too_deep: bool,
+    /// Substitutions past `MAX_SUBSTITUTION_DEPTH`, innermost last: whether
+    /// each is a backtick one. They are not opened, but their commands end
+    /// where they open and close, and their closers close them, not an
+    /// outer substitution.
+    skipped: Vec<bool>,
 }
 
 impl Lexer {
@@ -355,8 +362,10 @@ impl Lexer {
     }
 
     fn open_substitution(&mut self, backtick: bool, output: bool, process: bool) {
-        if self.open.len() >= MAX_SUBSTITUTION_DEPTH {
+        if self.open.len() >= MAX_SUBSTITUTION_DEPTH || !self.skipped.is_empty() {
             self.too_deep = true;
+            self.start(Start::Plain);
+            self.skipped.push(backtick);
             return;
         }
         let outer = std::mem::replace(
@@ -454,8 +463,17 @@ impl Lexer {
                 }
                 // A line continuation joins the two lines.
                 '\\' if next == Some('\n') => index += 1,
+                '`' if self.skipped.last() == Some(&true) => {
+                    self.skipped.pop();
+                    self.start(Start::Plain);
+                }
+                ')' if self.skipped.last() == Some(&false) => {
+                    self.skipped.pop();
+                    self.start(Start::Plain);
+                }
                 '`' => {
-                    if self.open.last().is_some_and(|open| open.backtick) {
+                    if self.skipped.is_empty() && self.open.last().is_some_and(|open| open.backtick)
+                    {
                         self.close_substitution();
                     } else {
                         self.open_substitution(
@@ -463,7 +481,9 @@ impl Lexer {
                         );
                     }
                 }
-                ')' if self.open.last().is_some_and(|open| !open.backtick) => {
+                ')' if self.skipped.is_empty()
+                    && self.open.last().is_some_and(|open| !open.backtick) =>
+                {
                     self.close_substitution();
                 }
                 '{' if self.word.is_empty() && next.is_none_or(char::is_whitespace) => {
