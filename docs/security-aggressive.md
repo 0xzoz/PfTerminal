@@ -265,7 +265,10 @@ then on, these apply there:
 
 - Core's protections;
 - approval for every command, from each pane's next turn;
-- the end of its grants and "for session" approvals.
+- the end of its grants and "for session" approvals;
+- for a command or file edit whose approval prompt is still open: the answer
+  isn't used and nothing runs; the agent can ask again under Aggressive
+  (#1001).
 
 A running `corbanu exec` can't ask you for approval, so from then on it
 refuses every command that isn't known read-only.
@@ -274,3 +277,8 @@ The rest of Aggressive starts in each of them when it restarts: its
 sandbox, `.env` protection, network off and the model-key rules. Until then
 it is shown at its own level. This only ever raises a level: a lower level
 saved in another window applies only after a restart.
+
+The other sessions of the window you confirm in take Core's protections and
+approval for every command at once, and so do sessions you start there
+before you restart, also when you confirm before the window's own session
+has started (#978).
