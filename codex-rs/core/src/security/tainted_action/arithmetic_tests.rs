@@ -368,3 +368,44 @@ fn review_2_redirects_and_decoded_values() {
         assert!(runs_unseen_in(shell, line), "{shell}: {line}");
     }
 }
+
+/// Review 3: joins across quotes, `printf -v`, IFS joins, function
+/// substitution, namerefs and zsh `$mapfile`.
+#[test]
+fn review_3_allow_list_and_new_sources() {
+    for (shell, line) in [
+        ("bash", "var=$(cat notes); n=va; m=\"$n\"r; echo $((m))"),
+        ("bash", "var=$(cat notes); n=va; m=$n\"r\"; echo $((m))"),
+        ("bash", "var=$(cat notes); n=va; m=$n\\r; echo $((m))"),
+        ("bash", "var=$(cat notes); n=va; echo $(( $n\"r\" ))"),
+        (
+            "bash",
+            "var=$(cat notes); printf -v n %s%s va r; echo $((n))",
+        ),
+        (
+            "bash",
+            "var=$(cat notes); a=(va r); IFS=; m=\"${a[*]}\"; echo $((m))",
+        ),
+        (
+            "bash",
+            "var=$(cat notes); set -- va r; IFS=; m=\"$*\"; echo $((m))",
+        ),
+        ("ksh", "v=${ cat notes; }; echo $((v))"),
+        ("bash", "v=${| cat notes; }; echo $((v))"),
+        ("bash", "v=$(cat notes); declare -n r=$v; echo $r"),
+        (
+            "zsh",
+            "zmodload zsh/mapfile; v=$mapfile[notes]; echo $((v))",
+        ),
+    ] {
+        assert!(runs_unseen_in(shell, line), "{shell}: {line}");
+    }
+    for line in [
+        "v=$(cat f); n=3; m=$n; k=$((m+1)); rc=$?; echo $(( n + m + k + rc ))",
+        "v=$(cat f); i=0; while (( i < 3 )); do i=$((i+1)); done",
+        "v=$(cat f); w=${#v}; ((w > 2)) && echo long",
+        "n=va; m=\"$n\"r; echo $((m))",
+    ] {
+        assert!(!runs_unseen(line), "{line}");
+    }
+}

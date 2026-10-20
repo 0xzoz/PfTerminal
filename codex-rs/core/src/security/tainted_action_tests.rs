@@ -2487,6 +2487,14 @@ fn issue_937_review_2_routes() {
         "v=$(printf '%s%s' a b); echo $((v))",
         // Should-fix: a decoded value holding a substitution.
         "v=$'a[\\x24\\x28cmd\\x290]'; echo $((v))",
+        // Review 3: joins across quotes, `printf -v`, IFS joins, namerefs.
+        "var=$(cat notes); n=va; m=\"$n\"r; echo $((m))",
+        "var=$(cat notes); n=va; m=$n\\r; echo $((m))",
+        "var=$(cat notes); printf -v n %s%s va r; echo $((n))",
+        "var=$(cat notes); a=(va r); IFS=; m=\"${a[*]}\"; echo $((m))",
+        "var=$(cat notes); set -- va r; IFS=; m=\"$*\"; echo $((m))",
+        "v=${ cat notes; }; echo $((v))",
+        "v=$(cat notes); declare -n r=$v; echo $r",
     ];
     let zsh = [
         "x=VAR; var=$(cat notes); echo $(( 1 + ${(L)x} ))",
@@ -2494,6 +2502,7 @@ fn issue_937_review_2_routes() {
         "zmodload zsh/system; sysread < notes; echo $((REPLY))",
         "v=$(cat notes); [[ $v = (#b)(*) ]]; echo $((match[1]))",
         "v=$(cat notes); KEYTIMEOUT=$v",
+        "zmodload zsh/mapfile; v=$mapfile[notes]; echo $((v))",
     ];
     let mut wrong = Vec::new();
     for shell in ["bash", "zsh"] {
@@ -2528,6 +2537,9 @@ fn issue_937_review_2_everyday_lines_still_run() {
             "OPTIND=1; for x in 1 2; do echo $((x)); done",
             "f=$(mktemp); read -r x < \"$f\"",
             "v=$(echo 5); echo $((v+1))",
+            "v=$(cat f); n=3; m=$n; k=$((m+1)); rc=$?; echo $(( n + m + k + rc ))",
+            "v=$(cat f); w=${#v}; ((w > 2)) && echo long",
+            &format!("echo \"${{a[{}é]}}\"", "x".repeat(254)),
         ] {
             let found = kind(&[shell, "-c", line]);
             if found.is_some() {
