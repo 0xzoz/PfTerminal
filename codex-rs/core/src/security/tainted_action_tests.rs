@@ -2667,6 +2667,10 @@ fn issue_937_review_6_fallback_routes() {
 /// read as commands, so after untrusted content they ask, with or without
 /// command output on the line.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
     use ProtectedActionKind::*;
     let mut wrong = Vec::new();
