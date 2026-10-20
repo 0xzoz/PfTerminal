@@ -368,7 +368,15 @@ impl ToolOrchestrator {
                     crate::security::user_namespaces::one_run_warning(
                         &tool_ctx.session,
                         turn_ctx,
-                        approval_command(tool, req, tool_ctx).as_deref(),
+                        &|| {
+                            runs_known_tool(
+                                tool,
+                                req,
+                                tool_ctx,
+                                turn_ctx,
+                                &file_system_sandbox_policy,
+                            )
+                        },
                     )
                 })
                 .flatten();
@@ -469,11 +477,9 @@ impl ToolOrchestrator {
                 .sandbox_permissions(req)
                 .requires_escalated_permissions()
         {
-            crate::security::user_namespaces::one_run_warning(
-                &tool_ctx.session,
-                turn_ctx,
-                approval_command(tool, req, tool_ctx).as_deref(),
-            )
+            crate::security::user_namespaces::one_run_warning(&tool_ctx.session, turn_ctx, &|| {
+                runs_known_tool(tool, req, tool_ctx, turn_ctx, &file_system_sandbox_policy)
+            })
             .filter(|(_, at)| *at > 0)
         } else {
             None
@@ -502,7 +508,7 @@ impl ToolOrchestrator {
                 let warning = crate::security::user_namespaces::one_run_warning(
                     &tool_ctx.session,
                     turn_ctx,
-                    /*command*/ None,
+                    &|| false,
                 )
                 .map(|(warning, at)| {
                     user_namespaces_warned_at = Some(at);
@@ -768,6 +774,8 @@ impl ToolOrchestrator {
                 && approved_by == Some(ApprovalResolutionSource::User),
             user_namespaces_warned_at,
         );
+        // A retry of this run (after a sandbox or network denial) reuses
+        // these permissions: the same approved command, so the same answer.
         if user_namespaces_allowed {
             crate::security::user_namespaces::note_allowed_run(
                 tool_ctx.session.thread_id(),
@@ -1398,8 +1406,17 @@ where
     }
 }
 
-/// D48 (c): the command a shell request runs, as its prompt shows it.
-fn approval_command<Rq, Out, T>(tool: &T, req: &Rq, tool_ctx: &ToolCtx) -> Option<Vec<String>>
+/// D48 (c): whether the command a shell request runs (as its prompt shows
+/// it) is a known tool's, its programs looked up through the `PATH` it runs
+/// with and checked against what this run's sandbox (with its additional
+/// permissions) can write.
+fn runs_known_tool<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    tool_ctx: &ToolCtx,
+    turn_ctx: &crate::session::turn_context::TurnContext,
+    file_system_sandbox_policy: &codex_protocol::permissions::FileSystemSandboxPolicy,
+) -> bool
 where
     T: ToolRuntime<Rq, Out>,
 {
@@ -1411,12 +1428,40 @@ where
         network_approval_context: None,
         fresh_human_authority: true,
     };
-    match tool.approval_action(req, &ctx).ok()? {
-        ApprovalAction::Shell { command, .. } | ApprovalAction::ExecCommand { command, .. } => {
-            Some(command)
+    let command = match tool.approval_action(req, &ctx) {
+        Ok(ApprovalAction::Shell { command, .. } | ApprovalAction::ExecCommand { command, .. }) => {
+            command
         }
-        ApprovalAction::ApplyPatch { .. } => None,
-    }
+        _ => return false,
+    };
+    #[allow(deprecated)]
+    let cwd = tool
+        .sandbox_cwd(req)
+        .and_then(|cwd| cwd.to_abs_path().ok())
+        .unwrap_or_else(|| turn_ctx.cwd.clone());
+    let policy = codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
+        file_system_sandbox_policy,
+        tool.additional_permissions(req),
+    );
+    let writable = |folder: &std::path::Path| policy.can_write_path_with_cwd(folder, cwd.as_path());
+    let executable = |file: &std::path::Path| {
+        std::fs::metadata(file).is_ok_and(|meta| {
+            #[cfg(unix)]
+            let runs = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0;
+            #[cfg(not(unix))]
+            let runs = true;
+            meta.is_file() && runs
+        })
+    };
+    crate::security::user_namespaces::known_tool(
+        &command,
+        &crate::security::user_namespaces::Lookup {
+            path: tool.local_search_path(req),
+            writable: &writable,
+            executable: &executable,
+        },
+    )
+    .is_some()
 }
 
 /// The command and folder a grant offer shows (PF-25-S01).

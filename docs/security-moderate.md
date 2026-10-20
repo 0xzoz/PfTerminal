@@ -148,21 +148,32 @@ The kill switch (`/security` → `g`) works under every level.
   permission hook or the automatic reviewer. After untrusted content (D48,
   Linux, Moderate only) it is offered only for a command whose program is a
   known tool: `unshare`, `bwrap`, `podman`, `buildah`, `flatpak` or `nix`.
-  The command must be one plain command naming the tool by name or from a
-  system folder (`/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`, `/usr/local/bin`,
-  `/run/current-system/sw/bin`, `/nix/var/nix/profiles/default/bin`),
-  optionally after `env`, `sudo`, `exec`, `command` or `nohup` with simple
-  options. Anything else isn't offered and keeps the rule: other programs,
+  The command must be one plain command (directly, or as the whole script
+  of a system `bash`, `sh` or `zsh`), optionally after `env`, `sudo` or
+  `nohup` (or, first in the script, `exec` or `command`) with simple
+  options. Each program it runs (the shell, the wrappers, the tool) must
+  come from a system folder (`/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`,
+  `/usr/local/bin`, `/run/current-system/sw/bin`,
+  `/nix/var/nix/profiles/default/bin`) the agent can't write: named by that
+  path, or by name and found there first through the command's `PATH`, with
+  no relative folder or folder the agent can write searched before it (a
+  remote run's `PATH` isn't checked, so there only the full system path
+  counts). Anything else isn't offered and keeps the rule: other programs,
   more than one command (`;`, `&&`, `|`), variables, substitutions,
-  redirections, `NAME=value` settings, a copy of the tool elsewhere
-  (`./podman`), other wrappers (`timeout`, `bash -c`), and aliases or
-  functions the command defines. You are asked every time, by you only
-  (not "for the session", a saved rule, a hook or the automatic reviewer),
-  with the same warning. Approving lifts nothing else: the protected-file
-  rules stay, unless the command is also a protected action, whose fresh
-  approval lifts them for that run as before. If more untrusted content
-  arrives before it starts, it isn't allowed. A known tool can itself run
-  any program inside the namespace (`unshare -r sh -c '…'`, `podman run`),
+  redirections, `NAME=value` settings, a copy of the tool or of the shell
+  elsewhere (`./podman`, a shell the agent names), other wrappers
+  (`timeout`, `bash -c`), and aliases or functions the command defines
+  (your own shell's functions and aliases still apply). You are asked every
+  time, by you only, with the same warning: not "for the session", a saved
+  rule, a hook or the automatic reviewer, and also where the automatic
+  reviewer would otherwise answer, so approving that request always allows
+  user namespaces for it (decline, and ask the agent to run it without
+  leaving the sandbox, to run it without them). Approving lifts nothing
+  else: the protected-file rules stay, unless the command is also a
+  protected action, whose fresh approval (asked also under a saved rule)
+  lifts them for that run as before. If more untrusted content arrives
+  before it starts, it isn't allowed. A known tool can itself run any
+  program inside the namespace (`unshare -r sh -c '…'`, `podman run`),
   so read the whole command. The allowance covers the approved process and
   everything it starts or is given while it runs, also after untrusted
   content arrives: an interactive program such as a shell keeps it for

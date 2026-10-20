@@ -31,6 +31,9 @@ use crate::session::turn_context::TurnContext;
 #[path = "user_namespaces_known_tool.rs"]
 mod known_tool;
 
+pub(crate) use known_tool::Lookup;
+pub(crate) use known_tool::known_tool;
+
 /// Whether agent commands get the user-namespace deny entry: on Linux,
 /// where Core's protected-path level is Moderate or Aggressive, or the
 /// launch enforces Aggressive. No approval or grant changes it.
@@ -148,18 +151,17 @@ pub(crate) fn allows_one_run(
 /// the sandbox, where approving it lets that run create user namespaces
 /// ([`allows_one_run`]), with the taint generation it is shown at: before
 /// untrusted content for any command (D27 (a)), after it only where
-/// `command`'s program is a known tool (D48 (c)). The orchestrator allows it
-/// only where this was shown.
+/// `runs_known_tool` says the command's program is a known tool (D48 (c),
+/// [`known_tool`]; asked only then). The orchestrator allows it only where
+/// this was shown.
 pub(crate) fn one_run_warning(
     session: &Session,
     turn: &TurnContext,
-    command: Option<&[String]>,
+    runs_known_tool: &dyn Fn() -> bool,
 ) -> Option<(String, u64)> {
     match turn_rule_at(session, turn)? {
         (user_namespaces::Rule::ModerateOneCommand, generation) => Some(generation),
-        (user_namespaces::Rule::ModerateAfterUntrusted, generation)
-            if command.and_then(known_tool::known_tool).is_some() =>
-        {
+        (user_namespaces::Rule::ModerateAfterUntrusted, generation) if runs_known_tool() => {
             Some(generation)
         }
         _ => None,

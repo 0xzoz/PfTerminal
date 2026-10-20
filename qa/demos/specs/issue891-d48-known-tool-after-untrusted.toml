@@ -33,7 +33,7 @@ type = "Run exactly this shell command in the sandbox: echo first-output-d48"
 [[steps]]
 key = "Enter"
 [[steps]]
-wait = "(?s)\\n\\s*first-output-d48(?:(?!Working).)*\\n› "
+wait = "(?s)└ first-output-d48(?:(?!Working).)*\\n› "
 timeout = 180
 compress = 3
 [[steps]]

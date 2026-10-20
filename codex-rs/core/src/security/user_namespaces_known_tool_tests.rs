@@ -1,6 +1,53 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+const PATH: &str = "/usr/local/bin:/usr/bin:/bin:/nix/var/nix/profiles/default/bin";
+
+/// Programs on this fake host: the system's, and copies in the workspace
+/// (`/work`) and `/tmp`, which the run can write.
+fn executable(file: &Path) -> bool {
+    let Some(file) = file.to_str() else {
+        return false;
+    };
+    let system = [
+        "/usr/bin/podman",
+        "/usr/bin/unshare",
+        "/usr/bin/bwrap",
+        "/usr/bin/buildah",
+        "/usr/bin/flatpak",
+        "/usr/bin/env",
+        "/usr/bin/sudo",
+        "/usr/bin/nohup",
+        "/usr/bin/timeout",
+        "/usr/bin/bash",
+        "/usr/bin/zsh",
+        "/bin/bash",
+        "/bin/sh",
+        "/bin/env",
+        "/nix/var/nix/profiles/default/bin/nix",
+    ];
+    system.contains(&file) || file.starts_with("/work/") || file.starts_with("/tmp/")
+}
+
+fn writable(folder: &Path) -> bool {
+    folder.starts_with("/work") || folder.starts_with("/tmp")
+}
+
+fn known(command: &[String]) -> Option<&'static str> {
+    known_with(command, Some(PATH))
+}
+
+fn known_with(command: &[String], path: Option<&str>) -> Option<&'static str> {
+    known_tool(
+        command,
+        &Lookup {
+            path,
+            writable: &writable,
+            executable: &executable,
+        },
+    )
+}
+
 fn shell(script: &str) -> Vec<String> {
     vec!["/bin/bash".into(), "-lc".into(), script.into()]
 }
@@ -29,19 +76,17 @@ fn d48_known_tools_are_resolved() {
         ("sudo -n -u root podman info", "podman"),
         ("exec -a name podman info", "podman"),
         ("command -p podman info", "podman"),
-        ("nohup env exec podman info", "podman"),
+        ("exec podman info", "podman"),
+        ("nohup env podman info", "podman"),
         ("podman run -v /src:/src alpine true", "podman"),
     ];
     for (script, tool) in cases {
-        assert_eq!(known_tool(&shell(script)), Some(tool), "{script}");
+        assert_eq!(known(&shell(script)), Some(tool), "{script}");
     }
-    assert_eq!(known_tool(&argv(&["podman", "info"])), Some("podman"));
+    assert_eq!(known(&argv(&["podman", "info"])), Some("podman"));
+    assert_eq!(known(&argv(&["env", "bwrap", "--help"])), Some("bwrap"));
     assert_eq!(
-        known_tool(&argv(&["env", "bwrap", "--help"])),
-        Some("bwrap")
-    );
-    assert_eq!(
-        known_tool(&argv(&["/bin/sh", "-c", "unshare -r true"])),
+        known(&argv(&["/bin/sh", "-c", "unshare -r true"])),
         Some("unshare")
     );
 }
@@ -110,6 +155,11 @@ fn d48_anything_else_is_not_offered() {
         "timeout 5 podman info",
         "xargs podman",
         "doas podman info",
+        // `exec` and `command` are builtins only as the script's first word.
+        "env exec podman info",
+        "nohup command podman info",
+        "sudo exec podman info",
+        "/usr/bin/exec podman info",
         // Nested shells and interpreters.
         "bash -c 'podman info'",
         "sh -c podman",
@@ -120,7 +170,7 @@ fn d48_anything_else_is_not_offered() {
         "",
     ];
     for script in scripts {
-        assert_eq!(known_tool(&shell(script)), None, "{script:?}");
+        assert_eq!(known(&shell(script)), None, "{script:?}");
     }
     for words in [
         &["./podman", "info"][..],
@@ -129,8 +179,79 @@ fn d48_anything_else_is_not_offered() {
         &["bash", "-e", "-c", "podman info"],
         &["/bin/bash", "-lc", "podman info", "extra"],
         &["sudo", "-u"],
+        &["exec", "podman", "info"],
         &[],
     ] {
-        assert_eq!(known_tool(&argv(words)), None, "{words:?}");
+        assert_eq!(known(&argv(words)), None, "{words:?}");
     }
+}
+
+/// The shell must be a system one too (`exec_command` lets the model choose
+/// it, and the prompt shows only the script), and a bare name is looked up
+/// through the run's `PATH`: no relative folder or one the run can write
+/// before the system copy, and none where the `PATH` isn't known (a remote
+/// run), where only a system path counts.
+#[test]
+fn d48_shells_and_path_lookup_resolve_only_system_programs() {
+    let podman = |shell_path: &str| {
+        vec![
+            shell_path.to_string(),
+            "-lc".to_string(),
+            "podman info".to_string(),
+        ]
+    };
+    for shell_path in ["/bin/bash", "/usr/bin/zsh", "/bin/sh", "bash", "zsh"] {
+        assert_eq!(known(&podman(shell_path)), Some("podman"), "{shell_path}");
+    }
+    for shell_path in [
+        "/work/bash",
+        "/tmp/sh",
+        "/tmp/zsh.evil",
+        "./bash",
+        "/opt/bash",
+        "/usr/bin/dash",
+        "fish",
+    ] {
+        assert_eq!(known(&podman(shell_path)), None, "{shell_path}");
+    }
+    let script = shell("podman info");
+    for (path, expected) in [
+        ("/usr/bin", Some("podman")),
+        ("/opt/bin:/usr/bin", Some("podman")),
+        ("/usr/bin:/work/bin", Some("podman")),
+        ("/usr/bin/:/bin", Some("podman")),
+        ("/work/bin:/usr/bin", None),
+        ("/tmp:/usr/bin", None),
+        (".:/usr/bin", None),
+        (":/usr/bin", None),
+        ("bin:/usr/bin", None),
+        ("/usr/bin/../../work:/usr/bin", None),
+        ("/bin", None),
+        ("", None),
+    ] {
+        assert_eq!(known_with(&script, Some(path)), expected, "{path:?}");
+    }
+    // No PATH known (a remote run): system paths only.
+    assert_eq!(known_with(&script, None), None);
+    assert_eq!(
+        known_with(&shell("/usr/bin/podman info"), None),
+        Some("podman")
+    );
+    assert_eq!(
+        known_with(&argv(&["/usr/bin/podman"]), None),
+        Some("podman")
+    );
+    // A system folder this run can write isn't one.
+    let everything = |_: &Path| true;
+    assert_eq!(
+        known_tool(
+            &shell("/usr/bin/podman info"),
+            &Lookup {
+                path: Some(PATH),
+                writable: &everything,
+                executable: &executable,
+            },
+        ),
+        None
+    );
 }

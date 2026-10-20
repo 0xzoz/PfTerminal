@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use codex_core::config::Constrained;
 use codex_features::Feature;
+use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
@@ -67,16 +68,23 @@ enum Kind {
     Escalated,
     /// The same through `exec_command`.
     EscalatedExec,
+    /// The same through `exec_command` with a shell the model chose: a
+    /// copy of bash outside the system folders.
+    EscalatedExecOwnShell,
     /// `shell_command` in the sandbox.
     Sandboxed,
 }
 
-fn step(call_id: &str, command: &str, kind: Kind) -> Vec<Value> {
+fn step(call_id: &str, command: &str, kind: Kind, own_shell: &str) -> Vec<Value> {
     let (tool, mut arguments) = match kind {
         Kind::Escalated | Kind::Sandboxed => ("shell_command", json!({ "command": command })),
         Kind::EscalatedExec => (
             "exec_command",
             json!({ "cmd": command, "yield_time_ms": 5_000 }),
+        ),
+        Kind::EscalatedExecOwnShell => (
+            "exec_command",
+            json!({ "cmd": command, "shell": own_shell, "yield_time_ms": 5_000 }),
         ),
     };
     if !matches!(kind, Kind::Sandboxed) {
@@ -95,6 +103,9 @@ struct Setup {
     level: SecurityLevel,
     /// A "don't ask again" rule saved earlier for `unshare`.
     saved_rule: bool,
+    approval: AskForApproval,
+    /// The automatic reviewer answers ordinary prompts.
+    auto_review: bool,
 }
 
 #[derive(Debug)]
@@ -166,9 +177,15 @@ async fn run(
         ),
         ev_completed("call-first"),
     ]];
+    // A shell the model may name for `exec_command`, outside the system
+    // folders.
+    let own_shell_dir = TempDir::new()?;
+    let own_shell = own_shell_dir.path().join("bash");
+    std::os::unix::fs::symlink("/bin/bash", &own_shell)?;
+    let own_shell = own_shell.to_string_lossy().into_owned();
     let ids: Vec<String> = (0..calls.len()).map(|n| format!("call-d48-{n}")).collect();
     for (id, (kind, command, _)) in ids.iter().zip(calls) {
-        steps.push(step(id, command, *kind));
+        steps.push(step(id, command, *kind, &own_shell));
     }
     steps.push(vec![
         ev_response_created("done"),
@@ -182,7 +199,10 @@ async fn run(
         .with_model("test-gpt-5.1-codex")
         .with_config(move |config| {
             config.security_level = setup.level;
-            config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+            config.permissions.approval_policy = Constrained::allow_any(setup.approval);
+            if setup.auto_review {
+                config.approvals_reviewer = ApprovalsReviewer::AutoReview;
+            }
             for feature in [Feature::SourceEnvelopes, Feature::UnifiedExec] {
                 config
                     .features
@@ -265,6 +285,8 @@ async fn run(
 const MODERATE: Setup = Setup {
     level: SecurityLevel::Moderate,
     saved_rule: false,
+    approval: AskForApproval::OnRequest,
+    auto_review: false,
 };
 
 /// In a session with untrusted content: a known tool's request to run
@@ -329,6 +351,8 @@ async fn d48_after_untrusted_content_only_known_tools_are_offered() -> anyhow::R
             "unshare -Ur true; unshare -Ur sh -c 'echo NAMESPACE-MADE-D$((40+8))'",
             ReviewDecision::Approved,
         ),
+        // A shell the model chose (the prompt shows only the script).
+        (Kind::EscalatedExecOwnShell, PLAIN, ReviewDecision::Approved),
         // A known tool that stays in the sandbox.
         (Kind::Sandboxed, UNSHARE, ReviewDecision::Approved),
     ];
@@ -377,10 +401,12 @@ async fn d48_after_untrusted_content_only_known_tools_are_offered() -> anyhow::R
     Ok(())
 }
 
-/// After untrusted content, a saved "don't ask again" rule (no prompt) and
-/// Aggressive keep the rule for a known tool: no warning, refused.
+/// After untrusted content, for a known tool: a saved "don't ask again"
+/// rule (no prompt), Aggressive and approvals off keep the rule, with no
+/// warning; with the automatic reviewer configured the person is still asked,
+/// with the warning, and the approved run may create user namespaces.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn d48_saved_rule_and_aggressive_keep_the_rule_for_known_tools() -> anyhow::Result<()> {
+async fn d48_saved_rule_aggressive_approvals_off_and_auto_review() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
     let mut wrong = Vec::new();
@@ -391,7 +417,7 @@ async fn d48_saved_rule_and_aggressive_keep_the_rule_for_known_tools() -> anyhow
                 saved_rule: true,
                 ..MODERATE
             },
-            "unshare -Ur printf NAMESPACE-MADE-%s D48",
+            PLAIN,
         ),
         (
             "Aggressive",
@@ -399,7 +425,23 @@ async fn d48_saved_rule_and_aggressive_keep_the_rule_for_known_tools() -> anyhow
                 level: SecurityLevel::Aggressive,
                 ..MODERATE
             },
-            UNSHARE,
+            PLAIN,
+        ),
+        (
+            "approvals off",
+            Setup {
+                approval: AskForApproval::Never,
+                ..MODERATE
+            },
+            PLAIN,
+        ),
+        (
+            "automatic reviewer",
+            Setup {
+                auto_review: true,
+                ..MODERATE
+            },
+            PLAIN,
         ),
     ] {
         let calls = Box::pin(run(
@@ -409,10 +451,16 @@ async fn d48_saved_rule_and_aggressive_keep_the_rule_for_known_tools() -> anyhow
         .await?;
         let call = &calls[0];
         eprintln!("{name}: {call:#?}");
-        let ok = call.unwarned()
-            && call.refused
-            && !call.made
-            && (!setup.saved_rule || call.asked.is_empty());
+        let ok = match name {
+            "automatic reviewer" => call.asked.len() == 1 && call.warned() && call.allowed(),
+            "approvals off" => call.asked.is_empty() && !call.made,
+            _ => {
+                call.unwarned()
+                    && call.refused
+                    && !call.made
+                    && (!setup.saved_rule || call.asked.is_empty())
+            }
+        };
         if !ok {
             wrong.push(format!("{name}: {call:#?}\noutput: {}", call.output));
         }

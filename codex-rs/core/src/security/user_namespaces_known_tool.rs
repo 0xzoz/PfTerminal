@@ -3,23 +3,31 @@
 //! offered only for a command whose program is a known tool that needs one.
 //!
 //! An allow-list, decided on the parsed command, never by searching its text:
-//! the command must be exactly one simple command (a shell's `-c` script is
-//! parsed with tree-sitter and must hold one plain command: no `;`, `&&`,
-//! `|`, substitutions, expansions, redirections or assignments), its program,
-//! after the wrappers `env`, `sudo`, `exec`, `command` and `nohup` (with only
-//! the options listed here), must be named exactly (file name) as one of
-//! [`KNOWN_TOOLS`], and the program and each wrapper must be a bare name or
-//! a path in one of [`SYSTEM_DIRS`] (not a copy in a folder the agent can
-//! write). Anything else, including anything this can't resolve, is not
-//! offered.
+//! - The command is exactly one simple command: either the program's own
+//!   words, or a `bash`, `sh` or `zsh` `-c`/`-lc` script that tree-sitter
+//!   parses into one plain command (no `;`, `&&`, `|`, newlines,
+//!   substitutions, expansions, redirections, assignments or functions).
+//! - Its program, after the wrappers `env`, `sudo` and `nohup` (and, as the
+//!   script's first word, the shell builtins `exec` and `command`), with only
+//!   the options listed here, is named exactly (file name) as one of
+//!   [`KNOWN_TOOLS`].
+//! - Every program file involved (the shell, each wrapper and the tool) is
+//!   in one of [`SYSTEM_DIRS`] that this run's sandbox can't write: named by
+//!   that path, or by bare name found there first through the `PATH` the
+//!   command runs with, with no folder the run can write (or a relative one)
+//!   searched before it. A copy the agent could have written is never it.
+//!
+//! Anything else, including anything this can't resolve, is not offered.
+
+use std::path::Component;
+use std::path::Path;
 
 use codex_sandboxing::user_namespaces::KNOWN_TOOLS;
 use codex_shell_command::bash::extract_bash_command;
 use codex_shell_command::bash::parse_shell_script_into_commands;
 
-/// Folders a program may be named in by path: the system's, and Nix's
-/// system-wide profiles. A path anywhere else (`./podman`, `/tmp/podman`,
-/// `~/bin/podman`) is not resolved.
+/// Folders a program may run from: the system's, and Nix's system-wide
+/// profiles.
 const SYSTEM_DIRS: [&str; 7] = [
     "/usr/bin",
     "/bin",
@@ -30,35 +38,69 @@ const SYSTEM_DIRS: [&str; 7] = [
     "/nix/var/nix/profiles/default/bin",
 ];
 
+/// The shells whose `-c` script is parsed (exact file names).
+const SHELLS: [&str; 3] = ["bash", "sh", "zsh"];
+
+/// How program names are found for one run.
+pub(crate) struct Lookup<'a> {
+    /// The `PATH` the command runs with, where it runs on this host; `None`
+    /// where unknown or remote (then a bare name isn't resolved).
+    pub(crate) path: Option<&'a str>,
+    /// Whether this run's sandbox lets it write in `folder`.
+    pub(crate) writable: &'a dyn Fn(&Path) -> bool,
+    /// Whether `file` is an executable file.
+    pub(crate) executable: &'a dyn Fn(&Path) -> bool,
+}
+
 /// The known tool `command` runs, if it resolves to exactly one (see the
 /// module docs).
-pub(crate) fn known_tool(command: &[String]) -> Option<&'static str> {
-    let words = match extract_bash_command(command) {
-        Some((_, script)) => {
+pub(crate) fn known_tool(command: &[String], lookup: &Lookup<'_>) -> Option<&'static str> {
+    match extract_bash_command(command) {
+        Some((shell, script)) => {
+            // The shell itself, which the model may choose (`exec_command`'s
+            // `shell`), must be a system one: the prompt shows only the
+            // script.
+            if !SHELLS.contains(&resolve(shell, lookup)?) {
+                return None;
+            }
             let mut commands = parse_shell_script_into_commands(script)?;
             if commands.len() != 1 {
                 return None;
             }
-            commands.pop()?
+            program_after_wrappers(&commands.pop()?, /*in_script*/ true, lookup)
         }
-        None => command.to_vec(),
-    };
-    program_after_wrappers(&words)
+        None => program_after_wrappers(command, /*in_script*/ false, lookup),
+    }
 }
 
 /// The known tool `words` (one simple command) runs, after the wrappers.
-fn program_after_wrappers(mut words: &[String]) -> Option<&'static str> {
+/// `in_script`: the words are a shell script's, so its first word may be the
+/// builtin `exec` or `command`.
+fn program_after_wrappers(
+    mut words: &[String],
+    in_script: bool,
+    lookup: &Lookup<'_>,
+) -> Option<&'static str> {
+    let mut first_word = true;
     loop {
         let (first, rest) = words.split_first()?;
-        let name = file_name(first)?;
+        // A shell builtin only as the script's first word, by bare name;
+        // anywhere else `exec` or `command` is whatever program has that name.
+        let builtin = in_script && first_word && matches!(first.as_str(), "exec" | "command");
+        first_word = false;
+        let name = if builtin {
+            first.as_str()
+        } else {
+            resolve(first, lookup)?
+        };
         // The wrapper's options without and with a value (a user, group or
         // name, never a command).
         let (flags, takes_value): (&[&str], &[&str]) = match name {
             "env" => (&["-i", "--ignore-environment"], &["-u", "--unset"]),
             "sudo" => (&["-n", "--non-interactive", "-E", "-H"], &["-u", "-g"]),
-            "exec" => (&["-c", "-l", "-cl", "-lc"], &["-a"]),
-            "command" => (&["-p"], &[]),
             "nohup" => (&[], &[]),
+            "exec" if builtin => (&["-c", "-l", "-cl", "-lc"], &["-a"]),
+            "command" if builtin => (&["-p"], &[]),
             _ => return KNOWN_TOOLS.iter().copied().find(|tool| *tool == name),
         };
         let mut at = 0;
@@ -86,17 +128,41 @@ fn program_after_wrappers(mut words: &[String]) -> Option<&'static str> {
     }
 }
 
-/// The file name `word` runs, where it is a bare name or a path in one of
-/// [`SYSTEM_DIRS`]; `None` for an assignment, an empty word or any other
-/// path.
-fn file_name(word: &str) -> Option<&str> {
+/// The file name of the program `word` runs, where that program is in one
+/// of [`SYSTEM_DIRS`] the run can't write (see the module docs); `None`
+/// otherwise, and for an assignment, an option or an empty word.
+fn resolve<'w>(word: &'w str, lookup: &Lookup<'_>) -> Option<&'w str> {
     if word.is_empty() || word.contains('=') || word.starts_with('-') {
         return None;
     }
     match word.rsplit_once('/') {
-        None => Some(word),
-        Some((folder, name)) => (SYSTEM_DIRS.contains(&folder) && !name.is_empty()).then_some(name),
+        Some((folder, name)) => (!name.is_empty() && system_dir(folder, lookup)).then_some(name),
+        None => {
+            for folder in lookup.path?.split(':') {
+                let folder = folder.trim_end_matches('/');
+                let path = Path::new(folder);
+                // A relative entry (also an empty one, the working folder)
+                // or one the run can write: a copy could be found there.
+                if !path.is_absolute()
+                    || !path
+                        .components()
+                        .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+                    || (lookup.writable)(path)
+                {
+                    return None;
+                }
+                if (lookup.executable)(&path.join(word)) {
+                    return system_dir(folder, lookup).then_some(word);
+                }
+            }
+            None
+        }
     }
+}
+
+/// Whether `folder` is one of [`SYSTEM_DIRS`] the run can't write.
+fn system_dir(folder: &str, lookup: &Lookup<'_>) -> bool {
+    SYSTEM_DIRS.contains(&folder) && !(lookup.writable)(Path::new(folder))
 }
 
 #[cfg(test)]
