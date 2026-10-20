@@ -254,7 +254,7 @@ pub(crate) async fn handle_mcp_tool_call(
     .await;
 
     match decided {
-        McpCallOutcome::Run(approval_application) => {
+        McpCallOutcome::Run(approval_application, decided_under) => {
             handle_approved_mcp_tool_call(
                 &sess,
                 step_context.as_ref(),
@@ -264,6 +264,7 @@ pub(crate) async fn handle_mcp_tool_call(
                 metadata,
                 item_metadata,
                 approval_application,
+                decided_under,
             )
             .await
         }
@@ -309,9 +310,13 @@ const STALE_MCP_APPROVAL_REFUSAL: &str = "The security level changed while this 
      was open, each time it was asked, so it was not used and the tool was not called. Ask \
      again if it is still needed.";
 
+/// D50: why an approved MCP call was not made after all.
+const STALE_MCP_PREPARED_REFUSAL: &str = "the security level changed while this tool call was \
+     being prepared, so it was not made; ask again if it is still needed";
+
 /// D50: the note an MCP approval asked again carries.
-const MCP_ASKED_AGAIN_NOTE: &str = "The security level changed while the earlier prompt was \
-     open, so it is asked again under the new level.";
+const MCP_ASKED_AGAIN_NOTE: &str = "The security level changed while this tool call was being \
+     approved, so it is asked again under the new level.";
 
 /// D50: `decide(asked_again)` again while a security transition was committed
 /// during a decision that lets the call run; refused after
@@ -323,8 +328,11 @@ where
 {
     for round in 1..=MAX_STALE_MCP_APPROVAL_ROUNDS {
         let decided_under = sess.services.authority_marker();
-        let outcome = decide(/*asked_again*/ round > 1).await;
-        if !matches!(outcome, McpCallOutcome::Run(_))
+        let outcome = match decide(/*asked_again*/ round > 1).await {
+            McpCallOutcome::Run(application, _) => McpCallOutcome::Run(application, decided_under),
+            skip => skip,
+        };
+        if !matches!(outcome, McpCallOutcome::Run(..))
             || !sess.services.transition_since(decided_under)
         {
             return outcome;
@@ -342,12 +350,11 @@ where
 
 /// Whether an MCP call runs, and under which approval, or why not.
 enum McpCallOutcome {
-    Run(McpToolApprovalApplication),
+    /// With the policy marker it was decided under (set by
+    /// [`decide_until_fresh`]).
+    Run(McpToolApprovalApplication, Option<(u64, u64)>),
     /// `metrics`: whether the skip is counted in the call metrics.
-    Skip {
-        message: String,
-        metrics: bool,
-    },
+    Skip { message: String, metrics: bool },
 }
 
 /// The post-taint check and the approval of one MCP call, under the policy
@@ -376,7 +383,9 @@ async fn decide_mcp_tool_call(
     )
     .await
     {
-        Ok(true) => return McpCallOutcome::Run(McpToolApprovalApplication::NotRequired),
+        Ok(true) => {
+            return McpCallOutcome::Run(McpToolApprovalApplication::NotRequired, None);
+        }
         Ok(false) => {}
         Err(refusal) => {
             return McpCallOutcome::Skip {
@@ -407,18 +416,19 @@ async fn decide_mcp_tool_call(
     )
     .await
     else {
-        return McpCallOutcome::Run(McpToolApprovalApplication::NotRequired);
+        return McpCallOutcome::Run(McpToolApprovalApplication::NotRequired, None);
     };
     match decision {
         decision @ (McpToolApprovalDecision::Accept
         | McpToolApprovalDecision::AcceptForSession
-        | McpToolApprovalDecision::AcceptAndRemember) => {
-            McpCallOutcome::Run(McpToolApprovalApplication::Apply {
+        | McpToolApprovalDecision::AcceptAndRemember) => McpCallOutcome::Run(
+            McpToolApprovalApplication::Apply {
                 decision,
                 policy: approval_policy,
                 shown_under: approval_shown_under,
-            })
-        }
+            },
+            None,
+        ),
         McpToolApprovalDecision::Decline { message } => McpCallOutcome::Skip {
             message: message.unwrap_or_else(|| "user rejected MCP tool call".to_string()),
             metrics: true,
@@ -572,6 +582,7 @@ async fn handle_approved_mcp_tool_call(
     metadata: McpToolApprovalMetadata,
     item_metadata: McpToolCallItemMetadata,
     approval_application: McpToolApprovalApplication,
+    decided_under: Option<(u64, u64)>,
 ) -> HandledMcpToolCall {
     let turn_context = step_context.turn.as_ref();
     let server = invocation.server.clone();
@@ -648,6 +659,11 @@ async fn handle_approved_mcp_tool_call(
                         request_meta,
                     )
                     .await?;
+                    // D50 (#1001): nor when a security transition was
+                    // committed while the call was prepared.
+                    if sess.services.transition_since(decided_under) {
+                        anyhow::bail!(STALE_MCP_PREPARED_REFUSAL);
+                    }
                     let mcp_call_trace = sess
                         .services
                         .rollout_thread_trace

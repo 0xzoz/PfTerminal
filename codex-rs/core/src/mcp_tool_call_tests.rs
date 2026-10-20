@@ -3124,11 +3124,14 @@ fn issue_1001_raise(
 }
 
 fn accepted() -> McpCallOutcome {
-    McpCallOutcome::Run(McpToolApprovalApplication::Apply {
-        decision: McpToolApprovalDecision::Accept,
-        policy: McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
-        shown_under: None,
-    })
+    McpCallOutcome::Run(
+        McpToolApprovalApplication::Apply {
+            decision: McpToolApprovalDecision::Accept,
+            policy: McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
+            shown_under: None,
+        },
+        /*decided_under*/ None,
+    )
 }
 
 /// D50 (#1001): an MCP call approved while a security transition was
@@ -3148,7 +3151,7 @@ async fn issue_1001_mcp_call_approved_before_a_level_change_is_asked_again() {
         async { accepted() }
     })
     .await;
-    assert!(matches!(outcome, McpCallOutcome::Run(_)));
+    assert!(matches!(outcome, McpCallOutcome::Run(..)));
     assert_eq!(asked, vec![false, true]);
 
     // Without a transition: decided once, as before.
@@ -3158,7 +3161,7 @@ async fn issue_1001_mcp_call_approved_before_a_level_change_is_asked_again() {
         async { accepted() }
     })
     .await;
-    assert!(matches!(outcome, McpCallOutcome::Run(_)));
+    assert!(matches!(outcome, McpCallOutcome::Run(..)));
     assert_eq!(asked, vec![false]);
 
     // A refusal stands, transition or not.
@@ -3206,7 +3209,7 @@ async fn issue_1001_mcp_call_stale_every_time_is_refused() {
     assert_eq!(asked, MAX_STALE_MCP_APPROVAL_ROUNDS);
     match outcome {
         McpCallOutcome::Skip { message, .. } => assert_eq!(message, STALE_MCP_APPROVAL_REFUSAL),
-        McpCallOutcome::Run(_) => panic!("a stale approval ran the call"),
+        McpCallOutcome::Run(..) => panic!("a stale approval ran the call"),
     }
 }
 
@@ -3233,7 +3236,7 @@ async fn issue_1001_ask(
         /*tool_description*/ None,
     );
     metadata.annotations = Some(annotations(
-        Some(false),
+        /*read_only*/ Some(false),
         /*destructive*/ Some(true),
         /*open_world*/ Some(true),
     ));
@@ -3304,9 +3307,23 @@ async fn issue_1001_session() -> (
 #[tokio::test]
 async fn issue_1001_mcp_question_asked_again_says_why() {
     let (session, turn_context, events) = issue_1001_session().await;
-    let (_, first) = issue_1001_ask(&session, &turn_context, &events, false, "Allow").await;
+    let (_, first) = issue_1001_ask(
+        &session,
+        &turn_context,
+        &events,
+        /*asked_again*/ false,
+        "Allow",
+    )
+    .await;
     assert!(!first.question.contains(MCP_ASKED_AGAIN_NOTE));
-    let (decision, again) = issue_1001_ask(&session, &turn_context, &events, true, "Allow").await;
+    let (decision, again) = issue_1001_ask(
+        &session,
+        &turn_context,
+        &events,
+        /*asked_again*/ true,
+        "Allow",
+    )
+    .await;
     assert_eq!(decision, Some(McpToolApprovalDecision::Accept));
     assert!(
         again.question.starts_with(MCP_ASKED_AGAIN_NOTE),
@@ -3326,7 +3343,7 @@ async fn issue_1011_lasting_answer_the_prompt_did_not_offer_allows_once() {
         &session,
         &turn_context,
         &events,
-        false,
+        /*asked_again*/ false,
         MCP_TOOL_APPROVAL_ACCEPT_FOR_SESSION,
     )
     .await;
@@ -3349,7 +3366,7 @@ async fn issue_1011_lasting_answer_the_prompt_did_not_offer_allows_once() {
         &session,
         &turn_context,
         &events,
-        false,
+        /*asked_again*/ false,
         MCP_TOOL_APPROVAL_ACCEPT_FOR_SESSION,
     )
     .await;
