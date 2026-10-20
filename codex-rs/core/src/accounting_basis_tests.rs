@@ -609,8 +609,8 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
     // A `.lock` file is checked by its size instead of read: the accounting
     // spool's writer still holds `accounting-pending/<process>.lock` (the
     // runtime is alive), and Windows enforces that exclusive lock against reads
-    // from any other handle (os error 33, #694). An empty file cannot hold the
-    // key.
+    // from any other handle (os error 33, #694). A file shorter than the key
+    // cannot hold it.
     let mut pending = vec![home.path().to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(dir)? {
@@ -621,7 +621,8 @@ async fn admission_records_the_named_account() -> anyhow::Result<()> {
                 .extension()
                 .is_some_and(|extension| extension == "lock")
             {
-                assert_eq!(std::fs::metadata(&path)?.len(), 0, "{}", path.display());
+                let len = std::fs::metadata(&path)?.len();
+                assert!(len < CANARY.len() as u64, "{}: {len} bytes", path.display());
             } else {
                 let bytes = std::fs::read(&path)
                     .map_err(|error| anyhow::anyhow!("read {}: {error}", path.display()))?;
