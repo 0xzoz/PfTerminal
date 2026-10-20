@@ -476,6 +476,10 @@ struct CodexAppsJsonRpcResponder {
 }
 
 impl Respond for CodexAppsJsonRpcResponder {
+    #[allow(
+        deprecated,
+        reason = "Rust 1.99 renames fetch_update to try_update, which is unstable on the argument-comment-lint nightly (nightly-2025-09-18)"
+    )]
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let body: Value = match serde_json::from_slice(&request.body) {
             Ok(body) => body,
@@ -502,7 +506,7 @@ impl Respond for CodexAppsJsonRpcResponder {
                     .as_ref()
                     .is_some_and(|remaining| {
                         remaining
-                            .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                                 remaining.checked_sub(1)
                             })
                             .is_ok()
