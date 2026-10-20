@@ -153,22 +153,65 @@ mod tests {
         ("shell.rs", include_str!("shell.rs")),
     ];
 
-    /// The loop keyword a line starts with (`for`, `while` or `loop`),
-    /// labelled or not, and the text from it.
-    fn loop_start(line: &str) -> Option<(&str, &str)> {
-        let mut code = line.trim_start();
-        if let Some(label) = code.strip_prefix('\'')
-            && let Some((name, rest)) = label.split_once(':')
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        {
-            code = rest.trim_start();
+    /// Where loops start in `line`, as their keyword (`for`, `while` or
+    /// `loop`) and its offset: at the start of the line or after `=`, `=>`,
+    /// `{`, `(`, `,`, `;` or `|`, labelled or not, in code outside strings,
+    /// character literals and comments.
+    fn loop_starts(line: &str) -> Vec<(&'static str, usize)> {
+        let bytes = line.as_bytes();
+        let mut found = Vec::new();
+        // Whether a statement or expression may start here.
+        let mut opens = true;
+        let mut at = 0;
+        while at < bytes.len() {
+            match bytes[at] {
+                b' ' | b'\t' | b'\n' | b'\r' => {}
+                b'/' if bytes.get(at + 1) == Some(&b'/') => break,
+                b'"' => {
+                    at += 1;
+                    while at < bytes.len() && bytes[at] != b'"' {
+                        at += if bytes[at] == b'\\' { 2 } else { 1 };
+                    }
+                    opens = false;
+                }
+                b'\'' if bytes.get(at + 2) == Some(&b'\'') => {
+                    at += 2;
+                    opens = false;
+                }
+                b'\'' if bytes.get(at + 1) == Some(&b'\\') => {
+                    at += bytes[at + 3..]
+                        .iter()
+                        .position(|&byte| byte == b'\'')
+                        .unwrap_or(0)
+                        + 3;
+                    opens = false;
+                }
+                b'\'' if opens => {
+                    // A label (`'outer: loop`) keeps the position open.
+                    let name = bytes[at + 1..]
+                        .iter()
+                        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'_')
+                        .count();
+                    if name > 0 && bytes.get(at + 1 + name) == Some(&b':') {
+                        at += name + 1;
+                    } else {
+                        opens = false;
+                    }
+                }
+                byte => {
+                    if opens
+                        && let Some(keyword) = ["for ", "while ", "loop {", "loop{"]
+                            .into_iter()
+                            .find(|keyword| bytes[at..].starts_with(keyword.as_bytes()))
+                    {
+                        found.push((keyword.trim_end_matches('{').trim_end(), at));
+                    }
+                    opens = matches!(byte, b'=' | b'>' | b'{' | b'(' | b',' | b';' | b'|');
+                }
+            }
+            at += 1;
         }
-        ["for ", "while ", "loop {"]
-            .into_iter()
-            .find(|keyword| code.starts_with(keyword))
-            .map(|keyword| (keyword.trim_end_matches('{').trim_end(), code))
+        found
     }
 
     /// Whether the body of the loop starting `header` (which runs on to
@@ -219,11 +262,10 @@ mod tests {
             if code.starts_with("mod tests") || code.starts_with("#[path = ") {
                 break;
             }
-            if !code.starts_with("//")
-                && let Some((keyword, from)) = loop_start(line)
-                && !steps_first(keyword, &source[offset + (line.len() - from.len())..])
-            {
-                missing.push(format!("{file}:{}", at + 1));
+            for (keyword, from) in loop_starts(line) {
+                if !steps_first(keyword, &source[offset + from..]) {
+                    missing.push(format!("{file}:{}", at + 1));
+                }
             }
             offset += line.len();
         }
@@ -245,11 +287,41 @@ mod tests {
         let loops = "for x in y {\n    work::step();\n}\nwhile a\n    && b\n{\n    f();\n}\n\
                      'outer: loop {\n}\n// for x in y {\nlet f = |x| x;\n\
                      for P { a } in s.split('{').chain(['\\'', '\\u{7d}']) {\n    work::step();\n}\n\
-                     while s == \"{\" {}\nfor P { a } in x {\n    f(a);\n}\n";
+                     while s == \"{\" {}\nfor P { a } in x {\n    f(a);\n}\n\
+                     let v = 'l: loop {\n    work::step();\n};\nlet w = loop {\n    break;\n};\n\
+                     match x { _ => while y {} }\nimpl A for B {}\nf(\"= loop {\", '\"', x)\n";
         assert_eq!(
             unstepped("f.rs", loops),
-            vec!["f.rs:4", "f.rs:9", "f.rs:16", "f.rs:17"]
+            vec![
+                "f.rs:4", "f.rs:9", "f.rs:16", "f.rs:17", "f.rs:23", "f.rs:26"
+            ]
         );
+    }
+
+    /// A module added to the classifier is checked too.
+    #[test]
+    fn every_classifier_module_is_checked() {
+        for (file, source) in SOURCES {
+            for line in source.lines() {
+                let code = line.trim_start();
+                let code = code.strip_prefix("pub(super) ").unwrap_or(code);
+                let code = code.strip_prefix("pub(crate) ").unwrap_or(code);
+                let Some(module) = code
+                    .strip_prefix("mod ")
+                    .and_then(|rest| rest.strip_suffix(';'))
+                else {
+                    continue;
+                };
+                assert!(
+                    module == "work"
+                        || module.ends_with("tests")
+                        || SOURCES
+                            .iter()
+                            .any(|(checked, _)| *checked == format!("{module}.rs")),
+                    "{file}: add `{module}.rs` to SOURCES in work.rs"
+                );
+            }
+        }
     }
 
     #[test]

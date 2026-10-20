@@ -750,12 +750,13 @@ fn review_6_fallback_stays_linear() {
     });
     work::assert_linear("assignments", |scale| {
         let count = 25_000 * scale;
-        assert_eq!(
-            arithmetic_assignments(&"i=1, ".repeat(count)).count(),
-            count
-        );
-        // Without separators each value runs on: only the last one is read.
-        assert_eq!(arithmetic_assignments(&"i=1 ".repeat(count)).count(), 1);
+        let found = arithmetic_assignments(&"i=1, ".repeat(count)).count();
+        assert_eq!(found, count);
+    });
+    // Without separators each value runs on: only the last one is read.
+    work::assert_linear("unseparated assignments", |scale| {
+        let found = arithmetic_assignments(&"i=1 ".repeat(25_000 * scale)).count();
+        assert_eq!(found, 1);
     });
     work::assert_linear("references", |scale| {
         assert!(numeric_references(&"$x + ".repeat(25_000 * scale)).is_some());
@@ -775,17 +776,26 @@ fn review_6_fallback_stays_linear() {
     });
     // D57 qualifier lists: assignments, attached groups, escapes and `$`
     // runs, nested groups, and substitutions in a list.
-    work::assert_linear("qualifier lists", |scale| {
+    work::assert_linear("assignment lists", |scale| {
+        assert_eq!(qualifier_lists(&"a=(1); ".repeat(12_500 * scale)).len(), 0);
+    });
+    // Past the bounded walk a chain of assignments counts as lists.
+    work::assert_linear("chained assignment lists", |scale| {
+        assert!(!qualifier_lists(&"a=(1) ".repeat(12_500 * scale)).is_empty());
+    });
+    work::assert_linear("attached groups", |scale| {
         let count = 12_500 * scale;
-        assert_eq!(qualifier_lists(&"a=(1); ".repeat(count)).len(), 0);
-        // Past the bounded walk a chain of assignments counts as lists.
-        assert!(!qualifier_lists(&"a=(1) ".repeat(count)).is_empty());
         assert_eq!(qualifier_lists(&"x) a=(".repeat(count)).len(), count);
+    });
+    work::assert_linear("groups", |scale| {
+        let count = 12_500 * scale;
         assert_eq!(qualifier_lists(&"f(x) ".repeat(count)).len(), count);
     });
-    work::assert_linear("escaped qualifier list", |scale| {
+    work::assert_linear("escapes", |scale| {
         let escapes = "\\".repeat(50_000 * scale);
         assert_eq!(qualifier_lists(&format!("{escapes}(x)")).len(), 1);
+    });
+    work::assert_linear("dollars", |scale| {
         let dollars = "$".repeat(50_000 * scale);
         assert_eq!(qualifier_lists(&format!("{dollars}(x)")).len(), 1);
     });
