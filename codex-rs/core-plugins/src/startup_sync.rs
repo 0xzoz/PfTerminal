@@ -1133,6 +1133,9 @@ fn extract_zipball_to_dir(bytes: &[u8], destination: &Path) -> Result<(), String
                 "curated plugins zip entry `{name}` escapes extraction root"
             ));
         };
+        if entry.is_symlink() {
+            continue;
+        }
 
         let mut components = relative_path.components();
         let Some(std::path::Component::Normal(_)) = components.next() else {
