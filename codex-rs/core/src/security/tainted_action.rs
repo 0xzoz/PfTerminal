@@ -853,10 +853,13 @@ impl Classifier {
         // #937: arithmetic on a variable filled from command output or
         // `read` runs the substitutions in its value, like `eval`.
         // #1028: zsh `e`/`+` glob qualifiers run code the classifier does
-        // not read as commands.
+        // not read as commands; #1084: so may a value under glob
+        // substitution.
         if self.rebuilt == 0
             && self.not_shell == 0
-            && (arithmetic.runs_unseen(command) || arithmetic.runs_qualifier_code(command))
+            && (arithmetic.runs_unseen(command)
+                || arithmetic.runs_qualifier_code(command)
+                || arithmetic.uses_glob_substitution(command))
         {
             self.note(ProtectedActionKind::UnseenCode);
         }
