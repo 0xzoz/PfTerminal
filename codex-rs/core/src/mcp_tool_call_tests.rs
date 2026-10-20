@@ -2134,7 +2134,13 @@ async fn maybe_persist_mcp_tool_approval_reloads_session_config() {
         tool_name: "calendar/list_events".to_string(),
     };
 
-    maybe_persist_mcp_tool_approval(&session, &turn_context, key.clone()).await;
+    maybe_persist_mcp_tool_approval(
+        &session,
+        &turn_context,
+        key.clone(),
+        session.services.authority_marker(),
+    )
+    .await;
 
     let config = session.get_config().await;
     let apps_toml = config
@@ -2184,7 +2190,13 @@ async fn maybe_persist_mcp_tool_approval_reloads_session_config_for_custom_serve
         tool_name: "search".to_string(),
     };
 
-    maybe_persist_mcp_tool_approval(&session, &turn_context, key.clone()).await;
+    maybe_persist_mcp_tool_approval(
+        &session,
+        &turn_context,
+        key.clone(),
+        session.services.authority_marker(),
+    )
+    .await;
 
     let config = session.get_config().await;
     let mcp_servers_toml = config
@@ -2239,7 +2251,13 @@ enabled = true
         tool_name: "search".to_string(),
     };
 
-    maybe_persist_mcp_tool_approval(&session, &turn_context, key.clone()).await;
+    maybe_persist_mcp_tool_approval(
+        &session,
+        &turn_context,
+        key.clone(),
+        session.services.authority_marker(),
+    )
+    .await;
 
     let contents = std::fs::read_to_string(codex_home.join(CONFIG_TOML_FILE)).expect("read config");
     let parsed: ConfigToml = toml::from_str(&contents).expect("parse config");
@@ -2294,7 +2312,13 @@ async fn maybe_persist_mcp_tool_approval_writes_project_config_for_project_serve
         tool_name: "search".to_string(),
     };
 
-    maybe_persist_mcp_tool_approval(&session, &turn_context, key.clone()).await;
+    maybe_persist_mcp_tool_approval(
+        &session,
+        &turn_context,
+        key.clone(),
+        session.services.authority_marker(),
+    )
+    .await;
 
     let contents = std::fs::read_to_string(project_codex_dir.join(CONFIG_TOML_FILE))
         .expect("read project config");
@@ -2628,7 +2652,12 @@ async fn permission_request_hook_runs_after_remembered_mcp_approval() {
     let remembered_key =
         session_mcp_tool_approval_key(&invocation, Some(&metadata), AppToolApproval::Auto)
             .expect("memory MCP tool should support session approval");
-    remember_mcp_tool_approval(&session, remembered_key).await;
+    remember_mcp_tool_approval(
+        &session,
+        remembered_key,
+        session.services.authority_marker(),
+    )
+    .await;
 
     let session = Arc::new(session);
     let turn_context = Arc::new(turn_context);
@@ -2949,4 +2978,77 @@ async fn approve_mode_skips_guardian_in_every_permission_mode() {
 
         assert_eq!(decision, None);
     }
+}
+
+/// #945: an MCP "for session" answer that arrives after a security transition
+/// was for a stale prompt. It is not remembered, even when another tool call
+/// checked the approval cache under the new policy meanwhile.
+#[tokio::test]
+async fn issue_945_mcp_for_session_answer_after_a_level_change_is_not_remembered() {
+    use codex_security_policy::PolicyPrincipal;
+    use codex_security_policy::PrincipalKind;
+    use codex_security_policy::RevocationState;
+    use codex_security_policy::SecurityLevel;
+    use codex_security_policy::SecuritySettings;
+
+    let (session, turn_context) = make_session_and_context().await;
+    let controller = crate::security::TrustedSecurityController::initialize(
+        &session.services.agent_control.effective_security_policy(),
+        crate::security::PersistedHumanSecurityState::new(
+            SecuritySettings::new(SecurityLevel::Permissive),
+            PolicyPrincipal::new(PrincipalKind::Human, "human:issue-945").unwrap(),
+            RevocationState::new(),
+        )
+        .unwrap(),
+        session.thread_id,
+        codex_protocol::SessionId::from(session.thread_id),
+        crate::security::EffectivePolicyInitialization::Root,
+    )
+    .expect("initialize the session's policy tree");
+    let key = McpToolApprovalKey {
+        server: "memory".to_string(),
+        connector_id: None,
+        tool_name: "create_entities".to_string(),
+    };
+
+    // The prompt is shown under Permissive.
+    let shown_under = session.services.authority_marker();
+    assert!(!mcp_tool_approval_is_remembered(&session, &key).await);
+    // The level rises; another tool call checks the cache meanwhile.
+    let change = controller
+        .confirm_level_change(SecurityLevel::Moderate, RevocationState::new())
+        .unwrap();
+    controller.apply_confirmed_change(change).unwrap();
+    drop(session.services.approval_cache().await);
+
+    for decision in [
+        McpToolApprovalDecision::AcceptForSession,
+        McpToolApprovalDecision::AcceptAndRemember,
+    ] {
+        apply_mcp_tool_approval_decision(
+            &session,
+            &turn_context,
+            &decision,
+            Some(key.clone()),
+            /*persistent_approval_key*/ None,
+            shown_under,
+        )
+        .await;
+        assert!(
+            !mcp_tool_approval_is_remembered(&session, &key).await,
+            "{decision:?} answered after the level change was stored"
+        );
+    }
+
+    // An answer to a prompt shown under the level in force is remembered.
+    apply_mcp_tool_approval_decision(
+        &session,
+        &turn_context,
+        &McpToolApprovalDecision::AcceptForSession,
+        Some(key.clone()),
+        /*persistent_approval_key*/ None,
+        session.services.authority_marker(),
+    )
+    .await;
+    assert!(mcp_tool_approval_is_remembered(&session, &key).await);
 }

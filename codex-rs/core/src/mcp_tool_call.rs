@@ -275,6 +275,9 @@ pub(crate) async fn handle_mcp_tool_call(
     } else {
         McpToolApprovalPolicy::for_server(approval_mode)
     };
+    // #945: the policy the approval prompt is shown under. A "for session"
+    // or remembered answer is stored only while it is still in force.
+    let approval_shown_under = sess.services.authority_marker();
     if let Some(decision) = maybe_request_mcp_tool_approval(
         &sess,
         step_context,
@@ -302,6 +305,7 @@ pub(crate) async fn handle_mcp_tool_call(
                     McpToolApprovalApplication::Apply {
                         decision,
                         policy: approval_policy,
+                        shown_under: approval_shown_under,
                     },
                 )
                 .await;
@@ -519,8 +523,11 @@ async fn handle_approved_mcp_tool_call(
         let result = async {
             let result = prepared_call
                 .call_with_preparation(|| async {
-                    if let McpToolApprovalApplication::Apply { decision, policy } =
-                        &approval_application
+                    if let McpToolApprovalApplication::Apply {
+                        decision,
+                        policy,
+                        shown_under,
+                    } = &approval_application
                     {
                         let session_approval_key = session_mcp_tool_approval_key(
                             &invocation,
@@ -542,6 +549,7 @@ async fn handle_approved_mcp_tool_call(
                             decision,
                             session_approval_key,
                             persistent_approval_key,
+                            *shown_under,
                         )
                         .await;
                     }
@@ -1151,6 +1159,8 @@ enum McpToolApprovalApplication {
     Apply {
         decision: McpToolApprovalDecision,
         policy: McpToolApprovalPolicy,
+        /// #945: the policy marker the approval prompt was shown under.
+        shown_under: Option<(u64, u64)>,
     },
 }
 
@@ -2065,10 +2075,15 @@ async fn mcp_tool_approval_is_remembered(sess: &Session, key: &McpToolApprovalKe
     matches!(store.get(key), Some(ReviewDecision::ApprovedForSession))
 }
 
-/// PF-23-S03: under the policy the cache was last checked under; dropped
-/// when a security transition was committed since.
-async fn remember_mcp_tool_approval(sess: &Session, key: McpToolApprovalKey) {
-    let decided_under = sess.services.tool_approvals.lock().await.policy();
+/// PF-23-S03: under the policy the prompt was shown under; dropped when a
+/// security transition was committed since (#945).
+async fn remember_mcp_tool_approval(
+    sess: &Session,
+    key: McpToolApprovalKey,
+    shown_under: Option<(u64, u64)>,
+) {
+    // No marker then: the tree was initialized since, without a transition.
+    let decided_under = shown_under.or_else(|| sess.services.authority_marker());
     sess.services.remember_approvals([key], decided_under).await;
 }
 
@@ -2078,18 +2093,32 @@ async fn apply_mcp_tool_approval_decision(
     decision: &McpToolApprovalDecision,
     session_approval_key: Option<McpToolApprovalKey>,
     persistent_approval_key: Option<McpToolApprovalKey>,
+    shown_under: Option<(u64, u64)>,
 ) {
+    let lasting = matches!(
+        decision,
+        McpToolApprovalDecision::AcceptForSession | McpToolApprovalDecision::AcceptAndRemember
+    );
+    // #945: answered after a security transition, for a stale prompt: it
+    // approves this call once and stores nothing.
+    if lasting && sess.services.transition_since(shown_under) {
+        tracing::info!(
+            target: "codex_core::security::transition",
+            "MCP tool approval answered after a security transition; not stored"
+        );
+        return;
+    }
     match decision {
         McpToolApprovalDecision::AcceptForSession => {
             if let Some(key) = session_approval_key {
-                remember_mcp_tool_approval(sess, key).await;
+                remember_mcp_tool_approval(sess, key, shown_under).await;
             }
         }
         McpToolApprovalDecision::AcceptAndRemember => {
             if let Some(key) = persistent_approval_key {
-                maybe_persist_mcp_tool_approval(sess, turn_context, key).await;
+                maybe_persist_mcp_tool_approval(sess, turn_context, key, shown_under).await;
             } else if let Some(key) = session_approval_key {
-                remember_mcp_tool_approval(sess, key).await;
+                remember_mcp_tool_approval(sess, key, shown_under).await;
             }
         }
         McpToolApprovalDecision::Accept
@@ -2102,12 +2131,13 @@ async fn maybe_persist_mcp_tool_approval(
     sess: &Session,
     turn_context: &TurnContext,
     key: McpToolApprovalKey,
+    shown_under: Option<(u64, u64)>,
 ) {
     let tool_name = key.tool_name.clone();
 
     let persist_result = if key.server == CODEX_APPS_MCP_SERVER_NAME {
         let Some(connector_id) = key.connector_id.clone() else {
-            remember_mcp_tool_approval(sess, key).await;
+            remember_mcp_tool_approval(sess, key, shown_under).await;
             return;
         };
         persist_codex_app_tool_approval(&turn_context.config, &connector_id, &tool_name).await
@@ -2122,12 +2152,12 @@ async fn maybe_persist_mcp_tool_approval(
             tool_name,
             "failed to persist MCP tool approval"
         );
-        remember_mcp_tool_approval(sess, key).await;
+        remember_mcp_tool_approval(sess, key, shown_under).await;
         return;
     }
 
     sess.reload_user_config_layer().await;
-    remember_mcp_tool_approval(sess, key).await;
+    remember_mcp_tool_approval(sess, key, shown_under).await;
 }
 
 async fn persist_codex_app_tool_approval(
