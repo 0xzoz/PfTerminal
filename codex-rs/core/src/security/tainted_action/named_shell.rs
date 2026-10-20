@@ -5,9 +5,13 @@
 //! Fail closed: only a line the host runs under the bash, dash or sh its
 //! argv names by system path (an sh that is not zsh), whose script is plain
 //! commands with literal words (a real bash parse: no substitutions,
-//! expansions, redirections, groups, assignments or control flow), each a
-//! program that never hands its words to a shell. Anything else keeps the
+//! parameter expansions, redirections, groups, assignments or control flow),
+//! each a program that never hands its words to a shell. The parse keeps
+//! backslashes, braces and glob characters, which bash still expands, so a
+//! word whose meaning matters must hold none. Anything else keeps the
 //! checks, a shell named without a system path included.
+
+use codex_shell_command::bash::PlainWord;
 
 /// Longer scripts are not parsed (they keep the checks).
 const MAX_SCRIPT_BYTES: usize = 64 * 1024;
@@ -15,15 +19,18 @@ const MAX_SCRIPT_BYTES: usize = 64 * 1024;
 const NOT_ZSH: &[&str] = &["/bin/bash", "/usr/bin/bash", "/bin/dash", "/usr/bin/dash"];
 /// `sh`, which counts only when it is one of those.
 const SYSTEM_SH: &[&str] = &["/bin/sh", "/usr/bin/sh"];
-/// Programs that only print, read or name files and never run their words
-/// (`printf` without options: `-v` assigns a variable).
+/// Programs that only print, read or name files and never run their words,
+/// whatever their words expand to (not `printf`: `-v` assigns a variable).
 const DATA_ONLY: &[&str] = &[
-    "echo", "printf", "cd", "pwd", "true", "false", "ls", "cat", "head", "tail", "wc", "grep",
-    "mkdir", "touch",
+    "echo", "cd", "pwd", "true", "false", "ls", "cat", "head", "tail", "wc", "grep", "mkdir",
+    "touch",
 ];
 /// Git subcommands that run nothing named on the line (hooks, pagers and
 /// filters come from configuration, which the classifier protects), without
-/// `--output` (a file the classifier does not judge as written).
+/// `--output` (a file the classifier does not judge as written, #1141) and
+/// without words bash may turn into it: a backslash (`--out\put`, or a
+/// backslash-newline in double quotes), or unquoted braces or glob
+/// characters (`{--output=x,}`, a glob matching a file so named).
 const GIT_DATA_ONLY: &[&str] = &[
     "status", "diff", "log", "show", "add", "commit", "restore", "switch", "checkout", "branch",
     "rm", "mv", "stash",
@@ -38,7 +45,7 @@ pub(super) fn avoids_zsh(command: &[String]) -> bool {
     {
         return false;
     }
-    codex_shell_command::bash::parse_shell_script_into_commands(script).is_some_and(|commands| {
+    codex_shell_command::bash::parse_shell_script_into_plain_words(script).is_some_and(|commands| {
         !commands.is_empty() && commands.iter().all(|words| data_only(words))
     })
 }
@@ -68,17 +75,20 @@ fn system_sh_not_zsh(_shell: &str) -> bool {
     false
 }
 
-fn data_only(words: &[String]) -> bool {
+fn data_only(words: &[PlainWord]) -> bool {
     let Some((name, rest)) = words.split_first() else {
         return false;
     };
-    match name.as_str() {
+    match name.text.as_str() {
         "git" => {
             rest.first()
-                .is_some_and(|subcommand| GIT_DATA_ONLY.contains(&subcommand.as_str()))
-                && !rest.iter().any(|word| word.starts_with("--output"))
+                .is_some_and(|subcommand| GIT_DATA_ONLY.contains(&subcommand.text.as_str()))
+                && !rest.iter().any(|word| {
+                    word.text.starts_with("--output")
+                        || word.text.contains('\\')
+                        || (word.unquoted && word.text.contains(['{', '*', '?', '[']))
+                })
         }
-        "printf" => rest.first().is_some_and(|format| !format.starts_with('-')),
         name => DATA_ONLY.contains(&name),
     }
 }

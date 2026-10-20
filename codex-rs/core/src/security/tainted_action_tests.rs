@@ -3103,16 +3103,15 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
             "/bin/bash",
             "git commit -m 'fix(tests): keep *(N) and /*(e:true:)'",
         ),
+        ("/bin/bash", "git commit -m \"[WIP] fix(tests)? {x}\""),
         ("/usr/bin/bash", "git add 'src/*(N)' && git status"),
         (
             "/bin/bash",
             "echo '/*(e:true:)' ; echo \"/*(+f)\" && echo '/*(oe:x:)'",
         ),
-        ("/bin/bash", "printf 'fix(tests)'"),
         ("/bin/bash", "grep -n 'x$~y' notes.txt | head -n 3"),
         ("/bin/bash", "echo '${~x} ${(e)y} setopt globsubst'"),
         ("/bin/dash", "cd /work && git log --oneline -- '*(N)'"),
-        ("/bin/sh", "git commit -m 'fix(tests)'"),
     ] {
         for flag in ["-lc", "-c"] {
             let found = named(&[shell, flag, line]);
@@ -3120,6 +3119,12 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
                 wrong.push(format!("{shell} {flag} {line:?}: {found:?}, expected None"));
             }
         }
+    }
+    // `/bin/sh` counts where it is bash or dash (stock macOS and Linux).
+    let sh = named(&["/bin/sh", "-c", "git commit -m 'fix(tests)'"]);
+    let sh_not_zsh = named_shell::avoids_zsh(&["/bin/sh".into(), "-c".into(), "true".into()]);
+    if sh != (!sh_not_zsh).then_some(UnseenCode) {
+        wrong.push(format!("/bin/sh (not zsh: {sh_not_zsh}): {sh:?}"));
     }
     // The same text where zsh may run asks as before: under zsh, through a
     // nested or hidden zsh, a program that may run its words, syntax that
@@ -3153,6 +3158,39 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
             "/bin/bash",
             "-lc",
             "git log -1 --format='/*(e:true:)' --output=x.zsh",
+        ],
+        // Review r1: words bash expands into an option.
+        vec![
+            "/bin/bash",
+            "-lc",
+            "printf \\-v GIT_PAGER %s '/*(e:true:)'; git log",
+        ],
+        vec!["/bin/bash", "-lc", "printf 'fix(tests) /*(e:true:)'"],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' --out\\put=x.zsh",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' {--output=x.zsh,}",
+        ],
+        vec!["/bin/bash", "-lc", "git log --format='/*(e:true:)' *"],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' ?-output=x.zsh",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' [-]-output=x.zsh",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' \"--out\\\nput=x.zsh\"",
         ],
         vec![
             "/bin/bash",
