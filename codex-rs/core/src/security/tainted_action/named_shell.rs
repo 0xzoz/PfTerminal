@@ -6,10 +6,12 @@
 //! argv names by system path (an sh that is not zsh), whose script is plain
 //! commands with literal words (a real bash parse: no substitutions,
 //! parameter expansions, redirections, groups, assignments or control flow),
-//! each a program that never hands its words to a shell. The parse keeps
-//! backslashes, braces and glob characters, which bash still expands, so a
-//! word whose meaning matters must hold none. Anything else keeps the
-//! checks, a shell named without a system path included.
+//! each a program that never hands its words to a shell. Where the parse
+//! and bash may split words differently (a backslash: `diff\<newline>tool`
+//! is one bash word, two parsed words; control characters) the line keeps
+//! the checks; braces and glob characters, which bash still expands, must
+//! stay out of words whose meaning matters. Anything else keeps the checks,
+//! a shell named without a system path included.
 
 use codex_shell_command::bash::PlainWord;
 
@@ -28,8 +30,7 @@ const DATA_ONLY: &[&str] = &[
 /// Git subcommands that run nothing named on the line (hooks, pagers and
 /// filters come from configuration, which the classifier protects), without
 /// `--output` (a file the classifier does not judge as written, #1141) and
-/// without words bash may turn into it: a backslash (`--out\put`, or a
-/// backslash-newline in double quotes), or unquoted braces or glob
+/// without words bash may expand into it: unquoted braces or glob
 /// characters (`{--output=x,}`, a glob matching a file so named).
 const GIT_DATA_ONLY: &[&str] = &[
     "status", "diff", "log", "show", "add", "commit", "restore", "switch", "checkout", "branch",
@@ -41,7 +42,10 @@ pub(super) fn avoids_zsh(command: &[String]) -> bool {
     let [shell, flag, script] = command else {
         return false;
     };
-    if !matches!(flag.as_str(), "-c" | "-lc") || script.len() > MAX_SCRIPT_BYTES || !not_zsh(shell)
+    if !matches!(flag.as_str(), "-c" | "-lc")
+        || script.len() > MAX_SCRIPT_BYTES
+        || script.contains(|ch: char| ch == '\\' || (ch.is_control() && !matches!(ch, '\n' | '\t')))
+        || !not_zsh(shell)
     {
         return false;
     }
@@ -85,7 +89,6 @@ fn data_only(words: &[PlainWord]) -> bool {
                 .is_some_and(|subcommand| GIT_DATA_ONLY.contains(&subcommand.text.as_str()))
                 && !rest.iter().any(|word| {
                     word.text.starts_with("--output")
-                        || word.text.contains('\\')
                         || (word.unquoted && word.text.contains(['{', '*', '?', '[']))
                 })
         }

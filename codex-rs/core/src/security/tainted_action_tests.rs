@@ -3192,6 +3192,19 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
             "-lc",
             "git log --format='/*(e:true:)' \"--out\\\nput=x.zsh\"",
         ],
+        // Review r2: an unquoted backslash-newline joins words for bash,
+        // not for the parse; other control characters.
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' --out\\\nput=x.zsh",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git diff\\\ntool -y -x 'zsh -c \"print -l /*(e:true:)\"'",
+        ],
+        vec!["/bin/bash", "-lc", "git commit -m '/*(e:true:)\r'"],
         vec![
             "/bin/bash",
             "-lc",
