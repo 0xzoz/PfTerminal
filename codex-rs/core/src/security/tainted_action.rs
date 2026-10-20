@@ -29,10 +29,12 @@ use std::collections::HashSet;
 use std::path::Path;
 
 mod arithmetic;
+mod code_variables;
 mod indirect;
 mod invocation;
 mod nested;
 mod outbound;
+mod outputs;
 mod paths;
 mod quoted;
 mod sed;
@@ -1046,6 +1048,10 @@ impl Classifier {
             if persistence_command(name, args) {
                 self.note(ProtectedActionKind::Persistence);
             }
+            // #1142: `git -c core.pager=…` runs the value (args as written).
+            if name == "git" && code_variables::git_runs_code(&words[index + 1..]) {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
             for (credential_command, verbs) in CREDENTIAL_COMMANDS {
                 work::step();
                 if name == *credential_command
@@ -1079,9 +1085,21 @@ impl Classifier {
                             .any(|word| flags.iter().any(|flag| has_flag(word, flag))))
             })
         });
-        let writer = command
+        // #1142: setting a variable whose value git or a pager runs.
+        if code_variables::sets_code_variable(simple, words, command.as_ref()) {
+            self.note(ProtectedActionKind::UnseenCode);
+        }
+        // #1141: an output option makes a writer of its command, and its
+        // value is a file written (`git log --output=~/.zshrc`, `-o.zshrc`).
+        let outputs = command
             .as_ref()
-            .map(|(index, name)| (*index, WRITERS.contains(&name.as_str())));
+            .and_then(|(index, name)| outputs::output_files(name, &words[index + 1..]));
+        let writer = command.as_ref().map(|(index, name)| {
+            (
+                *index,
+                WRITERS.contains(&name.as_str()) || outputs.is_some(),
+            )
+        });
         let cwd = folders.cwd.clone();
         // Words resolve against the folder of a `-C`/`--directory` flag
         // (`tar -C ~ ...`, `git -C ~/.codex ...`) once one has been given.
@@ -1142,6 +1160,22 @@ impl Classifier {
             }
             if let Some(payload) = indirect::decoded_payload(word) {
                 self.script(&payload, &cwd, depth + 1);
+            }
+        }
+        let bases = if folder == cwd {
+            vec![cwd.clone()]
+        } else {
+            vec![folder, cwd.clone()]
+        };
+        for file in outputs.iter().flatten() {
+            work::step();
+            for base in &bases {
+                work::step();
+                let resolved = self.homes.resolve(file, base);
+                self.word_path(&resolved, file, depth);
+                if self.homes.is_persistence(&resolved) {
+                    self.note(ProtectedActionKind::Persistence);
+                }
             }
         }
         self.scripts_of(simple, words, unseen, command.as_ref(), &cwd, depth);

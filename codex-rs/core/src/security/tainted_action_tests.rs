@@ -3151,3 +3151,78 @@ fn issue_1065_review_2_large_values_are_judged_once() {
     assert_eq!(many.1, few.1);
     assert!(many.2 - few.2 <= 8 * 997 * 2, "{few:?} {many:?}");
 }
+
+/// #1141: a file an output option names is written like a redirection
+/// target. #1142 (below): setting a variable or git config key whose value
+/// git (or a pager or editor it starts) runs is code the classifier does not
+/// read.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1141_output_files_are_written() {
+    use ProtectedActionKind::*;
+    for command in [
+        "git log -1 --format=x --output=~/.zshrc",
+        "git log -1 --format=x --output=/home/fixture/.zshrc",
+        "git log -1 --format=x --output /home/fixture/.zshrc",
+        "git log -1 --format=x --out=$HOME/.bashrc",
+        "git -C ~ log -1 --output=.zshrc",
+        "git -C ~ archive -o.zshrc HEAD",
+        "git archive -o~/.zshrc HEAD",
+        "git diff --output=.git/hooks/pre-commit",
+        "git format-patch -o ~/.config/autostart HEAD~1",
+        "env git log --output=~/.profile",
+        "sort -o ~/.zshrc list",
+        "git config --file ~/.zshrc a.b '$(touch pwned)'",
+        "git bundle create ~/.zshrc HEAD",
+    ] {
+        assert_eq!(script(command), Some(Persistence), "{command}");
+    }
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1142_git_code_settings_are_unseen_code() {
+    let unseen = Some(ProtectedActionKind::UnseenCode);
+    for command in [
+        "GIT_PAGER='touch pwned' git log",
+        "PAGER='touch pwned' git log",
+        "env GIT_PAGER='touch pwned' git log",
+        "export GIT_PAGER='touch pwned'; git log",
+        "printf -v GIT_PAGER %s 'touch pwned'; git log",
+        "printf -v PAGER %s 'touch pwned'; git log",
+        "n=PAGER; printf -v \"$n\" %s 'touch pwned'; git log",
+        "printf -v \"$(cat name)\" %s 'touch pwned'; git log",
+        "read -r GIT_EDITOR <<< 'touch pwned'; git commit",
+        "GIT_SSH_COMMAND='touch pwned' git fetch",
+        "GIT_EXTERNAL_DIFF='touch pwned' git diff",
+        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=x git log",
+        "git -c core.pager='touch pwned' log",
+        "git -c alias.x='!touch pwned' x",
+        "git --config-env=core.editor=X commit",
+        "git --exec-path=/tmp/x log",
+        "bash -c \"GIT_PAGER='touch pwned' git log\"",
+        "declare -u n=pager; printf -v \"$n\" %s 'touch pwned'; git log",
+        "HOME=/tmp/h git log",
+        "GIT_TRACE=/tmp/t git status",
+    ] {
+        assert_eq!(script(command), unseen, "{command}");
+    }
+    for command in [
+        "git log --oneline -20",
+        "git log --output-indicator-new=+ -p",
+        "git log --output=out.txt",
+        "git -c user.name=x -c color.ui=always commit -m 'fix editor crash'",
+        "git -C sub status",
+        "git commit -c HEAD",
+        "echo \"$PAGER\" ${EDITOR}",
+        "sort -o sorted.txt list",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
