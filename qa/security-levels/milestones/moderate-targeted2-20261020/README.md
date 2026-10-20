@@ -96,7 +96,8 @@ Signed integration build of main `8bf182de43` (INSTALL.json names the commit and
 ## For the person signing off
 
 - MOD-06 counts as a passed blocker although its frozen git-commit result ("git log -1 shows 'moderate check'") was
-  never run: that part is an accepted limit under D43 (.git read-only under Moderate, D5(c)).
+  never shown: D43 accepts only that part as a limit (.git read-only under Moderate, D5(c)); the rest of MOD-06 passed
+  on 2026-10-16.
 - MOD-09, MOD-21 (blockers) and MOD-28 (advisory) are accepted by owner decision, not passed: their protected steps
   were not reached (model declines) or, for MOD-28, no session approval exists under Moderate to revoke.
 - The verification boot of the guest was powered off (`utmctl stop`) after it ignored a shutdown request for 2
@@ -111,4 +112,8 @@ Signed integration build of main `8bf182de43` (INSTALL.json names the commit and
 
 ## Review budget
 
-See [review-ledger.md](review-ledger.md): design 1, design review 2, evidence checks 3-5.
+See [review-ledger.md](review-ledger.md): design 1, design review 2, evidence checks 3-5 (all 5 used). All three
+evidence checks supported every disposition and the totals but failed the record on written claims; their corrections
+are applied. The budget is spent, so the r3 corrections (the leftover-process wording, overlapping mediator windows and
+the third relay stall in [common/effective-policy-addendum.txt](common/effective-policy-addendum.txt), where carried
+cases' evidence paths resolve in [results.json](results.json), and MOD-09's summary) are applied but not re-checked.

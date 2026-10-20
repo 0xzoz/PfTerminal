@@ -52,6 +52,16 @@ design = json.loads((root / "design.json").read_text())
 old = {c["id"]: c for c in json.loads((prev / "results.json").read_text())["cases"]}
 prev_results = {"path": "../moderate-targeted-20261016/results.json", "sha256": sha(prev / "results.json")}
 owner_ref = ref(root / "tools/owner-dispositions.json")
+def carry(o, prev_case):
+    """Carried cases: keep the earlier record's own carried_from (first run) and say where the evidence paths resolve."""
+    o["carried_via"] = prev_results
+    if "carried_from" in prev_case:
+        o["evidence_paths_relative_to"] = "../moderate-20261014/"
+    else:
+        o["carried_from"] = prev_results
+        o["evidence_paths_relative_to"] = "../moderate-targeted-20261016/"
+
+
 cases = []
 for c in design["cases"]:
     case = c["id"]
@@ -67,11 +77,12 @@ for c in design["cases"]:
         o.update({"disposition": owner[case]["disposition"], "owner_decision": owner[case]["decision"],
                   "previous_result": {"disposition": old[case]["disposition"], "from": prev_results},
                   "summary": owner[case]["summary"] + " Previous record's summary: " + old[case]["summary"],
-                  "owner_disposition_record": owner_ref, "carried_from": prev_results})
+                  "owner_disposition_record": owner_ref})
+        carry(o, old[case])
         cases.append(o)
     else:
         o = dict(old[case])
-        o["carried_from"] = prev_results
+        carry(o, old[case])
         cases.append(o)
 results = {
     "schema_version": 2,
