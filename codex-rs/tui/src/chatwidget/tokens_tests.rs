@@ -3634,3 +3634,6 @@ fn plain_tokens_lower_bound_keeps_a_known_input_total() {
     };
     assert_eq!(plain_tokens(&day), "10,000+ tokens");
 }
+
+#[path = "tokens/warmup_resume_tests.rs"]
+mod warmup_resume_tests;

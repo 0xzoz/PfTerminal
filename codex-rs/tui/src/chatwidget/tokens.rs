@@ -16,6 +16,7 @@
 mod charge;
 mod chart;
 mod scope;
+mod warmup_resume;
 
 use std::sync::Arc;
 use std::sync::RwLock;
