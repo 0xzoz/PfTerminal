@@ -3540,6 +3540,42 @@ mod tests {
         );
     }
 
+    /// D52 (#1001), #1057: under Aggressive, core prefixes the question for
+    /// a server outside the Aggressive record's scope with a note that
+    /// "always allow" lasts only this session.
+    #[test]
+    fn approval_form_with_aggressive_session_only_note_snapshot() {
+        let (tx, _rx) = test_sender();
+        let request = from_form_request(
+            ThreadId::default(),
+            form_request(
+                "Security level Aggressive is on: always allowing this tool lasts only for this \
+                 session, because Aggressive keeps that choice only for connectors and servers \
+                 defined in your own config. Allow the project_server MCP server to run tool \
+                 \"post_message\"?",
+                empty_object_schema(),
+                tool_approval_meta(
+                    &[
+                        APPROVAL_PERSIST_SESSION_VALUE,
+                        APPROVAL_PERSIST_ALWAYS_VALUE,
+                    ],
+                    /*tool_params*/ None,
+                    /*tool_params_display*/ None,
+                ),
+            ),
+        )
+        .expect("expected approval fallback");
+        let overlay = McpServerElicitationOverlay::new(
+            request, tx, /*has_input_focus*/ true, /*enhanced_keys_supported*/ false,
+            /*disable_paste_burst*/ false,
+        );
+
+        insta::assert_snapshot!(
+            "mcp_server_elicitation_approval_form_with_aggressive_session_only_note",
+            render_snapshot(&overlay, Rect::new(0, 0, 120, 16))
+        );
+    }
+
     #[test]
     fn approval_form_tool_approval_with_param_summary_snapshot() {
         let (tx, _rx) = test_sender();

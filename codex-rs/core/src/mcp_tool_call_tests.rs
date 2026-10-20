@@ -3543,3 +3543,204 @@ command = "docs-server"
         "a project defines another server"
     );
 }
+
+/// Asks about a call to a server's tool with MCP elicitation on (so "always
+/// allow" is offered) under `policy`; returns the message shown. Declined.
+async fn issue_1057_elicitation_message(
+    session: &Arc<Session>,
+    turn_context: &Arc<TurnContext>,
+    events: &async_channel::Receiver<codex_protocol::protocol::Event>,
+    policy: McpToolApprovalPolicy,
+) -> String {
+    let invocation = McpInvocation {
+        server: "project_server".to_string(),
+        tool: "post_message".to_string(),
+        arguments: None,
+    };
+    let mut metadata = approval_metadata(
+        /*connector_id*/ None,
+        /*connector_name*/ None,
+        /*connector_description*/ None,
+        Some("Post Message"),
+        /*tool_description*/ None,
+    );
+    metadata.annotations = Some(annotations(
+        /*read_only*/ Some(false),
+        /*destructive*/ Some(true),
+        /*open_world*/ Some(true),
+    ));
+    let request = tokio::spawn({
+        let session = Arc::clone(session);
+        let turn_context = Arc::clone(turn_context);
+        async move {
+            maybe_request_mcp_tool_approval(
+                &session,
+                &StepContext::for_test(Arc::clone(&turn_context)),
+                "call-1057",
+                &invocation,
+                &HookToolName::new("mcp__project_server__post_message"),
+                &metadata,
+                &approval_config(&turn_context),
+                policy,
+                /*note*/ None,
+            )
+            .await
+        }
+    });
+    let shown = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.expect("event channel open");
+            if let EventMsg::ElicitationRequest(shown) = event.msg {
+                return shown;
+            }
+        }
+    })
+    .await
+    .expect("the approval was shown");
+    let codex_protocol::approvals::ElicitationRequest::Form { message, meta, .. } = shown.request
+    else {
+        panic!("a form: {:?}", shown.request);
+    };
+    assert!(
+        meta.as_ref()
+            .and_then(|meta| meta.get(MCP_TOOL_APPROVAL_PERSIST_KEY))
+            .is_some_and(|persist| persist
+                .to_string()
+                .contains(MCP_TOOL_APPROVAL_PERSIST_ALWAYS)),
+        "\"always allow\" is offered: {meta:?}"
+    );
+    session
+        .resolve_elicitation(
+            "project_server".to_string(),
+            rmcp::model::RequestId::String(
+                format!("{MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX}_call-1057").into(),
+            ),
+            ElicitationResponse {
+                action: ElicitationAction::Decline,
+                content: None,
+                meta: None,
+            },
+        )
+        .await
+        .expect("the approval resolves");
+    request.await.expect("approval task");
+    message
+}
+
+/// D52 (#1001), #1057 follow-up: under Aggressive, "always allow" for a
+/// server outside the Aggressive record's scope (a project's or a plugin's)
+/// lasts only this session; the prompt that offers it says so. Elsewhere the
+/// prompt is unchanged.
+#[tokio::test]
+async fn issue_1057_always_allow_lasting_only_the_session_says_so() {
+    let (session, mut turn_context, events) = make_session_and_context_with_rx().await;
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let turn = Arc::get_mut(&mut turn_context).expect("single turn context ref");
+    turn.approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("test setup should allow updating approval policy");
+    Arc::make_mut(&mut turn.config)
+        .features
+        .enable(Feature::ToolCallMcpElicitation)
+        .expect("enable MCP elicitation");
+
+    let session_only = issue_1057_elicitation_message(
+        &session,
+        &turn_context,
+        &events,
+        McpToolApprovalPolicy::for_server(AppToolApproval::Auto)
+            .session_only_under_aggressive(/*session_only_under_aggressive*/ true),
+    )
+    .await;
+    insta::assert_snapshot!("issue_1057_session_only_note", session_only);
+    assert!(session_only.starts_with(aggressive::SESSION_ONLY_NOTE));
+
+    let unchanged = issue_1057_elicitation_message(
+        &session,
+        &turn_context,
+        &events,
+        McpToolApprovalPolicy::for_server(AppToolApproval::Auto),
+    )
+    .await;
+    assert!(
+        !unchanged.contains(aggressive::SESSION_ONLY_NOTE),
+        "{unchanged}"
+    );
+    assert_eq!(
+        session_only,
+        format!("{} {unchanged}", aggressive::SESSION_ONLY_NOTE)
+    );
+}
+
+/// Where "always allow" is not offered (MCP elicitation off), the note is
+/// not shown.
+#[tokio::test]
+async fn issue_1057_no_session_only_note_without_always_allow() {
+    let (session, turn_context, events) = issue_1001_session().await;
+    let invocation = McpInvocation {
+        server: "project_server".to_string(),
+        tool: "post_message".to_string(),
+        arguments: None,
+    };
+    let mut metadata = approval_metadata(
+        /*connector_id*/ None,
+        /*connector_name*/ None,
+        /*connector_description*/ None,
+        Some("Post Message"),
+        /*tool_description*/ None,
+    );
+    metadata.annotations = Some(annotations(
+        /*read_only*/ Some(false),
+        /*destructive*/ Some(true),
+        /*open_world*/ Some(true),
+    ));
+    let request = tokio::spawn({
+        let session = Arc::clone(&session);
+        let turn_context = Arc::clone(&turn_context);
+        async move {
+            maybe_request_mcp_tool_approval(
+                &session,
+                &StepContext::for_test(Arc::clone(&turn_context)),
+                "call-1057",
+                &invocation,
+                &HookToolName::new("mcp__project_server__post_message"),
+                &metadata,
+                &approval_config(&turn_context),
+                McpToolApprovalPolicy::for_server(AppToolApproval::Auto)
+                    .session_only_under_aggressive(/*session_only_under_aggressive*/ true),
+                /*note*/ None,
+            )
+            .await
+        }
+    });
+    let shown = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let event = events.recv().await.expect("event channel open");
+            if let EventMsg::RequestUserInput(shown) = event.msg {
+                return shown;
+            }
+        }
+    })
+    .await
+    .expect("the approval question was shown");
+    let question = shown.questions[0].clone();
+    assert!(
+        !question.question.contains(aggressive::SESSION_ONLY_NOTE),
+        "{}",
+        question.question
+    );
+    session
+        .notify_user_input_response(
+            &shown.turn_id,
+            RequestUserInputResponse {
+                answers: HashMap::from([(
+                    question.id.clone(),
+                    RequestUserInputAnswer {
+                        answers: vec![MCP_TOOL_APPROVAL_ACCEPT.to_string()],
+                    },
+                )]),
+            },
+        )
+        .await;
+    request.await.expect("approval task");
+}
