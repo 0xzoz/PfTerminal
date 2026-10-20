@@ -292,24 +292,34 @@ const MODERATE: Setup = Setup {
 /// In a session with untrusted content: a known tool's request to run
 /// outside the sandbox is offered with the warning, every time (also after
 /// "for the session"), through both shell tools, and the approved run may
-/// create user namespaces; podman is offered too (declined here). Any other
+/// create user namespaces; podman and bwrap are offered too (declined here). Any other
 /// command, and the tricks around a known tool, get no warning and keep
 /// the rule, approved or not; so does a known tool in the sandbox.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn d48_after_untrusted_content_only_known_tools_are_offered() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
+    // By name where it is installed (found through PATH), else by its
+    // system path.
+    let bwrap = if std::path::Path::new("/usr/bin/bwrap").exists() {
+        "bwrap --ro-bind / / --unshare-user true"
+    } else {
+        "/usr/bin/bwrap --ro-bind / / --unshare-user true"
+    };
     let offered: &[(Kind, &str, ReviewDecision)] = &[
         (Kind::Escalated, PLAIN, ReviewDecision::ApprovedForSession),
         (Kind::Escalated, PLAIN, ReviewDecision::Approved),
         (Kind::EscalatedExec, PLAIN, ReviewDecision::Approved),
         (Kind::Escalated, UNSHARE, ReviewDecision::Approved),
         (Kind::EscalatedExec, UNSHARE, ReviewDecision::Approved),
+        // Podman by its system path (offered where it isn't installed too)
+        // and bwrap: declined.
         (
             Kind::Escalated,
-            "podman run --rm alpine true",
+            "/usr/bin/podman run --rm alpine true",
             ReviewDecision::denied("no"),
         ),
+        (Kind::EscalatedExec, bwrap, ReviewDecision::denied("no")),
     ];
     let not_offered: &[(Kind, &str, ReviewDecision)] = &[
         // An arbitrary command.
@@ -385,8 +395,8 @@ async fn d48_after_untrusted_content_only_known_tools_are_offered() -> anyhow::R
                     && call.allowed()
                     && call.asked[0].contains(PROTECTED_ACTION)
             }
-            // Podman offered, declined: nothing ran.
-            5 => call.asked.len() == 1 && call.warned() && !call.made,
+            // Podman and bwrap offered, declined: nothing ran.
+            5 | 6 => call.asked.len() == 1 && call.warned() && !call.made,
             // Whether the shell expands the alias decides whether it runs.
             _ if call.command.contains("alias") => {
                 call.unwarned() && !call.made && (call.explained || !call.refused)
