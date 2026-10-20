@@ -237,7 +237,6 @@ const MAX_DEVICES: usize = 256;
 fn on_overlay(path: &Path, meta: &std::fs::Metadata) -> bool {
     use std::os::fd::AsRawFd;
 
-    const OVERLAYFS_SUPER_MAGIC: i64 = 0x794c_7630;
     let lock = || NOT_OVERLAY.lock().unwrap_or_else(PoisonError::into_inner);
     if lock().contains(&meta.dev()) {
         return false;
@@ -264,9 +263,10 @@ fn on_overlay(path: &Path, meta: &std::fs::Metadata) -> bool {
     }
     // SAFETY: `fstatfs` succeeded, so it filled `stat`.
     let stat = unsafe { stat.assume_init() };
-    // `f_type`'s type differs between C libraries.
+    // `f_type`'s and the constant's types differ between C libraries; the
+    // value fits either.
     #[allow(clippy::unnecessary_cast)]
-    let overlay = stat.f_type as i64 == OVERLAYFS_SUPER_MAGIC;
+    let overlay = stat.f_type as i64 == libc::OVERLAYFS_SUPER_MAGIC as i64;
     if !overlay {
         let mut not_overlay = lock();
         if not_overlay.len() < MAX_DEVICES {

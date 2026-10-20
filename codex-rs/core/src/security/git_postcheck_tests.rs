@@ -1470,13 +1470,16 @@ fn issue_943_a_worktree_added_again_on_a_reused_inode() {
         // Where creation times aren't recorded (or on macOS or an overlay
         // file system, where they aren't compared), a reused inode is the
         // documented limit.
+        // Told apart from the code under test, so a creation time it drops
+        // by mistake fails here instead of skipping.
         let git_file = worktree.join(".git");
-        let born = super::unix::born(
-            &git_file,
-            &std::fs::symlink_metadata(&git_file).expect("git file"),
-        )
-        .is_some();
-        if new == old && !born {
+        let compared = !cfg!(target_os = "macos")
+            && std::fs::symlink_metadata(&git_file)
+                .expect("git file")
+                .created()
+                .is_ok()
+            && !on_overlay_fs(&git_file);
+        if new == old && !compared {
             continue;
         }
         assert!(
@@ -1496,33 +1499,43 @@ fn issue_943_a_worktree_added_again_on_a_reused_inode() {
 }
 
 /// #943 follow-up 19: creation times are still compared off overlay file
-/// systems, the first time a device is seen and after.
+/// systems, on each look (the device's answer is remembered after the
+/// first).
 #[cfg(target_os = "linux")]
 #[test]
 fn issue_943_creation_times_are_compared_off_overlay() {
     let project = Project::new();
     let git = project.git();
     let meta = std::fs::symlink_metadata(&git).expect("git folder");
-    let fs_type = fs_type_of(&git);
-    if fs_type == 0x794c_7630 {
-        #[allow(clippy::print_stderr)]
-        {
-            eprintln!("skipped: the temporary folder is on an overlay file system");
-        }
-        return;
-    }
     let created = meta
         .created()
         .ok()
         .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|since| since.as_nanos() as i128);
-    for _ in 0..2 {
-        assert_eq!(
-            super::unix::born(&git, &meta),
-            created,
-            "fs type {fs_type:#x}"
-        );
+    if on_overlay_fs(&git) || created.is_none() {
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("skipped: no creation times to compare in the temporary folder");
+        }
+        return;
     }
+    for _ in 0..2 {
+        assert_eq!(super::unix::born(&git, &meta), created);
+    }
+}
+
+/// Whether `path` is on an overlay file system, told apart from the code
+/// under test.
+#[cfg(target_os = "linux")]
+fn on_overlay_fs(path: &Path) -> bool {
+    #[allow(clippy::unnecessary_cast)]
+    let overlay = fs_type_of(path) == libc::OVERLAYFS_SUPER_MAGIC as i64;
+    overlay
+}
+
+#[cfg(not(target_os = "linux"))]
+fn on_overlay_fs(_path: &Path) -> bool {
+    false
 }
 
 #[cfg(target_os = "linux")]
