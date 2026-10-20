@@ -1404,6 +1404,7 @@ pub(crate) fn follow_configured_session_account(
     config: &Config,
     embedded: bool,
 ) {
+    let mut hold_once_named = false;
     let sign_in = match codex_model_provider::session_sign_in(&config.model_provider) {
         codex_login::SessionSignIn::Default if embedded => {
             if codex_login::default_login_left_unenforced() {
@@ -1413,17 +1414,23 @@ pub(crate) fn follow_configured_session_account(
             }
         }
         codex_login::SessionSignIn::Default if config.named_accounts_enabled() => {
-            // Blocking: reads the vault index once, at startup.
+            // Blocking, once at startup: an initialised vault is decrypted
+            // (which can read the OS keychain) to read its account metadata.
             if config.uses_named_sign_in_accounts() {
                 codex_login::SessionSignIn::Unknown
             } else {
-                auth_manager.hold_configured_sign_in_once_named();
+                hold_once_named = true;
                 codex_login::SessionSignIn::Default
             }
         }
         sign_in => sign_in,
     };
     auth_manager.register_configured_sign_in(sign_in);
+    // After the registration, which would otherwise overwrite a hold that a
+    // named session already registered set.
+    if hold_once_named {
+        auth_manager.hold_configured_sign_in_once_named();
+    }
 }
 
 fn analytics_rpc_transport(transport: &AppServerTransport) -> AppServerRpcTransport {

@@ -167,4 +167,16 @@ async fn a_server_held_once_named_never_falls_back_after_a_named_session() {
     pane.update(SessionSignIn::Named(account("work")));
     drop(pane);
     assert!(other_base.session_account_unknown());
+
+    // Held after a named session already registered: it holds at once.
+    let late = tempfile::tempdir().expect("home");
+    let late_base = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("sk-canary-default"),
+        late.path().to_path_buf(),
+    );
+    late_base.register_configured_sign_in(SessionSignIn::Default);
+    let named = late_base.register_session_sign_in(SessionSignIn::Named(account("work")));
+    late_base.hold_configured_sign_in_once_named();
+    drop(named);
+    assert!(late_base.session_account_unknown());
 }

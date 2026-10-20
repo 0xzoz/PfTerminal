@@ -430,7 +430,7 @@ async fn an_account_enrolled_while_the_server_runs_holds_after_its_thread() -> R
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(held, "requests outside a conversation were never held");
-    // (Startup requests, before `work` existed, used the default login.)
+    // Usage was only ever read on `work`, never on the default login.
     let usage = tokens_for(&server, "/api/codex/usage").await;
     assert!(
         !usage.is_empty() && usage.iter().all(|token| token == WORK_TOKEN),
