@@ -175,6 +175,9 @@ pub enum InspectionDay {
         /// First UTC day whose daily totals are kept; `None` while the ledger
         /// has no completed checkpoint.
         aggregate_day_floor: Option<i64>,
+        /// Inclusive completed checkpoint from this read snapshot, also when
+        /// every requested bucket starts after it. No checkpoint while staging.
+        completed_as_of_ms: Option<i64>,
         read_at_ms: i64,
         buckets: Vec<InspectionBucket>,
     },
@@ -989,10 +992,11 @@ async fn inspect_buckets(
     }
     // The same floor the day pages state, not the oldest compacted day: a
     // ledger that has compacted nothing yet still keeps a year of totals.
-    let aggregate_day_floor = match super::retention_fixture_on_connection(conn).await? {
-        super::RetentionFixture::Active(checkpoint) => Some(super::aggregate_day_floor(checkpoint)),
+    let completed_as_of_ms = match super::retention_fixture_on_connection(conn).await? {
+        super::RetentionFixture::Active(checkpoint) => Some(checkpoint),
         super::RetentionFixture::Staging | super::RetentionFixture::Absent => None,
     };
+    let aggregate_day_floor = completed_as_of_ms.map(super::aggregate_day_floor);
     let mut buckets = Vec::new();
     let mut cursor = requested.start_ms;
     let mut attempts = 0;
@@ -1068,6 +1072,7 @@ async fn inspect_buckets(
     Ok(InspectionDay::Range {
         requested,
         aggregate_day_floor,
+        completed_as_of_ms,
         read_at_ms,
         buckets,
     })

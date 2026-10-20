@@ -86,7 +86,7 @@ impl WriterLockCoordinator {
         })
     }
 
-    fn lock_coordination(&self) -> ThreadStoreResult<File> {
+    fn lock_coordination(&self) -> ThreadStoreResult<CoordinationLock> {
         fs::create_dir_all(&self.directory).map_err(|err| ThreadStoreError::Internal {
             message: format!(
                 "failed to create thread writer lock directory {}: {err}",
@@ -112,7 +112,7 @@ impl WriterLockCoordinator {
                 path.display()
             ),
         })?;
-        Ok(file)
+        Ok(CoordinationLock(file))
     }
 
     fn remove_stale_thread_locks(&self) -> io::Result<()> {
@@ -162,6 +162,19 @@ impl WriterLockCoordinator {
             }
         }
         Ok(())
+    }
+}
+
+/// The held coordination lock, unlocked when dropped.
+struct CoordinationLock(File);
+
+impl Drop for CoordinationLock {
+    fn drop(&mut self) {
+        // #928: closing the file releases the lock only once no other copy of
+        // the descriptor is open, and a child another thread forked keeps one
+        // until it starts its program. Unlock now so a waiter waits only for
+        // this holder.
+        let _ = self.0.unlock();
     }
 }
 

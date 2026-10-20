@@ -80,7 +80,8 @@ changed.
 Choosing Permissive or Aggressive from Moderate shows what changes first.
 Back to Permissive takes effect when you restart; until then Moderate stays
 on. Aggressive applies Core's stricter rules at once when its preflight
-passes (the `protected_mode_preflight` feature), and the rest at the restart.
+passes (the `protected_mode_preflight` feature), also in the other Corbanu
+Terminals running on the home (#919), and the rest at the restart.
 The kill switch (`/security` → `g`) works under every level.
 
 ## Limits
@@ -128,14 +129,37 @@ The kill switch (`/security` → `g`) works under every level.
   reports "No permissions to create new namespace"); depending on its
   version and settings, Claude Code then fails the command or offers to run
   it outside its own sandbox, which, like every pane command, asks you
-  first and still runs in Corbanu's sandbox. No approval lifts it. Choose
-  Permissive to run them.
+  first and still runs in Corbanu's sandbox. No approval lifts the rule
+  inside a contained Claude pane. Elsewhere, choose Permissive to run them,
+  or allow it for one command (next point).
+- You can allow user namespaces for one command (D27, Linux, Moderate only).
+  When the agent asks to run a command outside the sandbox before untrusted
+  content enters the session (every command's output counts, so in practice
+  this is the first command of a new session, before the agent has read
+  anything from outside), the approval prompt says that approving it
+  lifts Moderate's protected-file rules for that run and, with a warning,
+  that it also lets that one run create user namespaces: inside one, the
+  command can get past the file protections that remain for that run (it is
+  root over its own files there and can mount over paths), so a Corbanu it
+  starts may not run at Moderate, and more of the kernel is exposed to it.
+  Approve only a command you trust. Only your answer to that prompt counts:
+  not "for the session" for the next request, a saved "don't ask again"
+  rule (the command then stays in the sandbox with the rules kept), a
+  permission hook or the automatic reviewer, and no prompt after untrusted
+  content offers it. The allowance covers the approved process and
+  everything it starts or is given while it runs, also after untrusted
+  content arrives: an interactive program such as a shell keeps it for
+  every command typed into it later. The run still stays in the sandbox
+  (writes outside your writable folders and blocked network still fail).
+  Aggressive, and a launch that enforces Aggressive, never allow it.
 - A command that fails this way says why instead of a bare "Operation not
   permitted": its output (what the agent sees) and a warning in your
-  transcript name the rule and the level, and the `/security` inspector
-  lists "creating a user namespace" under recent denials. Before you approve
-  a command that runs `unshare`, `bwrap`, Podman, Buildah or Flatpak, the
-  approval prompt says it will fail. A contained Claude pane ends such a
+  transcript name the rule and the level and, under Moderate, how to allow
+  it for one command (in a new session, since the failed command's output
+  is untrusted content), and the `/security` inspector lists "creating a
+  user namespace" under recent denials. Before you approve a command that runs
+  `unshare`, `bwrap`, Podman, Buildah or Flatpak and stays in the sandbox,
+  the approval prompt says it will fail. A contained Claude pane ends such a
   turn with a note naming the rule. The explanation only reads the
   command's output; it never changes what runs.
 - A remote app server can't enforce a level chosen here; Corbanu refuses to

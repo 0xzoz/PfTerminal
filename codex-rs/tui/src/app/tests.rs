@@ -7062,6 +7062,67 @@ async fn issue_842_moderate_from_another_terminal_is_announced() {
     }
 }
 
+/// #919 (Travis, 2026-10-16, D20): Aggressive confirmed in another Corbanu
+/// Terminal on this home (Core already raised this process's sessions and
+/// required approval for every command) is announced here, saying what
+/// applies now and what waits for the restart; the protections claimed
+/// follow `source_envelopes`, and the level shown is this session's own.
+#[tokio::test]
+async fn issue_919_aggressive_from_another_terminal_is_announced() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    app.on_level_raised_elsewhere(
+        crate::legacy_core::security_revocation::SecurityLevel::Aggressive,
+    );
+    let mut text = String::new();
+    while let Ok(event) = app_event_rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            text.push_str(&lines_to_single_string(&cell.display_lines(/*width*/ 1000)));
+        }
+    }
+    for expected in [
+        "Aggressive was confirmed in another Corbanu Terminal on this home",
+        "Core's Aggressive protections apply here now: agent commands cannot run `corbanu vault …`",
+        "From each pane's next turn you approve every command that is not known read-only",
+        "Grants and \"for session\" approvals here ended",
+        "The rest of Aggressive starts when you restart Corbanu Terminal: its sandbox",
+        "this session is shown as Permissive",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    // A lower level is never announced as a raise.
+    app.on_level_raised_elsewhere(
+        crate::legacy_core::security_revocation::SecurityLevel::Permissive,
+    );
+    assert!(app_event_rx.try_recv().is_err());
+}
+
+/// #919: the notice claims the protected-path denials only with the
+/// untrusted-content labels on, and names the level this session is shown
+/// as until the restart.
+#[test]
+fn issue_919_aggressive_notice_follows_labels_and_the_shown_level() {
+    use crate::claude_panes::app_integration::aggressive_confirmed_elsewhere;
+    use crate::security::level::ChosenLevel;
+    let labelled =
+        aggressive_confirmed_elsewhere(/*untrusted_content*/ true, ChosenLevel::Moderate);
+    assert!(labelled.contains("protected paths"), "{labelled}");
+    assert!(labelled.contains("shown as Moderate"), "{labelled}");
+    // Moderate's credential broker already holds the model keys.
+    assert!(!labelled.contains("credential broker"), "{labelled}");
+    let vault_only =
+        aggressive_confirmed_elsewhere(/*untrusted_content*/ false, ChosenLevel::Permissive);
+    assert!(!vault_only.contains("protected paths"), "{vault_only}");
+    assert!(
+        vault_only.contains("model keys held by the credential broker, and the child-agent rules"),
+        "{vault_only}"
+    );
+    assert!(
+        vault_only.contains("in every Corbanu pane and child agent of this Corbanu Terminal"),
+        "{vault_only}"
+    );
+}
+
 fn interrupted_claude_turn(app: &App) -> crate::claude_panes::ClaudePaneTurnOutput {
     crate::claude_panes::ClaudePaneTurnOutput {
         text: String::new(),
