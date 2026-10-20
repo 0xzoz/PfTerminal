@@ -26,11 +26,13 @@ pub(super) const SUSPENDED_NOTE: &str = "This tool is set to always be allowed, 
      apply again when you return to a less strict level.";
 
 /// What an MCP approval question offering "always allow" says while
-/// Aggressive is on, for a tool outside the record's scope: such an answer
-/// is not recorded, so under Aggressive it lasts only this session.
-pub(super) const SESSION_ONLY_NOTE: &str = "Security level Aggressive is on: always allowing \
-     this tool lasts only for this session, because Aggressive keeps that choice only for \
-     connectors and servers defined in your own config.";
+/// Aggressive is on, for a tool outside the record's scope: the answer is
+/// saved (and applies at less strict levels) but not recorded, so under
+/// Aggressive it lasts only while the session's approval does.
+pub(super) const SESSION_ONLY_NOTE: &str = "Always allowing this tool saves that choice, but \
+     under security level Aggressive it applies only until this session ends or the level \
+     changes, because Aggressive keeps it only for connectors and for servers defined only in \
+     your own config. At less strict levels the saved choice applies.";
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct Recorded {

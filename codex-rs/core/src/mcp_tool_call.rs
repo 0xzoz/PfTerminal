@@ -387,6 +387,16 @@ fn aggressive_record_scope(
     scoped.then_some(key)
 }
 
+/// D52: whether "always allow" for this tool, chosen now, lasts only the
+/// session under Aggressive: Aggressive is on and the answer would not be
+/// recorded (`record_key`, see [`aggressive_record_scope`]).
+fn always_allow_lasts_only_the_session(
+    aggressive: bool,
+    record_key: Option<&McpToolApprovalKey>,
+) -> bool {
+    aggressive && record_key.is_none()
+}
+
 /// Whether a project config layer mentions `server` under `mcp_servers`, as
 /// a whole definition or only some fields (layers merge deeply), or has an
 /// `mcp_servers` value that is not a table.
@@ -487,7 +497,10 @@ async fn decide_mcp_tool_call(
     } else {
         McpToolApprovalPolicy::for_server(approval_mode)
     }
-    .session_only_under_aggressive(aggressive && record_key.is_none());
+    .session_only_under_aggressive(always_allow_lasts_only_the_session(
+        aggressive,
+        record_key.as_ref(),
+    ));
     // #945: the policy the approval prompt is shown under. A "for session"
     // or remembered answer is stored only while it is still in force.
     let approval_shown_under = sess.services.authority_marker();

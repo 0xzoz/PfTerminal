@@ -3542,17 +3542,20 @@ mod tests {
 
     /// D52 (#1001), #1057: under Aggressive, core prefixes the question for
     /// a server outside the Aggressive record's scope with a note that
-    /// "always allow" lasts only this session.
+    /// "always allow" lasts only this session there. The text must match
+    /// `SESSION_ONLY_NOTE` in core's `mcp_tool_call_aggressive.rs` (and core's
+    /// `issue_1057_session_only_note` snapshot).
     #[test]
     fn approval_form_with_aggressive_session_only_note_snapshot() {
         let (tx, _rx) = test_sender();
         let request = from_form_request(
             ThreadId::default(),
             form_request(
-                "Security level Aggressive is on: always allowing this tool lasts only for this \
-                 session, because Aggressive keeps that choice only for connectors and servers \
-                 defined in your own config. Allow the project_server MCP server to run tool \
-                 \"post_message\"?",
+                "Always allowing this tool saves that choice, but under security level \
+                 Aggressive it applies only until this session ends or the level changes, \
+                 because Aggressive keeps it only for connectors and for servers defined only \
+                 in your own config. At less strict levels the saved choice applies. Allow the \
+                 project_server MCP server to run tool \"post_message\"?",
                 empty_object_schema(),
                 tool_approval_meta(
                     &[

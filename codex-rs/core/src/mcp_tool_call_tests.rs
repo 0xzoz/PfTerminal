@@ -3744,3 +3744,85 @@ async fn issue_1057_no_session_only_note_without_always_allow() {
         .await;
     request.await.expect("approval task");
 }
+
+/// D52, #1057: the note's condition, from the config: under Aggressive,
+/// "always allow" lasts only the session for a server a project or a plugin
+/// defines (not recorded), not for one the user's own config alone defines
+/// (recorded); and never outside Aggressive.
+#[tokio::test]
+async fn issue_1057_always_allow_lasts_only_the_session_for_unrecorded_servers() {
+    use codex_config::ConfigLayerEntry;
+    use codex_config::ConfigLayerStack;
+    use codex_config::ConfigRequirements;
+    use codex_config::ConfigRequirementsToml;
+    let (_session, turn_context) = make_session_and_context().await;
+    let home = tempdir().expect("home");
+    let project = tempdir().expect("project");
+    let toml = |text: &str| toml::from_str::<toml::Value>(text).expect("toml");
+    let config_with = |user_layer: &str, project_layer: &str| {
+        let mut config = (*turn_context.config).clone();
+        config.config_layer_stack = ConfigLayerStack::new(
+            vec![
+                ConfigLayerEntry::new(
+                    ConfigLayerSource::User {
+                        file: AbsolutePathBuf::from_absolute_path(home.path().join("config.toml"))
+                            .expect("absolute"),
+                        profile: None,
+                    },
+                    toml(user_layer),
+                ),
+                ConfigLayerEntry::new(
+                    ConfigLayerSource::Project {
+                        dot_codex_folder: AbsolutePathBuf::from_absolute_path(project.path())
+                            .expect("absolute"),
+                    },
+                    toml(project_layer),
+                ),
+            ],
+            ConfigRequirements::default(),
+            ConfigRequirementsToml::default(),
+        )
+        .expect("layers");
+        config
+    };
+    let invocation = McpInvocation {
+        server: "docs".to_string(),
+        tool: "search".to_string(),
+        arguments: None,
+    };
+    let metadata = approval_metadata(
+        /*connector_id*/ None, /*connector_name*/ None,
+        /*connector_description*/ None, /*tool_title*/ None,
+        /*tool_description*/ None,
+    );
+    let defined = "[mcp_servers.docs]\ncommand = \"docs-server\"\n";
+    let lasts_only_the_session = |config: &Config, plugin_id, aggressive| {
+        always_allow_lasts_only_the_session(
+            aggressive,
+            aggressive_record_scope(config, &invocation, &metadata, plugin_id).as_ref(),
+        )
+    };
+
+    let project_defined = config_with("", defined);
+    assert!(lasts_only_the_session(
+        &project_defined,
+        /*plugin_id*/ None,
+        /*aggressive*/ true
+    ));
+    assert!(!lasts_only_the_session(
+        &project_defined,
+        /*plugin_id*/ None,
+        /*aggressive*/ false
+    ));
+    let user_defined = config_with(defined, "");
+    assert!(!lasts_only_the_session(
+        &user_defined,
+        /*plugin_id*/ None,
+        /*aggressive*/ true
+    ));
+    assert!(lasts_only_the_session(
+        &user_defined,
+        Some("plugin@market"),
+        /*aggressive*/ true
+    ));
+}
