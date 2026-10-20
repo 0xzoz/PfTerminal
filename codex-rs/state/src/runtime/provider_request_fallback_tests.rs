@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::busy_retry::count_attempts;
 use crate::runtime::test_support::unique_temp_dir;
 use pretty_assertions::assert_eq;
 use std::path::Path;
@@ -37,6 +38,43 @@ async fn hold_write_lock(path: &Path) -> anyhow::Result<sqlx::Transaction<'stati
     )
     .await?;
     Ok(pool.begin_with("BEGIN IMMEDIATE").await?)
+}
+
+/// That a step that met the held lock waited on the short-wait pool
+/// (`QUICK_BUSY_TIMEOUT` per attempt), not the main pool: there a held lock
+/// costs SQLite's whole busy timeout, `sqlite::BUSY_TIMEOUT`, per attempt. The
+/// upper bound is a fifth below that timeout, so it still rules out any
+/// main-pool wait while leaving room for a loaded runner (one short wait took
+/// 2.04 s on Windows CI, #914). The number of attempts is counted separately
+/// (`count_attempts`), and each attempt's wait read from SQLite
+/// (`assert_short_wait_pool`).
+fn assert_short_wait(waited: Duration) {
+    assert!(
+        waited >= crate::QUICK_BUSY_TIMEOUT / 2 && waited < crate::sqlite::BUSY_TIMEOUT * 4 / 5,
+        "{waited:?}"
+    );
+}
+
+/// That the steps have the short-wait pool (without it they run on the main
+/// pool), and that its connections wait `QUICK_BUSY_TIMEOUT` for the lock: at
+/// most half a throttle step's wait (`PROVIDER_REQUEST_BUSY_WAIT`), which so
+/// allows a second attempt and no more.
+async fn assert_short_wait_pool(runtime: &StateRuntime) -> anyhow::Result<()> {
+    let quick = runtime.quick.as_ref().expect("the short-wait pool is open");
+    let busy_timeout_ms: i64 = sqlx::query_scalar("PRAGMA busy_timeout")
+        .fetch_one(quick.pool.as_ref())
+        .await?;
+    assert_eq!(
+        Duration::from_millis(u64::try_from(busy_timeout_ms)?),
+        crate::QUICK_BUSY_TIMEOUT
+    );
+    assert!(
+        crate::QUICK_BUSY_TIMEOUT * 2
+            <= crate::runtime::provider_requests::PROVIDER_REQUEST_BUSY_WAIT,
+        "{:?}",
+        crate::QUICK_BUSY_TIMEOUT
+    );
+    Ok(())
 }
 
 async fn acquire(
@@ -91,11 +129,15 @@ async fn a_lock_held_past_the_wait_falls_back_to_this_process() -> anyhow::Resul
         ProviderRequestThrottled::new(/*decision*/ true, /*state_db_fallback*/ None)
     );
 
+    assert_short_wait_pool(&runtime).await?;
     let held = hold_write_lock(&runtime.sqlite().state_db_path()).await?;
     let started = Instant::now();
-    let check = runtime
-        .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 3_000)
-        .await;
+    let (check, attempts) = count_attempts(runtime.check_provider_request_throttle(
+        &key(),
+        &preflight(),
+        /*now_ms*/ 3_000,
+    ))
+    .await;
     let first_wait = started.elapsed();
     assert_eq!(check.state_db_fallback, Some(StateDbFallback::Busy));
     let block = check.decision.expect("the cooldown still holds");
@@ -107,21 +149,27 @@ async fn a_lock_held_past_the_wait_falls_back_to_this_process() -> anyhow::Resul
             Some("req-1".to_string())
         )
     );
-    // A step on the turn's path waits about a second (two short-wait
-    // attempts), not SQLite's 5 s busy timeout.
-    assert!(
-        first_wait >= crate::QUICK_BUSY_TIMEOUT / 2 && first_wait < Duration::from_secs(2),
-        "{first_wait:?}"
-    );
+    // A step on the turn's path makes a second short-wait attempt and no
+    // more (one only if the first ended within a pause of
+    // `PROVIDER_REQUEST_BUSY_WAIT`), and
+    // never waits SQLite's 5 s busy timeout.
+    assert!((1..=2).contains(&attempts), "{attempts} attempts");
+    assert_short_wait(first_wait);
 
     // While paused, later steps don't wait the lock out again.
     let started = Instant::now();
     let after_cooldown = 70_000;
-    let worker_b = acquire(&runtime, "worker-b", after_cooldown).await;
+    let ((worker_b, worker_c), attempts) = count_attempts(async {
+        (
+            acquire(&runtime, "worker-b", after_cooldown).await,
+            acquire(&runtime, "worker-c", after_cooldown + 1).await,
+        )
+    })
+    .await;
+    assert_eq!(attempts, 0);
     assert_eq!(worker_b.state_db_fallback, Some(StateDbFallback::Busy));
     let worker_b = acquired(worker_b);
     assert_eq!(worker_b.in_state_db, false);
-    let worker_c = acquire(&runtime, "worker-c", after_cooldown + 1).await;
     assert_eq!(
         blocked_reason(&worker_c),
         Some(ProviderRequestBlockReason::Lease)
@@ -524,10 +572,10 @@ async fn the_key_salt_is_per_home() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// #482: a row an older build kept under the unsalted key moves to the salted
-/// key with its cooldown, and the unsalted value is gone from the DB.
-#[tokio::test]
-async fn a_legacy_row_moves_to_its_salted_key() -> anyhow::Result<()> {
+/// A failed legacy write stays in this process: a fresh process cannot migrate
+/// a cooldown that never reached the historical database row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_non_durable_legacy_seed_stays_in_this_process() -> anyhow::Result<()> {
     let home = unique_temp_dir();
     let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
     let legacy = ProviderRequestKey {
@@ -549,9 +597,72 @@ async fn a_legacy_row_moves_to_its_salted_key() -> anyhow::Result<()> {
             )
             .await,
     );
-    runtime
+    assert!(lease.in_state_db);
+    let held = hold_write_lock(&runtime.sqlite().state_db_path()).await?;
+    let recorded = runtime
         .record_provider_request_throttle_result(&lease, rate_limited(), /*now_ms*/ 2_000)
         .await;
+    assert_eq!(
+        recorded,
+        ProviderRequestThrottled::new(/*decision*/ false, Some(StateDbFallback::Busy))
+    );
+    held.rollback().await?;
+
+    let process = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    process
+        .adopt_legacy_provider_request_key(
+            &legacy.key_fingerprint,
+            &salted.key_fingerprint,
+            /*now_ms*/ 2_500,
+        )
+        .await;
+    assert_eq!(
+        check_reason(
+            &process
+                .check_provider_request_throttle(&salted, &preflight(), /*now_ms*/ 3_000)
+                .await
+        ),
+        None
+    );
+    assert_eq!(
+        check_reason(
+            &runtime
+                .check_provider_request_throttle(&legacy, &preflight(), /*now_ms*/ 3_000)
+                .await
+        ),
+        Some((ProviderRequestBlockReason::Cooldown, 62_000, Some(429)))
+    );
+    process.close().await;
+    runtime.close().await;
+    let _ = std::fs::remove_dir_all(home);
+    Ok(())
+}
+
+/// #482: a row an older build kept under the unsalted key moves to the salted
+/// key with its cooldown, and the unsalted value is gone from the DB.
+#[tokio::test]
+async fn a_legacy_row_moves_to_its_salted_key() -> anyhow::Result<()> {
+    let home = unique_temp_dir();
+    let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    let legacy = ProviderRequestKey {
+        key_fingerprint: "env:ZAI_API_KEY:0123456789abcdef".to_string(),
+        ..key()
+    };
+    let salted = ProviderRequestKey {
+        key_fingerprint: "env-salted:ZAI_API_KEY:fedcba9876543210".to_string(),
+        ..key()
+    };
+    // Seed the historical database row directly: the best-effort throttle API
+    // may keep a failed write only in this process, and adjusts timestamps by
+    // elapsed time. Neither belongs to this migration fixture.
+    sqlx::query(
+        "INSERT INTO provider_request_state (provider_id, model, key_fingerprint, cooldown_until_ms, last_status, updated_at_ms) VALUES (?, ?, ?, 62000, 429, 2000)",
+    )
+    .bind(&legacy.provider_id)
+    .bind(&legacy.model)
+    .bind(&legacy.key_fingerprint)
+    .execute(runtime.pool.as_ref())
+    .await?;
 
     // A fresh process (no memory of the legacy cooldown) adopts the row.
     let process = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
@@ -719,6 +830,7 @@ async fn adoption_keeps_the_salted_row_and_deletes_idle_unsalted_rows() -> anyho
 async fn adoption_waits_out_a_busy_db_once() -> anyhow::Result<()> {
     let home = unique_temp_dir();
     let runtime = StateRuntime::init_for_testing(home.clone(), "zai".into()).await?;
+    assert_short_wait_pool(&runtime).await?;
     let held = hold_write_lock(&runtime.sqlite().state_db_path()).await?;
     let adopt = || {
         runtime.adopt_legacy_provider_request_key(
@@ -728,22 +840,23 @@ async fn adoption_waits_out_a_busy_db_once() -> anyhow::Result<()> {
         )
     };
     let started = Instant::now();
-    adopt().await;
-    assert!(
-        started.elapsed() >= crate::QUICK_BUSY_TIMEOUT / 2
-            && started.elapsed() < Duration::from_secs(2),
-        "{:?}",
-        started.elapsed()
-    );
+    let ((), attempts) = count_attempts(adopt()).await;
+    // One short-wait attempt, not SQLite's 5 s busy timeout.
+    assert_eq!(attempts, 1);
+    assert_short_wait(started.elapsed());
     assert_eq!(
         runtime.provider_request_memory.paused(),
         Some(StateDbFallback::Busy)
     );
     let started = Instant::now();
-    adopt().await;
-    let check = runtime
-        .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 2_000)
-        .await;
+    let (check, attempts) = count_attempts(async {
+        adopt().await;
+        runtime
+            .check_provider_request_throttle(&key(), &preflight(), /*now_ms*/ 2_000)
+            .await
+    })
+    .await;
+    assert_eq!(attempts, 0);
     assert_eq!(check.state_db_fallback, Some(StateDbFallback::Busy));
     assert!(
         started.elapsed() < Duration::from_secs(1),

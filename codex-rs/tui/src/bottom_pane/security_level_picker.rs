@@ -1246,9 +1246,29 @@ impl SecurityLevelPicker {
                         level.name(),
                         self.active.name()
                     )));
+                    // #978: confirmed where this session's policy does not
+                    // run here; the other sessions of this process took it.
+                    if level == ChosenLevel::Aggressive
+                        && let Some(approvals) = outcome
+                            .core
+                            .as_ref()
+                            .and_then(|report| report.approvals.as_ref())
+                    {
+                        for line in approvals_lines(approvals) {
+                            lines.extend(wrap(&line));
+                        }
+                    }
                 }
                 if let Some(report) = &outcome.core {
                     lines.extend(wrap(&core_outcome_line(report)));
+                    // #919: other processes on the home take it from the
+                    // saved state (not when it could not be saved).
+                    if level == ChosenLevel::Aggressive
+                        && report.next_start == SecurityLevel::Aggressive
+                        && report.not_saved.is_none()
+                    {
+                        lines.extend(wrap(AGGRESSIVE_REACHES_OTHER_TERMINALS));
+                    }
                     if let Some(reason) = &report.not_saved {
                         lines.extend(
                             wrap(&format!(
@@ -1458,7 +1478,7 @@ fn approvals_lines(
 /// What Core's Aggressive level does in a running session (PF-23, #443).
 /// #846: the project's credential files (`.env` and the like) are denied by
 /// Aggressive's sandbox profile, which starts at the restart, not by these.
-const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and cannot open protected paths (the vault store, sign-in files, credential files in your home folder such as .ssh, .aws and .netrc, and Corbanu's config, history and state), sensitive surfaces need a grant, external content reaches the model labelled untrusted, and memory summaries stop";
+pub(crate) const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and cannot open protected paths (the vault store, sign-in files, credential files in your home folder such as .ssh, .aws and .netrc, and Corbanu's config, history and state), sensitive surfaces need a grant, external content reaches the model labelled untrusted, and memory summaries stop";
 
 /// Issue #443: what only the restart applies after Aggressive is saved;
 /// `approvals_now` when the confirmation already required approval for
@@ -1583,7 +1603,7 @@ fn and_list_oxford(items: &[String]) -> String {
 
 /// Core's Aggressive effects without the untrusted-content labels
 /// (`source_envelopes` off): only the vault rule is sure to hold now.
-const CORE_EFFECTS_VAULT_ONLY: &str = "agent commands cannot run `corbanu vault …`";
+pub(crate) const CORE_EFFECTS_VAULT_ONLY: &str = "agent commands cannot run `corbanu vault …`";
 
 impl SecurityLevelPicker {
     /// Issue #443: Core's level is Aggressive in this session's live policy
@@ -1788,11 +1808,19 @@ impl SecurityLevelPicker {
                 format!(
                     "Core's level becomes Aggressive as soon as you confirm, in this session and the others of this Corbanu Terminal: {effects}; grants and \"for session\" approvals end. Approval for every command: {APPROVALS_NOW}."
                 )
+            } else if crate::legacy_core::security_level_change::sessions_run_here(&self.codex_home)
+            {
+                // #978: the other sessions of this process take it now.
+                format!(
+                    "Core's level becomes Aggressive from the next start (this session's policy does not run in this process yet): {effects}. {OTHER_SESSIONS_HERE_TAKE_AGGRESSIVE}"
+                )
             } else {
                 format!(
                     "Core's level becomes Aggressive from the next start (this session's policy does not run in this process yet): {effects}."
                 )
             },
+            // #919: other processes on the home take it from the saved state.
+            AGGRESSIVE_REACHES_OTHER_TERMINALS_REVIEW.to_string(),
         ]
     }
 
@@ -1861,6 +1889,17 @@ const PROTECTED_LAUNCH_KEEPS_SANDBOX: &str = "Protected launch (secretless_agent
 /// #842 (Travis, 2026-10-15): on the Saved screen after Moderate applied now.
 const MODERATE_REACHES_OTHER_TERMINALS: &str = "Other Corbanu Terminals running on this Corbanu home take Core's Moderate rules within about a second and say so; their model keys move to the credential broker when they restart.";
 
+/// #978: on the Aggressive review when this session's policy does not run in
+/// this process but other sessions of it do.
+const OTHER_SESSIONS_HERE_TAKE_AGGRESSIVE: &str = "The other sessions of this Corbanu Terminal running on this Corbanu home take it as soon as you confirm, with approval for every command from their next turn, and so do sessions you start here before you restart.";
+
+/// #919 (Travis, 2026-10-16, D20): on the Aggressive review, where Core's
+/// record is committed.
+const AGGRESSIVE_REACHES_OTHER_TERMINALS_REVIEW: &str = "Other Corbanu Terminals running on this Corbanu home take Core's Aggressive protections and approval for every command within about a second of confirming, and each says so; the rest of Aggressive starts there when they restart.";
+
+/// #919: on the Saved screen after Core's Aggressive record was saved.
+const AGGRESSIVE_REACHES_OTHER_TERMINALS: &str = "Other Corbanu Terminals running on this Corbanu home take Core's Aggressive protections and approval for every command within about a second and say so; the rest of Aggressive starts there when they restart.";
+
 fn name(level: SecurityLevel) -> &'static str {
     crate::security::view::profile_name(level)
 }
@@ -1897,6 +1936,16 @@ fn core_outcome_line(
             "Core's level is {} now in this session, and from every start.",
             name(report.in_force)
         ),
+        // #978: the other sessions of this process took it now.
+        LevelChangeKind::Stricter if report.other_sessions => format!(
+            "Core's level is {} now in the other sessions of this Corbanu Terminal{}.",
+            name(report.in_force),
+            if report.not_saved.is_none() {
+                ", and from every start"
+            } else {
+                ""
+            }
+        ),
         LevelChangeKind::Stricter => {
             format!(
                 "Core's level is {} from the next start.",
@@ -1913,6 +1962,11 @@ fn core_outcome_line(
             "Core's level stays {} in this session and is {} from the next start; grants and \"for session\" approvals ended now.",
             name(report.in_force),
             name(report.next_start)
+        ),
+        // #978: the other sessions of this process below it rose to it now.
+        LevelChangeKind::Unchanged if report.other_sessions => format!(
+            "Core's level: {}, now also in the other sessions of this Corbanu Terminal that were below it.",
+            name(report.in_force)
         ),
         LevelChangeKind::Unchanged => format!("Core's level: {}.", name(report.in_force)),
     }

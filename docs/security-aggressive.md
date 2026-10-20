@@ -134,16 +134,33 @@ own a command is root over its own files: it could open the placeholders the
 sandbox hides the vault store and other denied files with, and mount over
 paths, so a nested `corbanu exec` wouldn't be recognised as nested. The rule
 covers every process in Corbanu's Linux sandbox, bubblewrap's own included.
-No grant or approval lifts it; Permissive is unchanged. Commands that run
-without Corbanu's sandbox (an external sandbox), contained Claude panes and
-a remote Linux executor used from macOS or Windows aren't covered.
+No grant or approval lifts it under Aggressive, or where the launch enforces
+Aggressive; under Moderate a person can allow it for one command whose
+request to run outside the sandbox they approve, with a warning (D27, see
+[Moderate](security-moderate.md#limits)). Permissive is unchanged. Contained Claude
+panes get the rule too (#891). Commands that run without Corbanu's sandbox
+(an external sandbox) and a remote Linux executor used from macOS or Windows
+aren't covered.
 
 What needs a user namespace fails: a sandbox of its own (the commands of a
 nested `corbanu exec`, which Corbanu explains), rootless containers (Podman,
 Buildah, rootless Docker), `bwrap`, Flatpak, Nix's build sandbox, `unshare`,
 and Chrome or Electron with their sandbox on (Puppeteer's default; pass
-`--no-sandbox`, as Playwright does). 32-bit programs stop too. Choose
+`--no-sandbox`, as Playwright does). 32-bit programs stop too. In a
+contained Claude pane, Claude Code's own Bash sandbox (bubblewrap) can't
+start (bubblewrap reports "No permissions to create new namespace");
+depending on its version and settings, Claude Code then fails the command
+or offers to run it outside its own sandbox, which, like every pane
+command, asks you first and still runs in Corbanu's sandbox. Choose
 Permissive to run them.
+
+Such a failure is named, not left as a bare "Operation not permitted": the
+command's output and a warning in your transcript name the rule and the
+level, the `/security` inspector lists "creating a user namespace" under
+recent denials, and the approval prompt for a command that runs `unshare`,
+`bwrap`, Podman, Buildah or Flatpak says it will fail. A contained Claude
+pane ends such a turn with a note naming the rule. The explanation only
+reads the command's output; it never changes what runs.
 
 ## A managed network proxy
 
@@ -237,3 +254,31 @@ Moderate's rules don't cover run without one; choose a sandbox in your
 settings to keep every command in it. Where the sandbox can't start (for
 example Linux without user namespaces), commands fail under Moderate instead
 of running outside it.
+
+## Other Corbanu Terminals on the same home
+
+When you confirm Aggressive, other Corbanu Terminals running on the same
+Corbanu home move up to it within about a second (#919), as they do with
+the kill switch and Moderate. Each says so in its history. Other Corbanu
+processes on the home, such as a running `corbanu exec`, move up too. From
+then on, these apply there:
+
+- Core's protections;
+- approval for every command, from each pane's next turn;
+- the end of its grants and "for session" approvals;
+- for a command or file edit whose approval prompt is still open: the answer
+  isn't used and nothing runs; the agent can ask again under Aggressive
+  (#1001).
+
+A running `corbanu exec` can't ask you for approval, so from then on it
+refuses every command that isn't known read-only.
+
+The rest of Aggressive starts in each of them when it restarts: its
+sandbox, `.env` protection, network off and the model-key rules. Until then
+it is shown at its own level. This only ever raises a level: a lower level
+saved in another window applies only after a restart.
+
+The other sessions of the window you confirm in take Core's protections and
+approval for every command at once, and so do sessions you start there
+before you restart, also when you confirm before the window's own session
+has started (#978).

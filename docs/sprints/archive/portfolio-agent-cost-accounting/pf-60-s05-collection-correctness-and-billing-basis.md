@@ -71,6 +71,15 @@ exactly at published prices: 13 `gpt-5.4` requests, $0.270659 ([qualification](.
 AC10 now passes for OpenAI API-key routes; the record above is unchanged. Waiver (b) still stands; the enforced
 isolation gate is carried to [PF-60-S10](../../../plans/active/portfolio-agent-cost-accounting-followups.md#sprint-execution-map) (#404).
 
+### Addendum — 2026-10-16: waiver (b) discharged
+
+[PF-60-S10](../portfolio-agent-cost-accounting-followups/pf-60-s10-isolated-code-blind-acceptance.md) ran the
+code-blind acceptance of the follow-ups inside the enforced isolation gate on VM "macOS 3": separate unprivileged
+executor accounts, provider keys only through a relay the executors can't read, 105/105 isolation probes and a key scan
+of 0 ([record](../../../../qa/portfolio/agent-cost-accounting/followups-acceptance-20261016/README.md), PR #909).
+Travis accepted S10 on 2026-10-16 (29 passed, 1 failed, 7 blocked of 37; decision D24). Waiver (b) is discharged for
+the accounting acceptance; the record above is unchanged.
+
 ## Execution mandate
 
 - **Goal 1 (Blocker):** Kimi Code membership work is never recorded or shown as money spent.

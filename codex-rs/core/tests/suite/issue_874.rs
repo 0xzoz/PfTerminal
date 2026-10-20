@@ -20,6 +20,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use codex_security_policy::SecurityLevel;
 use core_test_support::responses::ResponsesRequest;
@@ -33,6 +34,7 @@ use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_sandbox;
 use core_test_support::test_codex::TestCodex;
+use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -86,6 +88,17 @@ async fn run(
     home: Arc<TempDir>,
     steps: Vec<Vec<Value>>,
 ) -> anyhow::Result<(Run, TestCodex)> {
+    run_in(level, setting, home, steps, /*project_of*/ None).await
+}
+
+/// [`run`], working in `project_of`'s project where given.
+async fn run_in(
+    level: SecurityLevel,
+    setting: Setting,
+    home: Arc<TempDir>,
+    steps: Vec<Vec<Value>>,
+    project_of: Option<&TestCodex>,
+) -> anyhow::Result<(Run, TestCodex)> {
     let server = start_mock_server().await;
     let mut steps = steps;
     steps.push(vec![
@@ -132,7 +145,10 @@ async fn run(
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
             additional_context: Default::default(),
-            thread_settings: Default::default(),
+            thread_settings: ThreadSettingsOverrides {
+                environments: project_of.map(|other| local_selections(other.config.cwd.clone())),
+                ..Default::default()
+            },
         })
         .await?;
     let mut warnings = Vec::new();
@@ -287,6 +303,68 @@ async fn issue_874_approval_does_not_lift_the_rules_while_a_finding_stands() -> 
             wrong.push(format!(
                 "planted={planted}: asked={} warnings={:?} read={read}",
                 run.asked, run.warnings
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Merge review (#926 with D27 (a), #891): while a finding stands in a
+/// project (found by any session of this process), a person's approval of
+/// a command there doesn't let its run create user namespaces either: in
+/// one, it could get past the protected-file rules the finding keeps.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_874_a_standing_finding_keeps_user_namespaces_denied() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    /// Prints whether the sandbox denies user namespaces to this run.
+    const SCRIPT: &str = "echo marker=${CODEX_SANDBOX_USER_NAMESPACES_DENIED:-unset}";
+    let mut wrong = Vec::new();
+    for planted in [false, true] {
+        let outside = TempDir::new()?;
+        let outside_path = outside.path().canonicalize()?;
+        std::fs::write(outside_path.join("zshrc"), "# start-up\n")?;
+        // One session, with full access, works in the project (planting a
+        // link there, or not).
+        let first = if planted {
+            plant(&outside_path)
+        } else {
+            "printf 'tidied'".to_string()
+        };
+        let (_, worked) = Box::pin(run(
+            SecurityLevel::Moderate,
+            Setting::FullAccess,
+            Arc::new(TempDir::new()?),
+            vec![step("call-first", json!({ "command": first }))],
+        ))
+        .await?;
+        // Another, in the workspace sandbox in the same project and before
+        // untrusted content, asks to run a command outside the sandbox; approved, which
+        // otherwise lets that run create user namespaces (D27 (a)).
+        let (second, _) = Box::pin(run_in(
+            SecurityLevel::Moderate,
+            Setting::Workspace,
+            Arc::new(TempDir::new()?),
+            vec![step(
+                "call-userns",
+                json!({
+                    "command": SCRIPT,
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "rootless podman needs a user namespace",
+                }),
+            )],
+            Some(&worked),
+        ))
+        .await?;
+        let out = output(&second.requests, "call-userns");
+        let denied = out.contains("marker=1");
+        let allowed = out.contains("marker=unset");
+        if second.asked == 0 || denied != planted || allowed == planted {
+            wrong.push(format!(
+                "planted={planted}: asked={} warnings={:?} output={out}",
+                second.asked, second.warnings
             ));
         }
     }

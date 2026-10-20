@@ -6,7 +6,8 @@ closed on 2026-10-08). They belong to the
 active [P1 security hardening plan](../../../plans/active/p1-security-hardening.md), which lists them in order
 with their dependencies, lanes and worktrees.
 
-- [PF-13-S07](pf-13-s07-integrated-credential-boundary-qualification.md): `ready`; archive after the Aggressive milestone.
+- [PF-13-S07](pf-13-s07-integrated-credential-boundary-qualification.md): `ready`; the Aggressive milestone was signed off on 2026-10-16, so it is archived once the
+  Linux canary is re-run on the current candidate.
 - PF-27-S06 and PF-27-S07: completed 2026-10-08, accepted by Travis with known limits, and archived
   ([S06](../../archive/p1-security-hardening/pf-27-s06-windows-broker-and-launch.md),
   [S07](../../archive/p1-security-hardening/pf-27-s07-windows-hardening-follow-ups.md)).

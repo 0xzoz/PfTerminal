@@ -29,8 +29,11 @@ use std::path::Path;
 
 mod indirect;
 mod invocation;
+mod nested;
 mod outbound;
 mod paths;
+mod quoted;
+mod sed;
 mod shell;
 
 pub(crate) use paths::USER_PERSISTENCE;
@@ -166,6 +169,13 @@ pub(crate) struct PostTaintAction {
     pub(crate) state: PostTaintState,
 }
 
+/// Appended to the prompt and the approvals-off refusal when
+/// [`PostTaintAction::reads_stay_denied`] holds.
+const AGGRESSIVE_READS_STAY_DENIED: &str = " Under security level Aggressive, credential files, \
+     the vault and the Corbanu home stay unreadable to agent commands even if you approve, and \
+     that is never granted, not even once; to allow it, switch to Permissive in /security (it \
+     applies after a restart).";
+
 impl PostTaintAction {
     /// Shown in the approval prompt so the human sees why it was asked again.
     pub(crate) fn approval_reason(&self) -> String {
@@ -175,12 +185,7 @@ impl PostTaintAction {
             self.kind.describe()
         );
         if self.reads_stay_denied() {
-            reason.push_str(
-                " Under security level Aggressive, credential files, the vault and the Corbanu \
-                 home stay unreadable to agent commands even if you approve, and that is never \
-                 granted, not even once; to allow it, switch to Permissive in /security (it \
-                 applies after a restart).",
-            );
+            reason.push_str(AGGRESSIVE_READS_STAY_DENIED);
         }
         reason
     }
@@ -198,11 +203,19 @@ impl PostTaintAction {
     }
 
     pub(crate) fn approvals_off_rejection(&self) -> String {
-        format!(
-            "Not run: this is {} after untrusted content entered the session, so it needs your \
-             approval, and approvals are off (approval_policy = never).",
+        let mut reason = format!(
+            "Not run: Security level {}: this is {} after untrusted content entered the session, \
+             so it needs your approval, and approvals are off (approval_policy = never). \
+             Review the action and turn approval prompts on (/permissions, or approval_policy \
+             in config.toml) before asking again. Other security protections still apply.",
+            level_name(self.state.level),
             self.kind.describe()
-        )
+        );
+        // #941 review: approving would not make these reads work under Aggressive.
+        if self.reads_stay_denied() {
+            reason.push_str(AGGRESSIVE_READS_STAY_DENIED);
+        }
+        reason
     }
 
     /// Refusal before any prompt: the kill switch denies protected actions.
@@ -304,7 +317,7 @@ const RECURSIVE_READERS: &[(&str, &[&str])] = &[
 ];
 /// Commands that write the paths they name (PF-23-S02): naming a persistence
 /// file to one of them, or redirecting output to it, is a write.
-const WRITERS: &[&str] = &[
+pub(super) const WRITERS: &[&str] = &[
     "tee", "cp", "mv", "install", "ln", "rsync", "dd", "truncate", "touch", "ditto", "sed", "perl",
     "ed", "ex", "patch", "chmod", "unzip", "tar", "curl", "wget", "rm", "rmdir", "unlink", "mkdir",
 ];
@@ -356,6 +369,10 @@ pub(super) fn classify_with(
         rebuilt: 0,
         not_shell: 0,
         sed_scope: None,
+        ran: Vec::new(),
+        ran_unknown: false,
+        written: Vec::new(),
+        nested_scripts: 0,
     };
     match action {
         ApprovalAction::Shell { command, cwd, .. }
@@ -519,6 +536,15 @@ struct Classifier {
     /// #841: the sed programs of the command line being judged, when a real
     /// shell parse of it is available.
     sed_scope: Option<SedScope>,
+    /// #885: script files the action runs (as resolved), and whether it runs
+    /// one whose name the classifier cannot see.
+    ran: Vec<String>,
+    ran_unknown: bool,
+    /// #885: files the action's command lines write (`None`: one the
+    /// classifier cannot name).
+    written: Vec<Option<String>>,
+    /// #885: nested shell scripts judged so far.
+    nested_scripts: usize,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
@@ -541,6 +567,8 @@ impl SedScope {
     /// carry no backslash or brace.
     fn of(command: &[String]) -> Option<Self> {
         let commands = codex_shell_command::bash::parse_shell_lc_plain_commands(command)?;
+        let piped = codex_shell_command::bash::extract_bash_command(command)
+            .is_some_and(|(_, script)| script.contains('|'));
         let mut scope = Self {
             programs: Vec::new(),
             others: Vec::new(),
@@ -592,6 +620,14 @@ impl SedScope {
                 let with_e = words
                     .iter()
                     .any(|word| word.starts_with('-') && word.contains('e'));
+                // #885: text sed saves (in place or through a pipe) may be
+                // run later in the line, so only the address and command
+                // letter of such a program are data.
+                let saves = piped
+                    || words
+                        .iter()
+                        .skip(1)
+                        .any(|word| word.starts_with('-') && word.contains('i'));
                 // macOS `sed -i ''`: the empty word after `-i` is its suffix.
                 let mut program_next = false;
                 let mut suffix_next = false;
@@ -608,8 +644,13 @@ impl SedScope {
                         };
                     program_next = word.starts_with('-') && word.ends_with('e');
                     suffix_next = word.starts_with('-') && word.ends_with('i');
-                    if program && sed_text_only(&word) {
-                        scope.programs.push(word);
+                    if program && let Some(prefix) = sed_text_prefix(&word) {
+                        let data = if saves {
+                            word[..prefix].to_string()
+                        } else {
+                            word
+                        };
+                        scope.programs.push(data);
                     } else {
                         scope.others.push(word);
                     }
@@ -638,7 +679,14 @@ impl SedScope {
 /// escaped by a backslash, and only blank space may follow it. Sed never
 /// runs such text; anything else (`s`, `e`, several commands) is not
 /// text-only.
+#[cfg(test)]
 fn sed_text_only(program: &str) -> bool {
+    sed_text_prefix(program).is_some()
+}
+
+/// For a text-only sed program (see `sed_text_only`), the length of its
+/// address and command letter: the part that is not text sed outputs.
+fn sed_text_prefix(program: &str) -> Option<usize> {
     fn address(rest: &str) -> Option<&str> {
         if let Some(regex) = rest.strip_prefix('/') {
             let mut escaped = false;
@@ -658,29 +706,37 @@ fn sed_text_only(program: &str) -> bool {
         }
         Some(rest.trim_start_matches(|ch: char| ch.is_ascii_digit()))
     }
-    let Some(mut rest) = address(program.trim_start_matches([' ', '\t'])) else {
-        return false;
-    };
+    let mut rest = address(program.trim_start_matches([' ', '\t']))?;
     if let Some(second) = rest.strip_prefix(',') {
         match address(second) {
             Some(after) if after.len() < second.len() => rest = after,
-            _ => return false,
+            _ => return None,
         }
     }
     let rest = rest.trim_start_matches([' ', '\t']);
-    let Some(text) = rest.strip_prefix(['a', 'i', 'c']) else {
-        return false;
-    };
+    let text = rest.strip_prefix(['a', 'i', 'c'])?;
+    let prefix = program.len() - text.len();
     let mut escaped = false;
     for (index, ch) in text.char_indices() {
         match ch {
             _ if escaped => escaped = false,
             '\\' => escaped = true,
-            '\n' => return text[index + 1..].trim().is_empty(),
+            '\n' => return text[index + 1..].trim().is_empty().then_some(prefix),
             _ => {}
         }
     }
-    true
+    Some(prefix)
+}
+
+/// A file read as code.
+enum FileText {
+    Missing,
+    /// Not a regular file, too large, past the file limit or where lookups
+    /// are not allowed.
+    Unreadable,
+    /// An executable (by its magic number).
+    Binary,
+    Text(String),
 }
 
 /// Whether a script the command runs must be read in full (it is what runs)
@@ -763,8 +819,12 @@ impl Classifier {
                 variables.insert(name.to_string(), value.to_string());
             }
         }
+        let mut lexed_seds = 0;
+        let mut lexed_shells = 0;
         for (index, simple) in lexed.commands.iter().enumerate() {
             let (words, unseen) = substitute(simple, &variables);
+            lexed_seds += sed::positions(&words).len();
+            lexed_shells += nested::shell_commands(&words);
             let feeds_pipe = pipe_sources.contains(&index);
             self.simple_command(
                 simple,
@@ -787,6 +847,8 @@ impl Classifier {
                 self.rebuilt -= 1;
             }
         }
+        // #885: nested shells' scripts and sed programs, read with quotes.
+        self.quoted_pass(command, cwd, depth, (lexed_seds, lexed_shells));
         self.sed_scope = outer_scope;
     }
 
@@ -1050,6 +1112,7 @@ impl Classifier {
     /// A script the command certainly runs: read in full or fail closed.
     fn required_script(&mut self, file: &str, cwd: &str, depth: usize, shell: bool) {
         if file.contains('$') || file.contains(shell::UNSEEN_OUTPUT) {
+            self.ran_unknown = true;
             self.note(ProtectedActionKind::UnseenCode);
             return;
         }
@@ -1119,25 +1182,37 @@ impl Classifier {
     /// large, past the file limit, or where lookups are not allowed) fails
     /// closed; an optional one is skipped when it is not there.
     fn script_file(&mut self, file: &str, cwd: &str, depth: usize, need: Script) {
-        use std::io::Read;
+        self.ran.push(file.to_string());
         let unreadable = |classifier: &mut Self, missing: bool| {
             if need == Script::Required || !missing {
                 classifier.note(ProtectedActionKind::UnseenCode);
             }
         };
+        match self.read_file(file) {
+            FileText::Missing => unreadable(self, /*missing*/ true),
+            FileText::Unreadable => unreadable(self, /*missing*/ false),
+            FileText::Binary => {}
+            FileText::Text(text) => self.script(&text, cwd, depth + 1),
+        }
+    }
+
+    /// Read a file the action runs or uses as code, within the lookup and
+    /// file limits.
+    fn read_file(&mut self, file: &str) -> FileText {
+        use std::io::Read;
         if !self.homes.lookups_allowed(file) {
-            return unreadable(self, /*missing*/ false);
+            return FileText::Unreadable;
         }
         // Check before opening: opening a FIFO or device would block.
         let Ok(metadata) = std::fs::metadata(file) else {
-            return unreadable(self, /*missing*/ true);
+            return FileText::Missing;
         };
         if !metadata.is_file() {
-            return unreadable(self, /*missing*/ false);
+            return FileText::Unreadable;
         }
         self.scripts_read += 1;
         if self.scripts_read > MAX_SCRIPT_FILES {
-            return unreadable(self, /*missing*/ false);
+            return FileText::Unreadable;
         }
         let mut options = std::fs::OpenOptions::new();
         options.read(true);
@@ -1148,27 +1223,26 @@ impl Classifier {
             options.custom_flags(libc::O_NONBLOCK);
         }
         let Ok(handle) = options.open(file) else {
-            return unreadable(self, /*missing*/ false);
+            return FileText::Unreadable;
         };
         if !handle.metadata().is_ok_and(|metadata| metadata.is_file()) {
-            return unreadable(self, /*missing*/ false);
+            return FileText::Unreadable;
         }
         let mut bytes = Vec::new();
         let mut reader = handle.take(indirect::SCRIPT_READ_LIMIT + 1);
         if reader.read_to_end(&mut bytes).is_err() {
-            return unreadable(self, /*missing*/ false);
+            return FileText::Unreadable;
         }
         // Executables first: their size does not matter.
         if BINARY_MAGIC.iter().any(|magic| bytes.starts_with(magic)) {
-            return;
+            return FileText::Binary;
         }
         if bytes.len() as u64 > indirect::SCRIPT_READ_LIMIT {
-            return unreadable(self, /*missing*/ false);
+            return FileText::Unreadable;
         }
         // The shell skips NUL bytes; so does the scan.
         bytes.retain(|byte| *byte != 0);
-        let text = String::from_utf8_lossy(&bytes);
-        self.script(&text, cwd, depth + 1);
+        FileText::Text(String::from_utf8_lossy(&bytes).into_owned())
     }
 }
 
@@ -1223,6 +1297,19 @@ fn substitute(
         .unzip()
 }
 
+/// The level as other product messages name it ("security level Moderate").
+fn level_name(level: SecurityLevel) -> &'static str {
+    match level {
+        SecurityLevel::Permissive => "Permissive",
+        SecurityLevel::Moderate => "Moderate",
+        SecurityLevel::Aggressive => "Aggressive",
+    }
+}
+
 #[cfg(test)]
 #[path = "tainted_action_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "tainted_action_refusal_tests.rs"]
+mod tainted_action_refusal_tests;

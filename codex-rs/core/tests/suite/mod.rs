@@ -39,6 +39,7 @@ mod accounting_anthropic;
 mod accounting_anthropic_recovery;
 mod accounting_chat;
 mod accounting_chat_recovery;
+mod accounting_code_review;
 mod accounting_responses;
 mod accounting_responses_recovery;
 #[path = "accounting_responses_ws.rs"]
@@ -107,8 +108,10 @@ mod issue_748;
 mod issue_766;
 #[cfg(target_os = "linux")]
 mod issue_826;
+mod issue_826_explained;
 mod issue_840;
 mod issue_874;
+mod issue_891_one_run;
 mod items;
 mod json_result;
 mod live_cli;

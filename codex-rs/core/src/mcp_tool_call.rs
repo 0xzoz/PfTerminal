@@ -234,11 +234,28 @@ pub(crate) async fn handle_mcp_tool_call(
     )
     .await;
 
-    // PF-23-S01: after untrusted content, a protected MCP call needs a fresh
-    // human approval; no remembered approval, hook or reviewer stands in.
-    match post_taint_mcp_check(&sess, step_context, &call_id, &invocation, &metadata).await {
-        Ok(true) => {
-            return handle_approved_mcp_tool_call(
+    // D50 (#1001): a call approved (or decided) while a security transition
+    // was committed was approved for a stale prompt. It does not run on that
+    // answer: it is decided again under the new level, the person asked
+    // again, and refused when that keeps happening.
+    let decided = decide_until_fresh(&sess, |asked_again| {
+        decide_mcp_tool_call(
+            &sess,
+            step_context,
+            &call_id,
+            &invocation,
+            &hook_tool_name,
+            &metadata,
+            &prepared_call,
+            approval_mode,
+            asked_again,
+        )
+    })
+    .await;
+
+    match decided {
+        McpCallOutcome::Run(approval_application, decided_under) => {
+            handle_approved_mcp_tool_call(
                 &sess,
                 step_context.as_ref(),
                 &call_id,
@@ -246,26 +263,134 @@ pub(crate) async fn handle_mcp_tool_call(
                 prepared_call,
                 metadata,
                 item_metadata,
-                McpToolApprovalApplication::NotRequired,
+                approval_application,
+                decided_under,
             )
-            .await;
+            .await
         }
-        Ok(false) => {}
-        Err(refusal) => {
+        McpCallOutcome::Skip { message, metrics } => {
             let result = notify_mcp_tool_call_skip(
                 sess.as_ref(),
                 turn_context.as_ref(),
                 &call_id,
                 invocation,
                 item_metadata.clone(),
-                refusal,
+                message,
                 /*already_started*/ true,
             )
             .await;
-            return HandledMcpToolCall {
+            if metrics {
+                let status = if result.is_ok() { "ok" } else { "error" };
+                let outcome = McpCallMetricOutcome::from_status(status);
+                emit_mcp_call_metrics(
+                    turn_context.as_ref(),
+                    &outcome,
+                    &server,
+                    &tool_name,
+                    connector_id.as_deref(),
+                    connector_name.as_deref(),
+                    /*duration*/ None,
+                );
+            }
+            HandledMcpToolCall {
                 result: CallToolResult::from_result(result),
                 tool_input: arguments_value
                     .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
+            }
+        }
+    }
+}
+
+/// D50 (#1001): how often an MCP call whose approval went stale is decided
+/// again.
+const MAX_STALE_MCP_APPROVAL_ROUNDS: usize = 3;
+
+/// D50: why an MCP call whose approval went stale every time did not run.
+const STALE_MCP_APPROVAL_REFUSAL: &str = "The security level changed while this approval \
+     was open, each time it was asked, so it was not used and the tool was not called. Ask \
+     again if it is still needed.";
+
+/// D50: why an approved MCP call was not made after all.
+const STALE_MCP_PREPARED_REFUSAL: &str = "the security level changed while this tool call was \
+     being prepared, so it was not made; ask again if it is still needed";
+
+/// D50: the note an MCP approval asked again carries.
+const MCP_ASKED_AGAIN_NOTE: &str = "The security level changed while this tool call was being \
+     approved, so it is asked again under the new level.";
+
+/// D50: `decide(asked_again)` again while a security transition was committed
+/// during a decision that lets the call run; refused after
+/// [`MAX_STALE_MCP_APPROVAL_ROUNDS`] such rounds.
+async fn decide_until_fresh<F, Fut>(sess: &Session, mut decide: F) -> McpCallOutcome
+where
+    F: FnMut(bool) -> Fut,
+    Fut: std::future::Future<Output = McpCallOutcome>,
+{
+    for round in 1..=MAX_STALE_MCP_APPROVAL_ROUNDS {
+        let decided_under = sess.services.authority_marker();
+        let outcome = match decide(/*asked_again*/ round > 1).await {
+            McpCallOutcome::Run(application, _) => McpCallOutcome::Run(application, decided_under),
+            skip => skip,
+        };
+        if !matches!(outcome, McpCallOutcome::Run(..))
+            || !sess.services.transition_since(decided_under)
+        {
+            return outcome;
+        }
+        tracing::info!(
+            target: "codex_core::security::transition",
+            "MCP tool call approved before a security transition; not used, asked again"
+        );
+    }
+    McpCallOutcome::Skip {
+        message: STALE_MCP_APPROVAL_REFUSAL.to_string(),
+        metrics: true,
+    }
+}
+
+/// Whether an MCP call runs, and under which approval, or why not.
+enum McpCallOutcome {
+    /// With the policy marker it was decided under (set by
+    /// [`decide_until_fresh`]).
+    Run(McpToolApprovalApplication, Option<(u64, u64)>),
+    /// `metrics`: whether the skip is counted in the call metrics.
+    Skip { message: String, metrics: bool },
+}
+
+/// The post-taint check and the approval of one MCP call, under the policy
+/// in force now. `asked_again`: an earlier answer went stale (D50).
+#[expect(clippy::too_many_arguments)]
+async fn decide_mcp_tool_call(
+    sess: &Arc<Session>,
+    step_context: &Arc<StepContext>,
+    call_id: &str,
+    invocation: &McpInvocation,
+    hook_tool_name: &HookToolName,
+    metadata: &McpToolApprovalMetadata,
+    prepared_call: &PreparedMcpCall,
+    approval_mode: AppToolApproval,
+    asked_again: bool,
+) -> McpCallOutcome {
+    // PF-23-S01: after untrusted content, a protected MCP call needs a fresh
+    // human approval; no remembered approval, hook or reviewer stands in.
+    match post_taint_mcp_check(
+        sess,
+        step_context,
+        call_id,
+        invocation,
+        metadata,
+        asked_again,
+    )
+    .await
+    {
+        Ok(true) => {
+            return McpCallOutcome::Run(McpToolApprovalApplication::NotRequired, None);
+        }
+        Ok(false) => {}
+        Err(refusal) => {
+            return McpCallOutcome::Skip {
+                message: refusal,
+                metrics: false,
             };
         }
     }
@@ -275,95 +400,44 @@ pub(crate) async fn handle_mcp_tool_call(
     } else {
         McpToolApprovalPolicy::for_server(approval_mode)
     };
-    if let Some(decision) = maybe_request_mcp_tool_approval(
-        &sess,
+    // #945: the policy the approval prompt is shown under. A "for session"
+    // or remembered answer is stored only while it is still in force.
+    let approval_shown_under = sess.services.authority_marker();
+    let Some(decision) = maybe_request_mcp_tool_approval(
+        sess,
         step_context,
-        &call_id,
-        &invocation,
-        &hook_tool_name,
-        &metadata,
+        call_id,
+        invocation,
+        hook_tool_name,
+        metadata,
         prepared_call.config(),
         approval_policy,
+        asked_again,
     )
     .await
-    {
-        let result = match decision {
-            decision @ (McpToolApprovalDecision::Accept
-            | McpToolApprovalDecision::AcceptForSession
-            | McpToolApprovalDecision::AcceptAndRemember) => {
-                return handle_approved_mcp_tool_call(
-                    &sess,
-                    step_context.as_ref(),
-                    &call_id,
-                    invocation,
-                    prepared_call,
-                    metadata,
-                    item_metadata,
-                    McpToolApprovalApplication::Apply {
-                        decision,
-                        policy: approval_policy,
-                    },
-                )
-                .await;
-            }
-            McpToolApprovalDecision::Decline { message } => {
-                let message = message.unwrap_or_else(|| "user rejected MCP tool call".to_string());
-                notify_mcp_tool_call_skip(
-                    sess.as_ref(),
-                    turn_context.as_ref(),
-                    &call_id,
-                    invocation,
-                    item_metadata.clone(),
-                    message,
-                    /*already_started*/ true,
-                )
-                .await
-            }
-            McpToolApprovalDecision::Cancel => {
-                let message = "user cancelled MCP tool call".to_string();
-                notify_mcp_tool_call_skip(
-                    sess.as_ref(),
-                    turn_context.as_ref(),
-                    &call_id,
-                    invocation,
-                    item_metadata.clone(),
-                    message,
-                    /*already_started*/ true,
-                )
-                .await
-            }
-        };
-
-        let status = if result.is_ok() { "ok" } else { "error" };
-        let outcome = McpCallMetricOutcome::from_status(status);
-        emit_mcp_call_metrics(
-            turn_context.as_ref(),
-            &outcome,
-            &server,
-            &tool_name,
-            connector_id.as_deref(),
-            connector_name.as_deref(),
-            /*duration*/ None,
-        );
-
-        return HandledMcpToolCall {
-            result: CallToolResult::from_result(result),
-            tool_input: arguments_value
-                .unwrap_or_else(|| JsonValue::Object(serde_json::Map::new())),
-        };
+    else {
+        return McpCallOutcome::Run(McpToolApprovalApplication::NotRequired, None);
+    };
+    match decision {
+        decision @ (McpToolApprovalDecision::Accept
+        | McpToolApprovalDecision::AcceptForSession
+        | McpToolApprovalDecision::AcceptAndRemember) => McpCallOutcome::Run(
+            McpToolApprovalApplication::Apply {
+                decision,
+                policy: approval_policy,
+                shown_under: approval_shown_under,
+            },
+            None,
+        ),
+        McpToolApprovalDecision::Decline { message } => McpCallOutcome::Skip {
+            message: message.unwrap_or_else(|| "user rejected MCP tool call".to_string()),
+            metrics: true,
+        },
+        McpToolApprovalDecision::Cancel => McpCallOutcome::Skip {
+            message: "user cancelled MCP tool call".to_string(),
+            metrics: true,
+        },
     }
-
-    handle_approved_mcp_tool_call(
-        &sess,
-        step_context.as_ref(),
-        &call_id,
-        invocation,
-        prepared_call,
-        metadata,
-        item_metadata,
-        McpToolApprovalApplication::NotRequired,
-    )
-    .await
 }
 
 /// Characters of MCP arguments shown from each end in a post-taint question.
@@ -378,6 +452,7 @@ async fn post_taint_mcp_check(
     call_id: &str,
     invocation: &McpInvocation,
     metadata: &McpToolApprovalMetadata,
+    asked_again: bool,
 ) -> Result<bool, String> {
     use crate::security::protected_surface;
     let turn_context = step_context.turn.as_ref();
@@ -435,7 +510,12 @@ async fn post_taint_mcp_check(
         format!("{head} … {tail} ({count} characters)")
     };
     let question = format!(
-        "Allow the {} MCP tool `{}` with {shown}? {}",
+        "{}Allow the {} MCP tool `{}` with {shown}? {}",
+        if asked_again {
+            format!("{MCP_ASKED_AGAIN_NOTE} ")
+        } else {
+            String::new()
+        },
         invocation.server,
         invocation.tool,
         check.reason()
@@ -502,6 +582,7 @@ async fn handle_approved_mcp_tool_call(
     metadata: McpToolApprovalMetadata,
     item_metadata: McpToolCallItemMetadata,
     approval_application: McpToolApprovalApplication,
+    decided_under: Option<(u64, u64)>,
 ) -> HandledMcpToolCall {
     let turn_context = step_context.turn.as_ref();
     let server = invocation.server.clone();
@@ -519,8 +600,11 @@ async fn handle_approved_mcp_tool_call(
         let result = async {
             let result = prepared_call
                 .call_with_preparation(|| async {
-                    if let McpToolApprovalApplication::Apply { decision, policy } =
-                        &approval_application
+                    if let McpToolApprovalApplication::Apply {
+                        decision,
+                        policy,
+                        shown_under,
+                    } = &approval_application
                     {
                         let session_approval_key = session_mcp_tool_approval_key(
                             &invocation,
@@ -542,6 +626,7 @@ async fn handle_approved_mcp_tool_call(
                             decision,
                             session_approval_key,
                             persistent_approval_key,
+                            *shown_under,
                         )
                         .await;
                     }
@@ -574,6 +659,11 @@ async fn handle_approved_mcp_tool_call(
                         request_meta,
                     )
                     .await?;
+                    // D50 (#1001): nor when a security transition was
+                    // committed while the call was prepared.
+                    if sess.services.transition_since(decided_under) {
+                        anyhow::bail!(STALE_MCP_PREPARED_REFUSAL);
+                    }
                     let mcp_call_trace = sess
                         .services
                         .rollout_thread_trace
@@ -1151,6 +1241,8 @@ enum McpToolApprovalApplication {
     Apply {
         decision: McpToolApprovalDecision,
         policy: McpToolApprovalPolicy,
+        /// #945: the policy marker the approval prompt was shown under.
+        shown_under: Option<(u64, u64)>,
     },
 }
 
@@ -1352,6 +1444,68 @@ struct McpToolApprovalPromptOptions {
     allow_persistent_approval: bool,
 }
 
+impl McpToolApprovalPromptOptions {
+    /// Only "Allow" and "Cancel": no approval that outlives this call.
+    fn once_only(self) -> Self {
+        Self {
+            allow_session_remember: false,
+            allow_persistent_approval: false,
+        }
+    }
+
+    /// #1011 (item 1): a lasting answer the prompt did not offer (a client
+    /// that sends it anyway, or the automatic reviewer) approves this call
+    /// only.
+    fn limit(self, decision: McpToolApprovalDecision) -> McpToolApprovalDecision {
+        match decision {
+            McpToolApprovalDecision::AcceptForSession if !self.allow_session_remember => {
+                McpToolApprovalDecision::Accept
+            }
+            McpToolApprovalDecision::AcceptAndRemember if !self.allow_persistent_approval => {
+                McpToolApprovalDecision::Accept
+            }
+            decision => decision,
+        }
+    }
+}
+
+/// #942: under a protected level, once the session holds untrusted content,
+/// every call to a tool that may change or send data (or move value) needs a
+/// fresh human approval, and no remembered approval stands in (PF-23-S01).
+/// The call's own output is untrusted content, so a "for this session" or
+/// "always" approval for such a tool could never apply after this call, and
+/// none is offered. Judged on the tool alone, without its arguments: the
+/// remembered approval would cover every later call of the tool.
+fn mcp_tool_needs_fresh_approval_after_taint(
+    sess: &Session,
+    step_context: &StepContext,
+    invocation: &McpInvocation,
+    metadata: &McpToolApprovalMetadata,
+) -> bool {
+    use crate::security::protected_surface;
+    let Some(state) = sess.services.model_client().post_taint_state() else {
+        return false;
+    };
+    if !state.protected_paths_apply() {
+        return false;
+    }
+    let turn_context = step_context.turn.as_ref();
+    #[allow(deprecated)]
+    let cwd = step_context.environments.primary().map_or_else(
+        || PathUri::from_abs_path(&turn_context.cwd),
+        |environment| environment.cwd().clone(),
+    );
+    let call = protected_surface::McpCall {
+        server: &invocation.server,
+        tool: &invocation.tool,
+        title: metadata.tool_title.as_deref(),
+        acts_outside: requires_mcp_tool_approval(metadata.annotations.as_ref()),
+        arguments: None,
+        cwd: &cwd,
+    };
+    protected_surface::classify_mcp(&call, turn_context.config.codex_home.as_path()).is_some()
+}
+
 struct McpToolApprovalElicitationRequest<'a> {
     server: &'a str,
     metadata: Option<&'a McpToolApprovalMetadata>,
@@ -1408,6 +1562,7 @@ async fn maybe_request_mcp_tool_approval(
     metadata: &McpToolApprovalMetadata,
     config: &codex_mcp::McpConfig,
     policy: McpToolApprovalPolicy,
+    asked_again: bool,
 ) -> Option<McpToolApprovalDecision> {
     let turn_context = &step_context.turn;
     let approvals_reviewer = connectors::mcp_approvals_reviewer_from_layers(
@@ -1473,6 +1628,14 @@ async fn maybe_request_mcp_tool_approval(
         .config
         .features
         .enabled(Feature::ToolCallMcpElicitation);
+    let mut prompt_options = mcp_tool_approval_prompt_options(
+        session_approval_key.as_ref(),
+        persistent_approval_key.as_ref(),
+        tool_call_mcp_elicitation_enabled,
+    );
+    if mcp_tool_needs_fresh_approval_after_taint(sess, step_context, invocation, metadata) {
+        prompt_options = prompt_options.once_only();
+    }
 
     if matches!(
         config.approval_policy.value(),
@@ -1489,14 +1652,9 @@ async fn maybe_request_mcp_tool_approval(
         )
         .await;
         let decision = mcp_tool_approval_decision_from_guardian(decision);
-        return Some(decision);
+        return Some(prompt_options.limit(decision));
     }
 
-    let prompt_options = mcp_tool_approval_prompt_options(
-        session_approval_key.as_ref(),
-        persistent_approval_key.as_ref(),
-        tool_call_mcp_elicitation_enabled,
-    );
     let question_id = format!("{MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX}_{call_id}");
     let rendered_template = render_mcp_tool_approval_template(
         &invocation.server,
@@ -1509,7 +1667,7 @@ async fn maybe_request_mcp_tool_approval(
         .as_ref()
         .map(|rendered_template| rendered_template.tool_params_display.clone())
         .or_else(|| build_mcp_tool_approval_display_params(invocation.arguments.as_ref()));
-    let question = build_mcp_tool_approval_question(
+    let mut question = build_mcp_tool_approval_question(
         question_id.clone(),
         &invocation.server,
         &invocation.tool,
@@ -1519,6 +1677,18 @@ async fn maybe_request_mcp_tool_approval(
             .as_ref()
             .map(|rendered_template| rendered_template.question.as_str()),
     );
+    // D50 (#1001): a prompt asked again says why.
+    let asked_again_note = |text: &str| format!("{MCP_ASKED_AGAIN_NOTE} {text}");
+    if asked_again {
+        question.question = asked_again_note(&question.question);
+    }
+    let message_override = rendered_template.as_ref().map(|rendered_template| {
+        if asked_again {
+            asked_again_note(&rendered_template.elicitation_message)
+        } else {
+            rendered_template.elicitation_message.clone()
+        }
+    });
     if tool_call_mcp_elicitation_enabled {
         let request_id = rmcp::model::RequestId::String(
             format!("{MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX}_{call_id}").into(),
@@ -1533,9 +1703,7 @@ async fn maybe_request_mcp_tool_approval(
                     .or(invocation.arguments.as_ref()),
                 tool_params_display: tool_params_display.as_deref(),
                 question,
-                message_override: rendered_template
-                    .as_ref()
-                    .map(|rendered_template| rendered_template.elicitation_message.as_str()),
+                message_override: message_override.as_deref(),
                 prompt_options,
             });
         let decision = parse_mcp_tool_approval_elicitation_response(
@@ -1550,7 +1718,7 @@ async fn maybe_request_mcp_tool_approval(
             &question_id,
         );
         let decision = normalize_approval_decision_for_mode(decision, policy.mode);
-        return Some(decision);
+        return Some(prompt_options.limit(decision));
     }
 
     let args = RequestUserInputArgs {
@@ -1564,7 +1732,7 @@ async fn maybe_request_mcp_tool_approval(
         parse_mcp_tool_approval_response(response, &question_id),
         policy.mode,
     );
-    Some(decision)
+    Some(prompt_options.limit(decision))
 }
 
 pub(crate) fn mcp_approvals_reviewer(
@@ -2065,10 +2233,15 @@ async fn mcp_tool_approval_is_remembered(sess: &Session, key: &McpToolApprovalKe
     matches!(store.get(key), Some(ReviewDecision::ApprovedForSession))
 }
 
-/// PF-23-S03: under the policy the cache was last checked under; dropped
-/// when a security transition was committed since.
-async fn remember_mcp_tool_approval(sess: &Session, key: McpToolApprovalKey) {
-    let decided_under = sess.services.tool_approvals.lock().await.policy();
+/// PF-23-S03: under the policy the prompt was shown under; dropped when a
+/// security transition was committed since (#945).
+async fn remember_mcp_tool_approval(
+    sess: &Session,
+    key: McpToolApprovalKey,
+    shown_under: Option<(u64, u64)>,
+) {
+    // No marker then: the tree was initialized since, without a transition.
+    let decided_under = shown_under.or_else(|| sess.services.authority_marker());
     sess.services.remember_approvals([key], decided_under).await;
 }
 
@@ -2078,18 +2251,32 @@ async fn apply_mcp_tool_approval_decision(
     decision: &McpToolApprovalDecision,
     session_approval_key: Option<McpToolApprovalKey>,
     persistent_approval_key: Option<McpToolApprovalKey>,
+    shown_under: Option<(u64, u64)>,
 ) {
+    let lasting = matches!(
+        decision,
+        McpToolApprovalDecision::AcceptForSession | McpToolApprovalDecision::AcceptAndRemember
+    );
+    // #945: answered after a security transition, for a stale prompt: it
+    // approves this call once and stores nothing.
+    if lasting && sess.services.transition_since(shown_under) {
+        tracing::info!(
+            target: "codex_core::security::transition",
+            "MCP tool approval answered after a security transition; not stored"
+        );
+        return;
+    }
     match decision {
         McpToolApprovalDecision::AcceptForSession => {
             if let Some(key) = session_approval_key {
-                remember_mcp_tool_approval(sess, key).await;
+                remember_mcp_tool_approval(sess, key, shown_under).await;
             }
         }
         McpToolApprovalDecision::AcceptAndRemember => {
             if let Some(key) = persistent_approval_key {
-                maybe_persist_mcp_tool_approval(sess, turn_context, key).await;
+                maybe_persist_mcp_tool_approval(sess, turn_context, key, shown_under).await;
             } else if let Some(key) = session_approval_key {
-                remember_mcp_tool_approval(sess, key).await;
+                remember_mcp_tool_approval(sess, key, shown_under).await;
             }
         }
         McpToolApprovalDecision::Accept
@@ -2102,12 +2289,13 @@ async fn maybe_persist_mcp_tool_approval(
     sess: &Session,
     turn_context: &TurnContext,
     key: McpToolApprovalKey,
+    shown_under: Option<(u64, u64)>,
 ) {
     let tool_name = key.tool_name.clone();
 
     let persist_result = if key.server == CODEX_APPS_MCP_SERVER_NAME {
         let Some(connector_id) = key.connector_id.clone() else {
-            remember_mcp_tool_approval(sess, key).await;
+            remember_mcp_tool_approval(sess, key, shown_under).await;
             return;
         };
         persist_codex_app_tool_approval(&turn_context.config, &connector_id, &tool_name).await
@@ -2122,12 +2310,12 @@ async fn maybe_persist_mcp_tool_approval(
             tool_name,
             "failed to persist MCP tool approval"
         );
-        remember_mcp_tool_approval(sess, key).await;
+        remember_mcp_tool_approval(sess, key, shown_under).await;
         return;
     }
 
     sess.reload_user_config_layer().await;
-    remember_mcp_tool_approval(sess, key).await;
+    remember_mcp_tool_approval(sess, key, shown_under).await;
 }
 
 async fn persist_codex_app_tool_approval(
