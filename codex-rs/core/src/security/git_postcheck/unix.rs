@@ -1063,7 +1063,8 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         // Gone (a worktree removed, a scratch clone deleted): nothing to
         // follow. Should the same one come back, it is compared with the
         // last look; a new one there gets a first look.
-        if DotGit::read(&repo.dot_git) == DotGit::Missing {
+        let now = DotGit::read(&repo.dot_git);
+        if now == DotGit::Missing {
             if let Some(prev) = snapshot.as_mut() {
                 prev.went_missing = true;
             }
@@ -1072,7 +1073,11 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         }
         // The last look stays until this one is done (a panic keeps it).
         let prev = snapshot.as_ref();
-        let mut cur = walk(repo, prev);
+        // Made again: what the old one had isn't carried into this look.
+        let mut cur = walk(
+            repo,
+            prev.filter(|prev| !(prev.went_missing && prev.dot_git != now)),
+        );
         // Missing at the last look and back as a different one: a full
         // look, not a first look (#943).
         let remade = prev
@@ -1175,7 +1180,8 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
 /// is compared with: the last look's folders that are still the same ones,
 /// and empty ones for its own git folders that aren't, so that config,
 /// hooks, remotes and steps there are reported as new (empty ones once
-/// filled).
+/// filled). A worktree's `commondir` naming its common folder, still the
+/// same one, isn't new (`git worktree add` again).
 fn remade_baseline(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Snapshot {
     let mut baseline = Snapshot::empty(&cur.dot_git);
     baseline.empty_new = prev.empty_new.clone();
@@ -1197,18 +1203,40 @@ fn remade_baseline(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Snapshot {
         })
         .map(|(path, read)| (path.clone(), read.clone()))
         .collect();
+    let kept: Vec<&PathBuf> = repo
+        .git_dirs
+        .iter()
+        .filter(|dir| baseline.folders.contains_key(*dir))
+        .collect();
     for dir in &repo.git_dirs {
-        baseline
+        if baseline.folders.contains_key(dir) {
+            continue;
+        }
+        let commondir = cur
             .folders
-            .entry(dir.clone())
-            .or_insert_with(|| Folder {
+            .get(dir)
+            .and_then(|folder| folder.entries.get(OsStr::new("commondir")))
+            .filter(|entry| entry.kind == Kind::File && entry.nlink == 1)
+            .filter(|_| {
+                read_small(&dir.join("commondir"))
+                    .and_then(|common| std::fs::canonicalize(dir.join(common.trim())).ok())
+                    .is_some_and(|common| kept.contains(&&common))
+            });
+        let entries = commondir
+            .map(|entry| (OsString::from("commondir"), entry.clone()))
+            .into_iter()
+            .collect();
+        baseline.folders.insert(
+            dir.clone(),
+            Folder {
                 dev: 0,
                 ino: 0,
                 ctime: 0,
                 settled: false,
                 role: Role::GitDir,
-                entries: HashMap::new(),
-            });
+                entries,
+            },
+        );
     }
     baseline
 }

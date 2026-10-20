@@ -647,7 +647,7 @@ fn issue_874_a_remote_behind_an_unreadable_git_folder_is_reported() {
 /// place isn't reported as "replaced" (its config and hooks would be as
 /// new, #943).
 #[test]
-fn issue_874_a_recloned_repository_gets_a_first_look() {
+fn issue_874_a_recloned_repository_isnt_reported_as_replaced() {
     let project = Project::new();
     let git = project.git();
     let (thread, repos) = baseline(&project);
@@ -920,6 +920,48 @@ fn issue_943_a_worktree_git_file_made_again_compares_with_the_last_look() {
         vec![format!(
             "config {}",
             worktree_git.join("config.worktree").display()
+        )]
+    );
+}
+
+/// #943 review r1: a worktree removed and added again in a later command
+/// (a new git folder below the common one) isn't reported for its
+/// `commondir`; one naming another folder is.
+#[test]
+fn issue_943_a_worktree_added_again_later() {
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    let add = |commondir: &str| {
+        std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+        std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+        std::fs::write(worktree_git.join("commondir"), commondir).expect("commondir");
+    };
+    add("../..\n");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let repos = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &repos, "Moderate"), None);
+    let remove = || {
+        std::fs::remove_file(worktree.join(".git")).expect("removed");
+        std::fs::remove_dir_all(&worktree_git).expect("removed");
+        assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    };
+    remove();
+    add("../..\n");
+    std::fs::write(worktree.join(".git"), &text).expect("added again");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    assert_eq!(project.held(), Vec::<String>::new());
+    remove();
+    add(&format!("{}\n", project.outside.display()));
+    std::fs::write(worktree.join(".git"), &text).expect("added again");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!(
+            "config {}",
+            worktree_git.join("commondir").display()
         )]
     );
 }
