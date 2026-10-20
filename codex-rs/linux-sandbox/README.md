@@ -98,6 +98,27 @@ commands that would enter the bubblewrap path.
   the inner stage installs them again. The command's environment
   carries `CODEX_SANDBOX_USER_NAMESPACES_DENIED=1`; a helper started there
   that cannot create the namespace bubblewrap needs says so and exits 1.
+- When bubblewrap is active, no sandboxed process outlives the helper's
+  session (#935). bubblewrap binds the sandbox's PID 1 to its parent
+  (`--die-with-parent`) only after setup, so a bubblewrap that died during
+  setup used to leave the command running on its own. The helper now runs
+  bubblewrap under a supervisor: a fork in its own process group, set as a
+  child subreaper, so an orphaned PID 1 becomes its child. The supervisor
+  kills bubblewrap and every remaining child with `SIGKILL` (for a PID 1
+  that is the whole PID namespace, double-forked daemons included), reaps
+  them and exits as bubblewrap did, when any of these happens:
+  - bubblewrap exits (normally, the command finished);
+  - the helper exits or is killed (its lifeline pipe closes);
+  - the helper's parent exits (a pidfd on the parent, checked with
+    `getppid()` after opening it; kernels without pidfds get
+    `PR_SET_PDEATHSIG`, which the helper forwards as `SIGTERM`);
+  - a credential file appears (the credential watcher cuts the lifeline).
+  This applies on every security level that runs bubblewrap, Permissive
+  included. The supervisor lists its children through `/proc`; without
+  `/proc` an orphaned PID 1 is not found. Commands run without bubblewrap
+  (full disk write access without managed-proxy routing, legacy Landlock)
+  are unchanged, and so is the short `/proc` mount probe, which runs only
+  `true`.
 - When bubblewrap is active, it mounts a fresh `/proc` via `--proc /proc` by default, but
   you can skip this in restrictive container environments with `--no-proc`.
 

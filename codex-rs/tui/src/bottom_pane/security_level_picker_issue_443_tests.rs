@@ -402,3 +402,40 @@ fn issue_505_screen_07_reports_approvals_and_kept_threads() {
         "{saved}"
     );
 }
+
+/// #919 (Travis, 2026-10-16, D20): the Aggressive review and screen 07 say
+/// that other Corbanu Terminals running on the home take Core's Aggressive
+/// protections too; screen 07 does not promise it when the level could not
+/// be saved.
+#[test]
+fn issue_919_aggressive_review_and_saved_say_other_terminals_take_it() {
+    const OTHERS: &str = "Other Corbanu Terminals running on this Corbanu home take Core's Aggressive protections and approval for every command within about a second";
+    for live in [true, false] {
+        let root = tempfile::tempdir().unwrap();
+        let mut picker = picker(&root, live);
+        picker.handle_key_event(key(KeyCode::Up));
+        picker.handle_key_event(key(KeyCode::Enter));
+        picker.basis.live = live;
+        let review = text(&picker);
+        assert!(review.contains(OTHERS), "{review}");
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let mut picker = picker(&root, /*live*/ true);
+    saved_live(&mut picker);
+    let saved = text(&picker);
+    assert!(saved.contains(OTHERS), "{saved}");
+    assert!(
+        saved.contains("the rest of Aggressive starts there when they restart"),
+        "{saved}"
+    );
+
+    if let Screen::Saved(Ok(outcome)) = &mut picker.screen
+        && let Some(report) = outcome.core.as_mut()
+    {
+        report.not_saved = Some("disk full".to_string());
+    }
+    let unsaved = text(&picker);
+    assert!(unsaved.contains("could not be saved"), "{unsaved}");
+    assert!(!unsaved.contains("Other Corbanu Terminals"), "{unsaved}");
+}

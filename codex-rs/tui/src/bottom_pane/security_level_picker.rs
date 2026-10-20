@@ -1261,6 +1261,14 @@ impl SecurityLevelPicker {
                 }
                 if let Some(report) = &outcome.core {
                     lines.extend(wrap(&core_outcome_line(report)));
+                    // #919: other processes on the home take it from the
+                    // saved state (not when it could not be saved).
+                    if level == ChosenLevel::Aggressive
+                        && report.next_start == SecurityLevel::Aggressive
+                        && report.not_saved.is_none()
+                    {
+                        lines.extend(wrap(AGGRESSIVE_REACHES_OTHER_TERMINALS));
+                    }
                     if let Some(reason) = &report.not_saved {
                         lines.extend(
                             wrap(&format!(
@@ -1470,7 +1478,7 @@ fn approvals_lines(
 /// What Core's Aggressive level does in a running session (PF-23, #443).
 /// #846: the project's credential files (`.env` and the like) are denied by
 /// Aggressive's sandbox profile, which starts at the restart, not by these.
-const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and cannot open protected paths (the vault store, sign-in files, credential files in your home folder such as .ssh, .aws and .netrc, and Corbanu's config, history and state), sensitive surfaces need a grant, external content reaches the model labelled untrusted, and memory summaries stop";
+pub(crate) const CORE_EFFECTS: &str = "agent commands cannot run `corbanu vault …` and cannot open protected paths (the vault store, sign-in files, credential files in your home folder such as .ssh, .aws and .netrc, and Corbanu's config, history and state), sensitive surfaces need a grant, external content reaches the model labelled untrusted, and memory summaries stop";
 
 /// Issue #443: what only the restart applies after Aggressive is saved;
 /// `approvals_now` when the confirmation already required approval for
@@ -1595,7 +1603,7 @@ fn and_list_oxford(items: &[String]) -> String {
 
 /// Core's Aggressive effects without the untrusted-content labels
 /// (`source_envelopes` off): only the vault rule is sure to hold now.
-const CORE_EFFECTS_VAULT_ONLY: &str = "agent commands cannot run `corbanu vault …`";
+pub(crate) const CORE_EFFECTS_VAULT_ONLY: &str = "agent commands cannot run `corbanu vault …`";
 
 impl SecurityLevelPicker {
     /// Issue #443: Core's level is Aggressive in this session's live policy
@@ -1806,6 +1814,8 @@ impl SecurityLevelPicker {
                     "Core's level becomes Aggressive from the next start (this session's policy does not run in this process yet): {effects}. Other sessions of this Corbanu Terminal running on this Corbanu home take it as soon as you confirm, with approval for every command from their next turn."
                 )
             },
+            // #919: other processes on the home take it from the saved state.
+            AGGRESSIVE_REACHES_OTHER_TERMINALS_REVIEW.to_string(),
         ]
     }
 
@@ -1873,6 +1883,13 @@ const PROTECTED_LAUNCH_KEEPS_SANDBOX: &str = "Protected launch (secretless_agent
 
 /// #842 (Travis, 2026-10-15): on the Saved screen after Moderate applied now.
 const MODERATE_REACHES_OTHER_TERMINALS: &str = "Other Corbanu Terminals running on this Corbanu home take Core's Moderate rules within about a second and say so; their model keys move to the credential broker when they restart.";
+
+/// #919 (Travis, 2026-10-16, D20): on the Aggressive review, where Core's
+/// record is committed.
+const AGGRESSIVE_REACHES_OTHER_TERMINALS_REVIEW: &str = "Other Corbanu Terminals running on this Corbanu home take Core's Aggressive protections and approval for every command within about a second of confirming, and each says so; the rest of Aggressive starts there when they restart.";
+
+/// #919: on the Saved screen after Core's Aggressive record was saved.
+const AGGRESSIVE_REACHES_OTHER_TERMINALS: &str = "Other Corbanu Terminals running on this Corbanu home take Core's Aggressive protections and approval for every command within about a second and say so; the rest of Aggressive starts there when they restart.";
 
 fn name(level: SecurityLevel) -> &'static str {
     crate::security::view::profile_name(level)

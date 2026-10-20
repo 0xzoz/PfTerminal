@@ -321,7 +321,7 @@ pub fn run_main() -> ! {
 const USER_NAMESPACES_DENIED_ENV: &str = "CODEX_SANDBOX_USER_NAMESPACES_DENIED";
 
 /// Shown when this helper runs inside a sandbox that denies user namespaces.
-const USER_NAMESPACES_DENIED_MESSAGE: &str = "Corbanu's Linux sandbox cannot start here: this command runs inside an agent command's sandbox under security level Moderate or Aggressive, where creating user namespaces is denied (Operation not permitted), and the sandbox needs one. Run it outside the agent's sandbox, or choose Permissive in /security.";
+const USER_NAMESPACES_DENIED_MESSAGE: &str = "Corbanu's Linux sandbox cannot start here: this command runs inside an agent command's sandbox under security level Moderate or Aggressive, where creating user namespaces is denied (Operation not permitted), and the sandbox needs one. Run it outside the agent's sandbox (under Moderate a person may allow user namespaces for one command whose request to run outside the sandbox they approve, before untrusted content, in practice the first command of a new session), or choose Permissive in /security.";
 
 fn mark_user_namespaces_denied() {
     // SAFETY: this helper process is single-threaded here (the proxy bridges
@@ -709,18 +709,13 @@ fn resolve_true_command() -> String {
     "true".to_string()
 }
 
+/// #935: bubblewrap always runs under the supervisor (`crate::supervisor`),
+/// so the sandbox cannot outlive this helper; also where there is nothing
+/// to clean up afterwards (this used to exec bubblewrap directly then).
 fn run_or_exec_bwrap(
     bwrap_args: crate::bwrap::BwrapArgs,
     credential_watcher: Option<crate::credential_watch::CredentialWatcher>,
 ) -> ! {
-    if bwrap_args.synthetic_mount_targets.is_empty()
-        && bwrap_args.protected_create_targets.is_empty()
-        && credential_watcher.is_none()
-    {
-        // #673: nothing to register.
-        drop(bwrap_args.registry_lock);
-        exec_bwrap(bwrap_args.args, bwrap_args.preserved_files);
-    }
     run_bwrap_in_child_with_synthetic_mount_cleanup(bwrap_args, credential_watcher);
 }
 
@@ -735,6 +730,12 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
         protected_create_targets,
         registry_lock,
     } = bwrap_args;
+    // #935: the supervisor is waited for; an ignored SIGCHLD (inherited
+    // across exec) would reap it unseen.
+    // SAFETY: plain syscall on this process.
+    unsafe {
+        libc::signal(libc::SIGCHLD, libc::SIG_DFL);
+    }
     let setup_signal_mask = ForwardedSignalMask::block();
     let (synthetic_mount_registrations, protected_create_registrations) = register_mount_targets(
         &synthetic_mount_targets,
@@ -748,7 +749,11 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
         .iter()
         .map(|target| target.path().to_path_buf())
         .collect::<Vec<_>>();
-    let parent_pid = unsafe { libc::getpid() };
+    // #935: the supervisor stops the sandbox when this helper's parent
+    // exits, when this helper exits or is killed, or on a credential stop.
+    let parent_watch = crate::supervisor::ParentWatch::open();
+    let (lifeline_read, lifeline) = crate::supervisor::lifeline();
+    // `pid` is the supervisor, which runs bubblewrap and exits as it did.
     let pid = unsafe { libc::fork() };
     if pid < 0 {
         let err = std::io::Error::last_os_error();
@@ -756,20 +761,41 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
     }
 
     if pid == 0 {
+        drop(lifeline);
         reset_forwarded_signal_handlers_to_default();
-        setup_signal_mask.restore();
+        // Bubblewrap shares the supervisor's process group, where forwarded
+        // signals are sent; they stay blocked in the supervisor itself.
         let setpgid_res = unsafe { libc::setpgid(0, 0) };
         if setpgid_res < 0 {
             let err = std::io::Error::last_os_error();
             panic!("failed to place bubblewrap child in its own process group: {err}");
         }
-        terminate_with_parent(parent_pid);
-        wait_for_parent_exec_start(exec_start_pipe[0], exec_start_pipe[1]);
-        exec_bwrap(args, preserved_files);
+        crate::supervisor::run(
+            lifeline_read,
+            FORWARDED_SIGNALS,
+            &exec_start_pipe,
+            |supervisor_pid| {
+                setup_signal_mask.restore();
+                terminate_with_parent(supervisor_pid);
+                wait_for_parent_exec_start(exec_start_pipe[0], exec_start_pipe[1]);
+                exec_bwrap(args, preserved_files);
+            },
+        );
     }
 
+    // Also here, so the group exists before any signal is forwarded to it.
+    // SAFETY: plain syscall on this process's child, which never execs.
+    unsafe {
+        libc::setpgid(pid, pid);
+    }
+    drop(lifeline_read);
+    let lifeline = Arc::new(lifeline);
+    parent_watch.cut_when_gone(Arc::clone(&lifeline));
     close_child_exec_start_read(exec_start_pipe[0]);
-    let credential_monitor = credential_watcher.map(|watcher| watcher.start(pid, &placeholders));
+    let credential_monitor = credential_watcher.map(|watcher| {
+        let lifeline = Arc::clone(&lifeline);
+        watcher.start(move || lifeline.cut(), &placeholders)
+    });
     let protected_create_monitor = ProtectedCreateMonitor::start(&protected_create_targets);
     let signal_forwarders = install_bwrap_signal_forwarders(pid);
     release_child_exec_start(exec_start_pipe[1]);
@@ -780,9 +806,12 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
         wait_for_bwrap_child_exit_without_reaping(pid);
         monitor.stop()
     });
+    // Stop forwarding before the pid can be reused (forwarded signals are
+    // handled on this thread only: the others started with them blocked).
+    wait_for_bwrap_child_exit_without_reaping(pid);
+    BWRAP_CHILD_PID.store(0, Ordering::SeqCst);
     let status = wait_for_bwrap_child(pid);
     let cleanup_signal_mask = ForwardedSignalMask::block();
-    BWRAP_CHILD_PID.store(0, Ordering::SeqCst);
     let protected_create_monitor_violation = protected_create_monitor
         .map(ProtectedCreateMonitor::stop)
         .unwrap_or(false);
@@ -955,18 +984,24 @@ fn wait_for_parent_exec_start(read_fd: libc::c_int, write_fd: libc::c_int) {
     }
 
     let mut byte = [0_u8; 1];
-    loop {
+    let started = loop {
         let read = unsafe { libc::read(read_fd, byte.as_mut_ptr().cast(), byte.len()) };
         if read >= 0 {
-            break;
+            break read == 1;
         }
         let err = std::io::Error::last_os_error();
         if err.kind() != std::io::ErrorKind::Interrupted {
-            break;
+            break false;
         }
-    }
+    };
     unsafe {
         libc::close(read_fd);
+    }
+    if !started {
+        // #935: the helper died before its watchers ran; never start the
+        // command unwatched.
+        // SAFETY: ends this forked child without unwinding.
+        unsafe { libc::_exit(127) }
     }
 }
 
@@ -1152,6 +1187,11 @@ fn register_mount_targets(
     Vec<SyntheticMountTargetRegistration>,
     Vec<ProtectedCreateTargetRegistration>,
 ) {
+    if synthetic_mount_targets.is_empty() && protected_create_targets.is_empty() {
+        // #673: nothing to register, so no registry lock either.
+        drop(registry_lock);
+        return (Vec::new(), Vec::new());
+    }
     let synthetic = register_synthetic_mount_targets(synthetic_mount_targets);
     let protected = register_protected_create_targets(protected_create_targets);
     drop(registry_lock);
@@ -1333,6 +1373,9 @@ fn synthetic_mount_marker_dir_has_active_process_matching(
 }
 
 fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration]) {
+    if targets.is_empty() {
+        return;
+    }
     with_synthetic_mount_registry_lock(|| {
         for target in targets.iter().rev() {
             match crate::placeholder_registry::remove_marker(&target.marker_file) {
@@ -1389,6 +1432,9 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
 }
 
 fn cleanup_protected_create_targets(targets: &[ProtectedCreateTargetRegistration]) -> bool {
+    if targets.is_empty() {
+        return false;
+    }
     with_synthetic_mount_registry_lock(|| {
         for target in targets.iter().rev() {
             match crate::placeholder_registry::remove_marker(&target.marker_file) {
