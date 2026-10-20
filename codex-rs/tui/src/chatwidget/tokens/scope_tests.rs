@@ -483,20 +483,35 @@ fn codex_auto_review_stays_unpriced_and_names_the_model() {
         ("subscription", covered, "Same work at API prices"),
     ];
     for (case, quote, expected) in cases {
-        let pages = own_day(vec![quote]);
-        let text: Vec<&String> = pages.iter().flat_map(|page| &page.text).collect();
-        // The fixture reaches the intended branch...
-        assert!(
-            text.iter().any(|line| line.contains(expected)),
-            "{case}: {text:#?}"
-        );
-        // ...and no line names the unpublished price.
-        assert!(
-            !text
-                .iter()
-                .any(|line| line.contains("doesn't publish a price")),
-            "{case}: {text:#?}"
-        );
+        // Alone, and beside an unpriced request of another model, so a
+        // no-price step is on the page that the sentence could be added to.
+        let other = unpriced(/*id*/ 3, thread(/*n*/ 1), "openai", "gpt-5.4");
+        for (beside, quotes) in [
+            ("alone", vec![quote.clone()]),
+            ("beside", vec![quote, other]),
+        ] {
+            let pages = own_day(quotes);
+            let text: Vec<&String> = pages.iter().flat_map(|page| &page.text).collect();
+            // The fixture reaches the intended branch...
+            assert!(
+                text.iter().any(|line| line.contains(expected)),
+                "{case} {beside}: {text:#?}"
+            );
+            if beside == "beside" {
+                assert!(
+                    text.iter()
+                        .any(|line| line.starts_with("Next step for requests with no price")),
+                    "{case} {beside}: {text:#?}"
+                );
+            }
+            // ...and no line names the unpublished price.
+            assert!(
+                !text
+                    .iter()
+                    .any(|line| line.contains("doesn't publish a price")),
+                "{case} {beside}: {text:#?}"
+            );
+        }
     }
 }
 
