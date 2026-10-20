@@ -445,19 +445,59 @@ fn codex_auto_review_stays_unpriced_and_names_the_model() {
         pages[1].text.join("\n")
     );
 
-    // Another unpriced OpenAI model gets the plain step, without the sentence.
-    let other = own_day(vec![unpriced(
-        /*id*/ 2,
-        thread(/*n*/ 1),
-        "openai",
-        "gpt-5.4",
-    )]);
-    assert!(
-        !other
-            .iter()
-            .flat_map(|page| &page.text)
-            .any(|line| line.contains("Codex Auto Review"))
-    );
+    // No other case gets the sentence: another unpriced OpenAI model, the
+    // same model on another provider, or Codex Auto Review priced in part,
+    // with incomplete usage, or covered by a subscription.
+    let review = |quote: ObservationQuote| {
+        let mut quote = quote;
+        quote.attempt.model = "codex-auto-review".into();
+        quote
+    };
+    let mut in_part = review(unpriced(/*id*/ 2, thread(/*n*/ 1), "openai", "x"));
+    in_part.buckets[0] = BucketQuote::Priced(decimal("0.0004"));
+    in_part.known_subtotal = decimal("0.0004");
+    in_part.subtotal_display = in_part.known_subtotal.display();
+    let mut covered = review(unpriced(/*id*/ 2, thread(/*n*/ 1), "openai", "x"));
+    covered.plan_burn_millis = Some(1);
+    let cases = [
+        (
+            "other model",
+            unpriced(/*id*/ 2, thread(/*n*/ 1), "openai", "gpt-5.4"),
+            "Next step for requests with no price",
+        ),
+        (
+            "other provider",
+            review(unpriced(/*id*/ 2, thread(/*n*/ 1), "local-mock", "x")),
+            "Next step for requests with no price",
+        ),
+        (
+            "priced in part",
+            in_part,
+            "Next step for requests priced only in part",
+        ),
+        (
+            "incomplete usage",
+            review(output_unreported(/*id*/ 2, thread(/*n*/ 1))),
+            "Next step for requests with incomplete usage",
+        ),
+        ("subscription", covered, "Same work at API prices"),
+    ];
+    for (case, quote, expected) in cases {
+        let pages = own_day(vec![quote]);
+        let text: Vec<&String> = pages.iter().flat_map(|page| &page.text).collect();
+        // The fixture reaches the intended branch...
+        assert!(
+            text.iter().any(|line| line.contains(expected)),
+            "{case}: {text:#?}"
+        );
+        // ...and no line names the unpublished price.
+        assert!(
+            !text
+                .iter()
+                .any(|line| line.contains("doesn't publish a price")),
+            "{case}: {text:#?}"
+        );
+    }
 }
 
 /// Each page, in order, and the monetary statements it must carry.

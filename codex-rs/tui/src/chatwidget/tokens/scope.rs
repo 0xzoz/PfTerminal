@@ -167,8 +167,9 @@ pub(super) fn no_price_next_step<'a>(
         } else if priced_any {
             &mut in_part
         } else if has_no_price(quote) || unreported {
-            auto_review |=
-                quote.attempt.provider == "openai" && quote.attempt.model == "codex-auto-review";
+            auto_review |= quote.attempt.provider == codex_model_provider_info::OPENAI_PROVIDER_ID
+                && quote.attempt.model
+                    == codex_model_provider::DEFAULT_APPROVAL_REVIEW_PREFERRED_MODEL;
             &mut no_price
         } else {
             // Only zero counts, which cost nothing whatever the rate.
@@ -195,13 +196,13 @@ pub(super) fn no_price_next_step<'a>(
         })
         .collect();
     if let Some(providers) = joined(&no_price) {
+        let model = if auto_review {
+            format!(" {AUTO_REVIEW_NO_PRICE}")
+        } else {
+            String::new()
+        };
         steps.push(format!(
-            "Next step for requests with no price: check the bill from {providers}. No published price covers them, so no cost is shown for them here.{}",
-            if auto_review {
-                format!(" {AUTO_REVIEW_NO_PRICE}")
-            } else {
-                String::new()
-            }
+            "Next step for requests with no price: check the bill from {providers}. No published price covers them, so no cost is shown for them here.{model}"
         ));
     }
     if let Some(providers) = joined(&in_part) {
