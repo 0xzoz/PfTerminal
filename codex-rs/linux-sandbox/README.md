@@ -167,9 +167,10 @@ commands that would enter the bubblewrap path.
   (`<home>/sandbox-placeholders`, written crash-safely: temporary file,
   sync, rename, sync of the folder) with what it made: device, inode, mode,
   owner, size, modification and change times (#348). Each run also records
-  the paths it uses (its placeholders and every empty file or folder it
-  mounts at). At the start of each sandboxed run, the records of runs that
-  have ended (another boot, or a pid that is gone or was reused) are swept:
+  the paths it uses (its placeholders, and the empty files and folders it
+  mounts at that another run recorded making). At the start of each run
+  that uses bubblewrap, the records of runs that have ended (another boot,
+  or a pid that is gone or was reused) are swept:
   a recorded placeholder is removed only when it is still exactly what was
   made, reached without following a link, no live run's record uses it,
   and it is not a mount point in any of the user's processes (a run that

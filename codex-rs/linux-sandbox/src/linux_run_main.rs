@@ -1320,10 +1320,10 @@ fn register_mount_targets(
 
 /// #348: records in the Corbanu home the placeholders this run makes (and
 /// makes them; bubblewrap then mounts over them) and the paths it uses: its
-/// placeholders, and every empty file or folder it mounts at (another
-/// run's placeholder, which a sweep must leave while this run mounts over
-/// it). Still under the lock the arguments were built under, which keeps
-/// out the record's sweeps ([`RegistryLock`]).
+/// placeholders, and the empty files and folders it mounts at that another
+/// run recorded making (a placeholder a sweep must leave while this run
+/// mounts over it). Still under the lock the arguments were built under,
+/// which keeps out the record's sweeps ([`RegistryLock`]).
 fn record_mount_targets(registrations: &[SyntheticMountTargetRegistration], args: &[String]) {
     let planned = registrations
         .iter()

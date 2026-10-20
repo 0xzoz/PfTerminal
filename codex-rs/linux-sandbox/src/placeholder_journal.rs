@@ -11,11 +11,13 @@
 //!   makes it itself (`O_EXCL`, so never over a file of someone else's) and
 //!   records what it made: device, inode, mode, owner, size, modification and
 //!   change times. bubblewrap finds it in place and mounts over it.
-//! - Each run also records the paths it uses (makes or holds), so a sweep
-//!   leaves a placeholder alone while a live run (in any `TMPDIR`) uses it.
-//! - At the start of each sandboxed run, the records of runs that have ended
-//!   (another boot, or a pid that is gone or was reused) are swept: a
-//!   recorded placeholder is removed only when what is at its path, reached
+//! - Each run also records the paths it uses: its placeholders, and the
+//!   paths it mounts at that another run's record lists as made or about
+//!   to be made (or paths in them). A sweep leaves a placeholder alone while
+//!   a live run (in any `TMPDIR`) uses it.
+//! - At the start of each run that uses bubblewrap, the records of runs
+//!   that have ended (another boot, or a pid that is gone or was reused)
+//!   are swept: a recorded placeholder is removed only when what is at its path, reached
 //!   without following a link, is still exactly what was recorded and no
 //!   live run uses it. Anything else (filled, replaced, changed, or a pending
 //!   one whose identity was never recorded) is left in place and reported
@@ -479,26 +481,26 @@ enum Removal {
 
 /// Removes the placeholder at `real` (reached without following a link)
 /// when it is still exactly what was made and no process mounts over it.
-fn remove_if_made(
-    path: &Path,
-    real: &Path,
-    kind: Kind,
-    identity: &Identity,
-    mounts: &mut Option<Option<HashSet<Vec<u8>>>>,
-) -> Removal {
-    let found = match crate::placeholder_registry::find_without_links(real) {
-        Ok(Some(found)) => found,
-        Ok(None) => return Removal::Missing,
-        Err(_) => return Removal::Failed,
+fn remove_if_made(path: &Path, real: &Path, kind: Kind, identity: &Identity) -> Removal {
+    let still_made = || match crate::placeholder_registry::find_without_links(real) {
+        Ok(Some(found)) if matches_made(&found, kind, identity) => Ok(found),
+        Ok(Some(_)) => Err(Removal::Kept(Kept::Changed)),
+        Ok(None) => Err(Removal::Missing),
+        Err(_) => Err(Removal::Failed),
     };
-    if !matches_made(&found, kind, identity) {
-        return Removal::Kept(Kept::Changed);
+    if let Err(removal) = still_made() {
+        return removal;
     }
     // A live run that left no record (an older helper, a record it could
-    // not write, another Corbanu home) may mount over it.
-    if mounted_anywhere(mounts, &[path, real]) {
+    // not write, another Corbanu home) may mount over it: read now.
+    if mounted_anywhere(&[path, real]) {
         return Removal::Failed;
     }
+    // Checked again last, right before the removal.
+    let found = match still_made() {
+        Ok(found) => found,
+        Err(removal) => return removal,
+    };
     let folder_before = found
         .folder_status()
         .ok()
@@ -521,17 +523,13 @@ fn remove_if_made(
 
 /// Whether any of `paths` is a mount point in the mount namespace of any of
 /// this user's processes (a sandbox's mounts are at the paths they have on
-/// the host). `mounts` holds them once read ([`mount_points`]). When that
-/// cannot be told, as if it were.
-fn mounted_anywhere(mounts: &mut Option<Option<HashSet<Vec<u8>>>>, paths: &[&Path]) -> bool {
-    mounts
-        .get_or_insert_with(mount_points)
-        .as_ref()
-        .is_none_or(|points| {
-            paths
-                .iter()
-                .any(|path| points.contains(path.as_os_str().as_bytes()))
-        })
+/// the host), read now. When that cannot be told, as if it were.
+fn mounted_anywhere(paths: &[&Path]) -> bool {
+    mount_points().as_ref().is_none_or(|points| {
+        paths
+            .iter()
+            .any(|path| points.contains(path.as_os_str().as_bytes()))
+    })
 }
 
 /// The mount points in the mount namespaces of this user's processes, or
@@ -770,12 +768,13 @@ impl Journal {
             return;
         };
         // Of the paths it mounts at, only another run's recorded placeholder
-        // (or a path in one) is one a sweep could remove from under it.
+        // (or a path in one) is one a cleanup could remove from under it:
+        // one it made, or was about to make (bubblewrap may have made it).
         let (records, unreadable_live) = self.other_records();
         let made: Vec<&Path> = records
             .iter()
             .flat_map(|(_, record)| record.entries.iter())
-            .filter(|entry| matches!(entry, Entry::Made { .. }))
+            .filter(|entry| matches!(entry, Entry::Made { .. } | Entry::Pending { .. }))
             .flat_map(|entry| {
                 let (path, real) = entry.paths();
                 [path, real]
@@ -937,7 +936,6 @@ impl Journal {
         let in_use = |path: &Path, real: &Path| {
             live.iter().any(|(_, record)| uses(record, path, real)) || used_by_registry(path, real)
         };
-        let mut mounts = None;
         for (stem, record) in ended {
             let mut kept = Vec::new();
             // Deepest first, so a placeholder in a placeholder folder of the
@@ -973,15 +971,22 @@ impl Journal {
                         identity,
                     } => {
                         let identity = expected.get(real).unwrap_or(identity);
-                        match remove_if_made(path, real, *kind, identity, &mut mounts) {
+                        match remove_if_made(path, real, *kind, identity) {
                             Removal::Removed {
                                 folder_before,
                                 folder_after,
                             } => {
-                                if let (Some(folder), Some(after)) = (real.parent(), folder_after)
+                                // Only the change an unlink makes: times and
+                                // size, never its mode or owner (a chmod or
+                                // chown in between). Both readings come from
+                                // the same open folder, so it is the same
+                                // folder either way.
+                                if let (Some(folder), Some(before), Some(after)) =
+                                    (real.parent(), folder_before, folder_after)
                                     && let Some(recorded) = record_identity(&record, folder)
-                                    && folder_before
-                                        == Some(*expected.get(folder).unwrap_or(&recorded))
+                                    && before == *expected.get(folder).unwrap_or(&recorded)
+                                    && (after.dev, after.ino, after.mode, after.uid)
+                                        == (before.dev, before.ino, before.mode, before.uid)
                                 {
                                     expected.insert(folder.to_path_buf(), after);
                                 }
