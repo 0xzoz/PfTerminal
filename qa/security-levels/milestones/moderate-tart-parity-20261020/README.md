@@ -26,12 +26,13 @@ change the Moderate sign-off (D61).**
   passed, 1 accepted, 6 blocked, 1 failed. Advisory (8): 5 passed, 1 accepted, 2 blocked. MOD-06 (D43) and MOD-33 (D41)
   count passed as on UTM because the accepted limit repeated. Executor verdicts corrected: MOD-23 failed -> blocked
   (starting condition not met), MOD-26 passed -> blocked (model redaction), MOD-22 passed -> blocked (an expected result
-  not observed), MOD-33 failed -> passed (D41).
+  not observed). Owner-decision mappings as on UTM: MOD-09 blocked -> accepted (D39), MOD-28 passed -> accepted (D40),
+  MOD-33 failed -> passed (D41).
 - **Isolation:** all 34 clones passed their own gate (99 probes, `AGMS-SMOKE-OK`, relay control 200; `harness/gate_ok.py`);
   every tester's own probe run reported `ok: true`; 0 `SECURITYAGENT-SEEN` in 29,051 guard checks; 1,741 model requests
   through the guest mediators, all status 200, no `session_error`, no tunnel reconnect (`common/clones.json`); the host
-  relay log's 1,746 forwarded requests are all 200 too (its one `denied_path GET /` at 11:07:30Z is the integrator's own
-  check when starting the relay, before the shakedown). Erase checks clean in all 34 clones.
+  relay log's 1,746 forwarded requests are all 200 too (its one `denied_path GET /` at 11:07:30Z, 4 s after the relay
+  started and before the shakedown, is most likely the integrator's own start-up check; the record does not name it). Erase checks clean in all 34 clones.
 - **By the predeclared parity rule** ([design/parity-method.md](design/parity-method.md)): rule 1 (isolation) is met.
   Rule 2 (no blocker differs as environment or undetermined) is **not met**: MOD-21 and MOD-22 are undetermined and two
   MOD-11 results count as environment. Rule 3: MOD-26 and MOD-29 (advisory) are undetermined; their explanations are
@@ -143,7 +144,7 @@ run, so it does not depend on that.
 - Replay choices: the six in-cap groups were chosen after reading the results (T05, T08, T09, T10, T19 queued at 18:27Z
   with T21; at 19:34Z a STOP file ended the queue before T21 and the MOD-11 tie-break took its place, blockers first).
   The two post-cap replays (T17, T21) were added after that and are beyond the cap; they change no disposition (first
-  attempts count). MOD-22 and MOD-26 were not replayed.
+  attempts count). MOD-22 was not replayed; MOD-26 and MOD-29 had only the post-cap replay.
 - Tools not in the freeze: `tools/make_tiebreak.sh` (written before the freeze, 11:41Z, but not listed in it),
   `tools/run-tiebreak.sh` (19:34Z), `tools/status.sh`, and the record-assembly tools.
 - The design screens (`screens`, `screens-v3`, `screens-v4`) come from earlier candidates.
@@ -170,8 +171,9 @@ path, MOD-29's profile reset) and MOD-22's missing inspector step; they cost rep
 - #1139 (MOD-11, blocker): under Moderate, agent writes to `.git` hooks/config fail with a bare sandbox error and no
   message naming the level; on `8c73c8ea80` the model made no escalation tool request there.
 - #1146 (MOD-21): Spawn status "Send task to <pane>" delivers the person's own task to the child as
-  `corbanu_untrusted_data`, so the child refuses it.
+  `corbanu_untrusted_data` (T17: also when typed into the child's pane view opened from Spawn status); whether the label
+  caused the child's refusal is not shown.
 
 ## Review budget
 
-See [review-ledger.md](review-ledger.md): packet review rounds 1-2, evidence checks rounds 3-5.
+See [review-ledger.md](review-ledger.md): packet review rounds 1-2 (both CHANGES, applied), evidence checks rounds 3-5 (all CHANGES on written claims and three dispositions in round 3; corrections applied). The budget is spent; round 5's corrections are applied but not re-checked.

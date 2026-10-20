@@ -316,6 +316,6 @@
   "executor": "passed",
   "disposition": "passed",
   "parity": "matched",
-  "summary": "With the person's broker_model_auth = false, Moderate saved and active after restart, neither screen claimed the broker, pong with no broker error. Same as UTM G25. The startup warning and the '\u25d0 Moderate set; off or not observed' line were 'recorded with ambiguity' (no word 'partial'), as on UTM; the Tart tester recorded that sub-result as 'inconclusive' and UTM's as 'passed with ambiguity' (not judged by either record)."
+  "summary": "With the person's broker_model_auth = false, Moderate saved and active after restart, neither screen claimed the broker, pong with no broker error. Same as UTM G25. The startup warning and the '\u25d0 Moderate set; off or not observed' line were 'recorded with ambiguity' (no word 'partial'), as on UTM; the Tart tester recorded that sub-result as 'inconclusive', UTM G25's as 'passed, with wording ambiguity noted'; the case only asks to record it. Tart's inspector listed only 'Model key broker' as off or not observed, UTM's 'Model key broker, Credential broker' (no expected result judges this)."
  }
 }
