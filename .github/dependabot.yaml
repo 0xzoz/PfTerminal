@@ -37,3 +37,7 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    ignore:
+      # Its SHA pin selects the Rust toolchain; it moves with the hand-made
+      # toolchain bumps described above.
+      - dependency-name: dtolnay/rust-toolchain
