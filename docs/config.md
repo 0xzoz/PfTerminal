@@ -266,8 +266,10 @@ files:
 - On macOS, your keychains (`~/Library/Keychains`).
 
 On Windows, one of these that doesn't exist when a command starts isn't
-covered for that command, except Corbanu's own folders and the files directly
-in its home.
+covered for that command (such as a backup recovery creates while it runs),
+except Corbanu's own folders inside its home (`secrets`, `wallet`, `run`,
+`shell_snapshots`, `log`, `sessions`, `archived_sessions`) and files created
+directly in its home.
 
 Approving a command never unlocks these, at any level; under Moderate the
 approval prompt names such a file and says so. Nothing runs outside the

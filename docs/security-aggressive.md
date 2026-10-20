@@ -3,9 +3,9 @@
 `/security` → Aggressive runs every agent command in a sandbox that writes only
 in the current folder. This page explains the file protections that people ask
 about most, and their limits. `/security` shows the same rules before you
-confirm the level, and the inspector shows what is in force. A protected file
-the image tool is refused is explained on screen, like a refused command, and
-listed in the inspector (#1087).
+confirm the level, and the inspector shows what is in force. When the image
+tool is refused a protected file, Corbanu explains it on screen, as for a
+refused command, and lists it in the inspector (#1087).
 
 ## Credential files
 
@@ -273,10 +273,10 @@ me again" or in a config file, an administrator's included (#1001): such a
 tool is decided as if it had no "always allow" setting (by you, or by your
 approvals reviewer or hooks, as usual). One you choose while Aggressive is on applies
 under it too; Corbanu records MCP ones in `mcp-approvals-aggressive.json` in
-its home, for connectors and for servers your own config defines. For a
-server a project or plugin defines, "always allow" chosen under Aggressive
-lasts only for that session while Aggressive is on, and the prompt says so
-(#1057).
+its home, for connectors and for servers defined only in your own config.
+For any other server (one a project or plugin defines or changes), "always
+allow" chosen under Aggressive lasts only for that session while Aggressive
+is on, and the prompt says so (#1057).
 
 ## Other Corbanu Terminals on the same home
 
