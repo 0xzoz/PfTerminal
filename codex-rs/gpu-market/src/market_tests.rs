@@ -69,6 +69,10 @@ impl GpuProvider for QuoteProvider {
         self.atomic_create_handle
     }
 
+    #[allow(
+        deprecated,
+        reason = "Rust 1.99 renames fetch_update to try_update, which is unstable on the argument-comment-lint nightly (nightly-2025-09-18)"
+    )]
     async fn search_offers(&self, request: SearchOffersRequest) -> ProviderResult<Vec<GpuOffer>> {
         self.search_calls.fetch_add(1, Ordering::SeqCst);
         if self
