@@ -1161,7 +1161,12 @@ impl Session {
                 return;
             }
         };
-        let current_exec_policy = self.services.exec_policy.current();
+        // D52 (#1001): under Aggressive, network allow rules saved outside it
+        // are suspended.
+        let current_exec_policy = self
+            .services
+            .exec_policy
+            .current_for(self.services.model_client().live_level_is_aggressive());
         let spec = match spec.with_exec_policy_network_rules(current_exec_policy.as_ref()) {
             Ok(spec) => spec,
             Err(err) => {
@@ -2899,6 +2904,16 @@ impl Session {
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("managed network proxy refresh semaphore closed"))?;
+        // D52 (#1001): one allowed while Aggressive is in force applies under
+        // Aggressive too (the others are suspended there). An unreadable live
+        // level counts as Aggressive, as it is enforced. Read before the
+        // marker: the marker only moves forward, so an unchanged marker means
+        // this was the level at the prompt (as for command rules, #945).
+        let approved_under = if self.services.model_client().live_level_is_aggressive() {
+            crate::exec_policy::ApprovedUnder::Aggressive
+        } else {
+            crate::exec_policy::ApprovedUnder::LessStrict
+        };
         if let Some(shown_under) = shown_under
             && self.services.transition_since(shown_under)
         {
@@ -2944,6 +2959,7 @@ impl Session {
                 execpolicy_amendment.protocol,
                 execpolicy_amendment.decision,
                 Some(execpolicy_amendment.justification),
+                approved_under,
             )
             .await
             .map_err(|err| {
@@ -3306,6 +3322,7 @@ impl Session {
                 &response,
                 &environment.environment_id,
                 originating_turn_state.as_ref(),
+                shown_under,
             )
             .await;
             return Ok(Some(response));
@@ -3519,6 +3536,7 @@ impl Session {
                     &response,
                     &entry.environment.environment_id,
                     originating_turn_state.as_ref(),
+                    entry.shown_under,
                 )
                 .await;
                 entry.tx_response.send(response).ok();
@@ -3673,11 +3691,15 @@ impl Session {
         }
     }
 
+    /// Records a grant answered to a request shown under `granted_under`.
+    /// D51 (#1001): it holds only while no security transition is committed
+    /// (see [`crate::state::GrantedPermissions`]).
     async fn record_granted_request_permissions_for_turn(
         &self,
         response: &RequestPermissionsResponse,
         environment_id: &str,
         originating_turn_state: Option<&Arc<Mutex<crate::state::TurnState>>>,
+        granted_under: Option<(u64, u64)>,
     ) {
         if response.permissions.is_empty() {
             return;
@@ -3687,15 +3709,31 @@ impl Session {
             PermissionGrantScope::Turn => {
                 if let Some(turn_state) = originating_turn_state {
                     let mut ts = turn_state.lock().await;
-                    ts.record_granted_permissions(environment_id, permissions);
-                    if response.strict_auto_review {
-                        ts.enable_strict_auto_review();
+                    // Read under the lock: a later grant is never recorded
+                    // under an earlier marker.
+                    let current = self.services.authority_marker();
+                    let recorded = ts.record_granted_permissions(
+                        environment_id,
+                        permissions,
+                        granted_under,
+                        current,
+                    );
+                    // D51: strict auto-review comes with the grant and ends
+                    // with it.
+                    if recorded && response.strict_auto_review {
+                        ts.enable_strict_auto_review(current);
                     }
                 }
             }
             PermissionGrantScope::Session => {
                 let mut state = self.state.lock().await;
-                state.record_granted_permissions(environment_id, permissions);
+                let current = self.services.authority_marker();
+                state.record_granted_permissions(
+                    environment_id,
+                    permissions,
+                    granted_under,
+                    current,
+                );
             }
         }
     }
@@ -3711,8 +3749,8 @@ impl Session {
         let granted = {
             let active = self.active_turn.lock().await;
             let active = active.as_ref()?;
-            let ts = active.turn_state.lock().await;
-            ts.granted_permissions(environment_id)
+            let mut ts = active.turn_state.lock().await;
+            ts.granted_permissions(environment_id, self.services.authority_marker())
         };
         self.usable_grant(granted).await
     }
@@ -3789,7 +3827,7 @@ impl Session {
             return false;
         };
         let ts = active.turn_state.lock().await;
-        ts.strict_auto_review_enabled()
+        ts.strict_auto_review_enabled(self.services.authority_marker())
     }
 
     pub(crate) async fn granted_session_permissions(
@@ -3797,8 +3835,8 @@ impl Session {
         environment_id: &str,
     ) -> Option<AdditionalPermissionProfile> {
         let granted = {
-            let state = self.state.lock().await;
-            state.granted_permissions(environment_id)
+            let mut state = self.state.lock().await;
+            state.granted_permissions(environment_id, self.services.authority_marker())
         };
         self.usable_grant(granted).await
     }
