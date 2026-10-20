@@ -22,7 +22,8 @@ const DATA_ONLY: &[&str] = &[
     "mkdir", "touch",
 ];
 /// Git subcommands that run nothing named on the line (hooks, pagers and
-/// filters come from configuration, which the classifier protects).
+/// filters come from configuration, which the classifier protects), without
+/// `--output` (a file the classifier does not judge as written).
 const GIT_DATA_ONLY: &[&str] = &[
     "status", "diff", "log", "show", "add", "commit", "restore", "switch", "checkout", "branch",
     "rm", "mv", "stash",
@@ -72,9 +73,11 @@ fn data_only(words: &[String]) -> bool {
         return false;
     };
     match name.as_str() {
-        "git" => rest
-            .first()
-            .is_some_and(|subcommand| GIT_DATA_ONLY.contains(&subcommand.as_str())),
+        "git" => {
+            rest.first()
+                .is_some_and(|subcommand| GIT_DATA_ONLY.contains(&subcommand.as_str()))
+                && !rest.iter().any(|word| word.starts_with("--output"))
+        }
         "printf" => rest.first().is_some_and(|format| !format.starts_with('-')),
         name => DATA_ONLY.contains(&name),
     }

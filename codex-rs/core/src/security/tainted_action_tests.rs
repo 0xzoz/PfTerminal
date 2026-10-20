@@ -3152,6 +3152,11 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
         vec![
             "/bin/bash",
             "-lc",
+            "git log -1 --format='/*(e:true:)' --output=x.zsh",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
             "printf -v PAGER '%s' '/*(e:true:)'; git log",
         ],
         vec!["/bin/bash", "-lc", "PAGER='/*(e:true:)' git log"],
