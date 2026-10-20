@@ -2727,6 +2727,17 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
         ("zsh", "print -l a($x)"),
         ("zsh", "print -l a(N$x)"),
         ("zsh", "echo cHJpbnQgLWwgLyhlOnRydWU6KQ== | base64 -d | zsh"),
+        // Review r3: `)` quoted or escaped in the code, expanded
+        // delimiters, delimited and `?` modes, nested subscripts, numeric
+        // function names.
+        ("zsh", "print -r -- /(e:'print \")\"':)"),
+        ("zsh", "print -r -- /(e:print\\ x\\ \\):)"),
+        ("zsh", "x=':print x:'; print -r -- /(e$x)"),
+        ("zsh", "print -r -- /(feu+xee:'print x':)"),
+        ("zsh", "print -r -- /(fzu+xze:'print x':)"),
+        ("zsh", "print -r -- /([a[1]+1]e:'print x':)"),
+        ("zsh", "function 9 { true; }; print -r -- /(+9)"),
+        ("zsh", "print -r -- /(f?e:'print x':)"),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found != Some(UnseenCode) {

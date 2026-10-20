@@ -65,6 +65,9 @@ const GROUP: &str = "__corbanu_arithmetic_group_";
 /// Compound lists nested deeper than this are not followed (fails closed).
 const MAX_LIST_DEPTH: usize = 4;
 
+/// Bytes read for where a quoted qualifier group ends (#1028).
+const MAX_QUOTED_GROUP: usize = 4096;
+
 /// Words walked back from an array assignment to where its command starts.
 const MAX_ASSIGNMENT_WALK: usize = 64;
 /// Longest `$NAME` prefix compared with the variables names are built from.
@@ -868,8 +871,17 @@ impl Arithmetic {
     pub(super) fn runs_qualifier_code(&self, text: &[String]) -> bool {
         let runs = |text: &str| {
             all_qualifier_lists(text).into_iter().any(|range| {
-                // A group left open may hold either.
-                (range.is_empty() && range.start == text.len()) || qualifier_runs_code(&text[range])
+                // A group left open may hold either. The group may also end
+                // later than read without quotes, at the first `)` outside
+                // quotes (`e:'a)':`, `e:a\\):`): both are read.
+                if range.is_empty() && range.start == text.len() {
+                    return true;
+                }
+                let list = &text[range.clone()];
+                qualifier_runs_code(list)
+                    || (list.contains(['\'', '"', '\\'])
+                        && quoted_group_end(text, range.start)
+                            .is_none_or(|end| qualifier_runs_code(&text[range.start..end])))
             })
         };
         text.iter()
@@ -2489,6 +2501,39 @@ fn lists_attached(text: &str, skip_arithmetic: bool) -> Vec<Range<usize>> {
     lists
 }
 
+/// Where the group whose `(` is just before `start` ends when quotes and
+/// backslashes are read: at the first `)` outside them and outside nested
+/// groups. `None` when it does not end within `MAX_QUOTED_GROUP` bytes,
+/// which the caller treats as code (bounded, so many groups stay linear).
+fn quoted_group_end(text: &str, start: usize) -> Option<usize> {
+    let bytes = &text.as_bytes()[..text.len().min(start + MAX_QUOTED_GROUP)];
+    let mut depth = 0_usize;
+    let mut at = start;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 1,
+            b'\'' => {
+                at = bytes[at + 1..]
+                    .iter()
+                    .position(|byte| *byte == b'\'')
+                    .map_or(bytes.len(), |end| at + 1 + end);
+            }
+            b'"' => {
+                at += 1;
+                while at < bytes.len() && bytes[at] != b'"' {
+                    at += if bytes[at] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'(' => depth += 1,
+            b')' if depth == 0 => return Some(at),
+            b')' => depth -= 1,
+            _ => {}
+        }
+        at += 1;
+    }
+    None
+}
+
 /// Whether zsh, parsing a group's text as glob qualifiers, may reach one
 /// that runs code before a character it rejects: `e` with any delimiter
 /// and non-empty code that closes,
@@ -2544,6 +2589,8 @@ fn qualifier_runs_code(list: &str) -> bool {
         at = match byte {
             // Code between delimiters: zsh rejects it left open, and empty
             // code runs nothing.
+            // An expanded delimiter or code (`e$x`).
+            b'e' if matches!(list.get(at + 1), Some(b'$' | b'`')) => return true,
             b'e' => match delimited(at + 1) {
                 Some(next) if next > at + 3 => return true,
                 Some(next) => next,
@@ -2563,7 +2610,7 @@ fn qualifier_runs_code(list: &str) -> bool {
             b'+' => {
                 return list
                     .get(at + 1)
-                    .is_some_and(|next| next.is_ascii_alphabetic() || b"_{".contains(next));
+                    .is_some_and(|next| next.is_ascii_alphanumeric() || b"_{$`".contains(next));
             }
             b'o' | b'O' => match list.get(at + 1) {
                 Some(b'e') => match delimited(at + 2) {
@@ -2572,9 +2619,9 @@ fn qualifier_runs_code(list: &str) -> bool {
                     None => return false,
                 },
                 Some(b'+') => {
-                    return list
-                        .get(at + 2)
-                        .is_some_and(|next| next.is_ascii_alphabetic() || b"_{".contains(next));
+                    return list.get(at + 2).is_some_and(|next| {
+                        next.is_ascii_alphanumeric() || b"_{$`".contains(next)
+                    });
                 }
                 Some(b'n' | b'L' | b'l' | b'a' | b'm' | b'c' | b'd' | b'N') => at + 2,
                 _ => return false,
@@ -2622,28 +2669,46 @@ fn qualifier_runs_code(list: &str) -> bool {
                 Some(next) => next,
                 None => return false,
             },
+            // A mode: octal or symbolic (`f?755`, `fu+x`), else delimited
+            // by its first character (`feu+xe`).
             b'f' => match list.get(at + 1) {
-                Some(next) if next.is_ascii_punctuation() && !b"+-=".contains(next) => {
-                    match delimited(at + 1) {
-                        Some(next) => next,
-                        None => return false,
-                    }
-                }
-                _ => {
+                Some(next) if b"01234567ugoa+-=?".contains(next) => {
                     let mut next = at + 1;
                     while list
                         .get(next)
-                        .is_some_and(|byte| b"01234567ugoa+-=rwxXst,".contains(byte))
+                        .is_some_and(|byte| b"01234567ugoa+-=?rwxXst,".contains(byte))
                     {
                         next += 1;
                     }
                     next
                 }
+                _ => match delimited(at + 1) {
+                    Some(next) => next,
+                    None => return false,
+                },
             },
-            b'[' => match list[at..].iter().position(|byte| *byte == b']') {
-                Some(end) => at + end + 1,
-                None => return false,
-            },
+            // A subscript, which may nest (`[a[1]+1]`).
+            b'[' => {
+                let mut depth = 0_usize;
+                let mut end = None;
+                for (offset, byte) in list[at..].iter().enumerate() {
+                    match byte {
+                        b'[' => depth += 1,
+                        b']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                end = Some(at + offset + 1);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                match end {
+                    Some(end) => end,
+                    None => return false,
+                }
+            }
             b'%' => at + 1 + usize::from(matches!(list.get(at + 1), Some(b'b' | b'c'))),
             // Modifiers follow; none of them runs code, but an expansion
             // in them may still be read as qualifiers.
