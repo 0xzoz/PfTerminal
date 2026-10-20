@@ -1087,6 +1087,77 @@ pub(crate) fn record_permission_refusal(session: &Session) {
     );
 }
 
+/// #1087: the explanation for an in-process file tool's read of `path` (the
+/// image tool's) that the protected-path rules refused where the tool's own
+/// permissions allow it: under Moderate or Aggressive, it names the level as
+/// a refused command does (#442, #748), and is listed under the inspector's
+/// recent denials (#622, #839). `own` is the tool's sandbox context before
+/// the rules, `protected` after them. Explanation only.
+pub(crate) async fn file_tool_denial_explanation(
+    session: &Session,
+    turn: &TurnContext,
+    own: &codex_file_system::FileSystemSandboxContext,
+    protected: &codex_file_system::FileSystemSandboxContext,
+    path: &Path,
+) -> Option<String> {
+    let (level, inputs) = ReadPolicyInputs::capture_at(session, turn, SecurityLevel::Moderate)
+        .map(|inputs| (SecurityLevel::Moderate, inputs))
+        .or_else(|| {
+            ReadPolicyInputs::capture(session, turn)
+                .map(|inputs| (SecurityLevel::Aggressive, inputs))
+        })?;
+    let policy = |context: &codex_file_system::FileSystemSandboxContext| {
+        PermissionProfile::try_from(context.permissions.clone())
+            .ok()
+            .map(|profile| profile.file_system_sandbox_policy())
+    };
+    let (own_policy, protected_policy) = (policy(own)?, policy(protected)?);
+    let cwd = own
+        .cwd
+        .as_ref()
+        .and_then(|cwd| cwd.to_abs_path().ok())
+        .unwrap_or_else(|| inputs.turn_cwd.clone());
+    let path = path.to_path_buf();
+    let found = off_thread(move || {
+        let cwd = cwd.as_path();
+        let refused = !super::protected_surface::readable_under(&protected_policy, &path, cwd)
+            && super::protected_surface::readable_under(&own_policy, &path, cwd);
+        if !refused {
+            return None;
+        }
+        let shown = path.display().to_string();
+        Some(if level == SecurityLevel::Aggressive {
+            let note = ProtectedNote::Read(shown);
+            (note.inspected(), None, note.explanation())
+        } else if ReadDenials::is_security_file(
+            &inputs.codex_home,
+            inputs.user_home.as_deref(),
+            &path,
+        ) {
+            let (what, outcome) = moderate::Denied::SecurityFile.inspected();
+            (
+                what,
+                Some(outcome),
+                moderate::security_file_explanation(&shown, moderate::WayForward::Permissive),
+            )
+        } else {
+            let (what, outcome) = moderate::Denied::Read.inspected();
+            (
+                what,
+                Some(outcome),
+                moderate::read_explanation(&shown, moderate::WayForward::Permissive),
+            )
+        })
+    })
+    .await;
+    let (what, outcome, explanation) = found?;
+    match outcome {
+        Some(outcome) => super::inspection::record_refusal(session.thread_id(), what, outcome),
+        None => super::inspection::record_sandbox_denial(session.thread_id(), what),
+    }
+    Some(explanation)
+}
+
 /// Shows `explanation` to the person as a warning beside the failed command.
 pub(crate) async fn notify(session: &Session, turn: &TurnContext, explanation: String) {
     session

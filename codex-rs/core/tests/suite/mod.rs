@@ -91,6 +91,7 @@ mod hooks;
 #[cfg(not(target_os = "windows"))]
 mod hooks_mcp;
 mod image_rollout;
+mod issue_1087;
 mod issue_443;
 mod issue_445;
 mod issue_505;
