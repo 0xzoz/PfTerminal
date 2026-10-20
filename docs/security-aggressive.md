@@ -170,6 +170,12 @@ when your organization's requirements enforce a managed network proxy
 That is how network access works in that setup, so what they reach through
 it is decided by your organization's proxy rules, not by Aggressive.
 
+Hosts you allowed for good ("always allow") while a less strict level was
+on aren't added to the proxy's allowlist under Aggressive, from the next
+start (like the rest of the network rules); they apply again at a less
+strict level. A host you allow for good while Aggressive is on applies under
+it too (#1001, like remembered command approvals, #626).
+
 - **macOS:** Unix sockets those requirements allow stay open. When they
   also allow local binding, agent commands can also accept and make local
   connections (any local port), and connect to port 53 (DNS) on any server,
@@ -254,6 +260,19 @@ Moderate's rules don't cover run without one; choose a sandbox in your
 settings to keep every command in it. Where the sandbox can't start (for
 example Linux without user namespaces), commands fail under Moderate instead
 of running outside it.
+
+## Remembered approvals
+
+Approvals you saved for good under a less strict level don't apply under
+Aggressive: you're asked instead, and the prompt says why. They're kept and
+apply again at a less strict level. This covers "don't ask again" command
+rules (#626) and MCP tools set to always be allowed, by "Allow and don't ask
+me again" or in a config file, an administrator's included (#1001): such a
+tool is decided as if it had no "always allow" setting (by you, or by your
+approvals reviewer or hooks, as usual). One you choose while Aggressive is on applies
+under it too; Corbanu records MCP ones in `mcp-approvals-aggressive.json` in
+its home, for connectors and for servers your own config defines (not one a
+project or plugin defines).
 
 ## Other Corbanu Terminals on the same home
 
