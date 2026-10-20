@@ -469,6 +469,12 @@ impl Arithmetic {
                     }
                     if name == "eval" {
                         self.evaluates_text = true;
+                        // `eval 'print ${'$t'x}'`: an expansion in the text
+                        // may spell `${~x}` (#1084).
+                        self.glob_subst |= words[start + index + 1..].iter().any(|word| {
+                            work::step();
+                            word.contains(['$', '`']) || word.contains(shell::UNSEEN_OUTPUT)
+                        });
                     }
                     self.note_one(&raw[..index], &redirect[start..], /*command*/ None);
                     start += index + 1;

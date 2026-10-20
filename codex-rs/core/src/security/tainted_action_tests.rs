@@ -3009,6 +3009,20 @@ fn issue_1084_glob_substitution_is_unseen_code() {
             "zsh",
             "export A$'RGV'0=sh; zsh -c 'x=$(cat notes); print -l $x'",
         ),
+        (
+            "zsh",
+            "export ${:-ARGV}0=sh; zsh -c 'x=$(cat notes); print -l $x'",
+        ),
+        (
+            "zsh",
+            "export ARGV{0,}=sh; zsh -c 'x=$(cat notes); print -l $x'",
+        ),
+        // Review r8: a `~` built from a character code and reparsed, the
+        // value from the environment.
+        ("zsh", "y='${'${(#):-126}'x}'; print -l ${(e)y}"),
+        ("zsh", "print -l ${(e):-'${'${(#):-126}'x}'}"),
+        ("zsh", "eval 'print -l ${'${(#):-126}'x}'"),
+        ("zsh", "printf -v t '\\176'; eval \"print -l \\${${t}x}\""),
     ] {
         let found = kind(&[shell, "-c", line]);
         if found != Some(UnseenCode) {

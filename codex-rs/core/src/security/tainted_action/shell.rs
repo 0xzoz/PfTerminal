@@ -172,6 +172,22 @@ pub(super) fn glob_substitution(text: &str) -> bool {
         || [joined.as_str(), bare.as_str()]
             .iter()
             .any(|text| substitutes_globs(text) || writes_options(text) || assigns_named(text))
+        || reparses(&joined)
+}
+
+/// `${(e)y}`: a flag group with `e` reparses a value, whose expansions may
+/// spell `${~x}` with no `~` on the line (`y='${'${(#):-126}'x}'`). Each
+/// group is read at most 64 bytes; one not closed by then counts. Linear.
+fn reparses(text: &str) -> bool {
+    text.match_indices("${(").any(|(at, _)| {
+        work::step();
+        let flags = &text.as_bytes()[at + "${(".len()..];
+        let group = &flags[..flags.len().min(64)];
+        group
+            .iter()
+            .position(|&byte| byte == b')')
+            .is_none_or(|end| group[..end].contains(&b'e'))
+    })
 }
 
 /// `${(P)n::=on}`: a `${(` flag group with any later `P` and `=` may
