@@ -959,8 +959,9 @@ WebSocket connection, as the built-in OpenAI provider does: one paid request
 with the session's instructions and tools (typically 10,000 to 15,000 input
 tokens), priced for that model. A thread started for `thread/realtime/start`
 uses its text model only for handoffs (when the realtime model hands a request
-to Codex) and, where it's enabled, the end-of-session transcript turn. Without those, the warm-up on
-the default model can cost several times the realtime session itself (#1045).
+to Codex) and, where it's enabled, the end-of-session transcript turn. When a
+session makes few or no handoffs, the warm-up on the default model can cost
+several times the realtime session itself (#1045).
 
 Clients that start a thread only for realtime should pass a small, cheap text
 `model` on `thread/start`. The warm-up is then priced for that model. Handoffs
