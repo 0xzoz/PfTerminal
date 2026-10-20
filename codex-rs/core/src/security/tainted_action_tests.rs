@@ -2666,6 +2666,10 @@ fn issue_937_review_6_fallback_routes() {
 /// #1012: bash `${v@P}` runs the command substitutions in the value, like
 /// `eval`, so after untrusted content it is code the user hasn't seen.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn issue_1012_prompt_transformation_is_unseen_code() {
     use ProtectedActionKind::*;
     let mut wrong = Vec::new();
