@@ -77,15 +77,21 @@ bumps (#1030). The date appears in:
 
 Picking the nightly:
 
-- Use the nightly of a rust-clippy "rustup" sync commit (its
-  `rust-toolchain.toml`) and pin `clippy_utils` to that commit, then refresh
-  `tools/argument-comment-lint/Cargo.lock` (`cargo update -p clippy_utils`;
-  CI builds with `--locked`).
+- Pin `clippy_utils` to a rust-clippy "rustup" sync commit and use the
+  nightly in its `rust-toolchain.toml`. If `clippy_utils` doesn't build on
+  it, try the next day's nightly; the 2026-08-07 sync needs 2026-08-08. Then
+  refresh `tools/argument-comment-lint/Cargo.lock` with
+  `cargo update -p clippy_utils` (CI builds with `--locked`).
 - Use a dylint version that builds on that nightly. Pin `dylint_linting` and
   `dylint_testing` exactly, and match the workflows' `CARGO_DYLINT_VERSION`
   and `DYLINT_LINK_VERSION`.
 - The whole workspace must compile and pass on it, on Linux and macOS:
-  `python3 tools/argument-comment-lint/run.py -- --keep-going`. Nightlies from
-  2026-09-01 on break `allocative` 0.3.6 (its `impl Allocative for !`
-  conflicts with `Infallible`), so the lint stays on 2026-08-23 until that is
-  fixed.
+  `python3 tools/argument-comment-lint/run.py -- --keep-going`.
+- It must fit the CI runners' memory. Compare peak memory with the current
+  pin, e.g. `/usr/bin/time -v cargo +<nightly> check -p codex-core --lib`.
+  The lint is on 2026-08-08 because newer nightlies fail one of these checks
+  (#1030). From about 2026-08-23, `codex-core` needs about 8.4 GB instead of
+  2.1 GB, and the Linux Bazel lint runner was killed; those nightlies also
+  emit "overflow evaluating the requirement" future-incompat warnings
+  (rust-lang/rust#159228). From 2026-09-01, `allocative` 0.3.6 doesn't
+  compile: its `impl Allocative for !` conflicts with `Infallible`.
