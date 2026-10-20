@@ -796,7 +796,13 @@ impl Classifier {
             .iter()
             .filter_map(|command| command.pipe_from)
             .collect();
+        // #1012: bash `${v@P}` expands the value as a prompt, running the
+        // substitutions in it, like `eval`.
+        let prompt_expansion = self.not_shell == 0
+            && self.rebuilt == 0
+            && command.iter().any(|arg| shell::prompt_expansion(arg));
         if (lexed.incomplete && self.not_shell == 0 && self.rebuilt == 0)
+            || prompt_expansion
             || indirect::opaque_execution(&lexed.commands)
         {
             self.note(ProtectedActionKind::UnseenCode);

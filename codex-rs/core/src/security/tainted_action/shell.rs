@@ -82,6 +82,16 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
     }
 }
 
+/// Whether text may use bash's prompt transformation (`${v@P}`,
+/// `${a[0]@P}`, `${!r@P}`), which runs the command substitutions in the
+/// value (#1012). Read without quotes, so a nested shell's script counts;
+/// a backslash-newline joins lines first. Linear.
+pub(super) fn prompt_expansion(text: &str) -> bool {
+    let text = text.replace("\\\n", "");
+    text.find("${")
+        .is_some_and(|first| text[first..].contains("@P}"))
+}
+
 /// `$IFS` and `${IFS}` separate words.
 fn replace_ifs(arg: &str) -> String {
     let arg = arg.replace("${IFS}", " ");

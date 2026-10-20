@@ -2220,3 +2220,37 @@ fn issue_885_review_3_routes() {
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
 }
+
+/// #1012: bash `${v@P}` runs the command substitutions in the value, like
+/// `eval`, so after untrusted content it is code the user hasn't seen.
+#[test]
+fn issue_1012_prompt_transformation_is_unseen_code() {
+    use ProtectedActionKind::*;
+    let mut wrong = Vec::new();
+    for line in [
+        "v=$(cat notes); echo \"${v@P}\"",
+        "echo ${v@P}",
+        "printf '%s\\n' \"${a[0]@P}\"",
+        "echo ${!r@P}",
+        "echo \"${@@P}\"",
+        "echo ${x:-${v@P}}",
+        "bash -c 'echo \"${v@P}\"'",
+        "echo ${v@\\\nP}",
+    ] {
+        let found = kind(&["bash", "-c", line]);
+        if found != Some(UnseenCode) {
+            wrong.push(format!("{line:?} -> {found:?}"));
+        }
+    }
+    for line in [
+        "echo ${v@Q} ${v@U} ${v@a}",
+        "echo \"$v@P\" user@Pi",
+        "echo '@P}'",
+    ] {
+        let found = kind(&["bash", "-c", line]);
+        if found.is_some() {
+            wrong.push(format!("{line:?} -> {found:?}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
