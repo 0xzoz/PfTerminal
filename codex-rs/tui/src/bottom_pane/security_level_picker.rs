@@ -1246,6 +1246,18 @@ impl SecurityLevelPicker {
                         level.name(),
                         self.active.name()
                     )));
+                    // #978: confirmed where this session's policy does not
+                    // run here; the other sessions of this process took it.
+                    if level == ChosenLevel::Aggressive
+                        && let Some(approvals) = outcome
+                            .core
+                            .as_ref()
+                            .and_then(|report| report.approvals.as_ref())
+                    {
+                        for line in approvals_lines(approvals) {
+                            lines.extend(wrap(&line));
+                        }
+                    }
                 }
                 if let Some(report) = &outcome.core {
                     lines.extend(wrap(&core_outcome_line(report)));
@@ -1789,8 +1801,9 @@ impl SecurityLevelPicker {
                     "Core's level becomes Aggressive as soon as you confirm, in this session and the others of this Corbanu Terminal: {effects}; grants and \"for session\" approvals end. Approval for every command: {APPROVALS_NOW}."
                 )
             } else {
+                // #978: the other sessions of this process take it now.
                 format!(
-                    "Core's level becomes Aggressive from the next start (this session's policy does not run in this process yet): {effects}."
+                    "Core's level becomes Aggressive from the next start (this session's policy does not run in this process yet): {effects}. Other sessions of this Corbanu Terminal running on this Corbanu home take it as soon as you confirm, with approval for every command from their next turn."
                 )
             },
         ]
@@ -1895,6 +1908,11 @@ fn core_outcome_line(
     match report.kind {
         LevelChangeKind::Stricter if report.live => format!(
             "Core's level is {} now in this session, and from every start.",
+            name(report.in_force)
+        ),
+        // #978: the other sessions of this process took it now.
+        LevelChangeKind::Stricter if report.other_sessions => format!(
+            "Core's level is {} now in the other sessions of this Corbanu Terminal, and from every start.",
             name(report.in_force)
         ),
         LevelChangeKind::Stricter => {

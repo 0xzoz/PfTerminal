@@ -140,6 +140,56 @@ fn issue_443_review_without_a_live_tree_waits_for_the_restart() {
         review.contains("Core's level becomes Aggressive from the next start"),
         "{review}"
     );
+    // #978
+    assert!(
+        review.contains("Other sessions of this Corbanu Terminal running on this Corbanu home take it as soon as you confirm, with approval for every command from their next turn."),
+        "{review}"
+    );
+}
+
+/// #978: confirmed where this session's policy does not run in this
+/// process: the Saved screen says the other sessions of this Corbanu
+/// Terminal took Core's level and approval for every command now.
+#[test]
+fn issue_978_saved_without_a_live_tree_names_the_other_sessions() {
+    let root = tempfile::tempdir().unwrap();
+    let mut picker = picker(&root, /*live*/ false);
+    picker.stored = StoredLevel::Chosen(ChosenLevel::Aggressive);
+    picker.screen = Screen::Saved(Ok(TransitionOutcome {
+        level: ChosenLevel::Aggressive,
+        core: Some(LevelChangeReport {
+            kind: LevelChangeKind::Stricter,
+            in_force: SecurityLevel::Aggressive,
+            next_start: SecurityLevel::Aggressive,
+            live: false,
+            other_sessions: true,
+            not_saved: None,
+            approvals: Some(ApprovalsAtConfirmation {
+                held: 2,
+                kept: Vec::new(),
+                pending: 0,
+            }),
+        }),
+    }));
+    let saved = text(&picker);
+    assert!(
+        saved.contains("Until then this session stays Permissive."),
+        "{saved}"
+    );
+    assert!(
+        saved.contains(
+            "Core's level is Aggressive now in the other sessions of this Corbanu Terminal, and from every start."
+        ),
+        "{saved}"
+    );
+    assert!(
+        saved.contains("approve every command that is not known read-only (reviewer: you), now in 2 threads of this Corbanu Terminal"),
+        "{saved}"
+    );
+    insta::assert_snapshot!(
+        "issue_978_saved_aggressive_without_a_live_tree",
+        render(&picker, /*width*/ 80)
+    );
 }
 
 #[test]
@@ -199,6 +249,7 @@ pub(super) fn saved_live_with(
             in_force: SecurityLevel::Aggressive,
             next_start: SecurityLevel::Aggressive,
             live: true,
+            other_sessions: false,
             not_saved: None,
             approvals,
         }),

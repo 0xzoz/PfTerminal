@@ -186,10 +186,14 @@ pub struct LevelChangeReport {
     pub next_start: SecurityLevel,
     /// Whether running sessions of this process took it.
     pub live: bool,
+    /// Whether it reached other sessions of this process on the home (a
+    /// stricter level applies to them now, also when `live` is false).
+    pub other_sessions: bool,
     /// A stricter level applied now but could not be saved.
     pub not_saved: Option<String>,
-    /// #505: Aggressive confirmed in a session of this process: what
-    /// requiring approval for every command did to its sessions.
+    /// #505: Aggressive confirmed in this process: what requiring approval
+    /// for every command did to its sessions (#978: with or without a live
+    /// tree).
     pub approvals: Option<super::confirmed_approvals::ApprovalsAtConfirmation>,
 }
 
@@ -278,9 +282,10 @@ pub fn commit_human_level_change(
         now_unix_seconds,
     )?;
     // #505: approval for every command, in the stored settings of every
-    // session of this process on the home, from its next turn.
-    let approvals = (live
-        && target == SecurityLevel::Aggressive
+    // session of this process on the home, from its next turn, and in those
+    // it starts later. #978: also without a live tree here: the commit still
+    // raised this process's other trees on the home.
+    let approvals = (target == SecurityLevel::Aggressive
         && committed.level == SecurityLevel::Aggressive)
         .then(|| super::confirmed_approvals::confirm(codex_home));
     Ok(LevelChangeReport {
@@ -294,6 +299,7 @@ pub fn commit_human_level_change(
         in_force: committed.level,
         next_start: committed.next_start_level,
         live,
+        other_sessions: committed.reached_other_trees,
         not_saved: committed.not_saved,
         approvals,
     })
