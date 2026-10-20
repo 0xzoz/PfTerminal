@@ -169,12 +169,17 @@ The kill switch (`/security` → `g`) works under every level.
   after `git init` or a fresh clone there (not a worktree git adds again for
   the same repository), and approving a command in that project doesn't lift
   the rules until you remove them or restart Corbanu Terminal; the same one
-  moved back is compared with the last look. Where a worktree's or submodule's
-  `.git` is replaced by another kind, or pointed at other git folders, check
-  its config and hooks yourself before you run git there. New config and hooks
-  are checked only in a repository's own git folder, not in its worktrees' or
-  submodules'. A session that works in more than 16 repositories forgets the
-  oldest; its next look there reports only links, steps and hard links.
+  moved back (the same inode and, where the file system records it, the same
+  creation time) is compared with the last look (looked at in full where it
+  now names other git folders). On a file system that doesn't record creation
+  times, a new `.git` file that gets a removed one's inode number (Linux
+  reuses them) with the same text counts as moved back. Where a worktree's or
+  submodule's `.git` is replaced by another kind, or pointed at other git
+  folders, check its config and hooks yourself before you run git there. New
+  config and hooks are checked only in a repository's own git folder, not in
+  its worktrees' or submodules'. A session that works in more than 16
+  repositories forgets the oldest; its next look there reports only links,
+  steps and hard links.
 - MCP servers, apps, hooks and `!` shell commands run outside the sandbox, as
   under every level.
 - On Linux, where a command you approve can write a Corbanu home's folder
