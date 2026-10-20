@@ -136,6 +136,15 @@ impl ToolOrchestrator {
         }
     }
 
+    /// Approves, selects the sandbox and runs the tool. D50 (#1001): when a
+    /// security transition is committed while a run is being approved (up to
+    /// its first attempt), the answer was for a stale prompt: nothing runs on
+    /// it, and the run is decided again under the new level, the person asked
+    /// again (as network access is, #945). Where the transition switched
+    /// Aggressive on, the run's exec-policy decision (made by the tool's
+    /// handler) is stale too, so it is refused instead: a new call is decided
+    /// under Aggressive. A retry outside the sandbox approved (or due) before
+    /// a transition is not run.
     pub async fn run<Rq, Out, T>(
         &mut self,
         tool: &mut T,
@@ -147,6 +156,65 @@ impl ToolOrchestrator {
     where
         T: ToolRuntime<Rq, Out>,
     {
+        let aggressive_at_start = tool_ctx
+            .session
+            .services
+            .model_client()
+            .live_level_is_aggressive();
+        let mut asked_again = false;
+        for _ in 0..MAX_STALE_APPROVAL_ROUNDS {
+            match Box::pin(self.run_round(
+                tool,
+                req,
+                tool_ctx,
+                turn_ctx,
+                approval_policy,
+                asked_again,
+            ))
+            .await?
+            {
+                Round::Done(result) => return Ok(result),
+                Round::Stale { person_asked } => {
+                    tracing::info!(
+                        target: "codex_core::security::transition",
+                        call_id = %tool_ctx.call_id,
+                        "approval answered after a security transition; not used"
+                    );
+                    if tool_ctx
+                        .session
+                        .services
+                        .model_client()
+                        .live_level_is_aggressive()
+                        != aggressive_at_start
+                    {
+                        warn(tool_ctx, STALE_AGGRESSIVE_REFUSAL).await;
+                        return Err(ToolError::Rejected(STALE_AGGRESSIVE_REFUSAL.to_string()));
+                    }
+                    // The note is for a person who saw the earlier prompt.
+                    asked_again = person_asked;
+                }
+            }
+        }
+        warn(tool_ctx, STALE_APPROVAL_REFUSAL).await;
+        Err(ToolError::Rejected(STALE_APPROVAL_REFUSAL.to_string()))
+    }
+
+    /// One decision and run; [`Round::Stale`] when a security transition was
+    /// committed before its first attempt started.
+    async fn run_round<Rq, Out, T>(
+        &mut self,
+        tool: &mut T,
+        req: &Rq,
+        tool_ctx: &ToolCtx,
+        turn_ctx: &crate::session::turn_context::TurnContext,
+        approval_policy: AskForApproval,
+        asked_again: bool,
+    ) -> Result<Round<Out>, ToolError>
+    where
+        T: ToolRuntime<Rq, Out>,
+    {
+        // D50: the policy this run is decided under.
+        let decided_under = tool_ctx.session.services.authority_marker();
         let otel = turn_ctx.session_telemetry.clone();
         let otel_tn = flat_tool_name(&tool_ctx.tool_name).into_owned();
         let otel_ci = &tool_ctx.call_id;
@@ -230,6 +298,10 @@ impl ToolOrchestrator {
         // PF-30-S03: a protected action after untrusted content needs fresh,
         // exact human approval, whatever the requirement above would allow.
         let post_taint = post_taint_action(tool, req, tool_ctx, &requirement).await;
+        // D27 (a), D48 (c): the taint generation at which the person was
+        // warned, in the prompt they answer, that approving lets this run
+        // create user namespaces (only a run whose prompt showed it may).
+        let mut user_namespaces_warned_at = None;
         // Issue #245: additional permissions never reopen a protected path.
         // Refused before anyone is asked where no approval can lift the
         // rules for this run; checked again below once the rules are known.
@@ -354,9 +426,35 @@ impl ToolOrchestrator {
                 moderate_kept_read_note(tool, req, tool_ctx, turn_ctx, action).await;
             // #747: and that it stays in the sandbox under Moderate.
             let stays_sandboxed = moderate_sandbox_note(tool, req, moderate_keeps_sandbox);
-            // #826: that what needs a user namespace fails on Linux.
-            let user_namespaces_note =
-                user_namespaces_note(tool, req, tool_ctx, turn_ctx).map(|(note, _)| note);
+            // D48 (c): a known tool's request to run outside the sandbox may
+            // create user namespaces if approved here, with the warning;
+            // #826: elsewhere, that what needs one fails on Linux.
+            let warning = tool
+                .sandbox_permissions(req)
+                .requires_escalated_permissions()
+                .then(|| {
+                    crate::security::user_namespaces::one_run_warning(
+                        &tool_ctx.session,
+                        turn_ctx,
+                        &|| {
+                            runs_known_tool(
+                                tool,
+                                req,
+                                tool_ctx,
+                                turn_ctx,
+                                &file_system_sandbox_policy,
+                            )
+                        },
+                    )
+                })
+                .flatten();
+            let user_namespaces_note = match warning {
+                Some((warning, at)) => {
+                    user_namespaces_warned_at = Some(at);
+                    Some(warning)
+                }
+                None => user_namespaces_note(tool, req, tool_ctx, turn_ctx).map(|(note, _)| note),
+            };
             let approval_ctx = ApprovalCtx {
                 session: &tool_ctx.session,
                 turn: &tool_ctx.turn,
@@ -395,9 +493,16 @@ impl ToolOrchestrator {
                 ApprovalReviewer::User,
                 &otel,
                 DeclineRecord::ByCaller,
+                asked_again,
             )
             .await;
             pending.answered();
+            // D50: approved before a security transition; decided again
+            // (the recheck below would refuse it).
+            if decision.is_ok() && tool_ctx.session.services.transition_since(decided_under) {
+                post_taint_outcome(action, tool_ctx, "stale", Some(asked.elapsed()));
+                return Ok(Round::Stale { person_asked: true });
+            }
             post_taint_outcome(
                 action,
                 tool_ctx,
@@ -416,18 +521,45 @@ impl ToolOrchestrator {
         // asks to run outside the sandbox needs the human (no cache, hook or
         // automatic reviewer), also where it would run unasked; that answer
         // lifts the protected-path rules. With approvals off it stays refused.
+        let asks_sandbox_approval = match approval_policy {
+            AskForApproval::Never => false,
+            AskForApproval::Granular(granular) => granular.allows_sandbox_approval(),
+            AskForApproval::UnlessTrusted | AskForApproval::OnRequest => true,
+        };
         let ask_human_to_escalate = post_taint.is_none()
             && !matches!(requirement, ExecApprovalRequirement::Forbidden { .. })
-            && match approval_policy {
-                AskForApproval::Never => false,
-                AskForApproval::Granular(granular) => granular.allows_sandbox_approval(),
-                AskForApproval::UnlessTrusted | AskForApproval::OnRequest => true,
-            }
+            && asks_sandbox_approval
             && moderate_escalation_before_taint(tool, req, tool_ctx, &requirement);
+        // D48 (c) (Travis, 2026-10-20, security sign-off): after untrusted
+        // content under Moderate on Linux, a request to run outside the
+        // sandbox whose program is a known tool (unshare, bwrap, podman,
+        // buildah, flatpak, nix) is asked about afresh, every time, by the
+        // person (no approval cache, hook, automatic reviewer or saved rule),
+        // with D27's warning: approving lets that one run create user
+        // namespaces. It lifts nothing else: the protected-file rules stay.
+        let after_untrusted_warning = if post_taint.is_none()
+            && !ask_human_to_escalate
+            && !matches!(
+                requirement,
+                ExecApprovalRequirement::Forbidden { .. }
+                    | ExecApprovalRequirement::Skip {
+                        bypass_sandbox: true,
+                        ..
+                    }
+            )
+            && asks_sandbox_approval
+            && tool
+                .sandbox_permissions(req)
+                .requires_escalated_permissions()
+        {
+            crate::security::user_namespaces::one_run_warning(&tool_ctx.session, turn_ctx, &|| {
+                runs_known_tool(tool, req, tool_ctx, turn_ctx, &file_system_sandbox_policy)
+            })
+            .filter(|(_, at)| *at > 0)
+        } else {
+            None
+        };
         let mut escalation_approved_by_human = false;
-        // D27 (a): the person was warned in that prompt that approving lets
-        // the run create user namespaces.
-        let mut user_namespaces_warned = false;
         match &requirement {
             _ if post_taint.is_some() => {}
             _ if ask_human_to_escalate => {
@@ -441,28 +573,22 @@ impl ToolOrchestrator {
                     network_approval_context: None,
                     fresh_human_authority: true,
                 };
-                // Keep why the command runs (the requirement's reason, else the
-                // model's justification) ahead of the note.
-                let why = match &requirement {
-                    ExecApprovalRequirement::NeedsApproval {
-                        reason: Some(reason),
-                        ..
-                    } => Some(reason.clone()),
-                    _ => match tool.approval_action(req, &approval_ctx) {
-                        Ok(
-                            ApprovalAction::Shell { justification, .. }
-                            | ApprovalAction::ExecCommand { justification, .. },
-                        ) => justification,
-                        _ => None,
-                    },
-                };
+                // Keep why the command runs ahead of the note.
+                let why = escalation_why(tool, req, &requirement, &approval_ctx);
                 // D27 (a): on Linux, approving also lets this one run create
                 // user namespaces, and the person is warned (only a run whose
                 // prompt showed it may); elsewhere (#826), that what needs one
-                // fails.
-                let warning =
-                    crate::security::user_namespaces::one_run_warning(&tool_ctx.session, turn_ctx);
-                user_namespaces_warned = warning.is_some();
+                // fails. Before untrusted content only: if some arrived
+                // since this was decided, no warning.
+                let warning = crate::security::user_namespaces::one_run_warning(
+                    &tool_ctx.session,
+                    turn_ctx,
+                    &|| false,
+                )
+                .map(|(warning, at)| {
+                    user_namespaces_warned_at = Some(at);
+                    warning
+                });
                 let note = match warning.or_else(|| {
                     user_namespaces_note(tool, req, tool_ctx, turn_ctx).map(|(note, _)| note)
                 }) {
@@ -483,11 +609,55 @@ impl ToolOrchestrator {
                         ApprovalReviewer::User,
                         &otel,
                         DeclineRecord::Here,
+                        asked_again,
                     )
                     .await?,
                 );
                 already_approved = true;
                 escalation_approved_by_human = true;
+            }
+            _ if after_untrusted_warning.is_some() => {
+                // Set: the guard holds.
+                let (warning, at) = after_untrusted_warning.clone().unwrap_or_default();
+                let approval_ctx = ApprovalCtx {
+                    session: &tool_ctx.session,
+                    turn: &tool_ctx.turn,
+                    call_id: &tool_ctx.call_id,
+                    retry_reason: None,
+                    network_approval_context: None,
+                    fresh_human_authority: true,
+                };
+                // Why the command runs, what approving may let it write
+                // (#513), that it stays in the sandbox (#747), the warning.
+                let retry_reason = [
+                    escalation_why(tool, req, &requirement, &approval_ctx),
+                    persistence_note.clone(),
+                    moderate_sandbox_note(tool, req, moderate_keeps_sandbox).map(str::to_string),
+                    Some(warning),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ");
+                approved_by = Some(
+                    resolve_tool_apporval(
+                        tool,
+                        req,
+                        tool_ctx.call_id.as_str(),
+                        ApprovalCtx {
+                            retry_reason: Some(retry_reason),
+                            ..approval_ctx
+                        },
+                        tool_ctx,
+                        ApprovalReviewer::User,
+                        &otel,
+                        DeclineRecord::Here,
+                        asked_again,
+                    )
+                    .await?,
+                );
+                already_approved = true;
+                user_namespaces_warned_at = Some(at);
             }
             ExecApprovalRequirement::Skip { .. } => {
                 if strict_auto_review {
@@ -509,6 +679,7 @@ impl ToolOrchestrator {
                             ApprovalReviewer::Guardian,
                             &otel,
                             DeclineRecord::Here,
+                            asked_again,
                         )
                         .await?,
                     );
@@ -586,6 +757,7 @@ impl ToolOrchestrator {
                         reviewer,
                         &otel,
                         DeclineRecord::Here,
+                        asked_again,
                     )
                     .await?,
                 );
@@ -599,6 +771,14 @@ impl ToolOrchestrator {
             .as_ref()
             .and_then(crate::security::grant_offer::OfferGuard::take_confirmed);
         drop(grant_offer);
+        // D50: approved (or decided) before a security transition: nothing
+        // derived from the approval is used (checked again just before the
+        // first attempt).
+        if tool_ctx.session.services.transition_since(decided_under) {
+            return Ok(Round::Stale {
+                person_asked: approved_by == Some(ApprovalResolutionSource::User),
+            });
+        }
 
         // PF-23-S01 slice 3: after untrusted content the sandbox itself denies
         // credential and Corbanu home reads, whatever the command text says.
@@ -668,17 +848,21 @@ impl ToolOrchestrator {
         // D27 (a) (Travis, 2026-10-19, security sign-off): but for one run
         // under Moderate whose request to run outside the sandbox a person
         // approved when asked now, before untrusted content, after the
-        // prompt warned them. Never a remembered answer; never under
-        // Aggressive.
+        // prompt warned them. D48 (c) (2026-10-20): after untrusted content
+        // likewise, for a known tool's command, while no more untrusted
+        // content arrived since the warning. Never a remembered answer;
+        // never under Aggressive.
         let launch_enforces_aggressive = turn_ctx.config.permissions.launch_enforces_aggressive();
         let user_namespaces_allowed = crate::security::user_namespaces::allows_one_run(
             &tool_ctx.session,
             protected_level,
             launch_enforces_aggressive,
-            escalation_approved_by_human
-                && user_namespaces_warned
+            user_namespaces_warned_at.is_some()
                 && approved_by == Some(ApprovalResolutionSource::User),
+            user_namespaces_warned_at,
         );
+        // A retry of this run (after a sandbox or network denial) reuses
+        // these permissions: the same approved command, so the same answer.
         if user_namespaces_allowed {
             crate::security::user_namespaces::note_allowed_run(
                 tool_ctx.session.thread_id(),
@@ -842,6 +1026,13 @@ impl ToolOrchestrator {
                     .await;
             }
         }
+        // D50: approved (or decided) before a security transition: nothing
+        // runs on it; decided again under the new level.
+        if tool_ctx.session.services.transition_since(decided_under) {
+            return Ok(Round::Stale {
+                person_asked: approved_by == Some(ApprovalResolutionSource::User),
+            });
+        }
         let initial_attempt_start = Instant::now();
         let (first_result, first_deferred_network_approval) = Self::run_attempt(
             tool,
@@ -852,7 +1043,7 @@ impl ToolOrchestrator {
         )
         .await;
         let initial_duration = initial_attempt_start.elapsed();
-        match first_result {
+        let result = match first_result {
             Ok(out) => {
                 // We have a successful initial result
                 Ok(OrchestratorRunResult {
@@ -993,6 +1184,20 @@ impl ToolOrchestrator {
                             sandbox_startup_failure,
                         ))
                     && network_approval_context.is_none();
+                // D50: a retry due on an approval from before a security
+                // transition (one committed while the first attempt ran) is
+                // not asked about: it would not be run.
+                if tool_ctx.session.services.transition_since(decided_under) {
+                    warn(tool_ctx, STALE_RETRY_NOTE).await;
+                    otel.sandbox_outcome(
+                        &otel_tn,
+                        otel_ci,
+                        "denied",
+                        initial_duration,
+                        /*escalated_duration*/ None,
+                    );
+                    return Err(ToolError::Codex(err));
+                }
                 if !bypass_retry_approval {
                     let approval_ctx = ApprovalCtx {
                         session: &tool_ctx.session,
@@ -1020,6 +1225,7 @@ impl ToolOrchestrator {
                         },
                         &otel,
                         DeclineRecord::Here,
+                        /*asked_again*/ false,
                     )
                     .await?;
                     if let Some(action) = &post_taint {
@@ -1035,6 +1241,22 @@ impl ToolOrchestrator {
                                 .to_string(),
                         ));
                     }
+                }
+
+                // D50: nor a retry approved (or due on an earlier approval)
+                // before a security transition. The first attempt already
+                // ran, so the run is not decided again: the sandbox denial
+                // stands and the person is told why there was no retry.
+                if tool_ctx.session.services.transition_since(decided_under) {
+                    warn(tool_ctx, STALE_RETRY_NOTE).await;
+                    otel.sandbox_outcome(
+                        &otel_tn,
+                        otel_ci,
+                        "denied",
+                        initial_duration,
+                        /*escalated_duration*/ None,
+                    );
+                    return Err(ToolError::Codex(err));
                 }
 
                 let retry_sandbox_requested = !unsandboxed_allowed
@@ -1124,9 +1346,39 @@ impl ToolOrchestrator {
                 }
                 Err(err)
             }
-        }
+        };
+        result.map(Round::Done)
     }
 }
+
+/// One round of [`ToolOrchestrator::run`].
+enum Round<Out> {
+    Done(OrchestratorRunResult<Out>),
+    /// Approved (or decided) before a security transition (D50).
+    /// `person_asked`: a person answered the stale prompt.
+    Stale {
+        person_asked: bool,
+    },
+}
+
+/// D50 (#1001): how often a run whose approval went stale is decided again.
+const MAX_STALE_APPROVAL_ROUNDS: usize = 3;
+
+/// D50: why a run approved before a transition that switched Aggressive on
+/// did not run.
+pub(crate) const STALE_AGGRESSIVE_REFUSAL: &str = "Not run: the security policy changed while \
+     this was being approved (security level Aggressive was switched on), so the approval was \
+     not used. Ask again if it is still needed; it will be decided under Aggressive.";
+
+/// D50: why a retry outside the sandbox did not happen.
+const STALE_RETRY_NOTE: &str = "The security level changed while this command ran or its \
+     retry outside the sandbox was being approved, so it was not retried. Run it again to have \
+     it decided under the new level.";
+
+/// D50: why a run whose approval went stale every time did not run.
+pub(crate) const STALE_APPROVAL_REFUSAL: &str = "The security level changed while this \
+     approval was open, each time it was asked, so it was not used and nothing ran. Ask \
+     again if it is still needed.";
 
 /// Issue #540: whether the retry after a sandbox denial may run without a
 /// sandbox. A run that keeps its sandbox (`keeps_sandbox`: the protected-path
@@ -1281,6 +1533,101 @@ where
             .model_client()
             .post_taint_state()
             .is_some_and(|state| state.taint_generation == 0 && state.moderate_bound())
+}
+
+/// Why a command that asks to run outside the sandbox runs, for its prompt:
+/// the requirement's reason, else the model's justification.
+fn escalation_why<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    requirement: &ExecApprovalRequirement,
+    approval_ctx: &ApprovalCtx<'_>,
+) -> Option<String>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    match requirement {
+        ExecApprovalRequirement::NeedsApproval {
+            reason: Some(reason),
+            ..
+        } => Some(reason.clone()),
+        _ => match tool.approval_action(req, approval_ctx) {
+            Ok(
+                ApprovalAction::Shell { justification, .. }
+                | ApprovalAction::ExecCommand { justification, .. },
+            ) => justification,
+            _ => None,
+        },
+    }
+}
+
+/// D48 (c): whether the command a shell request runs (as its prompt shows
+/// it) is a known tool's, its programs looked up through the `PATH` it runs
+/// with and checked against what this run's sandbox (with its additional
+/// permissions) can write.
+fn runs_known_tool<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    tool_ctx: &ToolCtx,
+    turn_ctx: &crate::session::turn_context::TurnContext,
+    file_system_sandbox_policy: &codex_protocol::permissions::FileSystemSandboxPolicy,
+) -> bool
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    let ctx = ApprovalCtx {
+        session: &tool_ctx.session,
+        turn: &tool_ctx.turn,
+        call_id: &tool_ctx.call_id,
+        retry_reason: None,
+        network_approval_context: None,
+        fresh_human_authority: true,
+    };
+    let command = match tool.approval_action(req, &ctx) {
+        Ok(ApprovalAction::Shell { command, .. } | ApprovalAction::ExecCommand { command, .. }) => {
+            command
+        }
+        _ => return false,
+    };
+    #[allow(deprecated)]
+    let cwd = tool
+        .sandbox_cwd(req)
+        .and_then(|cwd| cwd.to_abs_path().ok())
+        .unwrap_or_else(|| turn_ctx.cwd.clone());
+    let policy = codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
+        file_system_sandbox_policy,
+        tool.additional_permissions(req),
+    );
+    // Also where it is reached through a link (`~/bin -> ~/project/bin`).
+    let writable = |path: &std::path::Path| {
+        policy.can_write_path_with_cwd(path, cwd.as_path())
+            || std::fs::canonicalize(path)
+                .is_ok_and(|real| policy.can_write_path_with_cwd(&real, cwd.as_path()))
+    };
+    // As the shell's search decides it (`access(X_OK)`), not by mode bits.
+    let executable = |file: &std::path::Path| {
+        #[cfg(unix)]
+        let runs = {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::CString::new(file.as_os_str().as_bytes()).is_ok_and(|file| {
+                // SAFETY: `file` is a valid NUL-terminated string that
+                // outlives the call; `access` only reads it.
+                unsafe { libc::access(file.as_ptr(), libc::X_OK) == 0 }
+            })
+        };
+        #[cfg(not(unix))]
+        let runs = true;
+        runs && std::fs::metadata(file).is_ok_and(|meta| meta.is_file())
+    };
+    crate::security::user_namespaces::known_tool(
+        &command,
+        &crate::security::user_namespaces::Lookup {
+            path: tool.local_search_path(req),
+            writable: &writable,
+            executable: &executable,
+        },
+    )
+    .is_some()
 }
 
 /// The command and folder a grant offer shows (PF-25-S01).
@@ -1943,3 +2290,7 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+#[path = "orchestrator_stale_tests.rs"]
+mod stale_tests;

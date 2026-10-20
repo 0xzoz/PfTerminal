@@ -38,3 +38,10 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   (`thread/resume` with turns, `thread/turns/list` with full items,
   `thread/items/list` and `thread/turns/items/list` fail with "failed to
   deserialize stored thread item"). Newer builds read older history unchanged.
+
+## `/cost`
+
+- **Codex Auto Review is named as unpriced.** On an OpenAI API key, requests
+  from the automatic approval reviewer still show `no price available` (no
+  estimate, never $0), and the next step now adds "OpenAI doesn't publish a
+  price for Codex Auto Review." (#913).

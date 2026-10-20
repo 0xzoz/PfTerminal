@@ -150,6 +150,12 @@ pub struct LandlockCommand {
     )]
     pub pinned_writable_roots: Option<PinnedWritableRoots>,
 
+    /// Internal (#348): the folder (in the Corbanu home) where each run
+    /// records the placeholders it makes, so one a run left behind is
+    /// removed later even when the temporary folder's registry is lost.
+    #[arg(long = "placeholder-record-dir", hide = true)]
+    pub placeholder_record_dir: Option<PathBuf>,
+
     /// When set, skip mounting a fresh `/proc` even though PID isolation is
     /// still enabled. This is primarily intended for restrictive container
     /// environments that deny `--proc /proc`.
@@ -183,6 +189,7 @@ pub fn run_main() -> ! {
         allow_network_for_proxy,
         proxy_route_spec,
         pinned_writable_roots,
+        placeholder_record_dir,
         no_proc,
         close_inherited_fd,
         command,
@@ -239,19 +246,21 @@ pub fn run_main() -> ! {
     }
 
     if file_system_sandbox_policy.has_full_disk_write_access() && !allow_network_for_proxy {
-        if let Err(e) = apply_permission_profile_to_current_thread(
-            &permission_profile,
-            &sandbox_policy_cwd,
-            /*apply_landlock_fs*/ false,
-            allow_network_for_proxy,
-            /*proxy_routed_network*/ false,
-        ) {
-            panic!("error applying Linux sandbox restrictions: {e:?}");
-        }
-        if file_system_sandbox_policy.denies_user_namespaces() {
-            mark_user_namespaces_denied();
-        }
-        exec_or_panic(command);
+        run_supervised_without_bwrap(|| {
+            if let Err(e) = apply_permission_profile_to_current_thread(
+                &permission_profile,
+                &sandbox_policy_cwd,
+                /*apply_landlock_fs*/ false,
+                allow_network_for_proxy,
+                /*proxy_routed_network*/ false,
+            ) {
+                panic!("error applying Linux sandbox restrictions: {e:?}");
+            }
+            if file_system_sandbox_policy.denies_user_namespaces() {
+                mark_user_namespaces_denied();
+            }
+            exec_or_panic(command);
+        });
     }
 
     if let Some(PinnedWritableRoots(pinned)) = pinned_writable_roots {
@@ -265,6 +274,11 @@ pub fn run_main() -> ! {
         // sandbox that denies them cannot create; say so instead of leaving
         // it to bubblewrap's message.
         refuse_when_user_namespaces_denied();
+        // #348: before any argument is built, so the record folder is there
+        // (and masked where the policy denies it) when the command runs.
+        if let Some(dir) = placeholder_record_dir.as_deref() {
+            crate::placeholder_journal::open(dir);
+        }
         // Outer stage: bubblewrap first, then re-enter this binary in the
         // sandboxed environment to apply seccomp. This path never falls back
         // to legacy Landlock on failure.
@@ -300,19 +314,110 @@ pub fn run_main() -> ! {
     }
 
     // Legacy path: Landlock enforcement only, when bwrap sandboxing is not enabled.
-    if let Err(e) = apply_permission_profile_to_current_thread(
-        &permission_profile,
-        &sandbox_policy_cwd,
-        /*apply_landlock_fs*/ true,
-        allow_network_for_proxy,
-        /*proxy_routed_network*/ false,
-    ) {
-        panic!("error applying legacy Linux sandbox restrictions: {e:?}");
+    run_supervised_without_bwrap(|| {
+        if let Err(e) = apply_permission_profile_to_current_thread(
+            &permission_profile,
+            &sandbox_policy_cwd,
+            /*apply_landlock_fs*/ true,
+            allow_network_for_proxy,
+            /*proxy_routed_network*/ false,
+        ) {
+            panic!("error applying legacy Linux sandbox restrictions: {e:?}");
+        }
+        if file_system_sandbox_policy.denies_user_namespaces() {
+            mark_user_namespaces_denied();
+        }
+        exec_or_panic(command);
+    });
+}
+
+/// #1006 (Travis, 2026-10-20, D47 option B): a command run without
+/// bubblewrap (full disk write access without managed-proxy routing, legacy
+/// Landlock) cannot outlive this helper either. `exec_command` (restrict,
+/// then exec) runs under #935's supervisor, in this helper's process group
+/// and session (the terminal's foreground group, if it was), with the
+/// original signal mask and `SIGCHLD` action. The supervisor kills every
+/// process it leaves behind when the command exits, when this helper exits
+/// or is killed, or when this helper's parent exits, and exits as the
+/// command did; this helper then exits the same way.
+///
+/// Signals: one sent to the process group reaches the command directly, so
+/// this helper keeps every signal blocked and ignores it, except the
+/// forwarded ones, which the supervisor relays once the command has left
+/// the group ([`crate::supervisor::Relay`]). A catchable signal sent to this
+/// helper's pid alone no longer reaches the command, except a forwarded one
+/// sent before this helper forks the supervisor or once the command has
+/// left the group (Corbanu signals the group, or kills this helper with
+/// `SIGKILL`, which stops the command).
+fn run_supervised_without_bwrap(exec_command: impl FnOnce()) -> ! {
+    // SAFETY: plain syscall on this process, still single-threaded.
+    let group = unsafe { libc::getpgrp() };
+    let original_mask = crate::supervisor::block_all_signals();
+    // SAFETY: plain data, valid when zeroed.
+    let mut original_sigchld: libc::sigaction = unsafe { std::mem::zeroed() };
+    // SAFETY: valid in and out pointers; the supervisor is waited for, and
+    // an ignored SIGCHLD (inherited across exec) would reap it unseen.
+    unsafe {
+        let mut default: libc::sigaction = std::mem::zeroed();
+        default.sa_sigaction = libc::SIG_DFL;
+        libc::sigaction(libc::SIGCHLD, &default, &mut original_sigchld);
     }
-    if file_system_sandbox_policy.denies_user_namespaces() {
-        mark_user_namespaces_denied();
+    let mut watched = FORWARDED_SIGNALS.to_vec();
+    watched.push(libc::SIGCHLD);
+    let signals = crate::supervisor::SignalFd::new(&watched);
+    // Without a pidfd, the parent's exit kills this helper (it blocks the
+    // signals it could catch), which cuts the lifeline.
+    let parent_watch = crate::supervisor::ParentWatch::open(libc::SIGKILL);
+    let (lifeline_read, lifeline) = crate::supervisor::lifeline();
+    let (mut relay, relay_requests) = crate::supervisor::Relay::pipe(group, FORWARDED_SIGNALS);
+    // Received before the command exists: sent to it as it starts, and not
+    // relayed later (read here, they are gone).
+    while let Some((signal, _)) = signals.try_next() {
+        relay.add_pending(signal);
     }
-    exec_or_panic(command);
+    // SAFETY: this process is single-threaded.
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        let err = std::io::Error::last_os_error();
+        panic!("failed to fork the sandbox supervisor: {err}");
+    }
+    if pid == 0 {
+        drop(lifeline);
+        drop(relay_requests);
+        drop(signals);
+        crate::supervisor::run(lifeline_read, &[], &[], Some(relay), |supervisor_pid| {
+            terminate_with_parent(supervisor_pid, libc::SIGKILL);
+            // SAFETY: plain syscalls on this process, restoring what it
+            // was started with.
+            unsafe {
+                libc::sigaction(libc::SIGCHLD, &original_sigchld, std::ptr::null_mut());
+                libc::sigprocmask(libc::SIG_SETMASK, &original_mask, std::ptr::null_mut());
+            }
+            exec_command();
+        });
+    }
+    drop(lifeline_read);
+    drop(relay);
+    parent_watch.cut_when_gone(Arc::new(lifeline));
+    loop {
+        let (signal, code) = signals.next();
+        if signal != libc::SIGCHLD {
+            // A terminal hangup signals the session leader alone.
+            let hangup = signal == libc::SIGHUP && code == libc::SI_KERNEL;
+            crate::supervisor::Relay::request(&relay_requests, signal, hangup);
+            continue;
+        }
+        let mut status = 0;
+        // SAFETY: valid out pointer; `pid` is this process's child.
+        let res = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+        if res == pid {
+            crate::supervisor::exit_like(status);
+        }
+        if res < 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            let err = std::io::Error::last_os_error();
+            panic!("waitpid failed for the sandbox supervisor: {err}");
+        }
+    }
 }
 
 /// #826: set in the environment of a command whose sandbox denies user
@@ -321,7 +426,7 @@ pub fn run_main() -> ! {
 const USER_NAMESPACES_DENIED_ENV: &str = "CODEX_SANDBOX_USER_NAMESPACES_DENIED";
 
 /// Shown when this helper runs inside a sandbox that denies user namespaces.
-const USER_NAMESPACES_DENIED_MESSAGE: &str = "Corbanu's Linux sandbox cannot start here: this command runs inside an agent command's sandbox under security level Moderate or Aggressive, where creating user namespaces is denied (Operation not permitted), and the sandbox needs one. Run it outside the agent's sandbox (under Moderate a person may allow user namespaces for one command whose request to run outside the sandbox they approve, before untrusted content, in practice the first command of a new session), or choose Permissive in /security.";
+const USER_NAMESPACES_DENIED_MESSAGE: &str = "Corbanu's Linux sandbox cannot start here: this command runs inside an agent command's sandbox under security level Moderate or Aggressive, where creating user namespaces is denied (Operation not permitted), and the sandbox needs one. Run it outside the agent's sandbox (under Moderate a person may allow user namespaces for one command whose request to run outside the sandbox they approve when asked: before untrusted content any command, in practice the first command of a new session; after it only one plain command that runs unshare, bwrap, podman, buildah, flatpak or nix), or choose Permissive in /security.";
 
 fn mark_user_namespaces_denied() {
     // SAFETY: this helper process is single-threaded here (the proxy bridges
@@ -464,6 +569,9 @@ fn run_bwrap_with_proc_fallback(
     // #582: once, before any arguments are built, so a stale placeholder is
     // not taken for an existing path (or a file where a folder belongs).
     remove_stale_synthetic_mount_targets();
+    // #348: then those whose runs' records in the temporary folder were lost
+    // (a reboot), from the record kept in the Corbanu home.
+    sweep_recorded_placeholders();
 
     if mount_proc
         && !preflight_proc_mount_support(network_mode)
@@ -741,6 +849,7 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
         &synthetic_mount_targets,
         &protected_create_targets,
         registry_lock,
+        &args,
     );
     let exec_start_pipe = create_exec_start_pipe(
         !protected_create_targets.is_empty() || credential_watcher.is_some(),
@@ -751,7 +860,7 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
         .collect::<Vec<_>>();
     // #935: the supervisor stops the sandbox when this helper's parent
     // exits, when this helper exits or is killed, or on a credential stop.
-    let parent_watch = crate::supervisor::ParentWatch::open();
+    let parent_watch = crate::supervisor::ParentWatch::open(libc::SIGTERM);
     let (lifeline_read, lifeline) = crate::supervisor::lifeline();
     // `pid` is the supervisor, which runs bubblewrap and exits as it did.
     let pid = unsafe { libc::fork() };
@@ -774,9 +883,10 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
             lifeline_read,
             FORWARDED_SIGNALS,
             &exec_start_pipe,
+            /*relay*/ None,
             |supervisor_pid| {
                 setup_signal_mask.restore();
-                terminate_with_parent(supervisor_pid);
+                terminate_with_parent(supervisor_pid, libc::SIGTERM);
                 wait_for_parent_exec_start(exec_start_pipe[0], exec_start_pipe[1]);
                 exec_bwrap(args, preserved_files);
             },
@@ -815,9 +925,14 @@ fn run_bwrap_in_child_with_synthetic_mount_cleanup(
     let protected_create_monitor_violation = protected_create_monitor
         .map(ProtectedCreateMonitor::stop)
         .unwrap_or(false);
+    // #348: this run no longer uses anything; then its cleanup.
+    crate::placeholder_journal::leave();
     cleanup_synthetic_mount_targets(&synthetic_mount_registrations);
     let protected_create_violation = protected_create_monitor_violation
         || cleanup_protected_create_targets(&protected_create_registrations);
+    // #348: what this run made and another live run still holds stays
+    // recorded (for a later sweep); the rest of its record goes.
+    crate::placeholder_journal::finish();
     signal_forwarders.restore();
     cleanup_signal_mask.restore();
     if let Some(found) = credential_stop {
@@ -1063,15 +1178,15 @@ impl ForwardedSignalMask {
     }
 }
 
-fn terminate_with_parent(parent_pid: libc::pid_t) {
-    let res = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) };
+fn terminate_with_parent(parent_pid: libc::pid_t, signal: libc::c_int) {
+    let res = unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, signal) };
     if res < 0 {
         let err = std::io::Error::last_os_error();
-        panic!("failed to set bubblewrap child parent-death signal: {err}");
+        panic!("failed to set the sandboxed child's parent-death signal: {err}");
     }
     if unsafe { libc::getppid() } != parent_pid {
         unsafe {
-            libc::raise(libc::SIGTERM);
+            libc::raise(signal);
         }
     }
 }
@@ -1183,19 +1298,75 @@ fn register_mount_targets(
     synthetic_mount_targets: &[crate::bwrap::SyntheticMountTarget],
     protected_create_targets: &[crate::bwrap::ProtectedCreateTarget],
     registry_lock: Option<RegistryLock>,
+    args: &[String],
 ) -> (
     Vec<SyntheticMountTargetRegistration>,
     Vec<ProtectedCreateTargetRegistration>,
 ) {
-    if synthetic_mount_targets.is_empty() && protected_create_targets.is_empty() {
-        // #673: nothing to register, so no registry lock either.
-        drop(registry_lock);
-        return (Vec::new(), Vec::new());
-    }
-    let synthetic = register_synthetic_mount_targets(synthetic_mount_targets);
-    let protected = register_protected_create_targets(protected_create_targets);
+    // #673: with nothing to register, no registry lock either.
+    let (synthetic, protected) =
+        if synthetic_mount_targets.is_empty() && protected_create_targets.is_empty() {
+            (Vec::new(), Vec::new())
+        } else {
+            (
+                register_synthetic_mount_targets(synthetic_mount_targets),
+                register_protected_create_targets(protected_create_targets),
+            )
+        };
+    record_mount_targets(&synthetic, args);
     drop(registry_lock);
     (synthetic, protected)
+}
+
+/// #348: records in the Corbanu home the placeholders this run makes (and
+/// makes them; bubblewrap then mounts over them) and the paths it uses: its
+/// placeholders, and every empty file or folder it mounts at (another
+/// run's placeholder, which a sweep must leave while this run mounts over
+/// it). Still under the lock the arguments were built under, which keeps
+/// out the record's sweeps ([`RegistryLock`]).
+fn record_mount_targets(registrations: &[SyntheticMountTargetRegistration], args: &[String]) {
+    let planned = registrations
+        .iter()
+        .map(|registration| crate::placeholder_journal::Planned {
+            kind: match registration.target.kind() {
+                crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
+                    crate::placeholder_journal::Kind::File
+                }
+                crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => {
+                    crate::placeholder_journal::Kind::Directory
+                }
+            },
+            path: registration.target.path(),
+            real: registration.target.removal_path(),
+            makes: registration.wrote_record,
+        })
+        .collect::<Vec<_>>();
+    crate::placeholder_journal::register(&planned, &empty_mount_destinations(args));
+}
+
+/// The empty files and folders named in bubblewrap's arguments (before the
+/// command), with the folders above them resolved. Any path named is
+/// included, not only mount targets: one too many only keeps a placeholder
+/// a little longer.
+fn empty_mount_destinations(args: &[String]) -> Vec<(PathBuf, PathBuf)> {
+    let mut found: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for arg in args.iter().take_while(|arg| arg.as_str() != "--") {
+        let path = Path::new(arg);
+        if !path.is_absolute() || found.iter().any(|(seen, _)| seen == path) {
+            continue;
+        }
+        let empty = fs::symlink_metadata(path).is_ok_and(|metadata| {
+            (metadata.is_file() && metadata.len() == 0)
+                || (metadata.is_dir()
+                    && fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none()))
+        });
+        if empty {
+            let real = crate::placeholder_registry::real_placeholder_path(path)
+                .unwrap_or_else(|| path.to_path_buf());
+            found.push((path.to_path_buf(), real));
+        }
+    }
+    found
 }
 
 fn register_synthetic_mount_targets(
@@ -1390,6 +1561,15 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
 
         for target in targets.iter().rev() {
             if synthetic_mount_marker_dir_has_active_process(&target.marker_dir) {
+                continue;
+            }
+            // #348: a live run of another temporary folder mounts over it:
+            // left (with its record here, and in this run's record kept in
+            // the Corbanu home) for a later sweep.
+            if crate::placeholder_journal::used_by_live_run(
+                target.target.path(),
+                target.target.removal_path(),
+            ) {
                 continue;
             }
             // #582: a placeholder another run made (and was killed before
@@ -1770,6 +1950,11 @@ fn remove_stale_synthetic_mount_targets() {
         if !only_ended_runs(&marker_dir) {
             continue;
         }
+        // #348: nor while a live run of another temporary folder mounts
+        // over it.
+        if crate::placeholder_journal::used_by_live_run(target.path(), target.removal_path()) {
+            continue;
+        }
         let recorded_at = synthetic_mount_target_record_time(&marker_dir);
         // A record without its location (an older run's): resolved now, as
         // before.
@@ -1854,6 +2039,48 @@ fn remove_ended_markers(marker_dir: &Path) {
     }
 }
 
+/// #348: sweeps the record kept in the Corbanu home
+/// ([`crate::placeholder_journal`]). Under this temporary folder's registry
+/// lock (taken first, as a registering run takes them), so no run of it
+/// registers a path between the check that no live run uses it and its
+/// removal; a run of another temporary folder records its paths there too.
+fn sweep_recorded_placeholders() {
+    let registry_lock = RegistryLock::acquire();
+    let registry_root = unchecked_synthetic_mount_registry_root()
+        .filter(|root| owned_by_this_user(root, /*file*/ false));
+    let used_by_registry = |path: &Path, real: &Path| {
+        registry_root.as_ref().is_some_and(|root| {
+            [path, real].iter().any(|path| {
+                marker_dir_has_live_run(&root.join(format!("{:016x}", hash_path(path))))
+            })
+        })
+    };
+    crate::placeholder_journal::sweep(&used_by_registry);
+    drop(registry_lock);
+}
+
+/// Whether a live run has a marker in `marker_dir` (when it cannot be read,
+/// taken as yes).
+fn marker_dir_has_live_run(marker_dir: &Path) -> bool {
+    let entries = match fs::read_dir(marker_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return true;
+        };
+        let path = entry.path();
+        if let Some(pid) = marker_pid(&path)
+            && crate::placeholder_registry::marker_run_is_active(&path, pid)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn marker_pid(path: &Path) -> Option<libc::pid_t> {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -1882,6 +2109,8 @@ thread_local! {
 #[derive(Debug)]
 pub(crate) struct RegistryLock {
     file: File,
+    /// Whether it holds the Corbanu home record's lock too (#348).
+    journal: bool,
     /// Released on the thread that took it (`REGISTRY_LOCK_HELD`).
     _not_send: std::marker::PhantomData<*const ()>,
 }
@@ -1910,8 +2139,13 @@ impl RegistryLock {
             return None;
         }
         REGISTRY_LOCK_HELD.set(true);
+        // #348: and the Corbanu home record's, taken second, as every run
+        // takes them: a sweep of a run in another temporary folder cannot
+        // remove a placeholder this run found until it has recorded it.
+        let journal = crate::placeholder_journal::hold();
         Some(Self {
             file,
+            journal,
             _not_send: std::marker::PhantomData,
         })
     }
@@ -1919,6 +2153,9 @@ impl RegistryLock {
 
 impl Drop for RegistryLock {
     fn drop(&mut self) {
+        if self.journal {
+            crate::placeholder_journal::release();
+        }
         REGISTRY_LOCK_HELD.set(false);
         // Closing the descriptor releases it too.
         // SAFETY: unlocks a descriptor this lock owns.
@@ -2094,6 +2331,7 @@ fn run_bwrap_in_child_capture_stderr(bwrap_args: crate::bwrap::BwrapArgs) -> Str
         &synthetic_mount_targets,
         &protected_create_targets,
         registry_lock,
+        &args,
     );
 
     let mut pipe_fds = [0; 2];
@@ -2143,8 +2381,10 @@ fn run_bwrap_in_child_capture_stderr(bwrap_args: crate::bwrap::BwrapArgs) -> Str
     let status = wait_for_bwrap_child(pid);
     let cleanup_signal_mask = ForwardedSignalMask::block();
     BWRAP_CHILD_PID.store(0, Ordering::SeqCst);
+    crate::placeholder_journal::leave();
     cleanup_synthetic_mount_targets(&synthetic_mount_registrations);
     cleanup_protected_create_targets(&protected_create_registrations);
+    crate::placeholder_journal::finish();
     signal_forwarders.restore();
     cleanup_signal_mask.restore();
     if libc::WIFSIGNALED(status) {
