@@ -539,7 +539,7 @@ fn outcome_line(choice: HumanRevocation, report: &RevocationReport) -> Result<St
         }
         (_, true, true) => "in every session of this Corbanu Terminal on this Corbanu home",
         (_, true, false) => {
-            "in every session of this Corbanu Terminal on this Corbanu home (only this one is running)"
+            "in every session of this Corbanu Terminal on this Corbanu home (only this session is running)"
         }
         (_, false, true) => {
             "in every running session of this Corbanu Terminal on this Corbanu home"

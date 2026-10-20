@@ -116,7 +116,7 @@ impl SecurityInspector {
                     .into()
             }
             Badge::Stale(level, age) => format!(
-                "◌ {level} set; this view is stale (status observed {age}); press r to refresh"
+                "◌ {level} set; this view is stale (status observed {age})"
             )
             .cyan()
             .into(),

@@ -407,7 +407,7 @@ fn issue_1035_revoke_all_confirmation_names_every_session() {
     };
     assert_eq!(
         outcome(&report),
-        "All active authority revoked in every session of this Corbanu Terminal on this Corbanu home (only this one is running). Saved: it holds after a restart. Level: Moderate."
+        "All active authority revoked in every session of this Corbanu Terminal on this Corbanu home (only this session is running). Saved: it holds after a restart. Level: Moderate."
     );
     assert_eq!(
         outcome(&RevocationReport {
