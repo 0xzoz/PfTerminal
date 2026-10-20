@@ -1,0 +1,8 @@
+21c21
+< C=$Q/common; mkdir -p "$C" "$Q/runs"
+---
+> C=$Q/${QWEN_COMMON:-common}; mkdir -p "$C" "$Q/runs"   # one folder per clone (QWEN_COMMON)
+8c8
+< exec ssh -n "${SSH_OPTS[@]}" "agent@$(cat $Q/common/vm-ip.txt)" "cd /tmp; sudo -n -u agmx0 -H /opt/agms/bin/agms-launch tui $R$q"
+---
+> exec ssh -n "${SSH_OPTS[@]}" "agent@$(cat $Q/${QWEN_COMMON:-common}/vm-ip.txt)" "cd /tmp; sudo -n -u agmx0 -H /opt/agms/bin/agms-launch tui $R$q"
