@@ -2228,6 +2228,150 @@ async fn issue1129_v2_reload_restores_the_recorded_account_or_refuses() {
     assert!(harness.manager.get_thread(child).await.is_err());
 }
 
+/// Spawns a V2 child of a new root on `child_provider` (runtime provider
+/// `child_provider_id`), lets its first turn record its account, and unloads
+/// it.
+async fn issue1129_spawn_and_unload_v2_child(
+    harness: &AgentControlHarness,
+    child_provider_id: &str,
+    child_provider: codex_model_provider_info::ModelProviderInfo,
+) -> ThreadId {
+    let (parent_thread_id, _parent_thread) = harness.start_paginated_thread().await;
+    let mut child_config = harness.config.clone();
+    child_config.model_provider = child_provider;
+    child_config.model_provider_id = child_provider_id.to_string();
+    child_config.model = Some("glm-5.2".to_string());
+    let child = harness
+        .control
+        .spawn_agent_with_metadata(
+            child_config,
+            text_input("hello child"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(AgentPath::try_from("/root/worker").expect("agent path")),
+                agent_nickname: None,
+                agent_role: None,
+                agent_class: None,
+            })),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn_agent should succeed")
+        .thread_id;
+    let child_thread = harness.manager.get_thread(child).await.expect("child");
+    wait_for_initial_turn_to_finish(&child_thread).await;
+    child_thread
+        .inject_response_items(vec![assistant_message(
+            "child persisted",
+            Some(MessagePhase::FinalAnswer),
+        )])
+        .await
+        .expect("child rollout should persist with v2 metadata");
+    issue1129_unload(harness, child).await;
+    child
+}
+
+/// #1129 review: a child on `zai-anthropic` running on account `work` of
+/// `zai` (borrowed: both use the same API key) is reloaded on `zai:work`,
+/// not on an account `work` of `zai-anthropic`; when the two no longer share
+/// the key the reload is refused.
+#[tokio::test]
+async fn issue1129_v2_reload_restores_a_borrowed_account_or_refuses() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    let _ = config.features.enable(Feature::NamedAccounts);
+    let zai = issue1129_zai_with_work_account(config.codex_home.as_path());
+    let mut anthropic =
+        codex_model_provider_info::ModelProviderInfo::create_zai_anthropic_provider();
+    anthropic.base_url = zai.base_url.clone();
+    anthropic.env_key = zai.env_key.clone();
+    anthropic.request_max_retries = Some(0);
+    anthropic.stream_max_retries = Some(0);
+    config.model_providers.insert("zai".to_string(), zai);
+    config
+        .model_providers
+        .insert("zai-anthropic".to_string(), anthropic.clone());
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let mut borrowed = anthropic;
+    borrowed.account = Some(codex_model_provider_info::NamedProviderAccount {
+        provider_id: "zai".to_string(),
+        name: "work".to_string(),
+    });
+    let child = issue1129_spawn_and_unload_v2_child(&harness, "zai-anthropic", borrowed).await;
+
+    harness
+        .control
+        .ensure_v2_agent_loaded(harness.config.clone(), child)
+        .await
+        .expect("the agent should reload");
+    assert_eq!(
+        issue1129_loaded_account(&harness, child).await,
+        Some("zai:work".to_string())
+    );
+
+    issue1129_unload(&harness, child).await;
+    let mut config = harness.config.clone();
+    if let Some(provider) = config.model_providers.get_mut("zai-anthropic") {
+        provider.env_key = Some("CORBANU_TEST_1129_OTHER_KEY".to_string());
+    }
+    let error = harness
+        .control
+        .ensure_v2_agent_loaded(config, child)
+        .await
+        .expect_err("the reload should be refused");
+    assert!(
+        error.to_string().starts_with(
+            "Resuming this agent: it ran on account `zai:work` of `zai-anthropic`, and \
+             `zai-anthropic` no longer uses the API key of `zai`"
+        ),
+        "{error}"
+    );
+    assert!(harness.manager.get_thread(child).await.is_err());
+}
+
+/// #1129 review: a child that ran on the default account while `zai` now
+/// selects account `work` is reloaded on the default account.
+#[tokio::test]
+async fn issue1129_v2_reload_restores_a_recorded_default_account() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    let _ = config.features.enable(Feature::NamedAccounts);
+    let zai = issue1129_zai_with_work_account(config.codex_home.as_path());
+    codex_login::login_with_provider_api_key(
+        &config.codex_home,
+        "CORBANU_TEST_1129_ZAI_KEY",
+        "canary-1129-default",
+        codex_login::AuthCredentialsStoreMode::File,
+        codex_login::AuthKeyringBackendKind::default(),
+    )
+    .expect("store default key");
+    config
+        .model_providers
+        .insert("zai".to_string(), zai.clone());
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let child = issue1129_spawn_and_unload_v2_child(&harness, "zai", zai).await;
+
+    let mut config = harness.config.clone();
+    if let Some(provider) = config.model_providers.get_mut("zai") {
+        crate::config::stamp_provider_account("zai", provider, "work").expect("stamp");
+    }
+    harness
+        .control
+        .ensure_v2_agent_loaded(config, child)
+        .await
+        .expect("the agent should reload");
+    assert_eq!(
+        issue1129_loaded_account(&harness, child).await,
+        Some("zai:default".to_string())
+    );
+}
+
 /// #1129: a V1 child spawned on account `work` of its parent's provider is
 /// resumed on `work`, not on the parent's default account; once `work` is
 /// gone the resume is refused.
