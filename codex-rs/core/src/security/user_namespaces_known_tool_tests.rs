@@ -241,6 +241,23 @@ fn d48_shells_and_path_lookup_resolve_only_system_programs() {
         known_with(&argv(&["/usr/bin/podman"]), None),
         Some("podman")
     );
+    // A system program this run can write (a grant for that one file) isn't
+    // one.
+    let podman_file = |path: &Path| writable(path) || path == Path::new("/usr/bin/podman");
+    for script in ["podman info", "/usr/bin/podman info"] {
+        assert_eq!(
+            known_tool(
+                &shell(script),
+                &Lookup {
+                    path: Some(PATH),
+                    writable: &podman_file,
+                    executable: &executable,
+                },
+            ),
+            None,
+            "{script}"
+        );
+    }
     // A system folder this run can write isn't one.
     let everything = |_: &Path| true;
     assert_eq!(

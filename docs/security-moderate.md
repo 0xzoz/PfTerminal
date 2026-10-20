@@ -163,7 +163,9 @@ The kill switch (`/security` → `g`) works under every level.
   redirections, `NAME=value` settings, a copy of the tool or of the shell
   elsewhere (`./podman`, a shell the agent names), other wrappers
   (`timeout`, `bash -c`), and aliases or functions the command defines
-  (your own shell's functions and aliases still apply). You are asked every
+  (your own shell's functions and aliases still apply, and so does a
+  `PATH` your shell's start-up files or saved snapshot set: Corbanu checks
+  the `PATH` it gives the command). You are asked every
   time, by you only, with the same warning: not "for the session", a saved
   rule, a hook or the automatic reviewer, and also where the automatic
   reviewer would otherwise answer, so approving that request always allows

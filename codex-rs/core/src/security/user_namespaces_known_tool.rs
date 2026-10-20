@@ -15,9 +15,17 @@
 //!   in one of [`SYSTEM_DIRS`] that this run's sandbox can't write: named by
 //!   that path, or by bare name found there first through the `PATH` the
 //!   command runs with, with no folder the run can write (or a relative one)
-//!   searched before it. A copy the agent could have written is never it.
+//!   searched before it, and not itself writable. A copy the agent could
+//!   have written is never it.
 //!
 //! Anything else, including anything this can't resolve, is not offered.
+//!
+//! Known limit: the `PATH` checked is the one Corbanu gives the command. The
+//! shell's own start-up can still change it (a shell snapshot's saved
+//! `PATH`, a login profile adding `~/bin`) or define a function of the
+//! tool's name: those are the person's own files, which Moderate keeps the
+//! agent from writing, but a folder they add that the agent can write isn't
+//! checked here.
 
 use std::path::Component;
 use std::path::Path;
@@ -46,7 +54,7 @@ pub(crate) struct Lookup<'a> {
     /// The `PATH` the command runs with, where it runs on this host; `None`
     /// where unknown or remote (then a bare name isn't resolved).
     pub(crate) path: Option<&'a str>,
-    /// Whether this run's sandbox lets it write in `folder`.
+    /// Whether this run's sandbox lets it write `path` (a folder: in it).
     pub(crate) writable: &'a dyn Fn(&Path) -> bool,
     /// Whether `file` is an executable file.
     pub(crate) executable: &'a dyn Fn(&Path) -> bool,
@@ -136,7 +144,10 @@ fn resolve<'w>(word: &'w str, lookup: &Lookup<'_>) -> Option<&'w str> {
         return None;
     }
     match word.rsplit_once('/') {
-        Some((folder, name)) => (!name.is_empty() && system_dir(folder, lookup)).then_some(name),
+        Some((folder, name)) => {
+            (!name.is_empty() && system_dir(folder, lookup) && !(lookup.writable)(Path::new(word)))
+                .then_some(name)
+        }
         None => {
             for folder in lookup.path?.split(':') {
                 let folder = folder.trim_end_matches('/');
@@ -151,8 +162,10 @@ fn resolve<'w>(word: &'w str, lookup: &Lookup<'_>) -> Option<&'w str> {
                 {
                     return None;
                 }
-                if (lookup.executable)(&path.join(word)) {
-                    return system_dir(folder, lookup).then_some(word);
+                let file = path.join(word);
+                if (lookup.executable)(&file) {
+                    return (system_dir(folder, lookup) && !(lookup.writable)(&file))
+                        .then_some(word);
                 }
             }
             None

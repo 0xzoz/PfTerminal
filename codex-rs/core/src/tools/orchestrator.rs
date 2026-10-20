@@ -1443,15 +1443,26 @@ where
         file_system_sandbox_policy,
         tool.additional_permissions(req),
     );
-    let writable = |folder: &std::path::Path| policy.can_write_path_with_cwd(folder, cwd.as_path());
+    // Also where it is reached through a link (`~/bin -> ~/project/bin`).
+    let writable = |path: &std::path::Path| {
+        policy.can_write_path_with_cwd(path, cwd.as_path())
+            || std::fs::canonicalize(path)
+                .is_ok_and(|real| policy.can_write_path_with_cwd(&real, cwd.as_path()))
+    };
+    // As the shell's search decides it (`access(X_OK)`), not by mode bits.
     let executable = |file: &std::path::Path| {
-        std::fs::metadata(file).is_ok_and(|meta| {
-            #[cfg(unix)]
-            let runs = std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0;
-            #[cfg(not(unix))]
-            let runs = true;
-            meta.is_file() && runs
-        })
+        #[cfg(unix)]
+        let runs = {
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::CString::new(file.as_os_str().as_bytes()).is_ok_and(|file| {
+                // SAFETY: `file` is a valid NUL-terminated string that
+                // outlives the call; `access` only reads it.
+                unsafe { libc::access(file.as_ptr(), libc::X_OK) == 0 }
+            })
+        };
+        #[cfg(not(unix))]
+        let runs = true;
+        runs && std::fs::metadata(file).is_ok_and(|meta| meta.is_file())
     };
     crate::security::user_namespaces::known_tool(
         &command,
