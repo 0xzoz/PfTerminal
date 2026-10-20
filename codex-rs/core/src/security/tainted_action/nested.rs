@@ -187,7 +187,7 @@ impl Classifier {
                 &mut found,
             );
         }
-        if found.unreadable {
+        if found.unreadable || folders.unfollowed {
             self.note(ProtectedActionKind::UnseenCode);
         }
         self.written.extend(found.written.iter().cloned());
@@ -380,6 +380,7 @@ impl Classifier {
                     // must not make up for a command this reading missed.
                     let counts = (found.sed_commands, found.shell_commands);
                     self.walk(&reading.commands, &mut inner, level + 1, found);
+                    found.unreadable |= inner.unfollowed;
                     if !word.lines {
                         (found.sed_commands, found.shell_commands) = counts;
                     }
@@ -394,7 +395,7 @@ impl Classifier {
                     found.sed_commands += counted.sed_commands;
                     found.shell_commands += counted.shell_commands;
                 }
-                found.unreadable |= counted.unreadable;
+                found.unreadable |= counted.unreadable || inner.unfollowed;
             }
         }
     }

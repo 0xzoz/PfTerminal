@@ -3088,3 +3088,49 @@ fn issue_1065_review_1_limits() {
     }
     assert_eq!(wrong, Vec::<String>::new());
 }
+
+/// #1065 review 2: a large value skipped on many uses is judged once, and
+/// small values past the budget build at most a bounded value. Counted by
+/// command lines and bytes lexed, not by time.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1065_review_2_large_values_are_judged_once() {
+    use ProtectedActionKind::*;
+    let counts = |line: &str| {
+        let classifier = classified(
+            &shell_in("/work", &["bash", "-lc", line]),
+            Path::new(HOME),
+            Some(Path::new(USER_HOME)),
+        );
+        (
+            classifier.found,
+            classifier.classified_lines,
+            classifier.classified_bytes,
+        )
+    };
+    // The third use of a 400 KiB value runs the budget out.
+    let value = "y".repeat(400 * 1024);
+    let uses = |count: usize| format!("a={value}; : {}", "$a".repeat(count));
+    let (few, many) = (counts(&uses(3)), counts(&uses(1500)));
+    assert_eq!((few.0, many.0), (Some(UnseenCode), Some(UnseenCode)));
+    assert_eq!(many.1, few.1);
+    // Only the longer line is lexed again, not the value per use.
+    assert!(many.2 - few.2 <= 8 * 1497 * 2, "{few:?} {many:?}");
+    // A value built from small ones past the budget, then used many times.
+    let small = "x".repeat(64);
+    let built = |count: usize| {
+        format!(
+            "x={small}; p=y;{} b={}; : {}",
+            " p=$p$p;".repeat(20),
+            "$x".repeat(10_000),
+            "$b".repeat(count)
+        )
+    };
+    let (few, many) = (counts(&built(3)), counts(&built(1000)));
+    assert_eq!((few.0, many.0), (Some(UnseenCode), Some(UnseenCode)));
+    assert_eq!(many.1, few.1);
+    assert!(many.2 - few.2 <= 8 * 997 * 2, "{few:?} {many:?}");
+}

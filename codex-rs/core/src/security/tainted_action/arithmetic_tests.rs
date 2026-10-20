@@ -10,7 +10,10 @@ fn runs_unseen_in(shell: &str, line: &str) -> bool {
     let argv = vec![shell.to_string(), "-c".to_string(), line.to_string()];
     let mut arithmetic = Arithmetic::new(&argv);
     let variables = HashMap::new();
-    let mut budget = usize::MAX;
+    let mut budget = super::super::Budget {
+        left: usize::MAX,
+        small_left: usize::MAX,
+    };
     for simple in &shell::simple_commands(&argv).commands {
         let (words, _, _) = super::super::substitute(simple, &variables, &mut budget);
         arithmetic.note(simple, &words);

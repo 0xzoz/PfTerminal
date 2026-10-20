@@ -25,6 +25,7 @@ use paths::Homes;
 use shell::SimpleCommand;
 use shell::basename;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 
 mod arithmetic;
@@ -343,10 +344,10 @@ const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_SCRIPT_FILES: usize = 16;
 /// Bytes of variable values one classification substitutes (#1065): a
 /// value doubled on each step (`a=$a$a`) or used many times would otherwise
-/// grow without bound. Past it the line asks, and only values up to
-/// `MAX_SMALL_VALUE` bytes are still substituted (each `$x` costs at least
-/// two bytes of text, so this stays linear); a larger value is judged once
-/// on its own.
+/// grow without bound. Past it the line asks, and values up to
+/// `MAX_SMALL_VALUE` bytes are still substituted, up to the same number of
+/// bytes again, so the line still names what it reaches; a larger value is
+/// judged once on its own.
 const MAX_SUBSTITUTED_BYTES: usize = 1024 * 1024;
 const MAX_SMALL_VALUE: usize = 64;
 /// Bytes of command text, and command lines, one classification lexes in
@@ -380,6 +381,11 @@ pub(super) fn classify_with(
     codex_home: &Path,
     user_home: Option<&Path>,
 ) -> Option<ProtectedActionKind> {
+    classified(action, codex_home, user_home).found
+}
+
+/// The classifier after judging the action, with its counters.
+fn classified(action: &ApprovalAction, codex_home: &Path, user_home: Option<&Path>) -> Classifier {
     let mut classifier = Classifier {
         homes: Homes::new(codex_home, user_home),
         found: None,
@@ -391,7 +397,10 @@ pub(super) fn classify_with(
         ran_unknown: false,
         written: Vec::new(),
         nested_scripts: 0,
-        substitution_budget: MAX_SUBSTITUTED_BYTES,
+        substitution_budget: Budget {
+            left: MAX_SUBSTITUTED_BYTES,
+            small_left: MAX_SUBSTITUTED_BYTES,
+        },
         classified_bytes: 0,
         classified_lines: 0,
     };
@@ -434,7 +443,7 @@ pub(super) fn classify_with(
     if classifier.homes.exhausted() {
         classifier.note(ProtectedActionKind::UnseenCode);
     }
-    classifier.found
+    classifier
 }
 
 fn path_text(path: &PathUri) -> String {
@@ -538,6 +547,13 @@ fn has_flag(word: &str, flag: &str) -> bool {
 
 /// Where the shell is while it runs a script: the folder, the previous one
 /// (`cd -`) and the `pushd` stack.
+/// Bytes of variable values left to substitute (#1065): any value, then
+/// only small ones once that runs out.
+struct Budget {
+    left: usize,
+    small_left: usize,
+}
+
 struct Folders {
     cwd: String,
     previous: String,
@@ -569,7 +585,7 @@ struct Classifier {
     /// #885: nested shell scripts judged so far.
     nested_scripts: usize,
     /// #1065: bytes of variable values left to substitute.
-    substitution_budget: usize,
+    substitution_budget: Budget,
     /// #1065: bytes of command text, and command lines, lexed so far.
     classified_bytes: usize,
     classified_lines: usize,
@@ -864,24 +880,29 @@ impl Classifier {
         let mut lexed_seds = 0;
         let mut lexed_shells = 0;
         let mut arithmetic = arithmetic::Arithmetic::new(command);
-        // Values too large to substitute, judged once each.
-        let mut judged: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        // Values too large to substitute, judged once each (by name and
+        // length) while the lexing limits allow.
+        let mut judged: HashSet<(String, usize)> = HashSet::new();
         for (index, simple) in lexed.commands.iter().enumerate() {
             let (words, unseen, skipped) =
                 substitute(simple, &variables, &mut self.substitution_budget);
-            if self.substitution_budget == 0 {
+            if self.substitution_budget.left == 0 {
                 self.note(ProtectedActionKind::UnseenCode);
             }
             for name in skipped {
                 let Some(value) = variables.get(&name) else {
                     continue;
                 };
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                std::hash::Hash::hash(value, &mut hasher);
-                if judged.insert(std::hash::Hasher::finish(&hasher)) {
-                    let value = value.clone();
-                    self.script(&value, &folders.cwd, depth + 1);
+                if !judged.insert((name, value.len())) {
+                    continue;
                 }
+                if value.len() > MAX_COMMAND_BYTES
+                    || self.classified_bytes.saturating_add(value.len()) > MAX_CLASSIFIED_BYTES
+                {
+                    self.note(ProtectedActionKind::UnseenCode);
+                    continue;
+                }
+                self.script(value, &folders.cwd, depth + 1);
             }
             // Decoded, quote-removed and with known variables substituted:
             // `eval "echo \${v@"P"}"`, `$'\x40'`, `p=@P; eval "echo \${v$p}"`.
@@ -1340,15 +1361,15 @@ fn is_special_parameter(name: &str) -> bool {
 /// reads them (`$a$b` is `a` then `b`), and for each word whether it holds a
 /// value the classifier cannot see: a variable never assigned in this action
 /// (other than special parameters) or one set from an unseen substitution.
-/// `budget` is the bytes of values left to substitute; a value that does
-/// not fit and is longer than `MAX_SMALL_VALUE` is unseen output, sets the
-/// budget to zero and is returned by name (#1065).
+/// `budget` is the bytes of values left to substitute (#1065); a value
+/// that does not fit is unseen output, runs the budget out, and is
+/// returned by name.
 fn substitute(
     command: &SimpleCommand,
     variables: &HashMap<String, String>,
-    budget: &mut usize,
-) -> (Vec<String>, Vec<bool>, Vec<String>) {
-    let mut skipped = Vec::new();
+    budget: &mut Budget,
+) -> (Vec<String>, Vec<bool>, HashSet<String>) {
+    let mut skipped = HashSet::new();
     let (words, unseen): (Vec<String>, Vec<bool>) = command
         .words
         .iter()
@@ -1367,17 +1388,27 @@ fn substitute(
                 };
                 let name = &after[..len];
                 match variables.get(name) {
+                    Some(value) if len > 0 && value.len() < budget.left => {
+                        budget.left -= value.len();
+                        unseen |= value.contains(shell::UNSEEN_OUTPUT);
+                        out.push_str(value);
+                    }
                     Some(value)
-                        if len > 0 && (value.len() < *budget || value.len() <= MAX_SMALL_VALUE) =>
+                        if len > 0
+                            && value.len() <= MAX_SMALL_VALUE
+                            && value.len() <= budget.small_left =>
                     {
-                        *budget = budget.saturating_sub(value.len());
+                        budget.left = 0;
+                        budget.small_left -= value.len();
                         unseen |= value.contains(shell::UNSEEN_OUTPUT);
                         out.push_str(value);
                     }
                     Some(_) if len > 0 => {
-                        *budget = 0;
+                        budget.left = 0;
                         unseen = true;
-                        skipped.push(name.to_string());
+                        if !skipped.contains(name) {
+                            skipped.insert(name.to_string());
+                        }
                         out.push_str(shell::UNSEEN_OUTPUT);
                     }
                     _ => {
