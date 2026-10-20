@@ -7034,11 +7034,11 @@ async fn spawn_on_a_connection_without_its_own_credential_is_refused() {
     let refusal = |child: &str| {
         format!(
             "spawn_agent: `{child}` would run on its default account, which has no credential \
-             (`{KEY}` is not set and no default key is stored); named accounts are per \
-             connection, and account `work` is selected for `zai` only. Omit `model_provider` \
-             and `account` to run on the parent's connection and account, or ask the user to \
-             add a default `{KEY}` (`/providers`). Do not retry on another account without the \
-             user's consent."
+             (`{KEY}` is not set and no default key is stored); accounts are selected per \
+             connection, and the parent runs on `zai` account `work`. Spawn without the \
+             `model_provider`, `account` or `agent_type` that chose this connection and account \
+             to run on the parent's, or ask the user to add a default `{KEY}` (`/providers`). \
+             Do not retry on another account without the user's consent."
         )
     };
     for (extra, child) in [

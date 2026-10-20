@@ -326,13 +326,16 @@ fn spawn_default_key_error_with(
         .map(|(id, provider)| (id.as_str(), provider))
         .collect::<Vec<_>>();
     configured.sort_by_key(|(id, _)| *id);
-    let (named_id, account) =
-        std::iter::once(parent)
-            .chain(configured)
-            .find_map(|(id, provider)| {
-                let account = provider.account.as_ref()?;
-                (provider.env_key.as_deref() == Some(env_key)).then_some((id, account))
-            })?;
+    // The parent first, so the message names it when it is the one on a
+    // named account.
+    let (index, named_id, account) = std::iter::once(parent)
+        .chain(configured)
+        .enumerate()
+        .find_map(|(index, (id, provider))| {
+            let account = provider.account.as_ref()?;
+            (provider.env_key.as_deref() == Some(env_key)).then_some((index, id, account))
+        })?;
+    let on_parent = index == 0;
     if child
         .api_key_env_vars()
         .iter()
@@ -347,13 +350,21 @@ fn spawn_default_key_error_with(
         ) => {}
         Ok(codex_login::ProviderApiKeyStorageMetadata::Stored { .. }) | Err(_) => return None,
     }
+    let named = if on_parent {
+        format!("the parent runs on `{named_id}` account `{}`", account.name)
+    } else {
+        format!(
+            "account `{}` is selected for `{named_id}` only",
+            account.name
+        )
+    };
     Some(format!(
         "spawn_agent: `{child_id}` would run on its default account, which has no credential \
-         (`{env_key}` is not set and no default key is stored); named accounts are per \
-         connection, and account `{account}` is selected for `{named_id}` only. Omit `model_provider` and `account` to run on the parent's \
-         connection and account, or ask the user to add a default `{env_key}` (`/providers`). \
-         Do not retry on another account without the user's consent.",
-        account = account.name,
+         (`{env_key}` is not set and no default key is stored); accounts are selected per \
+         connection, and {named}. Spawn without the `model_provider`, `account` or \
+         `agent_type` that chose this connection and account to run on the parent's, or ask \
+         the user to add a default `{env_key}` (`/providers`). Do not retry on another \
+         account without the user's consent."
     ))
 }
 
@@ -491,12 +502,16 @@ mod tests {
                      held: &dyn Fn(&str) -> bool| {
             spawn_default_key_error_with(config, child_id, child, parent, held)
         };
-        let refusal = "spawn_agent: `zai-anthropic` would run on its default account, which has \
-             no credential (`ZAI_API_KEY` is not set and no default key is stored); named \
-             accounts are per connection, and account `work` is selected for `zai` only. Omit \
-             `model_provider` and `account` to run on the parent's connection and account, or \
-             ask the user to add a default `ZAI_API_KEY` (`/providers`). Do not retry on \
-             another account without the user's consent.";
+        let refusal = |named: &str| {
+            format!(
+                "spawn_agent: `zai-anthropic` would run on its default account, which has no \
+                 credential (`ZAI_API_KEY` is not set and no default key is stored); accounts \
+                 are selected per connection, and {named}. Spawn without the `model_provider`, \
+                 `account` or `agent_type` that chose this connection and account to run on the \
+                 parent's, or ask the user to add a default `ZAI_API_KEY` (`/providers`). Do not \
+                 retry on another account without the user's consent."
+            )
+        };
         // The parent runs `zai` on `work`; no default key anywhere.
         assert_eq!(
             check(
@@ -506,7 +521,7 @@ mod tests {
                 ("zai", &work),
                 &nothing_held
             ),
-            Some(refusal.to_string())
+            Some(refusal("the parent runs on `zai` account `work`"))
         );
         // The same, with `[provider_accounts] zai = "work"` and a parent on
         // another provider.
@@ -523,7 +538,7 @@ mod tests {
                 ("kimi-code", &kimi),
                 &nothing_held
             ),
-            Some(refusal.to_string())
+            Some(refusal("account `work` is selected for `zai` only"))
         );
         // No named account in play: nothing changes.
         assert_eq!(

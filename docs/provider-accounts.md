@@ -50,13 +50,17 @@ account `ghost` of provider `zai` is not configured; add it with
 before any sign-in screen; with a remote app server, the server refuses at
 thread start.
 
-Accounts are per connection. `zai` (OpenAI-style) and `zai-anthropic`
-(Claude-style) share `ZAI_API_KEY`, but `[provider_accounts] zai = "work"`
-applies only to `zai`. A spawned agent the model starts on a connection that
-runs on the default key while the other connection (or the parent) runs on a
-named account is refused before it starts when no default key is set or
-stored, instead of failing at its first request. The TUI's `/model` and
-spawns check the same.
+Accounts are selected per connection. `zai` (OpenAI-style) and
+`zai-anthropic` (Claude-style) share `ZAI_API_KEY`, but `[provider_accounts]
+zai = "work"` or `--account work` on `zai` selects the account for `zai`
+only; a spawn that names `zai-anthropic` gets that connection's own selection.
+(A spawn that only changes the model, and is moved to the other connection
+because the model lives there, keeps its account, since both use the same
+key.) A spawned agent the model starts on a connection that runs on the
+default key while the other connection (or the parent) runs on a named
+account is refused before it starts when no default key is set or stored,
+instead of failing at its first request. The TUI's `/model` and spawns check
+the same.
 
 A resumed thread runs on its recorded provider and account. `corbanu resume`
 (an id, `--last` or the picker) and `/resume` use them without `--account`.
