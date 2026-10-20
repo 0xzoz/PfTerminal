@@ -450,6 +450,7 @@ impl Arithmetic {
             }
         }
         let mut start = 0;
+        let mut eval_scanned = false;
         // `eval let v`, zsh `noglob let v`: the rest is a command too. Each
         // level notes only what precedes its command, so this is linear.
         while start < raw.len().min(words.len()) {
@@ -470,11 +471,15 @@ impl Arithmetic {
                     if name == "eval" {
                         self.evaluates_text = true;
                         // `eval 'print ${'$t'x}'`: an expansion in the text
-                        // may spell `${~x}` (#1084).
-                        self.glob_subst |= words[start + index + 1..].iter().any(|word| {
-                            work::step();
-                            word.contains(['$', '`']) || word.contains(shell::UNSEEN_OUTPUT)
-                        });
+                        // may spell `${~x}` (#1084). Scanned at the first
+                        // `eval` only: later levels see a suffix (linear).
+                        if !eval_scanned {
+                            eval_scanned = true;
+                            self.glob_subst |= words[start + index + 1..].iter().any(|word| {
+                                work::step();
+                                word.contains(['$', '`']) || word.contains(shell::UNSEEN_OUTPUT)
+                            });
+                        }
                     }
                     self.note_one(&raw[..index], &redirect[start..], /*command*/ None);
                     start += index + 1;
