@@ -145,6 +145,7 @@ mod tests {
         ("arithmetic.rs", include_str!("arithmetic.rs")),
         ("indirect.rs", include_str!("indirect.rs")),
         ("invocation.rs", include_str!("invocation.rs")),
+        ("named_shell.rs", include_str!("named_shell.rs")),
         ("nested.rs", include_str!("nested.rs")),
         ("outbound.rs", include_str!("outbound.rs")),
         ("paths.rs", include_str!("paths.rs")),
