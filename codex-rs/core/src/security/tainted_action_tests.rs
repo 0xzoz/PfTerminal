@@ -3071,6 +3071,16 @@ fn issue_1065_review_1_limits() {
             Some(UnseenCode),
         ),
         ("cd /tmp/x && pushd /tmp && popd; echo ok".to_string(), None),
+        (format!("cd /{}; echo ok", "a".repeat(1000)), None),
+        // Review r3: sed calls one reading collects.
+        (
+            format!("cd /tmp;{} echo ok", " sed -n p f;".repeat(5000)),
+            Some(UnseenCode),
+        ),
+        (
+            format!("cd /tmp;{} echo ok", " sed -n p f;".repeat(100)),
+            None,
+        ),
         // Command lines lexed in all: decoded payloads.
         (format!("echo{}", decoded.repeat(5000)), Some(UnseenCode)),
         (format!("echo{}", decoded.repeat(50)), None),

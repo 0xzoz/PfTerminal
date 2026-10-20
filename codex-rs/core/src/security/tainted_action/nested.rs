@@ -34,6 +34,10 @@ const MAX_QUOTED_LEVEL: usize = 4;
 /// Nested scripts judged for one action; more fail closed.
 const MAX_NESTED_SCRIPTS: usize = 256;
 
+/// Scripts and sed calls one reading collects, each with its folder
+/// (#1065); more fail closed.
+const MAX_COLLECTED: usize = 4096;
+
 /// Pipeline stages that save their input to the files they are given.
 const PIPE_WRITERS: &[&str] = &["tee", "dd", "sponge", "cp", "install"];
 
@@ -168,7 +172,7 @@ impl Classifier {
         let mut folders = Folders {
             cwd: cwd.to_string(),
             previous: cwd.to_string(),
-            stack: Vec::new(),
+            stack: std::rc::Rc::default(),
             unfollowed: false,
         };
         let mut found = Found::default();
@@ -218,6 +222,10 @@ impl Classifier {
     /// `commands` and the quoted text in them, following `cd`.
     fn walk(&self, commands: &[Command], folders: &mut Folders, level: usize, found: &mut Found) {
         for command in commands {
+            if found.scripts.len() + found.seds.len() > MAX_COLLECTED {
+                found.unreadable = true;
+                return;
+            }
             let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
             // A substitution's `cd` does not move this line.
             if !command.substituted

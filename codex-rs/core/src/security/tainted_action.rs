@@ -356,9 +356,10 @@ const MAX_SMALL_VALUE: usize = 64;
 const MAX_CLASSIFIED_BYTES: usize = 4 * 1024 * 1024;
 const MAX_CLASSIFIED_LINES: usize = 4096;
 /// Folders `pushd` may stack, and bytes of a folder name the classifier
-/// follows (#1065); past them the line asks and the folder stays.
+/// follows (#1065); past them the line asks and the folder stays. The
+/// stack is shared, not copied, by the readings of quoted text.
 const MAX_FOLDER_STACK: usize = 64;
-const MAX_FOLDER_BYTES: usize = 4096;
+const MAX_FOLDER_BYTES: usize = 1024;
 /// Magic numbers of executables, which are not read as scripts.
 const BINARY_MAGIC: &[&[u8]] = &[
     b"\x7fELF",
@@ -557,7 +558,7 @@ struct Budget {
 struct Folders {
     cwd: String,
     previous: String,
-    stack: Vec<String>,
+    stack: std::rc::Rc<Vec<String>>,
     /// A `cd`/`pushd` past the folder limits was not followed (#1065).
     unfollowed: bool,
 }
@@ -861,7 +862,7 @@ impl Classifier {
         let mut folders = Folders {
             cwd: cwd.to_string(),
             previous: cwd.to_string(),
-            stack: Vec::new(),
+            stack: std::rc::Rc::default(),
             unfollowed: false,
         };
         let mut variables: HashMap<String, String> = HashMap::new();
@@ -1239,7 +1240,7 @@ impl Classifier {
             ("cd", None) => self.homes.user_home().map(str::to_string),
             ("cd", Some(target)) if target == "-" => Some(folders.previous.clone()),
             ("cd" | "pushd", Some(target)) => Some(self.homes.resolve(target, &folders.cwd)),
-            ("popd", _) => folders.stack.pop(),
+            ("popd", _) => std::rc::Rc::make_mut(&mut folders.stack).pop(),
             _ => None,
         };
         if let Some(next) = next {
@@ -1250,7 +1251,7 @@ impl Classifier {
                 return;
             }
             if name == "pushd" {
-                folders.stack.push(folders.cwd.clone());
+                std::rc::Rc::make_mut(&mut folders.stack).push(folders.cwd.clone());
             }
             folders.previous = std::mem::replace(&mut folders.cwd, next);
             variables.insert("PWD".to_string(), folders.cwd.clone());
