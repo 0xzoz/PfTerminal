@@ -985,15 +985,15 @@ pub(crate) async fn protected_note_in_command(
 
 /// #841, #1077: under Moderate with the secretless launch contract, what a
 /// person is told before approving a protected action that reads a file the
-/// contract keeps unreadable at every level (a CLI token, the keychains, or
-/// Corbanu's sign-in, vault, config or history): the file, what it is, and
+/// contract keeps unreadable at every level (a CLI token file, the keychains,
+/// or Corbanu's own files such as its sign-in, vault, config or history): the file, what it is, and
 /// that approving runs the command but cannot unlock it.
 pub(crate) fn moderate_kept_read_note(path: &str, kept: KeptFile) -> String {
     let what = match kept {
-        KeptFile::CliToken => "is a CLI token",
+        KeptFile::CliToken => "is a CLI token file",
         KeptFile::Keychain => "is part of your keychains",
         KeptFile::CorbanuOwn => {
-            "is one of Corbanu's own files (its sign-in, vault, config or history)"
+            "is one of Corbanu's own files (such as its sign-in, vault, config or history)"
         }
     };
     format!(

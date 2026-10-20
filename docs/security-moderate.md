@@ -42,11 +42,11 @@ without them Corbanu refuses every model request under Moderate, so
   Corbanu's own files and security settings, disclosure, value transfer, code
   you haven't seen, MCP calls that change or send data, and tools Corbanu
   hasn't classified. Where approving can't unlock a file, the prompt names
-  it and says what it is: under `secretless_agent_launch`, Corbanu's sign-in,
-  vault, config and history, CLI tokens (`~/.aws/credentials`, `~/.netrc`,
+  it and says what it is: under `secretless_agent_launch`, Corbanu's own
+  files (such as its sign-in, vault, config and history), CLI tokens (`~/.aws/credentials`, `~/.netrc`,
   `~/.npmrc`, `~/.git-credentials`, `~/.config/gh/hosts.yml`,
-  `~/.docker/config.json`, Claude's sign-in) and `~/Library/Keychains` stay
-  closed to agent commands (see
+  `~/.docker/config.json`, Claude's sign-in) and, on macOS,
+  `~/Library/Keychains` stay closed to agent commands (see
   [Protected launch](config.md#protected-launch-secretless_agent_launch)).
   Cached, remembered or automatic approvals don't count, and with approvals
   off these actions are refused.

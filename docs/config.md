@@ -236,14 +236,23 @@ the levels protect and their limits are on
 ### Protected launch (`secretless_agent_launch`)
 
 With `secretless_agent_launch` on, every agent command runs inside the OS
-sandbox, with only allowlisted environment variables, and can't read
-Corbanu's vault, sign-in files, config or history, or these CLI tokens:
-`~/.netrc`, `~/.git-credentials`, `~/.config/gh/hosts.yml`,
-`~/.aws/credentials`, `~/.docker/config.json`, `~/.npmrc` and Claude's
-sign-in (`~/.claude/.credentials.json`, or `.credentials.json` in
-`CLAUDE_CONFIG_DIR`); on macOS also `~/Library/Keychains`, and on Windows
-also `_netrc` in your profile folder, the GitHub CLI's `hosts.yml` and
-`gcloud` in `%APPDATA%`, and Cargo's `credentials.toml` and `credentials`.
+sandbox, with only allowlisted environment variables, and can't read these
+files:
+
+- Corbanu's own: its vault (`secrets`), sign-in files (`auth.json`,
+  `.credentials.json`, `provider_auth.json`, `.env`), config (`config.toml`,
+  `managed_config.toml`), `wallet`, history (`history.jsonl`), session
+  transcripts (`sessions`, `archived_sessions`), logs (`log`), shell
+  snapshots (`shell_snapshots`), its runtime folder (`run`), its databases and
+  their backups, and the credential broker's runtime folder.
+- CLI token files: `~/.netrc`, `~/.git-credentials`,
+  `~/.config/gh/hosts.yml`, `~/.aws/credentials`, `~/.docker/config.json`,
+  `~/.npmrc` and Claude's sign-in (`~/.claude/.credentials.json`, and
+  `.credentials.json` in `CLAUDE_CONFIG_DIR` when set); on Windows also
+  `_netrc` in your profile folder, the GitHub CLI's `hosts.yml` and `gcloud`
+  in `%APPDATA%`, and Cargo's `credentials.toml` and `credentials`.
+- On macOS, your keychains (`~/Library/Keychains`).
+
 Approving a command never unlocks these, at any level; under Moderate the
 approval prompt names such a file and says so. Nothing runs outside the
 sandbox at any level. At Permissive, Corbanu therefore doesn't offer it
