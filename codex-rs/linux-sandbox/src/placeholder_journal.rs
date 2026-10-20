@@ -439,17 +439,12 @@ pub(crate) fn recorded_by_another_run(path: &Path) -> bool {
 
 /// #607: whether a record (this run's or another's) names a placeholder made
 /// at `real` (or `path`) and what is there now (`status`) is none of those:
-/// the person replaced it (or changed it, when `exact`: another run's
-/// placeholder must still be exactly what was made). It is then not removed.
-/// `false` when no record names one made there (or there is no record).
-pub(crate) fn recorded_otherwise(
-    path: &Path,
-    real: &Path,
-    status: &libc::stat,
-    exact: bool,
-) -> bool {
+/// the person replaced it, or (another run's, which must still be exactly
+/// what was made) changed it. It is then not removed. `false` when no record
+/// names one made there (or there is no record).
+pub(crate) fn recorded_otherwise(path: &Path, real: &Path, status: &libc::stat) -> bool {
     let mut otherwise = false;
-    with_journal(|journal| otherwise = journal.recorded_otherwise(path, real, status, exact));
+    with_journal(|journal| otherwise = journal.recorded_otherwise(path, real, status));
     otherwise
 }
 
@@ -917,24 +912,20 @@ impl Journal {
             })
     }
 
-    fn recorded_otherwise(
-        &mut self,
-        path: &Path,
-        real: &Path,
-        status: &libc::stat,
-        exact: bool,
-    ) -> bool {
+    fn recorded_otherwise(&mut self, path: &Path, real: &Path, status: &libc::stat) -> bool {
         let Ok(_lock) = self.lock() else {
             return false;
         };
         let (records, _) = self.other_records();
-        let mut named = false;
-        for entry in self
-            .record
-            .entries
+        // This run's own placeholder: the same file or folder; another
+        // run's: exactly as made.
+        let own = self.record.entries.iter().map(|entry| (entry, false));
+        let others = records
             .iter()
-            .chain(records.iter().flat_map(|(_, record)| record.entries.iter()))
-        {
+            .flat_map(|(_, record)| record.entries.iter())
+            .map(|entry| (entry, true));
+        let mut named = false;
+        for (entry, exact) in own.chain(others) {
             let Entry::Made {
                 path: made,
                 real: made_real,
@@ -1010,9 +1001,9 @@ impl Journal {
         // empty when this run's cleanup came to it): a sweep reports it once
         // and leaves it, instead of it being forgotten here.
         self.record.entries.retain(|entry| match entry {
-            Entry::Made { real, .. } => !matches!(
+            Entry::Made { real, .. } => matches!(
                 crate::placeholder_registry::find_without_links(real),
-                Ok(None)
+                Ok(Some(_))
             ),
             Entry::Uses { .. } | Entry::Pending { .. } => false,
         });

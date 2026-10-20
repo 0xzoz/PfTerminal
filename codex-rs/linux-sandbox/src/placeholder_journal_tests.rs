@@ -820,54 +820,62 @@ fn another_runs_recorded_placeholder_is_named_as_one() {
             real: pending.clone(),
         }],
     );
-    assert!(setup.journal.recorded_by_another_run(&made, None));
-    assert!(setup.journal.recorded_by_another_run(&pending, None));
+    assert!(setup.journal.recorded_by_another_run(&made, /*real*/ None));
+    assert!(
+        setup
+            .journal
+            .recorded_by_another_run(&pending, /*real*/ None)
+    );
     let other = setup.base.join("home/.agents");
     assert!(!setup.journal.recorded_by_another_run(&other, Some(&other)));
 }
 
-/// #607: the record says what was made at a path: what is there now is
+/// #607: the record says what was made at a path. What is there now is
 /// recorded otherwise when it is another file (the person replaced it), or
-/// (`exact`) when it changed since; a path no record names is not.
+/// when another run's placeholder changed since; this run's own counts while
+/// it is the same file. A path no record names is not.
 #[test]
 fn a_replaced_or_changed_placeholder_is_recorded_otherwise() {
     let mut setup = Setup::new();
-    let path = setup.base.join("home/.pfterminal");
-    setup.made_by(ended(), &path, Kind::File);
     let status = |path: &Path| {
         crate::placeholder_registry::find_without_links(path)
             .expect("find")
             .expect("there")
             .status
     };
-    let made = status(&path);
-    for exact in [false, true] {
-        assert!(!setup.journal.recorded_otherwise(&path, &path, &made, exact));
+    let theirs = setup.base.join("home/.pfterminal");
+    setup.made_by(ended(), &theirs, Kind::File);
+    let own = setup.base.join("home/.git");
+    let planned = [Planned {
+        kind: Kind::Directory,
+        path: &own,
+        real: &own,
+        makes: true,
+    }];
+    setup.journal.register(&planned, &[]);
+    for path in [&theirs, &own] {
+        assert!(!setup.journal.recorded_otherwise(path, path, &status(path)));
     }
 
     tick();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-    let changed = status(&path);
-    assert!(
-        !setup
-            .journal
-            .recorded_otherwise(&path, &path, &changed, /*exact*/ false)
-    );
+    std::fs::set_permissions(&theirs, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    std::fs::set_permissions(&own, std::fs::Permissions::from_mode(0o700)).expect("chmod");
     assert!(
         setup
             .journal
-            .recorded_otherwise(&path, &path, &changed, /*exact*/ true)
+            .recorded_otherwise(&theirs, &theirs, &status(&theirs))
     );
+    assert!(!setup.journal.recorded_otherwise(&own, &own, &status(&own)));
 
-    std::fs::remove_file(&path).expect("removed");
-    std::fs::write(&path, "").expect("the person's own");
-    let replaced = status(&path);
-    for exact in [false, true] {
-        assert!(
-            setup
-                .journal
-                .recorded_otherwise(&path, &path, &replaced, exact)
-        );
+    // Made while the placeholders are there, so other inodes.
+    let new_file = setup.base.join("home/new-file");
+    let new_folder = setup.base.join("home/new-folder");
+    std::fs::write(&new_file, "").expect("the person's own");
+    std::fs::create_dir(&new_folder).expect("the person's own");
+    std::fs::rename(&new_file, &theirs).expect("replaced");
+    std::fs::rename(&new_folder, &own).expect("replaced");
+    for path in [&theirs, &own] {
+        assert!(setup.journal.recorded_otherwise(path, path, &status(path)));
     }
 
     let other = setup.base.join("home/other");
@@ -875,6 +883,6 @@ fn a_replaced_or_changed_placeholder_is_recorded_otherwise() {
     assert!(
         !setup
             .journal
-            .recorded_otherwise(&other, &other, &status(&other), true)
+            .recorded_otherwise(&other, &other, &status(&other))
     );
 }

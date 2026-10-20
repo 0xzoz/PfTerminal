@@ -1766,12 +1766,7 @@ fn remove_synthetic_mount_target(
     // #607: not when the record kept in the Corbanu home says a placeholder
     // was made there and this is none of those (the person replaced it); one
     // another run made must still be exactly as made.
-    if crate::placeholder_journal::recorded_otherwise(
-        target.path(),
-        path,
-        &found.status,
-        /*exact*/ recorded_at.is_some(),
-    ) {
+    if crate::placeholder_journal::recorded_otherwise(target.path(), path, &found.status) {
         return;
     }
     if !target.preserves_pre_existing_path()
@@ -1997,7 +1992,6 @@ fn remove_stale_synthetic_mount_targets() {
                     target.path(),
                     target.removal_path(),
                     &found.status,
-                    /*exact*/ true,
                 ) =>
             {
                 // #607: nor one the record kept in the Corbanu home says is

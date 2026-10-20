@@ -244,8 +244,10 @@ impl SyntheticMountTarget {
 
     /// #562: whether the file or folder found when the arguments were built
     /// is still the one at the path. Another run's cleanup may have removed
-    /// it since; bubblewrap then makes a new mount target, which is this
-    /// run's own placeholder.
+    /// it before this run registered it; the mount target made then is this
+    /// run's own placeholder. #607: once registered, a change is the
+    /// person's (or a mount target bubblewrap made again after the path
+    /// vanished in between, which is not told apart): left in place.
     pub(crate) fn pre_existing_path_is_unchanged(&self) -> bool {
         let Some(identity) = self.pre_existing_path else {
             return true;

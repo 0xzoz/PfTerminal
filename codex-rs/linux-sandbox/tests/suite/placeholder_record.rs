@@ -466,33 +466,56 @@ fn a_placeholder_folder_another_run_protects_paths_in_is_not_left_behind() {
     let git = setup.base.join(".git");
     // Full access with denials (Moderate's): the root is writable, `.git`
     // too; its hooks and config are read-only, as core protects them once
-    // `.git` exists.
-    let protects = || {
-        vec![
-            FileSystemSandboxEntry::new(
-                FileSystemPath::Special {
-                    value: FileSystemSpecialPath::Root,
+    // `.git` exists (or, in one case, a path in it is denied instead).
+    let protects = |deny: bool| {
+        let mut entries = vec![FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            FileSystemAccessMode::Write,
+        )];
+        if deny {
+            entries.push(FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: AbsolutePathBuf::try_from(git.join("info/secret")).unwrap(),
                 },
-                FileSystemAccessMode::Write,
-            ),
-            read_only(git.join("hooks")),
-            read_only(git.join("config")),
-        ]
+                FileSystemAccessMode::Deny,
+            ));
+        } else {
+            entries.push(read_only(git.join("hooks")));
+            entries.push(read_only(git.join("config")));
+        }
+        entries
     };
-    let maker = setup.start(&setup.tmp("maker"));
-    assert!(git.is_dir(), "the maker's placeholder folder");
-    let user = setup.start_with(&setup.tmp("user"), protects());
-    assert_ran(&finish(maker));
-    assert_ran(&finish(user));
-    let output = setup.run("echo ran", &setup.tmp("next"));
-    assert_ran(&output);
-    assert!(
-        std::fs::symlink_metadata(&git).is_err(),
-        "not left behind: {:?}",
-        std::fs::read_dir(&git).map(Iterator::collect::<Vec<_>>)
-    );
-    assert_eq!(setup.records(), Vec::<String>::new());
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    // The other run in a temporary folder of its own (found from the
+    // record kept in the Corbanu home) or in the maker's (found from its
+    // registry); the next run in a third, as after a reboot.
+    for (case, shared, deny) in [
+        ("own temporary folder", false, false),
+        ("shared temporary folder", true, false),
+        ("a denied path in it", false, true),
+    ] {
+        let maker_tmp = setup.tmp(&format!("maker-{case}"));
+        let maker = setup.start(&maker_tmp);
+        assert!(git.is_dir(), "{case}: the maker's placeholder folder");
+        let user_tmp = if shared {
+            maker_tmp.clone()
+        } else {
+            setup.tmp(&format!("user-{case}"))
+        };
+        let user = setup.start_with(&user_tmp, protects(deny));
+        assert_ran(&finish(maker));
+        assert_ran(&finish(user));
+        let output = setup.run("echo ran", &setup.tmp(&format!("next-{case}")));
+        assert_ran(&output);
+        assert!(
+            std::fs::symlink_metadata(&git).is_err(),
+            "{case}: not left behind: {:?}",
+            std::fs::read_dir(&git).map(Iterator::collect::<Vec<_>>)
+        );
+        assert_eq!(setup.records(), Vec::<String>::new(), "{case}");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "", "{case}");
+    }
 
     // The command can create nothing in it, as without the other run.
     let maker = setup.start(&setup.tmp("maker-2"));
@@ -501,7 +524,7 @@ fn a_placeholder_folder_another_run_protects_paths_in_is_not_left_behind() {
             "touch .git/hooks 2>/dev/null; echo hooks=$?; \
              mkdir .git/objects 2>/dev/null; echo objects=$?",
             &setup.tmp("writer"),
-            protects(),
+            protects(/*deny*/ false),
         )
         .output()
         .unwrap();
