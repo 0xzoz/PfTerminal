@@ -240,12 +240,13 @@ fn issue_841_reads_kept_by_the_launch_contract_are_recognised() {
     let contract = fixture.contract();
     let inputs = fixture.inputs(Fixture::profile());
     let named = |script: String| {
-        super::super::kept_read_named(
+        super::super::kept_read_note(
             &inputs,
             &contract,
             &["/bin/bash".to_string(), "-c".to_string(), script],
             &fixture.project,
         )
+        .is_some()
     };
     assert!(named(format!(
         "cat '{}/config.toml'",
@@ -253,6 +254,54 @@ fn issue_841_reads_kept_by_the_launch_contract_are_recognised() {
     )));
     assert!(named(format!("cat '{}/auth.json'", fixture.home.display())));
     assert!(!named("cat README.md".to_string()));
+}
+
+/// #1077 (MOD-09 item 7): the prompt names the file approving cannot unlock
+/// and what it is: a CLI token such as `~/.aws/credentials` is not called
+/// one of Corbanu's own files. A file approval does unlock (`~/.ssh/config`)
+/// gets no note.
+#[test]
+fn issue_1077_the_kept_read_note_names_the_file_and_what_it_is() {
+    let fixture = Fixture::new();
+    let contract = fixture.contract();
+    let inputs = fixture.inputs(Fixture::profile());
+    let note = |script: &str| {
+        super::super::kept_read_note(
+            &inputs,
+            &contract,
+            &[
+                "/bin/bash".to_string(),
+                "-c".to_string(),
+                script.to_string(),
+            ],
+            &fixture.project,
+        )
+    };
+    let notes = [
+        "cat ~/.aws/credentials",
+        "cat ~/.ssh/config ~/.netrc",
+        "cat \"$CODEX_HOME/config.toml\"",
+        "cat ~/.ssh/config",
+    ]
+    .map(|script| {
+        format!(
+            "{script}\n{}",
+            note(script).unwrap_or_else(|| "(no note)".to_string())
+        )
+    });
+    insta::assert_snapshot!(notes.join("\n\n"));
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            note("ls ~/Library/Keychains"),
+            Some(
+                "`~/Library/Keychains` is part of your keychains: secretless agent launch keeps \
+                 it unreadable to agent commands at every security level, even if you approve, \
+                 so approving cannot unlock it. If you approve, the command runs, but that \
+                 read fails."
+                    .to_string()
+            )
+        );
+    }
 }
 
 /// #839: what an explained denial was, for the inspector's recent denials:

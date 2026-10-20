@@ -32,7 +32,8 @@ without them Corbanu refuses every model request under Moderate, so
   `.agents`, and Corbanu's own files. Your fresh approval of one command
   lifts this for that command, except for Corbanu's runtime files, its
   security state and keys (such as `security_state.json` and
-  `source-origin.key`) and what `secretless_agent_launch` keeps; a remembered
+  `source-origin.key`) and what `secretless_agent_launch` keeps (such as
+  `~/.aws/credentials` and `~/.netrc`; see below); a remembered
   or automatic approval never does. A project's `.env` files aren't covered;
   Aggressive covers them.
 - **Untrusted content.** Tool, MCP, web, agent and memory output reaches the
@@ -40,11 +41,15 @@ without them Corbanu refuses every model request under Moderate, so
   approval: the vault, credentials (a project's `.env` files included),
   Corbanu's own files and security settings, disclosure, value transfer, code
   you haven't seen, MCP calls that change or send data, and tools Corbanu
-  hasn't classified. Where approving can't unlock a file (Corbanu's sign-in,
-  vault, config and history stay closed to agent commands under
-  `secretless_agent_launch`), the prompt says so. Cached, remembered or
-  automatic approvals don't count, and with approvals off these actions are
-  refused.
+  hasn't classified. Where approving can't unlock a file, the prompt names
+  it and says what it is: under `secretless_agent_launch`, Corbanu's own
+  files (such as its sign-in, vault, config and history), CLI tokens (`~/.aws/credentials`, `~/.netrc`,
+  `~/.npmrc`, `~/.git-credentials`, `~/.config/gh/hosts.yml`,
+  `~/.docker/config.json`, Claude's sign-in) and, on macOS,
+  `~/Library/Keychains` stay closed to agent commands (see
+  [Protected launch](config.md#protected-launch-secretless_agent_launch)).
+  Cached, remembered or automatic approvals don't count, and with approvals
+  off these actions are refused.
 - **Model keys.** From the next start, provider API keys are held by the
   credential broker, as under Aggressive. `broker_model_auth = false` in your
   own config keeps it off.
@@ -124,28 +129,28 @@ The kill switch (`/security` → `g`) works under every level.
 - If your own settings turn the sandbox off (full access), commands that the
   protected-file rules don't cover run without one. Choose a sandbox in your
   settings to keep every command in it.
-- With full access in your own settings, commands can also write the
-  project's `.git`, except its hooks and config (with a sandbox setting `.git`
-  stays read-only). A command could leave something there that your own git
-  later follows outside the sandbox (#874): a link such as
-  `.git/COMMIT_EDITMSG` to a file elsewhere (or to `.git/config`), which your
-  next `git commit` writes; a hard link; rebase or cherry-pick steps whose
-  `exec` lines, or a merge strategy that isn't git's own, run when you
-  continue; a remote in `.git/remotes`; config or a hooks folder where there
-  was none; or a replaced `.git`. On macOS and Linux, Corbanu looks at `.git`
-  before a session's first such command (and reports links, steps and hard
-  links already there), after each one, before each later command and at
-  the end of each turn, and warns you about anything new, with the command
-  that removes it. It removes nothing itself. Below `objects`, `lfs` and
-  `annex` it looks only at their own entries: git reads the files below and
-  puts new ones in place, it doesn't write through them. Links inside a
-  hooks folder are left alone (git runs hooks, it doesn't write through
-  them). Until you remove what it found, and while it can't look at all of
-  `.git` (a folder it can't read, or too many entries), approving a command
-  in that project doesn't lift the protected-file rules (nor run it outside
-  the sandbox, nor let it create user namespaces), in any session of this
-  Corbanu Terminal. Some setups of your own hold them too until you remove
-  them: a layout made of links (`git new-workdir`, Android's `repo`), a
+- With full access in your own settings, commands can also write the project's
+  `.git`, except its hooks and config (with a sandbox setting `.git` stays
+  read-only). A command could leave something there that your own git later
+  follows outside the sandbox (#874): a link such as `.git/COMMIT_EDITMSG` to
+  a file elsewhere (or to `.git/config`), which your next `git commit` writes;
+  a hard link; rebase or cherry-pick steps whose `exec` lines, or a merge
+  strategy that isn't git's own, run when you continue; a remote in
+  `.git/remotes`; config or a hooks folder where there was none; or a replaced
+  `.git`. On macOS and Linux, Corbanu looks at `.git` before a session's first
+  such command is decided (and reports links, steps and hard links already
+  there, which then hold that command too), after each one, before each later
+  command and at the end of each turn, and warns you about anything new, with
+  the command that removes it. It removes nothing itself. Below `objects`,
+  `lfs` and `annex` it looks only at their own entries: git reads the files
+  below and puts new ones in place, it doesn't write through them. Links
+  inside a hooks folder are left alone (git runs hooks, it doesn't write
+  through them). Until you remove what it found, and while it can't look at
+  all of `.git` (a folder it can't read, or too many entries), approving a
+  command in that project doesn't lift the protected-file rules (nor run it
+  outside the sandbox, nor let it create user namespaces), in any session of
+  this Corbanu Terminal. Some setups of your own hold them too until you
+  remove them: a layout made of links (`git new-workdir`, Android's `repo`), a
   `config.worktree` that `git sparse-checkout` adds, or a hooks folder a hook
   installer creates where there was none. On Linux the sandbox leaves empty
   files and folders in place while a command runs: a new config file or hooks
