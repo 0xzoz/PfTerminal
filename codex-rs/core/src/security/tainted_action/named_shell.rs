@@ -7,11 +7,10 @@
 //! commands with literal words (a real bash parse: no substitutions,
 //! parameter expansions, redirections, groups, assignments or control flow),
 //! each a program that never hands its words to a shell. Where the parse
-//! and bash may split words differently (a backslash: `diff\<newline>tool`
-//! is one bash word, two parsed words; control characters) the line keeps
-//! the checks; braces and glob characters, which bash still expands, must
-//! stay out of words whose meaning matters. Anything else keeps the checks,
-//! a shell named without a system path included.
+//! and bash may split words differently ([`splits_differently`]) the line
+//! keeps the checks; braces and glob characters, which bash still expands,
+//! must stay out of words whose meaning matters. Anything else keeps the
+//! checks, a shell named without a system path included.
 
 use codex_shell_command::bash::PlainWord;
 
@@ -44,13 +43,29 @@ pub(super) fn avoids_zsh(command: &[String]) -> bool {
     };
     if !matches!(flag.as_str(), "-c" | "-lc")
         || script.len() > MAX_SCRIPT_BYTES
-        || script.contains(|ch: char| ch == '\\' || (ch.is_control() && !matches!(ch, '\n' | '\t')))
+        || splits_differently(script)
         || !not_zsh(shell)
     {
         return false;
     }
     codex_shell_command::bash::parse_shell_script_into_plain_words(script).is_some_and(|commands| {
         !commands.is_empty() && commands.iter().all(|words| data_only(words))
+    })
+}
+
+/// Text the parse may split into words other than bash's: a backslash
+/// (`diff\<newline>tool` is one bash word, two parsed words), a control
+/// character other than newline or tab, or a non-ASCII character before
+/// `|`, a brace, a bracket or `~` (in a GBK, Big5 or Shift-JIS locale its
+/// last byte may start a character that takes that one in).
+fn splits_differently(script: &str) -> bool {
+    let mut previous_non_ascii = false;
+    script.chars().any(|ch| {
+        let differs = ch == '\\'
+            || (ch.is_control() && !matches!(ch, '\n' | '\t'))
+            || (previous_non_ascii && matches!(ch, '|' | '{' | '}' | '[' | ']' | '~'));
+        previous_non_ascii = !ch.is_ascii();
+        differs
     })
 }
 

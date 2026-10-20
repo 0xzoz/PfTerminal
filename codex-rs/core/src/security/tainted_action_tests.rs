@@ -3104,6 +3104,7 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
             "git commit -m 'fix(tests): keep *(N) and /*(e:true:)'",
         ),
         ("/bin/bash", "git commit -m \"[WIP] fix(tests)? {x}\""),
+        ("/bin/bash", "git commit -m 'fix(tests) \u{2014} caf\u{e9}'"),
         ("/usr/bin/bash", "git add 'src/*(N)' && git status"),
         (
             "/bin/bash",
@@ -3118,6 +3119,20 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
             if found.is_some() {
                 wrong.push(format!("{shell} {flag} {line:?}: {found:?}, expected None"));
             }
+        }
+    }
+    // Review r3: the parse and bash agree on these words only with a blank
+    // between a non-ASCII character and `|` (GBK, Big5, Shift-JIS).
+    let avoids =
+        |script: &str| named_shell::avoids_zsh(&["/bin/bash".into(), "-c".into(), script.into()]);
+    for (script, expected) in [
+        ("echo a\u{841} | echo b", true),
+        ("echo a\u{841}|echo b", false),
+        ("echo a\u{841}{x}", false),
+        ("echo a\\\nb", false),
+    ] {
+        if avoids(script) != expected {
+            wrong.push(format!("avoids_zsh({script:?}) != {expected}"));
         }
     }
     // `/bin/sh` counts where it is bash or dash (stock macOS and Linux).
@@ -3205,6 +3220,12 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
             "git diff\\\ntool -y -x 'zsh -c \"print -l /*(e:true:)\"'",
         ],
         vec!["/bin/bash", "-lc", "git commit -m '/*(e:true:)\r'"],
+        // Review r3: a GBK lead byte may take in the next character.
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' a\u{841}|echo --output=x.zsh",
+        ],
         vec![
             "/bin/bash",
             "-lc",
