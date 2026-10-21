@@ -1051,23 +1051,32 @@ impl Classifier {
             self.change_folder(name, args, folders, variables);
             // #1142: an alias body is code a later line runs (`alias
             // git='git -c core.pager=x'`). The lexer splits the quoted body
-            // into words; joined without the `NAME=` it reads as a script.
+            // into words, which are read again as a script.
             if name == "alias" {
-                let body: Vec<&str> = args
-                    .iter()
-                    .skip_while(|word| word.starts_with('-'))
-                    .map(|word| match word.split_once('=') {
-                        // A definition's start (`g=git`, `g.x=git`; a name
-                        // holds no `=`). A split piece of a body is cut too
-                        // (`-c core.pager=x` reads `-c x`, still unsafe; a
-                        // body's `PAGER=x` is judged as a word already);
-                        // options stay whole (`--config-env=k=v`).
-                        Some((_, body)) if !word.starts_with('-') => body,
-                        _ => word.as_str(),
-                    })
-                    .collect();
+                // A word with `=` may start a definition (`g=git`,
+                // `g.x=git`; a name holds no `=`) or be a split piece of a
+                // body (`core.pager=x`, a path): it is read both ways, as
+                // written and then cut (`g=git git`, `core.pager=x x`).
+                // Options stay whole (`--config-env=k=v`).
+                let mut body: Vec<&str> = Vec::new();
+                for word in args.iter().skip_while(|word| word.starts_with('-')) {
+                    work::step();
+                    body.push(word);
+                    if let Some((_, rest)) = word.split_once('=')
+                        && !word.starts_with('-')
+                    {
+                        body.push(rest);
+                    }
+                }
+                // Read plainly (substitutions run), and with each word
+                // quoted, so a word such as `#` or `'` cannot hide the rest.
                 if !body.is_empty() {
+                    let quoted: Vec<String> = body
+                        .iter()
+                        .map(|word| format!("'{}'", word.replace('\'', "'\\''")))
+                        .collect();
                     self.script(&body.join(" "), &folders.cwd, depth + 1);
+                    self.script(&quoted.join(" "), &folders.cwd, depth + 1);
                 }
             }
         }

@@ -3178,6 +3178,8 @@ fn issue_1141_output_files_are_written() {
         "git config --file ~/.zshrc a.b '$(touch pwned)'",
         "git bundle create ~/.zshrc HEAD",
         "printf 'protocol=x\\n' | git credential-store --file ~/.zshrc store",
+        // Review round 6: an alias body's path holding `=`.
+        "alias g='git diff --output /a=b/../home/fixture/.zshrc'",
         // Review round 1: a reading word as the value, chained `-C`.
         "git config --file ~/.zshenv 'x.$(touch pwned).y' get",
         "git config --comment --get -f ~/.zshenv 'x.$(touch pwned).y' z",
@@ -3281,6 +3283,11 @@ fn issue_1142_git_code_settings_are_unseen_code() {
         "export E='!touch pwned'; alias g='git --config-env=alias.x=E'",
         "alias g='git --exec-path=/tmp/d'",
         "alias g.x='git -c alias.y=!id y'",
+        // Review round 6.
+        "alias g='git -c \"core.pager=color.x;touch pwned\" log'",
+        "alias g='git -c \"core.pager=user.name;touch pwned\" log'",
+        "alias g='git --namespace \"#\" -c core.pager=id log'",
+        "alias g='git --namespace \"'\"'\" -c core.pager=id log'",
     ] {
         assert_eq!(script(command), unseen, "{command}");
     }
