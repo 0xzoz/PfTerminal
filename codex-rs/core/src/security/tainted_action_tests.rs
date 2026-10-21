@@ -3082,6 +3082,192 @@ fn issue_1084_glob_substitution_is_unseen_code() {
     assert_eq!(wrong, Vec::<String>::new());
 }
 
+/// D85: the zsh-only checks (#1028 glob qualifiers, #1084 glob substitution)
+/// ask only where zsh may run: not on a line a system bash, dash or sh runs
+/// as plain commands of programs that never hand their words to a shell,
+/// when the host runs the argv as named. Anything else asks as before.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
+    use ProtectedActionKind::*;
+    let named = |command: &[&str]| {
+        classify_as_named_with(
+            &shell_in("/work", command),
+            Path::new(HOME),
+            Some(Path::new(USER_HOME)),
+        )
+    };
+    let mut wrong = Vec::new();
+    // Bash, dash and sh lines that never reach zsh: no question.
+    for (shell, line) in [
+        ("/bin/bash", "git commit -m \"fix(tests)\""),
+        (
+            "/bin/bash",
+            "git commit -m 'fix(tests): keep *(N) and /*(e:true:)'",
+        ),
+        ("/bin/bash", "git commit -m \"[WIP] fix(tests)? {x}\""),
+        (
+            "/bin/bash",
+            "git commit -m 'fix(tests) \u{2014} r\u{e9}sum\u{e9}'",
+        ),
+        ("/usr/bin/bash", "git add 'src/*(N)' && git status"),
+        (
+            "/bin/bash",
+            "echo '/*(e:true:)' ; echo \"/*(+f)\" && echo '/*(oe:x:)'",
+        ),
+        ("/bin/bash", "grep -n 'x$~y' notes.txt | head -n 3"),
+        ("/bin/bash", "echo '${~x} ${(e)y} setopt globsubst'"),
+        ("/bin/dash", "cd /work && git log --oneline -- '*(N)'"),
+    ] {
+        for flag in ["-lc", "-c"] {
+            let found = named(&[shell, flag, line]);
+            if found.is_some() {
+                wrong.push(format!("{shell} {flag} {line:?}: {found:?}, expected None"));
+            }
+        }
+    }
+    // Review r3: the parse and bash agree on these words only with a blank
+    // between a non-ASCII character and `|` (GBK, Big5, Shift-JIS).
+    let avoids =
+        |script: &str| named_shell::avoids_zsh(&["/bin/bash".into(), "-c".into(), script.into()]);
+    for (script, expected) in [
+        ("echo a\u{841} | echo b", true),
+        ("echo a\u{841}|echo b", false),
+        ("echo a\u{841}{x}", false),
+        ("echo a\\\nb", false),
+    ] {
+        if avoids(script) != expected {
+            wrong.push(format!("avoids_zsh({script:?}) != {expected}"));
+        }
+    }
+    // `/bin/sh` counts where it is bash or dash (stock macOS and Linux).
+    let sh = named(&["/bin/sh", "-c", "git commit -m 'fix(tests)'"]);
+    let sh_not_zsh = named_shell::avoids_zsh(&["/bin/sh".into(), "-c".into(), "true".into()]);
+    if sh != (!sh_not_zsh).then_some(UnseenCode) {
+        wrong.push(format!("/bin/sh (not zsh: {sh_not_zsh}): {sh:?}"));
+    }
+    // The same text where zsh may run asks as before: under zsh, through a
+    // nested or hidden zsh, a program that may run its words, syntax that
+    // is not plain words, a shell named without a system path, or another
+    // argv shape.
+    let qualifier = "git commit -m '/*(e:true:)'";
+    for command in [
+        vec!["/bin/zsh", "-lc", qualifier],
+        vec!["/usr/bin/zsh", "-c", "git commit -m \"fix(tests)\""],
+        vec!["/bin/bash", "-lc", "zsh -c 'print -l /*(e:true:)'"],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "bash -c \"zsh -c 'print -l /*(e:true:)'\"",
+        ],
+        vec!["/bin/bash", "-lc", "/bin/z?h -c 'print -l /*(e:true:)'"],
+        vec!["/bin/bash", "-lc", "echo 'print -l /*(e:true:)' | /bin/zsh"],
+        vec!["/bin/bash", "-lc", "echo $(zsh -c 'print -l /*(e:true:)')"],
+        vec!["/bin/bash", "-lc", "tmux new 'print -l /*(e:true:)'"],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git -c core.pager=less log '/*(e:true:)'",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git rebase -x 'print -l /*(e:true:)' main",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log -1 --format='/*(e:true:)' --output=x.zsh",
+        ],
+        // Review r1: words bash expands into an option.
+        vec![
+            "/bin/bash",
+            "-lc",
+            "printf \\-v GIT_PAGER %s '/*(e:true:)'; git log",
+        ],
+        vec!["/bin/bash", "-lc", "printf 'fix(tests) /*(e:true:)'"],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' --out\\put=x.zsh",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' {--output=x.zsh,}",
+        ],
+        vec!["/bin/bash", "-lc", "git log --format='/*(e:true:)' *"],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' ?-output=x.zsh",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' [-]-output=x.zsh",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' \"--out\\\nput=x.zsh\"",
+        ],
+        // Review r2: an unquoted backslash-newline joins words for bash,
+        // not for the parse; other control characters.
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' --out\\\nput=x.zsh",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git diff\\\ntool -y -x 'zsh -c \"print -l /*(e:true:)\"'",
+        ],
+        vec!["/bin/bash", "-lc", "git commit -m '/*(e:true:)\r'"],
+        // Review r3: a GBK lead byte may take in the next character.
+        vec![
+            "/bin/bash",
+            "-lc",
+            "git log --format='/*(e:true:)' a\u{841}|echo --output=x.zsh",
+        ],
+        vec![
+            "/bin/bash",
+            "-lc",
+            "printf -v PAGER '%s' '/*(e:true:)'; git log",
+        ],
+        vec!["/bin/bash", "-lc", "PAGER='/*(e:true:)' git log"],
+        vec!["/bin/bash", "-lc", "echo '/*(e:true:)' > notes.zsh"],
+        vec!["/bin/bash", "-lc", "{ echo '/*(e:true:)'; }"],
+        vec!["/bin/bash", "-lc", "x='/*(e:true:)'; echo $x"],
+        vec!["bash", "-lc", qualifier],
+        vec!["sh", "-c", qualifier],
+        vec!["/opt/homebrew/bin/bash", "-lc", qualifier],
+        vec!["/usr/local/bin/bash", "-lc", qualifier],
+        vec!["/tmp/bash", "-lc", qualifier],
+        vec!["/bin/bash", "-ic", qualifier],
+        vec!["/bin/bash", "-lc", qualifier, "argv0"],
+        vec!["git", "commit", "-m", "/*(e:true:)"],
+    ] {
+        let found = named(&command);
+        if found != Some(UnseenCode) {
+            wrong.push(format!("{command:?}: {found:?}, expected UnseenCode"));
+        }
+    }
+    // Where the host may run the script under another shell (the zsh exec
+    // bridge), nothing changes.
+    for line in ["git commit -m \"fix(tests)\"", qualifier] {
+        let found = kind(&["/bin/bash", "-lc", line]);
+        if found != Some(UnseenCode) {
+            wrong.push(format!("bridge {line:?}: {found:?}, expected UnseenCode"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
 /// #1028: zsh `e` and `+` glob qualifiers run code the classifier does not
 /// read as commands, so after untrusted content they ask, with or without
 /// command output on the line.
@@ -3365,6 +3551,7 @@ fn issue_1065_review_2_large_values_are_judged_once() {
             &shell_in("/work", &["bash", "-lc", line]),
             Path::new(HOME),
             Some(Path::new(USER_HOME)),
+            /*as_named*/ false,
         );
         (
             classifier.found,

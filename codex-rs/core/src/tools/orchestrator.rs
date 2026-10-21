@@ -1845,10 +1845,19 @@ where
             // Classification may look at the filesystem: keep it off the
             // async workers and bounded in time; a stall fails closed.
             let codex_home = tool_ctx.turn.config.codex_home.to_path_buf();
+            // D85: the zsh exec bridge runs any shell tool `-c` script under
+            // zsh, whatever shell the argv names.
+            let features = tool_ctx.session.features();
+            let as_named = !features.enabled(codex_features::Feature::ShellZshFork)
+                && !features.enabled(codex_features::Feature::UnifiedExecZshFork);
             let classified = tokio::time::timeout(
                 POST_TAINT_CLASSIFY_TIMEOUT,
                 tokio::task::spawn_blocking(move || {
-                    crate::security::tainted_action::classify(&action, &codex_home)
+                    if as_named {
+                        crate::security::tainted_action::classify_as_named(&action, &codex_home)
+                    } else {
+                        crate::security::tainted_action::classify(&action, &codex_home)
+                    }
                 }),
             )
             .await;
