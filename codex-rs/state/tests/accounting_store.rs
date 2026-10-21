@@ -622,8 +622,10 @@ async fn accounting_inspect_work_budget_spans_range_buckets() -> anyhow::Result<
         let mut view =
             ready(AccountingStore::inspect_day(&runtime, a.thread_id, day, 3 * DAY).await?);
         assert_eq!(view.totals.attempts, i64::from(day == 0));
-        // Range buckets do not read other conversations; the day view does.
+        // Range buckets do not read other conversations or classify an empty
+        // day; the day view does.
         assert!(view.other_conversations.take().is_some());
+        assert_eq!(view.empty_day.take().is_some(), day != 0);
         days.push(InspectionDay::Ready(view));
     }
     let range = AccountingStore::inspect_range(
@@ -706,8 +708,10 @@ async fn accounting_inspect_whole_store_denominator_thresholds() -> anyhow::Resu
     for (count, day, expected_attempts) in [
         (95_236i64, 91, Some(8)),
         (95_237, 91, None),
-        (571_428, 92, Some(0)),
-        (571_429, 92, None),
+        // An empty day also reads its spawn tree's earliest recorded request
+        // (FUP-02): one more scan, so 4,000,000 / 8 less the day's visits.
+        (499_999, 92, Some(0)),
+        (500_000, 92, None),
     ] {
         sqlx::query(
             "WITH RECURSIVE n(i) AS (VALUES(?1) UNION ALL SELECT i+1 FROM n WHERE i<?2)

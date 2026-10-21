@@ -16,6 +16,7 @@
 
 mod charge;
 mod chart;
+mod empty_day;
 mod range;
 mod scope;
 mod warmup_resume;
@@ -1076,7 +1077,7 @@ fn inspection_pages_for(
     pages[0].text.splice(
         0..0,
         if t.attempts == 0 {
-            vec!["No recorded attempts in this conversation or its subagents; collection coverage unknown.".into()]
+            vec![empty_day::detail(ready.empty_day)]
         } else {
             estimate(t, EstimateGaps::of(ready.requests.values().flatten()))
         },
@@ -1441,6 +1442,7 @@ fn inspection_pages_for(
         .any(ObservationQuote::is_plan);
     let overview = plain_overview(
         heading,
+        ready.empty_day,
         named,
         ready.requests.values().flatten(),
         outside,
@@ -1910,7 +1912,7 @@ fn plain_billing(
         ),
         (None, None, Some(local), None) => (LOCAL, local),
         (None, None, None, Some(undeclared)) => (NOT_DECLARED, undeclared),
-        (None, None, None, None) => (PAY_PER_USE, "No requests".to_string()),
+        (None, None, None, None) => (PAY_PER_USE, "Nothing recorded".to_string()),
         (per_use, covered, local, undeclared) => (
             "Mixed",
             [
@@ -2391,6 +2393,7 @@ fn route_line(quotes: &[&ObservationQuote], named: bool) -> String {
 /// rather than showing nothing, so it never reads as a zero-cost day.
 fn plain_overview<'a>(
     heading: String,
+    empty: Option<codex_state::accounting::EmptyDay>,
     named: bool,
     quotes: impl IntoIterator<Item = &'a ObservationQuote>,
     outside: Vec<String>,
@@ -2399,7 +2402,7 @@ fn plain_overview<'a>(
 ) -> Vec<String> {
     let groups = by_route(quotes);
     let mut lines = if groups.is_empty() {
-        vec![format!("{heading} no recorded requests.")]
+        empty_day::overview(&heading, empty)
     } else {
         vec![heading]
     };

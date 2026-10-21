@@ -138,6 +138,13 @@ say which was used on their `Price basis` line. Codex Auto Review, the
 automatic approval reviewer, is one of these on an OpenAI API key: OpenAI
 doesn't publish a price for it, and `/cost` says so.
 
+A day with nothing recorded for the conversation says "no requests recorded"
+only when the whole UTC day ends before the conversation started. Otherwise it
+says "nothing recorded" (or "not recorded" for a day before this home's
+accounting began): a request that failed to record, or one sent from a build
+without developer accounting, leaves no record, so an empty day is not proof
+that none was sent.
+
 A provider you configure at Moonshot's Kimi Open Platform
 (`base_url = "https://api.moonshot.ai/v1"`, Chat Completions, API key) is priced
 from Moonshot's published rates for that route, whatever you name the

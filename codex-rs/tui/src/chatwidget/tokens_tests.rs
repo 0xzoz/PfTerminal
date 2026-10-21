@@ -308,6 +308,7 @@ fn packet() -> InspectionDay {
         unknown_parent_requests: Default::default(),
         requests: std::collections::BTreeMap::from([(q.attempt.request_id, vec![q])]),
         other_conversations: Some(Default::default()),
+        empty_day: None,
     })
 }
 
@@ -1590,6 +1591,8 @@ async fn accounting_inspect_empty_day_after_checkpoint_renders_lag() -> anyhow::
     use codex_state::accounting::AccountingStore;
 
     let home = tempfile::tempdir()?;
+    // Stored before the id is minted, so it is the conversation's start.
+    let created = chrono::Utc::now();
     let owner = ThreadId::new();
     let runtime = codex_state::StateRuntime::init(
         codex_state::SqliteConfig::from_sqlite_home(
@@ -1601,7 +1604,7 @@ async fn accounting_inspect_empty_day_after_checkpoint_renders_lag() -> anyhow::
     let metadata = codex_state::ThreadMetadataBuilder::new(
         owner,
         home.path().join("synthetic.jsonl"),
-        chrono::Utc::now(),
+        created,
         codex_protocol::protocol::SessionSource::Cli,
     );
     runtime.upsert_thread(&metadata.build("synthetic")).await?;
@@ -1614,13 +1617,16 @@ async fn accounting_inspect_empty_day_after_checkpoint_renders_lag() -> anyhow::
     assert_eq!(view.totals, DayTotals::default());
     assert!(view.requests.is_empty());
     assert_eq!(view.coverage.completed_as_of_ms, 0);
-    // The empty conversation says so in its scope, and that no other
-    // conversation recorded anything that day either.
+    // FUP-02: the conversation started today, so 1970-01-01 provably had
+    // none of its requests; and no other conversation recorded anything.
     assert_eq!(
         inspection_pages(Ok(empty))[0].text[..2].to_vec(),
         vec![
-            "This conversation on 1970-01-01 (UTC): no recorded requests.",
-            "No other conversation recorded requests on this day.",
+            format!(
+                "This conversation on 1970-01-01 (UTC): no requests recorded — this conversation started on {} (UTC), after this day.",
+                created.date_naive()
+            ),
+            "No other conversation recorded requests on this day.".to_string(),
         ]
     );
 
@@ -1821,8 +1827,11 @@ fn accounting_inspect_availability_state_snapshots() {
     empty.totals = DayTotals::default();
     empty.requests.clear();
     assert_eq!(
-        inspection_pages(Ok(InspectionDay::Ready(empty)))[0].text[0],
-        "This conversation on 1970-01-01 (UTC): no recorded requests."
+        inspection_pages(Ok(InspectionDay::Ready(empty)))[0].text[..2],
+        [
+            "This conversation on 1970-01-01 (UTC): nothing recorded.",
+            super::empty_day::NOT_PROOF,
+        ]
     );
     let InspectionDay::Ready(view) = packet() else {
         unreachable!()
