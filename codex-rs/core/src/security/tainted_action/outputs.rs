@@ -43,6 +43,10 @@ pub(super) fn output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
     if config_file {
         found |= option_values(args, "--file", 'f', &mut files);
     }
+    // `git credential-store --file FILE store` appends to FILE.
+    if name == "git" && has("credential-store") {
+        found |= option_values(args, "--file", NO_SHORT, &mut files);
+    }
     found |= option_values(args, long, *short, &mut files);
     if name == "git" {
         // `fast-export`/`fast-import` write their marks and pack edges.
@@ -227,6 +231,11 @@ mod tests {
             (
                 "git",
                 &["fast-export", "--export-marks=~/.zshrc", "HEAD"],
+                some(&["~/.zshrc"]),
+            ),
+            (
+                "git",
+                &["credential-store", "--file", "~/.zshrc", "store"],
                 some(&["~/.zshrc"]),
             ),
             ("sort", &["-o", "f", "in"], some(&["f"])),

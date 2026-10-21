@@ -1049,6 +1049,32 @@ impl Classifier {
                 self.note(ProtectedActionKind::UnseenCode);
             }
             self.change_folder(name, args, folders, variables);
+            // #1142: an alias body is code a later line runs (`alias
+            // git='git -c core.pager=x'`). The lexer splits the quoted body
+            // into words; joined without the `NAME=` it reads as a script.
+            if name == "alias" {
+                let body: Vec<&str> = args
+                    .iter()
+                    .skip_while(|word| word.starts_with('-'))
+                    .map(|word| match word.split_once('=') {
+                        // A definition's start (`g=git`), not a split piece
+                        // of a body (`core.pager=x`; a body's `PAGER=x` is
+                        // judged as a word already).
+                        Some((alias, body))
+                            if !alias.is_empty()
+                                && alias
+                                    .chars()
+                                    .all(|ch| ch.is_ascii_alphanumeric() || "_-".contains(ch)) =>
+                        {
+                            body
+                        }
+                        _ => word.as_str(),
+                    })
+                    .collect();
+                if !body.is_empty() {
+                    self.script(&body.join(" "), &folders.cwd, depth + 1);
+                }
+            }
         }
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.
@@ -1064,7 +1090,12 @@ impl Classifier {
                 self.note(ProtectedActionKind::Persistence);
             }
             // #1142: `git -c core.pager=…` runs the value (args as written).
-            if name == "git" && code_variables::git_runs_code(&words[index + 1..]) {
+            if name == "git"
+                && code_variables::git_runs_code(
+                    &words[index + 1..],
+                    simple.words.get(index + 1..).unwrap_or_default(),
+                )
+            {
                 self.note(ProtectedActionKind::UnseenCode);
             }
             for (credential_command, verbs) in CREDENTIAL_COMMANDS {
@@ -1125,6 +1156,7 @@ impl Classifier {
         // `-C ~ -C '' log` reads as `-C ~ -C log`.
         let mut chained: Vec<String> = Vec::new();
         let mut previous: Option<&str> = None;
+        let mut bases = vec![cwd.clone()];
         for (position, word) in words.iter().enumerate() {
             work::step();
             let written = simple.writes_to.contains(&position)
@@ -1143,6 +1175,9 @@ impl Classifier {
                 folder = self.homes.resolve(value, &cwd);
                 self.chain_folder(&mut chained, value, &cwd);
                 folder_value = true;
+            }
+            if folder_value {
+                bases = folder_bases(&folder, &chained, &cwd);
             }
             previous = Some(word.as_str());
             // Attached, assigned and volume forms (`-o/path`, `f=@/path`,
@@ -1163,10 +1198,9 @@ impl Classifier {
                 };
                 // `-C` means something else to some commands (`grep -C 3`):
                 // resolve against both folders.
-                let bases = folder_bases(&folder, &chained, &cwd);
-                for base in bases {
+                for base in &bases {
                     work::step();
-                    let resolved = self.homes.resolve(candidate, &base);
+                    let resolved = self.homes.resolve(candidate, base);
                     self.word_path(&resolved, candidate, depth);
                     if written && self.homes.is_persistence(&resolved) {
                         self.note(ProtectedActionKind::Persistence);
@@ -1180,7 +1214,6 @@ impl Classifier {
                 self.script(&payload, &cwd, depth + 1);
             }
         }
-        let bases = folder_bases(&folder, &chained, &cwd);
         for file in outputs.iter().flatten() {
             work::step();
             for base in &bases {

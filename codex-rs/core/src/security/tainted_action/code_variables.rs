@@ -143,14 +143,24 @@ fn names_code_variable(word: &str) -> bool {
         }
     }
     // An attached option value (`printf -vPAGER`, `read -raEDITOR`).
+    // Each suffix's leading name (`env -SPAGER=x`, `printf -vHOME[0]`);
+    // where each run of name characters ends is found once.
     if let Some(cluster) = word.strip_prefix('-')
         && !cluster.starts_with('-')
-        && cluster.char_indices().any(|(at, _)| {
-            work::step();
-            is_code_variable(&cluster[at..])
-        })
     {
-        return true;
+        let mut run_end = cluster.len();
+        for (at, ch) in cluster.char_indices().rev() {
+            work::step();
+            if !is_name_char(ch) {
+                run_end = at;
+                continue;
+            }
+            let before = &cluster[..at];
+            let read = before.ends_with('$') || before.ends_with("${");
+            if !read && is_code_variable(&cluster[at..run_end]) {
+                return true;
+            }
+        }
     }
     // The name as a token anywhere, unless it is read (`$PAGER`,
     // `${PAGER}`): `export PAGER`, `r=PAGER`, `${PAGER:=x}`.
@@ -196,14 +206,36 @@ pub(super) fn sets_code_variable(
     {
         return true;
     }
-    let dynamic = |word: &str| word.contains('$') || word.contains(shell::UNSEEN_OUTPUT);
+    // A name the classifier cannot see: an expansion (judged as written
+    // too, since a known value may be cut short: `a=(…)`, `export o='a b'`)
+    // or, where the shell globs the word, a pattern (`env PAG?R=*` names a
+    // file `PAGER=x`).
+    let expands = |word: &str| word.contains('$') || word.contains(shell::UNSEEN_OUTPUT);
+    let globs = |word: &str| word.contains(['*', '?', '[']);
+    let name_of = |word: &str| -> String {
+        word.split_once('=')
+            .map_or(word, |(name, _)| name)
+            .to_string()
+    };
     // An assignment before the command (`"$n=x" git`, `env "$n=x" git`)
-    // whose name the classifier cannot see.
+    // whose name the classifier cannot see. Leading assignments (`a[i]=1
+    // git`) are not globbed; a wrapper's operands (`env`) are.
     let before = command.map_or(words.len(), |(index, _)| *index);
-    if words[..before].iter().any(|word| {
-        !word.starts_with('-') && word.split_once('=').is_some_and(|(name, _)| dynamic(name))
-    }) {
-        return true;
+    let mut leading = true;
+    for at in 0..before {
+        work::step();
+        leading &= words[at]
+            .split_once('=')
+            .is_some_and(|(name, _)| assignment_form(name));
+        for word in [words.get(at), raw.get(at)].into_iter().flatten() {
+            work::step();
+            if word.starts_with('-') || !word.contains('=') {
+                continue;
+            }
+            if expands(&name_of(word)) || (!leading && globs(word)) {
+                return true;
+            }
+        }
     }
     let Some((index, name)) = command else {
         return false;
@@ -214,6 +246,11 @@ pub(super) fn sets_code_variable(
     if matches!(name, "set" | "setx") {
         return words[start..].iter().any(|word| names_in_any_case(word));
     }
+    // A nameref's target (`declare -n r="$x"`) is a name too.
+    let nameref = matches!(name, "declare" | "typeset" | "local")
+        && words[start..]
+            .iter()
+            .any(|word| word.starts_with('-') && !word.starts_with("--") && word.contains('n'));
     let redirect = |at: usize| {
         simple.stdin_from == Some(at)
             || simple.here_string == Some(at)
@@ -222,9 +259,27 @@ pub(super) fn sets_code_variable(
     // A name the classifier cannot see, or one in any case when it came
     // from a variable: a value given the uppercase attribute (`declare -u
     // n=pager; printf -v "$n"`) names `PAGER`.
+    // Declaration builtins do not glob their assignments (`declare
+    // a[0]=1`); other operands are globbed (`read PAGE[R]` with a file
+    // `PAGER`).
+    let declares = matches!(
+        name,
+        "declare" | "typeset" | "local" | "export" | "readonly" | "integer" | "float" | "private"
+    );
     let judged = |at: usize, name: &str| {
+        let raw_name = raw
+            .get(at)
+            .map(|word| if nameref { word.clone() } else { name_of(word) });
+        let globbed = globs(name)
+            && !(declares
+                && words
+                    .get(at)
+                    .is_some_and(|word| word.contains('=') && assignment_form(name)));
         !redirect(at)
-            && (dynamic(name) || (raw.get(at) != words.get(at) && names_in_any_case(name)))
+            && (expands(name)
+                || globbed
+                || raw_name.is_some_and(|raw_name| expands(&raw_name))
+                || (raw.get(at) != words.get(at) && names_in_any_case(name)))
     };
     // Options whose value is not a name (`read -p PROMPT`), and the one
     // whose value is (`read -a NAME`).
@@ -236,11 +291,6 @@ pub(super) fn sets_code_variable(
         _ if NAMING_BUILTINS.contains(&name) => ("", None),
         _ => return false,
     };
-    // A nameref's target (`declare -n r="$x"`) is a name too.
-    let nameref = matches!(name, "declare" | "typeset" | "local")
-        && words[start..]
-            .iter()
-            .any(|word| word.starts_with('-') && !word.starts_with("--") && word.contains('n'));
     let printf = name_flag == Some('v');
     let mut skip = false;
     let mut name_next = false;
@@ -292,6 +342,22 @@ pub(super) fn sets_code_variable(
     false
 }
 
+/// Whether `name` is a variable name, or one with a subscript
+/// (`a[i]`, `a[$i]`), as an assignment names it.
+fn assignment_form(name: &str) -> bool {
+    let name = name.strip_suffix('+').unwrap_or(name);
+    let base = match name.split_once('[') {
+        Some((base, subscript)) if subscript.ends_with(']') => base,
+        Some(_) => return false,
+        None => name,
+    };
+    let mut chars = base.chars();
+    chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && chars.all(is_name_char)
+}
+
 /// Whether a name operand, or a piece of it between `=` (a nameref's
 /// target), is a code variable in any case.
 fn names_in_any_case(operand: &str) -> bool {
@@ -311,7 +377,7 @@ fn names_in_any_case(operand: &str) -> bool {
 /// one of git's. Those lines are read to the end: a setting with a value
 /// (`-c k=v`; not `commit -c HEAD`) or a word holding an unseen value
 /// counts. Stops at the next `git` (#1102: each word is scanned once).
-pub(super) fn git_runs_code(args: &[String]) -> bool {
+pub(super) fn git_runs_code(args: &[String], raw: &[String]) -> bool {
     let unsafe_key = |setting: &str| {
         let key = setting
             .split_once('=')
@@ -322,7 +388,14 @@ pub(super) fn git_runs_code(args: &[String]) -> bool {
                 .iter()
                 .any(|prefix| key.starts_with(prefix)))
     };
-    let unseen = |word: &str| word.contains('$') || word.contains(shell::UNSEEN_OUTPUT);
+    let unseen_text = |word: &str| word.contains('$') || word.contains(shell::UNSEEN_OUTPUT);
+    // An expansion, as written too (a known value may be cut short: `a=(…)`,
+    // `export o='a b'`), or a glob (`-[c]` may name a file `-c`).
+    let unseen = |at: usize| {
+        args.get(at)
+            .is_some_and(|word| unseen_text(word) || word.contains(['*', '?', '[']))
+            || raw.get(at).is_some_and(|word| unseen_text(word))
+    };
     let is_git = |word: &str| shell::basename(word).eq_ignore_ascii_case("git");
     // Past the first word that is not an option: only settings with a
     // value, and unseen words, count.
@@ -334,14 +407,14 @@ pub(super) fn git_runs_code(args: &[String]) -> bool {
             return false;
         }
         let next = args.get(index + 1).map(String::as_str);
-        let setting = |value: &str| {
-            unsafe_key(value) && (!past_subcommand || value.contains('=') || unseen(value))
+        let setting = |value: &str, at: usize| {
+            unsafe_key(value) && (!past_subcommand || value.contains('=') || unseen(at))
         };
         if word == "-c" || word == "--config-env" {
             match next {
                 None => return !past_subcommand,
                 Some(value) if is_git(value) => return false,
-                Some(value) if setting(value) => return true,
+                Some(value) if setting(value, index + 1) => return true,
                 Some(_) => {}
             }
             index += 2;
@@ -352,8 +425,8 @@ pub(super) fn git_runs_code(args: &[String]) -> bool {
                 return true;
             }
         } else if word.starts_with("--exec-path=")
-            || unseen(word)
-            || (word.starts_with("-c") && !word.starts_with("--") && setting(&word[2..]))
+            || unseen(index)
+            || (word.starts_with("-c") && !word.starts_with("--") && setting(&word[2..], index))
         {
             return true;
         } else if !word.starts_with('-') && !past_subcommand {
@@ -373,7 +446,7 @@ pub(super) fn git_runs_code(args: &[String]) -> bool {
             if is_git(value) {
                 return false;
             }
-            if unseen(value) {
+            if unseen(index + 1) {
                 return true;
             }
             if !value.starts_with('-') {
@@ -519,8 +592,12 @@ mod tests {
             &["-p", "$o", "x"],
             &["-C", "$dir", "status"],
             &["-C", "d", "log", "\u{1}unseen-output\u{1}"],
+            // Review round 4: globs.
+            &["-[c]", "alias.x=!sh", "x"],
+            &["[-]c", "alias.x=!sh", "x"],
+            &["--exec-pat[h]=d", "x"],
         ] {
-            assert!(git_runs_code(&strings(args)), "{args:?}");
+            assert!(git_runs_code(&strings(args), &[]), "{args:?}");
         }
         for args in [
             &["log", "--oneline"][..],
@@ -536,7 +613,7 @@ mod tests {
             &["-C", "d", "commit", "-c", "HEAD"],
             &["-C", "d", "log", "-c"],
         ] {
-            assert!(!git_runs_code(&strings(args)), "{args:?}");
+            assert!(!git_runs_code(&strings(args), &[]), "{args:?}");
         }
     }
 }

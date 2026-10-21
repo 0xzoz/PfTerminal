@@ -3177,6 +3177,7 @@ fn issue_1141_output_files_are_written() {
         "sort -o ~/.zshrc list",
         "git config --file ~/.zshrc a.b '$(touch pwned)'",
         "git bundle create ~/.zshrc HEAD",
+        "printf 'protocol=x\\n' | git credential-store --file ~/.zshrc store",
         // Review round 1: a reading word as the value, chained `-C`.
         "git config --file ~/.zshenv 'x.$(touch pwned).y' get",
         "git config --comment --get -f ~/.zshenv 'x.$(touch pwned).y' z",
@@ -3261,6 +3262,21 @@ fn issue_1142_git_code_settings_are_unseen_code() {
         "o=\"-p -c alias.x=!id\"; git $o x",
         "set -a; printf -vGIT_TEST_FSMONITOR %s 'touch pwned'; git status",
         "read -rGIT_CONFIG_KEY_0 <<< core.pager",
+        // Review round 4: values the substitution cuts short, attached
+        // names with more after them, globs.
+        "o=(--bare -c 'alias.x=!id'); git \"${o[@]}\" x",
+        "export o='--bare -c alias.x=!id'; git $o x",
+        "a=(PAG); env \"${a[@]}ER=id\" git log",
+        "a=(HO); export \"${a[@]}ME=/tmp/e\"; git status",
+        "env -SPAGER=id git log",
+        "printf -vHOME[0] %s /tmp/e; git status",
+        "touch ./-c; git -[c] 'alias.x=!id' x",
+        "git [-]c 'alias.x=!id' x",
+        "git --exec-pat[h]=d x",
+        "touch PAGER=id; env PAG?R=* git log",
+        "touch PAGER; read PAGE[R] <<< id; git log",
+        "alias git='git -c core.pager=id'",
+        "alias -g g='git -c alias.x=!id x'",
     ] {
         assert_eq!(script(command), unseen, "{command}");
     }
@@ -3284,6 +3300,9 @@ fn issue_1142_git_code_settings_are_unseen_code() {
         "echo ${(U)name} ${(L)x}; git status",
         "git commit -m \"$msg\" && git log -c HEAD",
         "git -C sub commit -c HEAD",
+        "cmake -DCMAKE_INSTALL_PREFIX=$HOME/.local -DPAGER_DOCS=OFF .",
+        "a[1]=x b+=y git status; declare -a c; c[0]=1; declare d[1]=2",
+        "alias gs='git status' gl='git log --oneline'",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
