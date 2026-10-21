@@ -209,7 +209,9 @@ pub(super) fn read(text: &str) -> Result<Reading, Refusal> {
                     node.kind(),
                     "string" | "heredoc_body" | "arithmetic_expansion" | "expansion" | "subscript"
                 )
-                || (node.kind() == "test_command" && walk.source(node).starts_with("((")));
+                // A `(( ... ))` statement (a compound statement to the
+                // grammar).
+                || (node.kind() == "compound_statement" && walk.source(node).starts_with("((")));
         let in_test = !fresh && (in_test || node.kind() == "test_command");
         let mut cursor = node.walk();
         children.clear();
@@ -343,7 +345,8 @@ impl<'a> Walk<'a> {
         // One token for text the shells split: blanks or operators outside
         // quotes, a body, a comment or `${...}` (`echo == x; rm y` makes
         // `x; rm y` one pattern token to the grammar). In a test a pattern
-        // may hold blanks, `|` and parentheses, but not `;`, `&`, `<`, `>`.
+        // may hold blanks and `|` only inside parentheses outside quotes
+        // (bash's rule for `=~`); the grammar also counts quoted ones.
         if node.is_named()
             && !expanding
             && !matches!(
@@ -357,10 +360,11 @@ impl<'a> Walk<'a> {
                     | "heredoc_start"
                     | "heredoc_end"
             )
-            && splits(
-                self.source(node),
-                if in_test { ";&<>" } else { " \t\n;&|<>()" },
-            )
+            && if in_test {
+                splits_in_test(self.source(node))
+            } else {
+                splits(self.source(node), " \t\n;&|<>()")
+            }
         {
             self.refuse(Refusal::Words);
         }
@@ -541,9 +545,19 @@ impl<'a> Walk<'a> {
         if kind == "variable_assignment"
             && node
                 .child_by_field_name("name")
-                .is_some_and(|name| matches!(self.source(name), "SHELLOPTS" | "BASHOPTS"))
+                .is_some_and(|name| option_variable(self.source(name)))
         {
             self.refuse(Refusal::Reparse);
+        }
+        // `{echo,hi}` is a brace expansion to the shells, a block to the
+        // grammar.
+        if kind == "compound_statement"
+            && self
+                .source(node)
+                .strip_prefix('{')
+                .is_some_and(|rest| !rest.starts_with(char::is_whitespace))
+        {
+            self.refuse(Refusal::Words);
         }
         // `[ a > b ]` redirects to `b`; the grammar reads a comparison.
         if kind == "test_command" {
@@ -700,9 +714,17 @@ impl<'a> Walk<'a> {
         }
         // `set -k` makes later `name=value` arguments assignments, `set -o
         // posix` turns on aliases: only harmless options are read.
-        let wrapped = words
-            .iter()
-            .position(|word| !matches!(word.text.as_str(), "builtin" | "command"));
+        let wrapped = words.iter().position(|word| {
+            !matches!(
+                word.text.as_str(),
+                "builtin" | "command" | "noglob" | "nocorrect" | "-" | "time"
+            )
+        });
+        // A name spelled through an expansion behind a wrapper
+        // (`command $c -s expand_aliases`).
+        if kind == "command" && wrapped.is_some_and(|at| at > 0 && words[at].dynamic) {
+            self.refuse(Refusal::Reparse);
+        }
         if kind == "command"
             && let Some(at) = wrapped
             && words[at].text == "set"
@@ -711,10 +733,7 @@ impl<'a> Walk<'a> {
             self.refuse(Refusal::Reparse);
         }
         // Variables that set the options of shells started from this line.
-        if words
-            .iter()
-            .any(|word| word.text.starts_with("SHELLOPTS=") || word.text.starts_with("BASHOPTS="))
-        {
+        if words.iter().any(|word| option_variable(&word.text)) {
             self.refuse(Refusal::Reparse);
         }
         self.zsh_unsure |= words
@@ -774,6 +793,8 @@ impl<'a> Walk<'a> {
                     joined.dynamic |= part.dynamic;
                     joined.data &= part.data;
                 }
+                // Braces across parts may still expand (`{a,"b"}`).
+                joined.dynamic |= source.contains('{') && source.contains('}');
                 joined
             }
             "command_substitution" | "process_substitution" => Word {
@@ -819,8 +840,9 @@ impl<'a> Walk<'a> {
         Word {
             text,
             // A `$` the grammar left in a word (`$a$b` may come as `$a`,
-            // `$`, `b`) may still expand.
-            dynamic: source.contains('$'),
+            // `$`, `b`) may still expand, and braces may expand into
+            // several words (`{alias,ls=x}`).
+            dynamic: source.contains('$') || (source.contains('{') && source.contains('}')),
             data,
         }
     }
@@ -867,7 +889,7 @@ fn literal(text: &str) -> Word {
 /// hold an expansion or a substitution (copying nested ones whole at every
 /// level would take work quadratic in their depth).
 fn unknown(source: &str) -> Word {
-    if source.contains(['$', '`', '(']) {
+    if source.contains(['$', '`', '(', '{']) {
         return expanded();
     }
     Word {
@@ -887,6 +909,35 @@ fn splits(text: &str, separators: &str) -> bool {
             chars.next();
         } else if separators.contains(ch) {
             return true;
+        }
+    }
+    false
+}
+
+/// Whether a test's token holds, outside quotes and backslash escapes, a
+/// `;&<>` or `]]`, or a blank or `|` outside parentheses.
+fn splits_in_test(text: &str) -> bool {
+    let mut chars = text.chars().peekable();
+    let mut quote = None;
+    let mut depth = 0usize;
+    while let Some(ch) = chars.next() {
+        work::step();
+        match (quote, ch) {
+            (Some(open), ch) if ch == open => quote = None,
+            (Some('"'), '\\') => {
+                chars.next();
+            }
+            (Some(_), _) => {}
+            (None, '\\') => {
+                chars.next();
+            }
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, '(') => depth += 1,
+            (None, ')') => depth = depth.saturating_sub(1),
+            (None, ';' | '&' | '<' | '>') => return true,
+            (None, ']') if chars.peek() == Some(&']') => return true,
+            (None, ch) if depth == 0 && (ch.is_whitespace() || ch == '|') => return true,
+            _ => {}
         }
     }
     false
@@ -924,6 +975,18 @@ fn harmless_set(args: &[Word]) -> bool {
         option_name = flags.ends_with('o');
     }
     !option_name
+}
+
+/// Whether `word` names (or assigns) a variable that changes how this or a
+/// later shell reads text or which command a name runs: `SHELLOPTS`,
+/// `BASHOPTS`, `POSIXLY_CORRECT` (posix mode turns on aliases),
+/// `BASH_ALIASES`, `BASH_CMDS`.
+fn option_variable(word: &str) -> bool {
+    let name = word.split(['=', '[', '+']).next().unwrap_or_default();
+    matches!(
+        name,
+        "SHELLOPTS" | "BASHOPTS" | "POSIXLY_CORRECT" | "BASH_ALIASES" | "BASH_CMDS"
+    )
 }
 
 /// The text of a word's expansion, whose value is not known.

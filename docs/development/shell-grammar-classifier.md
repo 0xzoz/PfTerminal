@@ -53,8 +53,8 @@ is marked:
 | `LineContinuation` | A backslash-newline. The shells join the lines before splitting words; the grammar ends a word there. |
 | `HereDocuments` | More than 8 here-documents, or a delimiter longer than 64 bytes: the grammar's scanner keeps pending here-documents in at most 1024 bytes of state and silently forgets them all past that. Also any here-document the scanner may end elsewhere than the shells: a delimiter other than plain characters or one whole quoted word, a body not on the line after its operator (one per line), an end that is not exactly the delimiter on its own line (tabs only for `<<-`), a body line equal to the delimiter before that end, expansions in a quoted body, and a backquote, backslash or unparsed expansion in an unquoted body. |
 | `ParseBudget` / `Syntax` | The parse stops at the first error that every parse in progress has met (error recovery can be quadratic), or after `bytes/2 + 64` progress checks. Any `ERROR` or `MISSING` node also refuses. So do constructs the grammar accepts and bash rejects: `;;` outside `case`, a redirection whose word is on the next line, `f(x)`, and a function body that is not a compound command. |
-| `Words` | The grammar's words may not be the shells': a reserved word as a command's name (`done x`, `coproc cmd`, `} x`), an "assignment" with an invalid name (`--x=1 cmd`), `[v]` read as a test, blanks or operators inside a word token, a comment starting inside a word, a word glued to a redirection's word, a redirection the grammar gives more than one word (`rm >/dev/null -rf x` runs `rm -rf x`; `>&-` takes none), words after a here-document's delimiter, `{fd}>f`, a non-blank character that is in no token (`\ ` before a word), a token holding blanks or operators the shells split on (`echo == x; rm y` makes `x; rm y` one pattern token; in a test only `;&<>` count), `[ a > b ]` (a redirection to bash), or a token that holds an expansion the grammar did not parse (`${x#$(cmd)}` makes `$(cmd)` one pattern token), single-quoted text included where the shells treat quotes as ordinary characters (inside double quotes, a here-document body, arithmetic or `${...}`). |
-| `Reparse` | A command that may change how the shells read the lines after it: `alias`, `shopt`, `setopt`, `emulate`, ... named anywhere in a command (so `builtin alias` counts), `set` with any option but `-e -u -x -v`, `-o errexit/nounset/xtrace/verbose/pipefail` and `--` (`set -k` makes later `name=value` arguments assignments, `set -o posix` turns on aliases), `SHELLOPTS`/`BASHOPTS` set for a shell started from the line, or a command name spelled through an expansion. |
+| `Words` | The grammar's words may not be the shells': a reserved word as a command's name (`done x`, `coproc cmd`, `} x`), an "assignment" with an invalid name (`--x=1 cmd`), `[v]` read as a test, blanks or operators inside a word token, a comment starting inside a word, a word glued to a redirection's word, a redirection the grammar gives more than one word (`rm >/dev/null -rf x` runs `rm -rf x`; `>&-` takes none), words after a here-document's delimiter, `{fd}>f`, a non-blank character that is in no token (`\ ` before a word), a token holding blanks or operators the shells split on (`echo == x; rm y` makes `x; rm y` one pattern token; in a test, blanks and `|` count outside parentheses and quotes, as bash reads `=~`), `{echo,hi}` read as a block, `[ a > b ]` (a redirection to bash), or a token that holds an expansion the grammar did not parse (`${x#$(cmd)}` makes `$(cmd)` one pattern token), single-quoted text included where the shells treat quotes as ordinary characters (inside double quotes, a here-document body, arithmetic or `${...}`). |
+| `Reparse` | A command that may change how the shells read the lines after it: `alias`, `shopt`, `setopt`, `emulate`, ... named anywhere in a command (so `builtin alias` counts), `set` with any option but `-e -u -x -v`, `-o errexit/nounset/xtrace/verbose/pipefail` and `--` (`set -k` makes later `name=value` arguments assignments, `set -o posix` turns on aliases), `SHELLOPTS`, `BASHOPTS`, `POSIXLY_CORRECT`, `BASH_ALIASES` or `BASH_CMDS` named or assigned, or a command name spelled through an expansion or braces (behind `command`/`builtin` too). |
 | `Unsupported` | Extended glob patterns, which bash rejects without `shopt -s extglob`. |
 | `TooDeep` | Syntax nodes nested deeper than 512. |
 
@@ -105,11 +105,11 @@ readers agree on the commands. A refusal leaves today's behaviour unchanged.
 
 ## Phase 1 results (harness, macOS, bash 3.2, zsh 5.9, dash)
 
-These are from 5446 distinct texts (2595 test literals, 63 corpus lines and
+These are from 5460 distinct texts (2607 test literals, 65 corpus lines and
 2788 generated), after the fail-closed rules above.
 
-- **Agree:** 1807 of the test literals and 32 of the corpus lines.
-- **Commands differ, reader finds more:** 188 test literals. These are
+- **Agree:** 1796 of the test literals and 32 of the corpus lines.
+- **Commands differ, reader finds more:** 187 test literals. These are
   mostly arithmetic and subscript text that `quoted.rs` reads as commands on
   purpose (#937), and `[[ ... =~ (re) ]]` patterns.
 - **Grammar finds commands the reader misses:** 2 test literals.
@@ -131,6 +131,18 @@ These are from 5446 distinct texts (2595 test literals, 63 corpus lines and
   commands keep today's rules.
 - `time cmd` is read as a command named `time` (bash's keyword). Treat it as
   a wrapper, as the classifier does today.
+- Strings that run later (`eval '...'`, `trap '...' DEBUG`, `source`/`.`
+  files) can change how later lines are read (`eval 'shopt -s
+  expand_aliases'`). Phase 3 must refuse a line whenever a nested reading
+  of such a string refuses.
+- Some commands change which program a data name runs without changing how
+  text is read: `hash -p`, `BASH_CMDS`, `PATH=`, functions. Arithmetic
+  operands (`let`, `[[ ... -eq ... ]]`) are evaluated too. Today's rules
+  for these stay.
+- Some checks are not counted by `work.rs`: substring scans of a node's
+  text at each nesting level, the scanner's look-ahead, and the token sort.
+  All are bounded by the 4 KiB cap (a few million character steps at
+  most).
 - A nested shell's reading depends on its environment as well as its text
   (`ENV`, `BASH_ENV`, `ZDOTDIR`, startup files); the classifier's existing
   rules for those stay.

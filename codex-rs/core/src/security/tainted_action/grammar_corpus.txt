@@ -68,3 +68,17 @@ xargs sh -c 'id' < f
 sudo -u root sh -c 'id'
 ssh host 'id'
 echo a\tb
+# From the #1183 reviews (rounds 1-4).
+cat <<'EOF'\nEOF; cat <<'Z'\nEOF\necho x\nZ\n
+cat <<E"O"F\nx\nEOF\necho x\nE"O"F\n
+x=a; echo ${x#$(echo x)}
+rm >/dev/null -rf ~/x
+cat <<EOF\n${x:-'$(id)'}\nEOF\n
+(echo == x; rm -rf ~)
+set -k; git fetch origin X=y
+[[ x =~ '([['a ]] || echo x '' ]]
+(( '$(id)' ))
+command {shopt,-s,expand_aliases}\ncommand {alias,ls=echo\ x}\nls /
+c=shopt; command $c -s expand_aliases
+POSIXLY_CORRECT=1\nBASH_ALIASES[ls]='rm x'\nls
+{echo,hi}\n}

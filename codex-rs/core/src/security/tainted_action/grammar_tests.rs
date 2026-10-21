@@ -261,6 +261,7 @@ fn words_a_redirection_or_a_quote_would_hide_are_refused() {
         "echo \"${x:-'$(id)'}\"",
         "cat <<EOF\n${x:-'$(id)'}\nEOF\n",
         "echo $(( '$(id)' ))",
+        "(( '$(id)' ))",
         // A variable to hold a descriptor.
         "echo {x}>f",
     ] {
@@ -292,11 +293,15 @@ fn tokens_the_shells_split_are_refused() {
         "[ a > b ]",
         "[ x == a; rm -rf ~ ]",
         "[[ x =~ a&&b ]]",
+        "[[ x =~ '([['a ]] || echo x '' ]]",
+        "[[ x =~ '('a\n]] || echo x ]]",
+        "{echo,hi}\n}",
     ] {
         assert!(read(text).is_err(), "{text:?}");
     }
     // Blanks inside a test's pattern or `${...}` are the shells' too.
     assert!(read("[[ $x =~ a\\ b ]] && echo ${x/ /_}").is_ok());
+    assert!(read("[[ $x =~ ^(a|b c)$ ]] && [[ $y == 'p q' ]]").is_ok());
     // Only a C-style `for`'s header is arithmetic.
     assert!(read("for ((i=0; i<2; i++)); do echo '$x'; done").is_ok());
 }
@@ -318,6 +323,13 @@ fn set_is_read_only_with_harmless_options() {
         "set -o",
         "SHELLOPTS=keyword bash -c x",
         "env BASHOPTS=expand_aliases bash -c x",
+        "POSIXLY_CORRECT=1",
+        "export POSIXLY_CORRECT",
+        "BASH_ALIASES[ls]='rm x'",
+        "BASH_CMDS[ls]=/bin/rm",
+        "command {shopt,-s,expand_aliases}",
+        "command {alias,ls=echo\\ x}",
+        "c=shopt; command $c -s expand_aliases",
     ] {
         assert_eq!(read(text).err(), Some(Refusal::Reparse), "{text:?}");
     }
