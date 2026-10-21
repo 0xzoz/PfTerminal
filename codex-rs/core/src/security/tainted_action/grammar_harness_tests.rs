@@ -15,6 +15,8 @@
 use super::Refusal;
 use super::read;
 use crate::security::tainted_action::quoted;
+use crate::security::tainted_action::shadow;
+use crate::security::tainted_action::shadow::Comparison;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -293,87 +295,6 @@ fn all_cases() -> Vec<(&'static str, String)> {
     cases
 }
 
-const RESERVED: &[&str] = &[
-    "!", "{", "}", "(", ")", "if", "then", "else", "elif", "fi", "do", "done", "while", "until",
-    "time", "esac",
-];
-
-/// The hand-written reader's commands as sorted names (an expansion is
-/// `$`), or why the classifier treats the text as unreadable.
-fn reader_names(text: &str) -> Result<Vec<String>, &'static str> {
-    let reading = quoted::commands(text);
-    if reading.too_deep {
-        return Err("too deep");
-    }
-    if reading.unsure {
-        return Err("unsure");
-    }
-    if reading.unterminated {
-        return Err("unterminated");
-    }
-    let mut names = Vec::new();
-    for command in &reading.commands {
-        let first = command.words.iter().find(|word| {
-            !(is_assignment(&word.text) || (!word.quoted && RESERVED.contains(&word.text.as_str())))
-        });
-        let Some(first) = first else { continue };
-        if !first.quoted && matches!(first.text.as_str(), "for" | "select" | "case" | "function") {
-            continue;
-        }
-        names.push(if first.dynamic {
-            "$".to_string()
-        } else {
-            first.text.clone()
-        });
-    }
-    names.sort();
-    Ok(names)
-}
-
-fn is_assignment(word: &str) -> bool {
-    let name = word.split(['=', '[', '+']).next().unwrap_or_default();
-    word.len() > name.len()
-        && word[name.len()..].contains('=')
-        && name
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_alphabetic() || ch == '_')
-        && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_')
-}
-
-fn grammar_names(text: &str) -> Result<(Vec<String>, bool), Refusal> {
-    let reading = read(text)?;
-    let mut names: Vec<String> = reading
-        .commands
-        .iter()
-        .filter_map(|command| command.words.first())
-        .map(|name| {
-            if name.dynamic {
-                "$".to_string()
-            } else {
-                name.text.clone()
-            }
-        })
-        .collect();
-    names.sort();
-    Ok((names, reading.zsh_unsure))
-}
-
-/// The names in `from` (sorted, with repeats) that `other` lacks.
-fn missing(from: &[String], other: &[String]) -> Vec<String> {
-    let mut left = other.to_vec();
-    let mut lacking = Vec::new();
-    for name in from {
-        match left.iter().position(|other| other == name) {
-            Some(at) => {
-                left.remove(at);
-            }
-            None => lacking.push(name.clone()),
-        }
-    }
-    lacking
-}
-
 /// Whether `shell` reads `text` without a syntax error (`-n`: nothing runs).
 fn shell_accepts(shell: &str, flags: &[&str], text: &str) -> bool {
     Command::new(shell)
@@ -393,10 +314,6 @@ fn escaped(text: &str) -> String {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "the corpus is POSIX shell text; the grammar is the same on Windows"
-)]
 fn grammar_and_reader_differential() {
     let cases = all_cases();
     assert!(cases.len() > 2000, "corpus too small: {}", cases.len());
@@ -413,28 +330,34 @@ fn grammar_and_reader_differential() {
     let mut report = String::new();
     let mut max_checks_per_byte = 0.0f64;
     for (origin, text) in &cases {
-        let reader = reader_names(text);
-        let grammar = grammar_names(text);
+        let reading = quoted::commands(text);
+        let mut unlimited = usize::MAX;
+        let (comparison, _) = shadow::compare(text, &reading, &mut unlimited);
+        let reader = shadow::reader_names(&reading);
+        let grammar =
+            read(text).map(|grammar| (shadow::grammar_names(&grammar), grammar.zsh_unsure));
         if let Ok(reading) = read(text) {
             max_checks_per_byte =
                 max_checks_per_byte.max(reading.parse_checks as f64 / text.len() as f64);
         }
-        let category = match (&reader, &grammar) {
-            (Ok(reader), Ok((grammar, _))) if reader == grammar => "agree".to_string(),
-            (Ok(reader), Ok((grammar, _))) => {
-                let only_reader = missing(reader, grammar);
-                let only_grammar = missing(grammar, reader);
-                match (only_reader.is_empty(), only_grammar.is_empty()) {
-                    (false, true) => "commands differ: reader finds more".to_string(),
-                    (true, false) => "commands differ: grammar finds more".to_string(),
-                    _ => "commands differ: each finds some the other does not".to_string(),
-                }
-            }
-            (Ok(_), Err(refusal)) => format!("grammar refuses ({refusal:?})"),
-            (Err(why), Ok(_)) => format!("reader unreadable ({why}), grammar reads"),
-            (Err(_), Err(_)) => "both refuse".to_string(),
-        };
+        let category = format!("{comparison:?}");
         let zsh = matches!(grammar, Ok((_, true)));
+        // Phase 3: lines whose zsh-only checks no longer ask under zsh.
+        let proves = crate::security::tainted_action::named_shell::grammar_proves_data(&[
+            "/bin/zsh".to_string(),
+            "-lc".to_string(),
+            text.clone(),
+        ]);
+        if proves {
+            *counts
+                .entry(format!("{origin}: phase 3 proves data under zsh"))
+                .or_default() += 1;
+            let _ = writeln!(
+                report,
+                "{origin}\tphase 3 proves data\t\t\t\t{}",
+                escaped(text)
+            );
+        }
         *counts.entry(format!("{origin}: {category}")).or_default() += 1;
         if zsh {
             *counts.entry(format!("{origin}: zsh-unsure")).or_default() += 1;
@@ -462,7 +385,7 @@ fn grammar_and_reader_differential() {
                 .entry(format!("{origin}: {shell_category}"))
                 .or_default() += 1;
         }
-        if category != "agree" || shell_category.is_some() {
+        if comparison != Comparison::Agree || shell_category.is_some() {
             let _ = writeln!(
                 report,
                 "{origin}\t{category}\t{}\treader={reader:?}\tgrammar={grammar:?}\t{}",
