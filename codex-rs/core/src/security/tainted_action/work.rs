@@ -143,6 +143,7 @@ mod tests {
     const SOURCES: &[(&str, &str)] = &[
         ("tainted_action.rs", include_str!("../tainted_action.rs")),
         ("arithmetic.rs", include_str!("arithmetic.rs")),
+        ("git_config.rs", include_str!("git_config.rs")),
         ("indirect.rs", include_str!("indirect.rs")),
         ("invocation.rs", include_str!("invocation.rs")),
         ("nested.rs", include_str!("nested.rs")),

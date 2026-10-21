@@ -29,6 +29,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 mod arithmetic;
+mod git_config;
 mod indirect;
 mod invocation;
 mod nested;
@@ -1015,6 +1016,12 @@ impl Classifier {
         }
         if let Some((index, name)) = &command {
             let args = &words[index + 1..];
+            if name == "git"
+                && !git_config::inspection_only_prefix(&words[..*index])
+                && git_config::writes_code_setting(args)
+            {
+                self.note(ProtectedActionKind::Persistence);
+            }
             // Code named by a variable or substitution the classifier cannot
             // see: the command word (`$X`, `bash -c "$X"`), an interpreter's
             // inline code (`python3 -c "$X"`) or `eval "$x"`.
