@@ -74,8 +74,9 @@ Do not mark work complete while required evidence is missing.
 
 Corbanu Terminal is licensed under [Apache-2.0](license.md), and contributions
 come in under the same licence: anything you submit for inclusion is licensed
-under Apache-2.0, as section 5 of the licence says. There is no contributor
-licence agreement (CLA) to sign, and a DCO `Signed-off-by` line is not required.
+under Apache-2.0 unless you explicitly say otherwise (section 5 of the
+licence). There is no contributor licence agreement (CLA) to sign, and a DCO
+`Signed-off-by` line is not required.
 
 ## Security reports
 
