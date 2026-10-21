@@ -2,8 +2,8 @@
 # one fresh Tart clone per group (six groups, plus T09 for D141). Build 9750861c2a on both machines.
 
 Both machines use utm-par2's guest harness (../harness/: every guest file of
-../../moderate-utm-samebuild-20261021/harness/, byte for byte, except agms_mediator.py, which also logs MOD-21 task flags;
-fixture.tar by SHA-256), one stage (the same package and packet v4d for every group), and the same network path (guest
+../../moderate-utm-samebuild-20261021/harness/, byte for byte, except agms_mediator.py, which also logs MOD-21 task flags,
+and expected.json, which make_stage.sh writes with this build's SHA-256; fixture.tar by SHA-256), one stage (the same package and packet v4d for every group), and the same network path (guest
 mediator -> one SSH reverse tunnel bound to the guest's loopback -> host relay on 127.0.0.1:11237 that adds the Z.AI key
 on the host). No real key was placed in any guest. Freeze: design/FROZEN.sha256, pushed as 487307d944 at
 2026-10-21T17:50:39Z, before "macOS 3" was started (17:51:14Z); no frozen file changed after it. The amendment v9 freeze

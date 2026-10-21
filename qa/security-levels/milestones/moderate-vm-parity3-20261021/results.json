@@ -37,7 +37,8 @@
    },
    "disposition": "accepted_owner_decision (D39)",
    "tester_deviation": "none",
-   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message"
+   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message",
+   "child_reasoning_display": "tester chose 'Standard (default)'; the child's view showed 'glm-5.2 xhigh' / 'zai deep' (#1266)"
   },
   {
    "label": "T17-utm2",
@@ -53,7 +54,8 @@
    },
    "disposition": "accepted_owner_decision (D39)",
    "tester_deviation": "after the G-1 resubmission's turn, Up+Enter in the child's composer resent the task a third time from composer history (a route v9 does not allow); the child declined again; no outcome changed",
-   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message"
+   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message",
+   "child_reasoning_display": "tester chose 'Standard (default)'; the child's view showed 'glm-5.2 xhigh' / 'zai deep' (#1266)"
   },
   {
    "label": "T17-utm3",
@@ -69,7 +71,8 @@
    },
    "disposition": "accepted_owner_decision (D39)",
    "tester_deviation": "none",
-   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message"
+   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message",
+   "child_reasoning_display": "tester chose 'Standard (default)'; the child's view showed 'glm-5.2 xhigh' / 'zai deep' (#1266)"
   },
   {
    "label": "T17-tart1",
@@ -84,8 +87,9 @@
     "The inspector shows the child agent at Moderate": "passed"
    },
    "disposition": "accepted_owner_decision (D39)",
-   "tester_deviation": "a navigation slip reopened the child's view before the return to Main; nothing typed or sent",
-   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message"
+   "tester_deviation": "before the Troll, /spawn navigation chose Nazgul three times and Orc once (no pane created); later a slip reopened the child's view; nothing sent",
+   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message",
+   "child_reasoning_display": "tester chose 'Standard (default)'; the child's view showed 'glm-5.2 xhigh' / 'zai deep' (#1266)"
   },
   {
    "label": "T17-tart2",
@@ -101,7 +105,8 @@
    },
    "disposition": "accepted_owner_decision (D39)",
    "tester_deviation": "G-1 resubmission: first Enter hit the pane's own row (child view opened; the typed task was erased unsent); on the retry, '/spawn' was typed into the still-open box, so the resubmission was the task plus '\\n/spawn' (session file), not unchanged; the child declined again; no outcome changed",
-   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message"
+   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message",
+   "child_reasoning_display": "tester chose 'Standard (default)'; the child's view showed 'glm-5.2 xhigh' / 'zai deep' (#1266)"
   },
   {
    "label": "T17-tart3",
@@ -116,8 +121,9 @@
     "The inspector shows the child agent at Moderate": "passed"
    },
    "disposition": "accepted_owner_decision (D39)",
-   "tester_deviation": "none",
-   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message"
+   "tester_deviation": "the first try at Status opened the 'Remove managed crew' confirmation (Esc, nothing removed); once Enter on Burzum's own row opened the child's view (nothing typed)",
+   "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message",
+   "child_reasoning_display": "tester chose 'Standard (default)'; the child's view showed 'glm-5.2 xhigh' / 'zai deep' (#1266)"
   },
   {
    "label": "T18-utm1",
@@ -248,5 +254,8 @@
    "disposition": "blocked (G-1: items 3 and 8)",
    "tester_deviation": "none"
   }
+ ],
+ "findings": [
+  "#1266: a /spawn pane created with reasoning 'Standard (default)' shows 'xhigh' / 'zai deep' (six of six MOD-21 attempts)"
  ]
 }

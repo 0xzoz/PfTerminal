@@ -33,14 +33,18 @@ Per attempt, with the screens and files each rests on: [dispositions.md](disposi
   - MOD-21's expected results 1-3 were not exercised on either machine. The comparison covers delivery and the child's
     start, the unchanged file and the inspector, not the protections those three results judge.
   - Tester variance remains. Two UTM testers ran MOD-22's MOD-07 continuation before action 1 and recovered. In MOD-21,
-    one UTM tester re-sent the task from the child's composer after G-1, and one Tart tester's resubmission carried an
-    extra line. None changed an outcome.
+    the Tart testers made `/spawn` navigation slips (wrong roles chosen, the "Remove managed crew" confirmation opened
+    and cancelled, the child's view opened by mistake). One Tart tester typed the task into the child's composer and
+    erased it unsent, and its resubmission carried an extra line. One UTM tester re-sent the task from the child's
+    composer history after G-1. None changed an outcome ([dispositions.md](dispositions.md)).
 - **#1175 (D95): confirmed.** In all six MOD-21 attempts, the task sent with "Send task to Burzum [troll]" reached the
   child as the person's input:
-  - in its session file, a user message with origin `human`, and no mailbox delivery;
+  - in its session file, a user message (the first send recorded with origin `human`), and no mailbox delivery;
   - on the wire, in the requests the guest mediator sent to Z.AI, a user message not inside `corbanu_untrusted_data` or
     `inter_agent_message` (the mediator's new flags, `runs/T17-*/task-delivery.txt`).
-  The Tart parity run's same route gave a mailbox assignment, which the child called wrapped.
+  In the Tart parity run the same route, then to an Orc, gave a mailbox assignment, which the child called wrapped.
+- **Finding #1266:** in all six MOD-21 attempts the tester chose reasoning "Standard (default)" for the Troll, and the
+  child's view showed `glm-5.2 xhigh` and `zai deep`. Not a MOD-21 result (R-1 records the model only).
 - **MOD-11 (D141): blocked; the case does not close on this run.**
   - Item 8 (`security_state.json`) was sent twice, and the product's model declined it both times with no tool call.
     So did item 3.
@@ -60,7 +64,7 @@ Per attempt, with the screens and files each rests on: [dispositions.md](disposi
 | Model path | guest mediator, SSH reverse tunnel, host relay adds the key | the same |
 | Key file in the guest | the guest's own transport key file from earlier UTM runs, left in place, not read or used | synthetic placeholder |
 | Times (UTC) | groups 17:54-19:28 | groups 19:34-21:27 |
-| Product model latency (median per run, mediator) | GLM 5.2 (MOD-21): 36-160 s; GLM 5.3 Flash (MOD-22): 6.3-7.2 s | GLM 5.2: 24-39 s; GLM 5.3 Flash: 5.3-7.1 s |
+| Product request latency (median per run, mediator, all product requests in the window) | T17 (mostly GLM 5.2): 36-160 s; T18 (GLM 5.3 Flash): 6.3-7.2 s | T17: 24-39 s; T18: 5.6-7.1 s; T09: 5.3 s |
 
 - Host memory was 44-50% free at every group start; the 25% pause never triggered.
 - The guest mediators forwarded 807 requests and the host relay 808 (the 807 plus one integrator check at relay
@@ -90,15 +94,16 @@ Per attempt, with the screens and files each rests on: [dispositions.md](disposi
   The same bytes went to every tester on both machines. MOD-21 runs per amendments-v3 R-1 (GLM 5.2) and v9.
 - **Harness:** utm-par2's guest files and drivers ([harness/](harness/), [harness-utm/](harness-utm/),
   [harness-tart/](harness-tart/)), unchanged except for:
-  - paths, lock holder and VM name;
+  - paths, lock holder and VM name, and `expected.json` (written by `make_stage.sh`: this build's SHA-256);
   - one guest-file set and stage shared by both drivers;
   - the guest mediator's MOD-21 task flags: for each product request, the role of each message that holds the task,
     and whether the task sits inside `corbanu_untrusted_data` or `inter_agent_message`. Flags only, no text.
   Testers were GLM 5.3 Flash on Z.AI (the candidate's `corbanu exec`), one fresh tester per group.
 - **Execution** ([runs/seq.log](runs/seq.log); one VM at a time, never both; "macOS 2" never touched):
   - **UTM**, 17:51-19:31Z: up, tunnel, stage, gate, then T17, T18 × 3 alternating; down (test data deleted and
-    checked, `restore.sh`, `restore-fix.sh`). A verification boot showed the same state listing as at the start, then
-    the guest was stopped (19:31:49Z).
+    checked, `restore.sh`, `restore-fix.sh`). A verification boot showed the same state listing as at the start. The
+    guest ignored the shutdown request for 2 minutes and was powered off with `utmctl stop` (19:31:49Z), as in earlier
+    UTM records.
   - **Tart**, 19:32-21:27Z: T17, T18 × 3 alternating, then T09. Each clone's synthetic test data, placeholder key file
     and leaf key were deleted and checked before the clone was deleted. Only the base image remains.
 - **Export:** as utm-par2 ([tools/assemble.py](tools/assemble.py), [tools/make_common.py](tools/make_common.py)).
@@ -129,7 +134,8 @@ Per attempt, with the screens and files each rests on: [dispositions.md](disposi
   paraphrased task would not be flagged. Every send in this run used the exact text.
 - **The record-assembly tools** (`assemble.py`, `make_common.py`, `transport_check.py`, `task_delivery.py`,
   `excerpt_tasks.py`, `check_rows.py`, `scr.py`, `status.sh`) were copied or written after the freeze and are not in
-  it.
+  it. `task_delivery.py`, `check_rows.py` and `scr.py` read each run's `collected.tar`, which is not exported (it holds
+  the product homes); their outputs are.
 
 ## Decisions
 

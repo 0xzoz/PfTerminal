@@ -29,8 +29,9 @@ that use it are in [../moderate-vm-parity3-20261021/](../moderate-vm-parity3-202
     v2, v3, v4, v6 and v7 (the files of the tester packet v4c,
     [../moderate-utm-samebuild-20261021/executor-packet/v4c/](../moderate-utm-samebuild-20261021/executor-packet/v4c/)),
     the decision, the scope, the test-machine description, and text copies of the `/spawn` and Spawn status screens
-    from two earlier MOD-21 runs on build `8c73c8ea80` ([design/designer-packet/](design/designer-packet/); one screen
-    with the agent's reply removed, one dropped because it showed an earlier result). The copied inputs are listed by
+    from two earlier MOD-21 runs on build `8c73c8ea80` ([design/designer-packet/](design/designer-packet/)). One screen
+    was dropped because it showed an earlier result. Another (S17) keeps the product's approval prompt for MOD-21's
+    outside write from an earlier run, with the agent's reply removed. The copied inputs are listed by
     SHA-256 in [design/designer-packet.sha256](design/designer-packet.sha256).
   - Reviewer: a separate fresh read-only reviewer, given three more test-machine facts
     ([design/review-packet/tools.md](design/review-packet/tools.md)), answered `VERDICT: CHANGES`. Its final version is
