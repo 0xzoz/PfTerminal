@@ -56,6 +56,10 @@ use tracing::Level;
 use tracing_test::internal::MockWriter;
 use wiremock::MockServer;
 
+/// #349: how long a test waits for something that must happen (a request,
+/// a status, a rollout line). Generous so a loaded runner can't fail a wait
+/// that succeeds a moment later; a passing wait returns as soon as it holds.
+const POSITIVE_WAIT: Duration = Duration::from_secs(20);
 const SPAWN_CALL_ID: &str = "spawn-call-1";
 const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
 const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
@@ -334,7 +338,7 @@ async fn wait_for_hook_log(
     filename: &str,
     expected_len: usize,
 ) -> Result<Vec<serde_json::Value>> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + POSITIVE_WAIT;
     loop {
         let inputs = read_hook_log(home, filename)?;
         if inputs.len() >= expected_len {
@@ -351,7 +355,7 @@ async fn wait_for_hook_log(
 }
 
 async fn wait_for_spawned_thread_id(test: &TestCodex) -> Result<String> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + POSITIVE_WAIT;
     loop {
         let ids = test.thread_manager.list_thread_ids().await;
         if let Some(spawned_id) = ids
@@ -370,7 +374,7 @@ async fn wait_for_spawned_thread_id(test: &TestCodex) -> Result<String> {
 async fn wait_for_requests(
     mock: &core_test_support::responses::ResponseMock,
 ) -> Result<Vec<ResponsesRequest>> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + POSITIVE_WAIT;
     loop {
         let requests = mock.requests();
         if !requests.is_empty() {
@@ -387,7 +391,7 @@ async fn wait_for_request_with_model(
     mock: &core_test_support::responses::ResponseMock,
     model: &str,
 ) -> Result<ResponsesRequest> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + POSITIVE_WAIT;
     loop {
         if let Some(request) = mock
             .requests()
@@ -510,7 +514,7 @@ async fn setup_turn_one_with_custom_spawned_child(
             .codex
             .rollout_path()
             .ok_or_else(|| anyhow::anyhow!("expected parent rollout path"))?;
-        let deadline = Instant::now() + Duration::from_secs(6);
+        let deadline = Instant::now() + POSITIVE_WAIT;
         loop {
             let has_notification =
                 tokio::fs::read_to_string(&rollout_path)
@@ -901,14 +905,14 @@ async fn subagent_notification_is_included_without_wait() -> Result<()> {
         .thread_manager
         .get_thread(ThreadId::from_string(&spawned_id)?)
         .await?;
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(POSITIVE_WAIT, async {
         while !matches!(child_thread.agent_status().await, AgentStatus::Completed(_)) {
             sleep(Duration::from_millis(10)).await;
         }
     })
     .await?;
     let state_db = test.codex.state_db().expect("mailbox state db");
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(POSITIVE_WAIT, async {
         loop {
             if !state_db
                 .list_recoverable_agent_messages(test.session_configured.thread_id)
@@ -988,7 +992,7 @@ async fn direct_operator_turn_in_spawned_child_does_not_notify_parent() -> Resul
         })
         .await?;
     let _ = wait_for_requests(&direct_child_request).await?;
-    tokio::time::timeout(Duration::from_secs(3), async {
+    tokio::time::timeout(POSITIVE_WAIT, async {
         loop {
             if matches!(
                 child_thread.agent_status().await,
@@ -1126,7 +1130,7 @@ async fn spawned_child_receives_forked_parent_context(
             .expect("legacy child thread id"),
     )?;
     let child_thread = test.thread_manager.get_thread(child_thread_id).await?;
-    tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(POSITIVE_WAIT, async {
         while !matches!(child_thread.agent_status().await, AgentStatus::Completed(_)) {
             sleep(Duration::from_millis(10)).await;
         }
@@ -1438,7 +1442,7 @@ async fn spawned_agent_uses_summary_support_for_final_model(
     )
     .await?;
 
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + POSITIVE_WAIT;
     let child_body = loop {
         if let Some(body) = child_request_log
             .requests()
@@ -1621,7 +1625,7 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(plaintext: bool) -> R
 
     // The response mock records candidate requests before its request matcher runs, so wait for
     // the child request instead of assuming the latest recorded request is already it.
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + POSITIVE_WAIT;
     let child_request = loop {
         if let Some(request) = child_request_log
             .requests()
@@ -1684,7 +1688,7 @@ async fn multi_agent_v2_spawn_sends_agent_message_to_child(plaintext: bool) -> R
         .into_iter()
         .find(|thread_id| *thread_id != root_thread_id)
         .expect("child thread ID");
-    let logs = tokio::time::timeout(Duration::from_secs(5), async {
+    let logs = tokio::time::timeout(POSITIVE_WAIT, async {
         loop {
             let logs = String::from_utf8(output.lock().expect("buffer lock").clone())
                 .expect("logs should be UTF-8");
