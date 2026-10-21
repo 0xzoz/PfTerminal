@@ -4134,6 +4134,25 @@ fn issue_1161_git_config_unknown_options_do_not_hide_writes() {
         "git --list-cmds x config sequence.editor 'sh -c x'",
         "git --unknown-flag config pager.log x",
         "git config --unknown-option user.name pager.log x",
+        // The conservative read check cannot prove a read after an unknown
+        // option: its next word may be that option's value.
+        "git config --loc --get pager.log",
+        "git config --comm --unset pager.log 'sh -c x'",
+        "git config --comm unset pager.log 'sh -c x'",
+        "git config --comm -f pager.log 'sh -c x'",
+        "git config --comm -h pager.log 'sh -c x'",
+        "git config --comm remove-section pager.log 'sh -c x'",
+        "git config --c --unset pager.log 'sh -c x'",
+        "git config --comm=note pager.log 'sh -c x'",
+        "git config --comm=./git pager.log 'sh -c x'",
+        "git config --unknown=note user.name marker",
+        "git config --comment --unset pager.log 'sh -c x'",
+        "git config --comment unset pager.log 'sh -c x'",
+        "git config --comment -f pager.log 'sh -c x'",
+        "git config --comment git pager.log x",
+        "git config --comment=./git pager.log x",
+        "git config --local unset pager.log marker",
+        "git config --local remove-section pager.log marker",
         "find . -maxdepth 0 -exec git config pager.log 'sh -c x' \\;",
         "custom-wrapper git config pager.log x",
     ] {
@@ -4168,6 +4187,8 @@ fn issue_1161_git_config_unlisted_keys_and_renames_are_persistence() {
         "git config ab.cd.clean marker && git config --rename-section ab.cd filter.cd",
         "git config --rename-section ab.cd filter.cd",
         "git config rename-section ab.cd filter.cd",
+        "git config color.x.clean 'sh -c evil' && git config --ren color.x filter.x",
+        "git config --ren color.x filter.x",
     ] {
         assert_eq!(
             script(command),
@@ -4194,7 +4215,6 @@ fn issue_1161_git_config_safe_writes_reads_and_deletions_stay_quiet() {
         "git config -zf fixture.cfg user.name pager.log",
         "git config --comment pager.log user.name marker",
         "git config -z --get pager.log",
-        "git config --loc --get pager.log",
         "git config --unset-all pager.log",
         "git config --remove-section filter.preview",
         "git config remove-section filter.preview",
@@ -4223,9 +4243,14 @@ fn issue_1161_git_helpers_keep_local_key_and_rename_checks() {
             "pager.log marker",
             "filter.demo.clean marker",
             "diff.demo.command marker",
+            "--file git pager.log marker",
             "--rename-section harmless pager",
             "rename-section harmless pager",
             "--unknown-option user.name pager.log marker",
+            "--ren color.x filter.x",
+            "--comm --unset pager.log marker",
+            "--comm unset pager.log marker",
+            "--comm -f pager.log marker",
         ] {
             let command = format!("{helper} {args}");
             assert_eq!(
@@ -4258,6 +4283,8 @@ fn issue_1161_git_helper_reads_safe_keys_and_data_stay_quiet() {
     for command in [
         "git-config user.name pager.log",
         "git-config --file fixture.cfg user.name pager.log",
+        "git-config --file git user.name pager.log",
+        "git-config --file git --get pager.log",
         "git-config --get pager.log",
         "git-config get pager.log",
         "git-config --unset pager.log",
@@ -4280,10 +4307,36 @@ fn issue_1161_git_helper_reads_safe_keys_and_data_stay_quiet() {
     ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
 )]
 fn issue_1161_local_key_checks_keep_git_helper_scans_linear() {
-    for unit in ["git-config ", "git-config.exe ", "git.exe config "] {
+    for (prefix, unit) in [
+        ("", "git-config "),
+        ("", "git-config.exe "),
+        ("", "git.exe config "),
+        ("git-config ", "-f config -f git "),
+        ("git-config.exe ", "-f config -f git-config.exe "),
+        ("git.exe config ", "-f config -f git.exe config "),
+    ] {
         work::assert_linear(unit, |scale| {
-            let line = format!("{}user.name marker", unit.repeat(400 * scale));
+            let line = format!("{prefix}{}user.name marker", unit.repeat(400 * scale));
             let _ = script(&line);
         });
+    }
+}
+
+#[test]
+fn issue_1161_local_key_cache_keeps_parser_states_separate() {
+    for line in ["-- set user.name marker", "set set user.name marker"] {
+        let words = line
+            .split_whitespace()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut writes = git_config::Writes::new(&words);
+        assert_eq!(
+            [
+                writes.writes_code_setting(/*from*/ 0, Some("config")),
+                writes.writes_code_setting(/*from*/ 1, Some("config")),
+            ],
+            [true, false],
+            "{line}"
+        );
     }
 }

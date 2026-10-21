@@ -1153,6 +1153,7 @@ impl Classifier {
             self.change_folder(name, args, folders, variables);
         }
         let mut git_config = GitConfigWrites::new(&lower);
+        let mut local_git_config = git_config::Writes::new(words);
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.
         for (index, word) in lower.iter().enumerate() {
@@ -1180,7 +1181,7 @@ impl Classifier {
             });
             if (name == "git" || helper.is_some())
                 && !inspecting
-                && git_config::writes_code_setting(&words[index + 1..], subcommand)
+                && local_git_config.writes_code_setting(index + 1, subcommand)
             {
                 self.note(ProtectedActionKind::Persistence);
             }

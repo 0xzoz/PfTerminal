@@ -41,89 +41,129 @@ fn config_args(args: &[String]) -> Option<&[String]> {
     None
 }
 
-/// Whether a possible local write sets a key outside the same allowlist
-/// used for `git -c`. Values do not make an unsafe key safe: even `false`
-/// or `rebase` asks after untrusted content. Section renames can install
-/// previously harmless keys in a program-running family and also ask.
-pub(super) fn writes_code_setting(args: &[String], subcommand: Option<&str>) -> bool {
-    let args = match subcommand {
-        Some("config") => args,
-        Some(_) => return false,
-        None => match config_args(args) {
-            Some(args) => args,
-            None => return false,
-        },
-    };
-    if outputs::git_config_reads(args) {
-        return false;
+/// Local config writes, sharing work across all Git words in a command.
+/// A Git-looking word can be an option's value, so scans from different
+/// Git words may overlap even when each scan respects option boundaries.
+pub(super) struct Writes<'a> {
+    words: &'a [String],
+    seen: Option<FollowingWrites>,
+}
+
+struct FollowingWrites {
+    reads: Vec<bool>,
+    /// A suffix's result for each combination of the two parser flags.
+    writes: Vec<[Option<bool>; 4]>,
+}
+
+impl<'a> Writes<'a> {
+    pub(super) fn new(words: &'a [String]) -> Self {
+        Self { words, seen: None }
     }
-    let mut at = 0;
-    let mut action_seen = false;
-    let mut options = true;
-    let mut maybe_value = false;
-    while let Some(word) = args.get(at) {
-        work::step();
-        if is_git(word) {
+
+    /// Whether a possible local write sets a key outside the same allowlist
+    /// used for `git -c`. Values do not make an unsafe key safe: even `false`
+    /// or `rebase` asks after untrusted content. Section renames can install
+    /// previously harmless keys in a program-running family and also ask.
+    pub(super) fn writes_code_setting(&mut self, from: usize, subcommand: Option<&str>) -> bool {
+        let words = self.words;
+        let args = &words[from..];
+        let args = match subcommand {
+            Some("config") => args,
+            Some(_) => return false,
+            None => match config_args(args) {
+                Some(args) => args,
+                None => return false,
+            },
+        };
+        let mut at = words.len() - args.len();
+        let seen = self.seen.get_or_insert_with(|| FollowingWrites {
+            reads: outputs::git_config_reads_each(words),
+            writes: vec![[None; 4]; words.len()],
+        });
+        if seen.reads[at] {
             return false;
         }
-        if options && word == "--" {
-            options = false;
-            at += 1;
-            continue;
-        }
-        if options && word.starts_with('-') {
-            let option = word.split_once('=').map_or(word.as_str(), |(name, _)| name);
-            if matches!(
-                option,
-                "--unset" | "--unset-all" | "--remove-section" | "--help" | "-h"
-            ) {
-                return false;
+        let mut subcommand_position = true;
+        let mut options = true;
+        let mut visited = Vec::new();
+        let writes = loop {
+            work::step();
+            let Some(word) = words.get(at) else {
+                break false;
+            };
+            let state = usize::from(options) | (usize::from(subcommand_position) << 1);
+            if let Some(writes) = seen.writes[at][state] {
+                break writes;
             }
-            if option == "--rename-section" {
-                return args.get(at + 2).is_some();
-            }
-            if outputs::GIT_CONFIG_VALUES.contains(&option) || option == "-t" {
-                at += if word.contains('=') { 1 } else { 2 };
-            } else if outputs::GIT_CONFIG_FLAGS.contains(&option)
-                || matches!(
-                    option,
-                    "-z" | "--add" | "--replace-all" | "--append" | "--bool-or-str"
-                )
-                || word.contains('=')
-            {
+            visited.push((at, state));
+            let first = std::mem::take(&mut subcommand_position);
+            if options && word == "--" {
+                options = false;
                 at += 1;
-            } else if !word.starts_with("--")
-                && let Some((offset, flag)) =
-                    word.char_indices().find(|(_, ch)| matches!(ch, 'f' | 't'))
-            {
-                // A short option group (`-zf FILE`) or attached value.
-                at += 1 + usize::from(offset + flag.len_utf8() == word.len());
-            } else {
-                // Could be an abbreviated flag or a value-taking option.
-                // Judge both possible key positions; never silently give up.
-                maybe_value = true;
-                at += 1;
+                continue;
             }
-            continue;
-        }
-        if options && !action_seen {
-            match word.as_str() {
-                "unset" | "remove-section" => return false,
-                "rename-section" => return args.get(at + 2).is_some(),
-                "set" => {
-                    action_seen = true;
-                    at += 1;
-                    continue;
+            if options && word.starts_with('-') {
+                let option = word.split_once('=').map_or(word.as_str(), |(name, _)| name);
+                if matches!(
+                    word.as_str(),
+                    "--unset" | "--unset-all" | "--remove-section" | "--help" | "-h"
+                ) {
+                    break false;
                 }
-                _ => {}
+                if word == "--rename-section" {
+                    break words.get(at + 2).is_some();
+                }
+                if outputs::GIT_CONFIG_VALUES.contains(&option) || option == "-t" {
+                    at += if word.contains('=') { 1 } else { 2 };
+                } else if outputs::GIT_CONFIG_FLAGS.contains(&word.as_str())
+                    || matches!(
+                        word.as_str(),
+                        "-z" | "--add" | "--replace-all" | "--append" | "--bool-or-str"
+                    )
+                {
+                    at += 1;
+                } else if let Some(short) = word.strip_prefix('-')
+                    && !short.starts_with('-')
+                    && let Some((offset, flag)) =
+                        short.char_indices().find(|(_, ch)| matches!(ch, 'f' | 't'))
+                    && short[..offset].chars().all(|ch| ch == 'z')
+                {
+                    // A short option group (`-zf FILE`) or attached value.
+                    at += 1 + usize::from(offset + flag.len_utf8() == short.len());
+                } else {
+                    // An abbreviation can rename a section or take the next
+                    // word as its value. The read check did not prove a read;
+                    // ask instead of guessing where a write's key starts.
+                    break true;
+                }
+                continue;
             }
+            if is_git(word) {
+                break false;
+            }
+            // After any option, Git uses legacy key/value syntax. Only the
+            // first argument can select a subcommand such as `unset`.
+            if options && first {
+                match word.as_str() {
+                    "unset" | "remove-section" => break false,
+                    "rename-section" => break words.get(at + 2).is_some(),
+                    "set" => {
+                        at += 1;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            let safe = |key: &str| code_variables::safe_git_key(&key.to_ascii_lowercase());
+            break words.get(at + 1).is_some() && !safe(word);
+        };
+        // Each word/state is scanned at most once across all invocations.
+        for (at, state) in visited {
+            work::step();
+            seen.writes[at][state] = Some(writes);
         }
-        let safe = |key: &str| code_variables::safe_git_key(&key.to_ascii_lowercase());
-        return args.get(at + 1).is_some_and(|next| {
-            !safe(word) || (maybe_value && args.get(at + 2).is_some() && !safe(next))
-        });
+        writes
     }
-    false
 }
 
 /// The shared resolver deliberately skips wrapper options conservatively.
