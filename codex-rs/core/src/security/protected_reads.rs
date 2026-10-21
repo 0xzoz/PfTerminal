@@ -90,7 +90,15 @@ pub(crate) fn unhurried_lookups_for_tests(enabled: bool) {
 }
 
 pub(crate) fn lookup_timeout() -> Duration {
-    if UNHURRIED_LOOKUPS.load(Ordering::Relaxed) {
+    // #997: this crate's own unit tests get the test bound too; under load
+    // they took over 2 seconds as the integration suites did (#902).
+    // `cfg!(test)` is never set in a build that ships.
+    lookup_timeout_in(/*unit_test*/ cfg!(test))
+}
+
+/// The bound in a unit-test build (`unit_test`) or any other process.
+fn lookup_timeout_in(unit_test: bool) -> Duration {
+    if unit_test || UNHURRIED_LOOKUPS.load(Ordering::Relaxed) {
         TEST_LOOKUP_TIMEOUT
     } else {
         LOOKUP_TIMEOUT
