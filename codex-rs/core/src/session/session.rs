@@ -1197,7 +1197,15 @@ impl Session {
                     });
             let (network_proxy, session_network_proxy) =
                 if let Some(spec) = config.permissions.network.as_ref() {
-                    let current_exec_policy = exec_policy.current();
+                    // D52 (#1001): under Aggressive (as the model client reads
+                    // the level), network allow rules saved outside it are
+                    // suspended.
+                    let live_aggressive = crate::client::live_level_of(
+                        config.security_level,
+                        Some(&ingress_policy),
+                        thread_id,
+                    ) == codex_security_policy::SecurityLevel::Aggressive;
+                    let current_exec_policy = exec_policy.current_for(live_aggressive);
                     let (network_proxy, session_network_proxy) = Self::start_managed_network_proxy(
                         spec,
                         current_exec_policy.as_ref(),

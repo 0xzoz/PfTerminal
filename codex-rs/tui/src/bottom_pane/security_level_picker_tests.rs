@@ -806,8 +806,10 @@ mod pf_24_s02 {
         picker.handle_key_event(key(KeyCode::Up));
         picker.handle_key_event(key(KeyCode::Enter));
         let review = machine.text(&picker);
+        // #1015: no session has started in this window yet; it starts under
+        // the saved level.
         assert!(
-            review.contains("Core's level becomes Aggressive from the next start"),
+            review.contains("Core's level is saved as Aggressive as soon as you confirm"),
             "{review}"
         );
         picker.handle_key_event(key(KeyCode::Enter));
@@ -1037,8 +1039,11 @@ mod pf_24_s02 {
         );
         let (picker, _rx) = machine.picker(ChosenLevel::Aggressive);
         let list = machine.text(&picker);
+        // The message embeds the temp path, so where it wraps (at a space or
+        // after a '/') depends on TMPDIR length; match with whitespace removed.
+        let unwrapped: String = list.split_whitespace().collect();
         assert!(
-            list.contains("may have been changed outside /security"),
+            unwrapped.contains("mayhavebeenchangedoutside/security"),
             "{list}"
         );
     }
