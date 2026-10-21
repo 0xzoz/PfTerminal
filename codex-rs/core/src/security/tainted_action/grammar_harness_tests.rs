@@ -342,6 +342,22 @@ fn grammar_and_reader_differential() {
         }
         let category = format!("{comparison:?}");
         let zsh = matches!(grammar, Ok((_, true)));
+        // Phase 3: lines whose zsh-only checks no longer ask under zsh.
+        let proves = crate::security::tainted_action::named_shell::grammar_proves_data(&[
+            "/bin/zsh".to_string(),
+            "-lc".to_string(),
+            text.clone(),
+        ]);
+        if proves {
+            *counts
+                .entry(format!("{origin}: phase 3 proves data under zsh"))
+                .or_default() += 1;
+            let _ = writeln!(
+                report,
+                "{origin}\tphase 3 proves data\t\t\t\t{}",
+                escaped(text)
+            );
+        }
         *counts.entry(format!("{origin}: {category}")).or_default() += 1;
         if zsh {
             *counts.entry(format!("{origin}: zsh-unsure")).or_default() += 1;
