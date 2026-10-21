@@ -4093,6 +4093,11 @@ fn issue_1255_git_config_editor_is_persistence() {
         "git config -fy -e",
         "git config --type=bool -e",
         "git config -e x",
+        "git config --fil /tmp/zz -e",
+        "git config --typ bool -e",
+        "git config --ty bool -e",
+        "git -C config config -e",
+        "git -C config config --global -e",
         "GIT_EDITOR=true git config -e",
         "git -C repo config -e",
         "git -C /tmp/git-x config -e",
@@ -4213,6 +4218,7 @@ fn issue_1255_checks_are_linear() {
         ("separators", "-- "),
         ("git config words", "git config "),
         ("lookalike folders", "-C /tmp/git-x "),
+        ("config as a value", "-C config --fil "),
     ] {
         work::assert_linear(label, |scale| {
             let line = format!("git {} status", unit.repeat(400 * scale));

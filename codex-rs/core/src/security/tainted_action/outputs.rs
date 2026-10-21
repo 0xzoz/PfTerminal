@@ -219,8 +219,9 @@ fn reads_by_subcommand(words: &[String]) -> bool {
 /// (`git config -- -e` edits too). What the editor writes is config the
 /// classifier never sees. Read loosely, so as to ask: any option before
 /// the first other word counts, past the values of the options that take
-/// one; other options are taken as flags. Worked out in one pass from the
-/// end.
+/// one. An option that is neither a known flag nor a known value option
+/// may be either (git takes any unambiguous prefix: `--fil F -e`, `--typ
+/// bool -e`). Worked out in one pass from the end.
 pub(super) fn git_config_edits_each(words: &[String]) -> Vec<bool> {
     let opens_editor = |word: &str| {
         if word.starts_with("--") {
@@ -244,8 +245,10 @@ pub(super) fn git_config_edits_each(words: &[String]) -> Vec<bool> {
             || (!word.starts_with("--") && word.ends_with('f'))
         {
             after_next
-        } else {
+        } else if word.contains('=') || GIT_CONFIG_FLAGS.contains(&word.as_str()) {
             next
+        } else {
+            next || after_next
         };
         after_next = next;
         next = here;
@@ -391,6 +394,11 @@ mod tests {
             ("-fy -e", true),
             ("--type=bool -e", true),
             ("-e x", true),
+            ("--fil y -e", true),
+            ("--typ bool -e", true),
+            ("--ty bool -e", true),
+            ("-t bool -e", true),
+            ("--unknown -e", true),
             ("user.name -e", false),
             ("--local user.name -e", false),
             ("-- edit", false),
