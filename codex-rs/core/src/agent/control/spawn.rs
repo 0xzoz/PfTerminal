@@ -1063,27 +1063,45 @@ impl AgentControl {
     }
 
     /// Resume an existing agent thread from a recorded rollout file.
+    #[cfg(test)]
     pub(crate) async fn resume_agent_from_rollout(
         &self,
         config: Config,
         thread_id: ThreadId,
         session_source: SessionSource,
     ) -> CodexResult<ThreadId> {
+        self.resume_agent_tree_from_rollout(config, thread_id, session_source)
+            .await
+            .map(|(thread_id, _)| thread_id)
+    }
+
+    /// Resume an existing agent thread from a recorded rollout file, with its
+    /// open V1 descendants. A descendant that cannot be resumed (its recorded
+    /// account is gone, say) does not fail the resume; it is returned with
+    /// why, after the resumed thread's id, so the caller can tell the model
+    /// and the user (#1144).
+    pub(crate) async fn resume_agent_tree_from_rollout(
+        &self,
+        config: Config,
+        thread_id: ThreadId,
+        session_source: SessionSource,
+    ) -> CodexResult<(ThreadId, Vec<(ThreadId, String)>)> {
         let root_depth = thread_spawn_depth(&session_source).unwrap_or(0);
         let (resumed_thread_id, resumed_multi_agent_version) = Box::pin(
             self.resume_single_agent_from_rollout(config.clone(), thread_id, session_source),
         )
         .await?;
+        let mut refused_descendants = Vec::new();
         let state = self.upgrade()?;
         if config.multi_agent_version_from_features() == MultiAgentVersion::V2
             || resumed_multi_agent_version == MultiAgentVersion::V2
         {
             self.restore_persisted_agent_subtree(resumed_thread_id)
                 .await?;
-            return Ok(resumed_thread_id);
+            return Ok((resumed_thread_id, refused_descendants));
         }
         let Some(agent_graph_store) = state.agent_graph_store() else {
-            return Ok(resumed_thread_id);
+            return Ok((resumed_thread_id, refused_descendants));
         };
 
         let mut resume_queue = VecDeque::from([(thread_id, root_depth)]);
@@ -1128,6 +1146,7 @@ impl AgentControl {
                         Ok((_, _)) => true,
                         Err(err) => {
                             warn!("failed to resume descendant thread {child_thread_id}: {err}");
+                            refused_descendants.push((child_thread_id, err.to_string()));
                             false
                         }
                     }
@@ -1138,7 +1157,7 @@ impl AgentControl {
             }
         }
 
-        Ok(resumed_thread_id)
+        Ok((resumed_thread_id, refused_descendants))
     }
 
     async fn resume_single_agent_from_rollout(
