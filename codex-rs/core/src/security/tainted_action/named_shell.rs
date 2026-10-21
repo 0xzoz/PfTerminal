@@ -95,7 +95,7 @@ pub(super) fn grammar_proves_data(command: &[String]) -> bool {
     let Ok(reading) = grammar::read(script) else {
         return false;
     };
-    let mut budget = script.len();
+    let mut budget = usize::MAX;
     let (comparison, _) = shadow::compare(script, &quoted::commands(script), &mut budget);
     !reading.zsh_unsure
         && !reading.bash_only
