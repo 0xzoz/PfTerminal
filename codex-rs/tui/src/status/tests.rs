@@ -2734,8 +2734,26 @@ async fn account_line_counts_only_this_providers_named_accounts() {
     );
 }
 
-/// D86: the default OpenAI provider in a home without named accounts
-/// renders exactly as with named accounts off (no "Model provider" line).
+/// D86: with named accounts off, an enrolled named account changes nothing.
+#[tokio::test]
+async fn account_line_stays_off_with_named_accounts_off() {
+    let home = TempDir::new().expect("temp home");
+    enroll_named_accounts(&home, &[("zai", "work")]);
+    let rendered = named_account_status_in(
+        &home, /*named_accounts*/ false, /*account*/ None, /*account_usage*/ None,
+        /*width*/ 100,
+    )
+    .await;
+    let line = model_provider_line(&rendered);
+    assert!(
+        line.contains("Z.AI") && !line.contains("account"),
+        "{rendered}"
+    );
+}
+
+/// D86: the default OpenAI provider in a home without named accounts has no
+/// "Model provider" line, as with named accounts off. The renders are
+/// compared without any "Account usage" line, which is not part of D86.
 #[tokio::test]
 async fn default_openai_status_is_unchanged_without_named_accounts() {
     async fn render(named_accounts: bool) -> String {
@@ -2782,11 +2800,25 @@ async fn default_openai_status_is_unchanged_without_named_accounts() {
             /*reasoning_effort_override*/ None,
             "<none>".to_string(),
             /*refreshing_rate_limits*/ false,
-            /*account_usage*/ None,
+            // What `status_account_usage` passes: rows only with the flag on.
+            named_accounts.then(|| super::StatusAccountUsage {
+                rows: vec![(
+                    codex_vault::DEFAULT_PROVIDER_ACCOUNT.to_string(),
+                    usage.clone(),
+                )],
+            }),
         );
         sanitize_directory(render_lines(&composite.display_lines(/*width*/ 100))).join("\n")
     }
     let on = render(/*named_accounts*/ true).await;
+    let off = render(/*named_accounts*/ false).await;
     assert!(!on.contains("Model provider"), "{on}");
-    assert_eq!(on, render(/*named_accounts*/ false).await);
+    let without_account_usage = |rendered: &str| {
+        rendered
+            .lines()
+            .filter(|line| !line.contains("Account usage:"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(without_account_usage(&on), off);
 }

@@ -1091,19 +1091,19 @@ fn provider_has_named_account(
     active_account: Option<&str>,
     used_named_account: bool,
 ) -> bool {
-    let is_named = |name: &str| name != codex_vault::DEFAULT_PROVIDER_ACCOUNT;
-    let stamped = config.model_provider.account.as_ref();
+    // A stamped account (`[provider_accounts]`, `--account`, borrowed ones
+    // included) always has a named, non-`default` name.
     if used_named_account
-        || active_account.is_some_and(is_named)
-        || stamped.is_some_and(|account| is_named(&account.name))
+        || config.model_provider.account.is_some()
+        || active_account.is_some_and(|name| name != codex_vault::DEFAULT_PROVIDER_ACCOUNT)
     {
         return true;
     }
-    let provider_id = stamped.map_or(config.model_provider_id.as_str(), |account| {
-        account.provider_id.as_str()
-    });
-    crate::provider_named_accounts::holds_any_named_account(&config.codex_home, provider_id)
-        .unwrap_or(true)
+    crate::provider_named_accounts::holds_any_named_account(
+        &config.codex_home,
+        &config.model_provider_id,
+    )
+    .unwrap_or(true)
 }
 
 fn sanitize_base_url(raw: &str) -> Option<String> {
