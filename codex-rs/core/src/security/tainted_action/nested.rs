@@ -280,24 +280,27 @@ impl Classifier {
             let mut roles = vec![Role::Code; texts.len()];
             let mut input_role = Role::Code;
             let mut resolved = HashSet::new();
-            let mut wrappers_checked = HashSet::new();
+            // Words before it were checked as wrappers (starts ascend).
+            let mut wrappers_checked = 0;
             let mut runners = 0;
             let mut watched = false;
             let mut sed_command = false;
             for start in starts {
                 work::step();
-                let Some((index, resolved_name)) = indirect::command_word(&texts[start..]) else {
-                    continue;
+                let launched = indirect::command_word(&texts[start..]);
+                // #1268: with no command word, the line may be in an
+                // option (`env -S'git config k v'`, `--split-string=...`).
+                let last = match &launched {
+                    Some((index, _)) => start + index,
+                    None if texts[start].starts_with('#') => continue,
+                    None => texts.len() - 1,
                 };
-                let at = start + index;
                 // Wrappers that run a string as a shell line (`watch`,
                 // `su -c`, `flock f -c`, `env -S`). Only the outermost
                 // `watch` counts: an inner one is part of its line.
-                for wrapper in start..=at {
+                for wrapper in start.max(wrappers_checked)..=last {
                     work::step();
-                    if !wrappers_checked.insert(wrapper) {
-                        continue;
-                    }
+                    wrappers_checked = wrapper + 1;
                     let is_watch = name(&texts[wrapper]) == "watch";
                     if is_watch && std::mem::replace(&mut watched, true) {
                         continue;
@@ -314,6 +317,10 @@ impl Classifier {
                         break;
                     }
                 }
+                let Some((index, resolved_name)) = launched else {
+                    continue;
+                };
+                let at = start + index;
                 if !resolved.insert(at) {
                     continue;
                 }
