@@ -3993,6 +3993,21 @@ fn d153_git_names_in_quoted_text_do_not_end_the_git_checks() {
         "git --namespace 'a git.exe b' -c core.pager=sh log",
         "git -C git.exe b -c core.pager=sh log",
         "git --namespace=./git.exe b -c core.pager=sh log",
+        // Review round 1: spellings the lexer reads as a git name, other
+        // options from `git.exe`, and a plain `git` (which main missed).
+        "git.exe -c 'user.name=a g{it.exe b' -c core.pager=sh log",
+        "git -c 'user.name=a g{it b' -c core.pager=sh log",
+        "git.exe -c \"user.name=a git$'.exe' b\" -c core.pager=sh log",
+        "git.exe -c 'user.name=a$IFS\"git.exe\" b' -c core.pager=sh log",
+        "git.exe --namespace 'a git.exe b' -c core.pager=sh log",
+        "git.exe --namespace='a git.exe b' -c core.pager=sh log",
+        "git.exe -C git.exe b -c core.pager=sh log",
+        "git.exe -C 'x git.exe y git.exe z' -c core.pager=sh log",
+        "git.exe --namespace=./git.exe b -c core.pager=sh log",
+        "git --namespace 'a git b' -c core.pager=sh log",
+        "git -C 'x git y git z' -c core.pager=sh log",
+        "git --namespace=./git b -c core.pager=sh log",
+        "x=git.exe; git -C \"a $x b\" -c core.pager=sh log",
     ] {
         assert_eq!(
             script(command),
@@ -4015,6 +4030,9 @@ fn d153_git_names_in_quoted_text_do_not_end_the_git_checks() {
         "git -c user.name=git log",
         "git -c 'user.name=Ada Lovelace' commit -m x",
         "git commit -m 'fix the git.exe path'",
+        "git.exe commit -m 'fix the git.exe path'",
+        "git -C git status",
+        "git -C repo log -1 git.exe",
         "git log --grep 'git.exe crash' --oneline",
         "git.exe status",
     ] {
@@ -4035,9 +4053,14 @@ fn d153_checks_are_linear() {
         ("git.exe options", "--namespace=./git.exe "),
         ("quoted settings", "-c 'user.name=a b' "),
         ("quoted names", "'a git.exe b' "),
+        ("git.exe then text", "-C x git.exe a "),
+        ("git then text", "-C x git a "),
+        ("names in values", "-C git.exe -C git "),
     ] {
         work::assert_linear(label, |scale| {
             let line = format!("git {} status", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!("git.exe {} status", unit.repeat(400 * scale));
             let _ = script(&line);
         });
     }

@@ -52,29 +52,31 @@ pub(super) fn setting_holds_git_name(words: &[Word]) -> bool {
     false
 }
 
-/// Whether a piece of `text`, split at blanks and shell punctuation as the
-/// word lexer splits it, names git or a dashed helper: with quotes and
-/// backslashes dropped (as the lexer drops them) and with backslashes kept
-/// (`C:\Git\cmd\git.exe`).
+/// Whether `text` holds a word that names git or a dashed helper: as the
+/// word lexer reads it (braces, `$'...'`, `$IFS`), or split at blanks and
+/// shell punctuation with backslashes kept (`C:\Git\cmd\git.exe`).
 fn holds_git_name(text: &str) -> bool {
-    let unquoted: String = text
-        .chars()
-        .filter(|ch| !matches!(ch, '\'' | '"'))
-        .collect();
-    let unescaped: String = unquoted.chars().filter(|ch| *ch != '\\').collect();
-    [unquoted, unescaped].iter().any(|text| {
-        text.split(|ch: char| {
-            ch.is_whitespace()
-                || matches!(
-                    ch,
-                    ',' | ';' | '&' | '|' | '(' | ')' | '<' | '>' | '{' | '}' | '`'
-                )
-        })
-        .any(|piece| {
-            work::step();
-            shell::basename(piece).eq_ignore_ascii_case("git") || git_name(piece).is_some()
-        })
-    })
+    let names_git = |word: &str| {
+        work::step();
+        shell::basename(word).eq_ignore_ascii_case("git") || git_name(word).is_some()
+    };
+    let lexed = shell::simple_commands(&[text.to_string()]);
+    lexed.incomplete
+        || lexed.too_deep
+        || lexed
+            .commands
+            .iter()
+            .flat_map(|command| &command.words)
+            .any(|word| names_git(word))
+        || text
+            .split(|ch: char| {
+                ch.is_whitespace()
+                    || matches!(
+                        ch,
+                        ',' | ';' | '&' | '|' | '(' | ')' | '<' | '>' | '`' | '\'' | '"'
+                    )
+            })
+            .any(names_git)
 }
 
 #[cfg(test)]
