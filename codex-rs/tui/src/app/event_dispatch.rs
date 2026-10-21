@@ -2150,7 +2150,10 @@ impl App {
                     let message = match outcome {
                         SettingsUpdateOutcome::Confirmed => {
                             if self.refresh_model_list(app_server).await {
-                                Some(account_switch_message(account.as_ref()))
+                                Some(account_switch_message(
+                                    account.as_ref(),
+                                    &self.config,
+                                ))
                             } else {
                                 Some(SWITCH_LIST_NOT_REFRESHED.to_string())
                             }
@@ -6904,25 +6907,45 @@ pub(super) fn sign_in_account_switch(
     (codex_model_provider::named_sign_in_account(current) != account).then_some(account)
 }
 
-pub(super) fn account_switch_message(account: Option<&codex_login::NamedChatgptAccount>) -> String {
-    account_switch_message_for(account, codex_login::default_login_left_unenforced())
+pub(super) fn account_switch_message(
+    account: Option<&codex_login::NamedChatgptAccount>,
+    config: &Config,
+) -> String {
+    account_switch_message_for(
+        account,
+        codex_login::default_login_left_unenforced(),
+        login_restrictions_configured(config),
+    )
+}
+
+/// #1205: whether `forced_login_method` or `forced_chatgpt_workspace_id` is
+/// configured; only these can rule out the default login (the login method
+/// implied by an API-key provider such as Z.AI does not count).
+pub(super) fn login_restrictions_configured(config: &Config) -> bool {
+    config.configured_forced_login_method.is_some() || config.forced_chatgpt_workspace_id.is_some()
 }
 
 /// `default_login_left_in_place`: this process skipped the startup
 /// enforcement of the login restrictions on the default login (#570), so a
-/// default login they rule out is hidden rather than used (#609).
+/// default login they rule out is hidden rather than used (#609). The caveat
+/// is shown only when `login_restrictions_configured` too (#1205).
 pub(super) fn account_switch_message_for(
     account: Option<&codex_login::NamedChatgptAccount>,
     default_login_left_in_place: bool,
+    login_restrictions_configured: bool,
 ) -> String {
     let label = match account {
         Some(account) => format!("{} account `{}`", account.provider_id, account.name),
-        None => "the default account".to_string(),
+        None => "the default OpenAI login".to_string(),
     };
-    if account.is_none() && default_login_left_in_place {
-        "Switched to the default account; model list refreshed. If your login restrictions (`forced_login_method`, `forced_chatgpt_workspace_id`) rule out the default login, this session cannot use it and its next request is refused with the reason; sign in with `corbanu login`, or pick a named account in /providers.".to_string()
+    let message =
+        format!("Connectors, usage and the model list now use {label}; model list refreshed.");
+    if account.is_none() && default_login_left_in_place && login_restrictions_configured {
+        format!(
+            "{message} If your login restrictions (`forced_login_method`, `forced_chatgpt_workspace_id`) rule out the default login, this session cannot use it and its next request is refused with the reason; sign in with `corbanu login`, or pick a named account in /providers."
+        )
     } else {
-        format!("Connectors, usage and the model list now use {label}; model list refreshed.")
+        message
     }
 }
 
