@@ -472,6 +472,104 @@ fn direct_orc_task_reaches_provider_through_core_mailbox_without_prompt_wrapper(
     })
 }
 
+/// Whether `item` is a user message whose text is exactly `text`.
+fn is_user_text(item: &serde_json::Value, text: &str) -> bool {
+    item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+        && item.get("role").and_then(serde_json::Value::as_str) == Some("user")
+        && item
+            .get("content")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|content| {
+                content
+                    .iter()
+                    .any(|span| span.get("text").and_then(serde_json::Value::as_str) == Some(text))
+            })
+}
+
+/// D95 (#1146): a task the person types in Spawn status's "Send task to"
+/// prompt reaches the Orc as the person's own input, a plain user message as
+/// if typed in its pane, with no inter-agent wrapper. A task another agent
+/// sends the same Orc is unchanged: it still arrives as an inter-agent
+/// message (which source envelopes label untrusted).
+#[test]
+fn spawn_status_person_task_reaches_child_as_user_input() -> Result<()> {
+    run_dispatch_integration(|| async {
+        let mock = MockServer::start().await;
+        let responses = mount_sse_repeating(&mock, sse_completed("orc-person-response")).await;
+        let mut fixture = RealDispatchFixture::start(&mock, /*max_threads*/ 3).await?;
+        let target = fixture.spawn_target("Snaga").await?;
+        let idle = move |app: &App| {
+            app.agent_navigation
+                .get(&target)
+                .is_some_and(|entry| !entry.is_running)
+        };
+
+        // What the prompt does with the text the person typed.
+        let person_task = "run the person's acceptance command 1146";
+        (crate::spawn_orchestration::spawn_agent_task_prompt_submit(
+            fixture.app.app_event_tx.clone(),
+            target,
+        ))(format!("  {person_task}\n"));
+        fixture
+            .route_until(std::time::Duration::from_secs(20), |app| {
+                !responses.requests().is_empty() && idle(app)
+            })
+            .await?;
+        let person_request = responses.requests().into_iter().last().expect("request");
+        let items = person_request.input();
+        let serialized = serde_json::to_string(&items)?;
+        assert!(
+            items.iter().any(|item| is_user_text(item, person_task)),
+            "{serialized}"
+        );
+        assert!(
+            !pending_agent_message_text(&person_request).contains(person_task),
+            "{serialized}"
+        );
+        assert!(
+            !serialized.contains("corbanu_untrusted_data"),
+            "{serialized}"
+        );
+        assert!(!serialized.contains("inter_agent_message"), "{serialized}");
+
+        // A task from an agent: unchanged.
+        let agent_task = "agent relayed task 1146";
+        let before = responses.requests().len();
+        fixture
+            .app
+            .app_event_tx
+            .send(AppEvent::SubmitSpawnAgentTask {
+                thread_id: target,
+                task: agent_task.to_string(),
+                sent_while_kill_switch_on: false,
+            });
+        fixture
+            .route_until(std::time::Duration::from_secs(20), |app| {
+                responses.requests().len() > before && idle(app)
+            })
+            .await?;
+        let agent_request = responses.requests().into_iter().last().expect("request");
+        let items = agent_request.input();
+        let serialized = serde_json::to_string(&items)?;
+        assert!(
+            pending_agent_message_text(&agent_request).contains(agent_task),
+            "{serialized}"
+        );
+        assert!(
+            !items.iter().any(|item| is_user_text(item, agent_task)),
+            "{serialized}"
+        );
+        assert!(
+            serialized.contains(&format!(
+                "<inter_agent_message sender=\\\"/root\\\" recipient=\\\"/root/orc_snaga\\\">\\n{agent_task}\\n</inter_agent_message>"
+            )),
+            "{serialized}"
+        );
+        fixture.server.shutdown().await?;
+        Ok(())
+    })
+}
+
 #[test]
 fn operator_pane_dispatch_starts_normal_turn_with_target_session_model() -> Result<()> {
     run_dispatch_integration(|| async {

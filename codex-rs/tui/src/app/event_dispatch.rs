@@ -5586,6 +5586,134 @@ impl App {
                     }
                 }
             }
+            AppEvent::SubmitSpawnAgentTaskFromPerson { thread_id, task } => {
+                // D95 (#1146): the person's own task from Spawn status starts
+                // a turn in the pane as user input, as if typed there. No
+                // agent's dispatch acknowledgement is consumed or attributed
+                // to it, and nothing goes through the inter-agent mailbox.
+                if self.spawn_legacy_read_only
+                    || self.spawn_crew.as_ref().is_some_and(|crew| {
+                        !matches!(crew.status, crate::crew_state::CrewCreationStatus::Ready)
+                    })
+                {
+                    self.chat_widget.add_error_message(
+                        "This /spawn hierarchy is read-only until its crew identity and creation \
+                         state are reconciled."
+                            .to_string(),
+                    );
+                    return Ok(AppRunControl::Continue);
+                }
+                let task = task.trim().to_string();
+                if task.is_empty() {
+                    self.chat_widget
+                        .add_error_message("Spawn task cannot be empty.".to_string());
+                    return Ok(AppRunControl::Continue);
+                }
+                if task.len() > crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES {
+                    self.chat_widget.add_error_message(format!(
+                        "task is {} bytes; maximum is {} bytes",
+                        task.len(),
+                        crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES
+                    ));
+                    return Ok(AppRunControl::Continue);
+                }
+                let label = self.thread_label(thread_id);
+                // #507: a typed message is not kept while the kill switch is
+                // on; neither is this one.
+                if self.kill_switch_on_now() {
+                    self.chat_widget.add_error_message(format!(
+                        "Not sent to {label}: the security kill switch is on. A task you send from \
+                         Spawn status starts a turn as if you typed it in that pane, and a typed \
+                         message is not kept while the switch is on. Send it again after turning \
+                         the switch off."
+                    ));
+                    return Ok(AppRunControl::Continue);
+                }
+                let thread_id = match self
+                    .materialize_saved_native_spawn_thread_for_task(app_server, thread_id)
+                    .await
+                {
+                    Ok(thread_id) => thread_id,
+                    Err(error) => {
+                        self.chat_widget
+                            .add_error_message(format!("Not sent to {label}: {error:#}"));
+                        return Ok(AppRunControl::Continue);
+                    }
+                };
+                let session = match self.thread_event_channels.get(&thread_id) {
+                    Some(channel) => match channel.store.try_lock() {
+                        Ok(store) => store.session.clone(),
+                        Err(_) => {
+                            // As for operator panes: never wait on a thread
+                            // store here; wait off-loop and replay the task.
+                            let store = Arc::clone(&channel.store);
+                            let app_event_tx = self.app_event_tx.clone();
+                            tokio::spawn(async move {
+                                drop(store.lock().await);
+                                app_event_tx
+                                    .send(AppEvent::SubmitSpawnAgentTaskFromPerson { thread_id, task });
+                            });
+                            return Ok(AppRunControl::Continue);
+                        }
+                    },
+                    None => None,
+                };
+                let Some(session) = session else {
+                    self.chat_widget.add_error_message(format!(
+                        "Not sent to {label}: the pane has no live session to start a turn in."
+                    ));
+                    return Ok(AppRunControl::Continue);
+                };
+                // A user turn, as typing in the pane starts (or steers the
+                // running one). It keeps the pane's own approval and
+                // permission settings as the thread last reported them, so
+                // sending a task from here changes neither.
+                let mut op = AppCommand::user_turn(
+                    vec![codex_app_server_protocol::UserInput::Text {
+                        text: task.clone(),
+                        text_elements: Vec::new(),
+                    }],
+                    session.cwd.to_path_buf(),
+                    session.approval_policy,
+                    session.active_permission_profile.clone(),
+                    session.model,
+                    session.reasoning_effort,
+                    /*summary*/ None,
+                    /*service_tier*/ None,
+                    /*final_output_json_schema*/ None,
+                    session.collaboration_mode.map(|mode| *mode),
+                    session.personality,
+                );
+                if let AppCommand::UserTurn {
+                    approvals_reviewer, ..
+                } = &mut op
+                {
+                    *approvals_reviewer = Some(session.approvals_reviewer);
+                }
+                match self.submit_thread_op(app_server, thread_id, op).await {
+                    Ok(()) => {
+                        self.spawn_status_by_thread.insert(
+                            thread_id,
+                            codex_app_server_protocol::CollabAgentState {
+                                status: codex_app_server_protocol::CollabAgentStatus::Running,
+                                message: None,
+                            },
+                        );
+                        self.agent_navigation
+                            .set_running(thread_id, /*is_running*/ true);
+                        self.agent_navigation.set_last_task_message(
+                            thread_id,
+                            Some(task.chars().take(240).collect()),
+                        );
+                        self.persist_pane_state();
+                    }
+                    Err(error) => {
+                        self.chat_widget.add_error_message(format!(
+                            "Not sent to {label}: the turn could not start: {error:#}"
+                        ));
+                    }
+                }
+            }
             AppEvent::SubmitCodexUserPaneTask {
                 thread_id,
                 task,
