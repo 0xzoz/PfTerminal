@@ -695,6 +695,11 @@ fn script_writes(script: &str, depth: usize, follow_cd: bool) -> Writes {
     if script.contains(['\n', '`']) || ["$(", "<(", ">("].iter().any(|s| script.contains(s)) {
         writes.understood = false;
     }
+    // #1212: the words below lose their quotes, so following a `cd`, a
+    // quoted `'&&'` would read as a separator (`echo '&&' cd x && …`).
+    if follow_cd && quotes_a_separator(script) {
+        writes.understood = false;
+    }
     let words = shlex::split(script)
         .unwrap_or_else(|| script.split_whitespace().map(str::to_string).collect());
     let mut segment: Vec<String> = Vec::new();
@@ -779,9 +784,32 @@ fn script_writes(script: &str, depth: usize, follow_cd: bool) -> Writes {
     writes
 }
 
+/// #1212: whether `script` quotes or escapes a `&`, `|` or `;`.
+fn quotes_a_separator(script: &str) -> bool {
+    let separator = |c: char| matches!(c, '&' | '|' | ';');
+    let mut quote = None;
+    let mut chars = script.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (Some('\''), _) if separator(c) => return true,
+            (Some('\''), _) => {}
+            (_, '\\') if chars.next().is_some_and(separator) => return true,
+            (_, '\\') => {}
+            (Some(_), _) if separator(c) => return true,
+            (None, '\'' | '"') => quote = Some(c),
+            _ => {}
+        }
+    }
+    false
+}
+
 /// #1182: the folder the rest of a script runs in after `cd DIR && …`
 /// ([`writes_following_cd`]), as spelled from where it started (`None`:
-/// there). Text-based like the rest: `CDPATH` is not looked at.
+/// there). Text-based like the rest: `CDPATH` is not looked at, and (#1212)
+/// a `..` after the folder is taken away by name (`cd sub && echo > ../x`
+/// spells `sub/../x`, read as `./x`), while the shell opens it from where
+/// `sub` really is, which differs when `sub` is a link.
 #[derive(Default)]
 struct ScriptFolder {
     /// Whether a `cd` is followed at all ([`writes`] does not).
@@ -840,8 +868,9 @@ impl ScriptFolder {
 }
 
 /// The folder `cd` moves to (`~` without one), or `None` for `cd -`, an
-/// empty name, one a shell expands (`$`, a backquote, `~user`, a glob) or
-/// an option it does not know.
+/// empty name, one a shell expands (`$`, a backquote, `~user`, a glob), a
+/// place in zsh's folder stack (`cd +1`, #1212) or an option it does not
+/// know.
 fn cd_folder(arguments: &[String]) -> Option<String> {
     let operands: Vec<&str> = arguments
         .iter()
@@ -852,7 +881,7 @@ fn cd_folder(arguments: &[String]) -> Option<String> {
         [] => Some("~".to_string()),
         [folder]
             if !folder.is_empty()
-                && !folder.starts_with('-')
+                && !folder.starts_with(['-', '+'])
                 && !folder.contains(['$', '`', '*', '?', '['])
                 && (!folder.starts_with('~') || *folder == "~" || folder.starts_with("~/")) =>
         {
