@@ -3741,6 +3741,10 @@ fn issue_1142_git_code_settings_are_unseen_code() {
 
 /// #1142 review round 3: a flag group cut inside a character.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn issue_1142_flag_groups_cut_inside_a_character() {
     let line = format!("echo ${{({}\u{e9})}} a=1", "h".repeat(63));
     let _ = script(&line);
@@ -3748,6 +3752,10 @@ fn issue_1142_flag_groups_cut_inside_a_character() {
 
 /// #1102: the #1141/#1142 checks stay linear in the line's length.
 #[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
 fn issue_1141_1142_checks_are_linear() {
     for (label, unit) in [
         ("git words", "-/git -c x "),
