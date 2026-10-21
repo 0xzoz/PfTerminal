@@ -152,6 +152,7 @@ mod tests {
         ("code_variables.rs", include_str!("code_variables.rs")),
         ("outbound.rs", include_str!("outbound.rs")),
         ("outputs.rs", include_str!("outputs.rs")),
+        ("git_helpers.rs", include_str!("git_helpers.rs")),
         ("paths.rs", include_str!("paths.rs")),
         ("quoted.rs", include_str!("quoted.rs")),
         ("sed.rs", include_str!("sed.rs")),

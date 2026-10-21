@@ -229,6 +229,8 @@ fn issue_1182_writes_following_cd() {
             &["sub/../outside-notes.txt"],
         ),
         ("cd .husky && printf x > pre-commit", &[".husky/pre-commit"]),
+        // #1212: quotes without a separator in them.
+        ("cd sub && printf 'a b' > \"c d\"", &["sub/c d"]),
         ("cd a && cd b && touch x ~/y", &["a/b/x", "~/y"]),
         ("cd -P sub && echo x | tee out", &["sub/out"]),
         ("cd && echo x > notes", &["~/notes"]),
@@ -261,6 +263,13 @@ fn issue_1182_writes_following_cd() {
         "X=1 cd sub && echo y > z",
         "cd x && pushd y && echo z > w",
         "bash -c 'cd sub && echo x > y'",
+        // #1212: a quoted or escaped separator; zsh's folder stack.
+        "echo '&&' cd x && printf y > .husky/pre-commit",
+        "echo \\&\\& cd x && printf y > z",
+        "echo 'a;' cd x && printf y > z",
+        "cd x && echo \"|\" tee ../y",
+        "cd +0 && echo y > z",
+        "cd -P +1 && echo y > z",
     ] {
         assert!(!of(script).understood, "{script}: {:?}", of(script));
     }
@@ -443,6 +452,8 @@ fn issue_740_unliftable_notes() {
         "cd sub; printf x > .husky/pre-commit",
         "cd \"$PWD\" && echo x > .codex/config.toml",
         "curl -s -o /dev/null https://example.com",
+        // #1212: the `&&` before `cd` is quoted; the hook is `./.husky`'s.
+        "echo '&&' cd x && printf y > .husky/pre-commit",
     ] {
         assert_eq!(note(script), None, "{script}");
     }

@@ -4,8 +4,13 @@
 
 use super::basename;
 use super::code_variables;
+use super::git_helpers;
 use super::outputs;
 use super::work;
+
+fn is_git(word: &str) -> bool {
+    basename(word).eq_ignore_ascii_case("git") || git_helpers::git_name(word).is_some()
+}
 
 /// Find `config`, sharing Git's global value-option boundaries. Unknown
 /// options are not a reason to stop checking. Stop at the next Git word so
@@ -14,7 +19,7 @@ fn config_args(args: &[String]) -> Option<&[String]> {
     let mut at = 0;
     while let Some(word) = args.get(at) {
         work::step();
-        if basename(word).eq_ignore_ascii_case("git") {
+        if is_git(word) {
             return None;
         }
         if word == "config" {
@@ -23,10 +28,7 @@ fn config_args(args: &[String]) -> Option<&[String]> {
         if code_variables::GIT_VALUE_OPTIONS.contains(&word.as_str())
             || matches!(word.as_str(), "-c" | "--config-env")
         {
-            if args
-                .get(at + 1)
-                .is_some_and(|value| basename(value).eq_ignore_ascii_case("git"))
-            {
+            if args.get(at + 1).is_some_and(|value| is_git(value)) {
                 return None;
             }
             at += 2;
@@ -43,9 +45,14 @@ fn config_args(args: &[String]) -> Option<&[String]> {
 /// used for `git -c`. Values do not make an unsafe key safe: even `false`
 /// or `rebase` asks after untrusted content. Section renames can install
 /// previously harmless keys in a program-running family and also ask.
-pub(super) fn writes_code_setting(args: &[String]) -> bool {
-    let Some(args) = config_args(args) else {
-        return false;
+pub(super) fn writes_code_setting(args: &[String], subcommand: Option<&str>) -> bool {
+    let args = match subcommand {
+        Some("config") => args,
+        Some(_) => return false,
+        None => match config_args(args) {
+            Some(args) => args,
+            None => return false,
+        },
     };
     if outputs::git_config_reads(args) {
         return false;
@@ -56,7 +63,7 @@ pub(super) fn writes_code_setting(args: &[String]) -> bool {
     let mut maybe_value = false;
     while let Some(word) = args.get(at) {
         work::step();
-        if basename(word).eq_ignore_ascii_case("git") {
+        if is_git(word) {
             return false;
         }
         if options && word == "--" {

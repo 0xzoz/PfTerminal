@@ -3781,6 +3781,108 @@ fn issue_1141_1142_checks_are_linear() {
     }
 }
 
+/// #1159: git under another name is judged as git (a dashed helper in git's
+/// exec path runs `git <subcommand>`, `git.exe` is git), and more git
+/// options and variables that name a file or folder git writes are writes.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1159_git_helpers_and_path_writes() {
+    use ProtectedActionKind::*;
+    for command in [
+        "/usr/lib/git-core/git-config --global core.pager 'touch pwned'",
+        "git-config --global core.pager 'touch pwned'",
+        "git-config core.fsmonitor 'touch pwned'",
+        "git-config alias.x '!touch pwned'",
+        "GIT-CONFIG --global core.pager x",
+        "sudo /usr/lib/git-core/git-config --system core.pager x",
+        "find . -maxdepth 0 -exec /usr/libexec/git-core/git-config --global core.pager x \\;",
+        "git.exe config --global core.pager x",
+        "git-config.exe --global core.pager x",
+        "git-log -1 --format=x --output=~/.zshrc",
+        "/usr/lib/git-core/git-archive -o ~/.zshrc HEAD",
+        "git-config --file ~/.zshrc a.b x",
+        "git-bundle create ~/.zshrc HEAD",
+        "git-credential-store --file ~/.zshrc store",
+        "git.exe log -1 --output=~/.zshrc",
+        "git checkout-index -a --prefix=$HOME/",
+        "git checkout-index -a --prefix=~/.z",
+        "git checkout-index -af --prefix=/home/fixture/.config/autostart/",
+        "git -C ~ checkout-index -a --prefix=",
+        "/usr/lib/git-core/git-checkout-index -a --prefix=~/",
+        "git read-tree --index-output=~/.zshrc HEAD",
+        "git --work-tree=~ checkout HEAD -- .zshrc",
+        "git --work-tree ~ checkout HEAD -- .zshrc",
+        // Review round 1: a prefix that makes new names (`.` + `git/hooks/x`).
+        "git checkout-index -f --prefix=. git/hooks/pre-commit",
+        "git checkout-index -fa --prefix=.",
+        "git checkout-index -a --prefix=.gi",
+        "git-checkout-index -a --prefix=.",
+    ] {
+        assert_eq!(script(command), Some(Persistence), "{command}");
+    }
+    for command in [
+        "git.exe -c core.pager='touch pwned' log",
+        "env git.exe -c alias.x='!touch pwned' x",
+        "git -C git.exe -c core.pager='touch pwned' log",
+        "find . -exec /usr/lib/git-core/git-conf* --global core.pager x \\;",
+        "find . -exec git-$sub --global core.pager x \\;",
+        "GIT_INDEX_FILE=~/.zshrc git add x",
+        "export GIT_WORK_TREE=~; git checkout HEAD -- .zshrc",
+        // Review round 1: a setting whose value ends in a git name is judged
+        // before the scan stops there.
+        "git -c core.pager=./git.exe log",
+        "git -ccore.pager=./git.exe log",
+        "git --exec-path=./git.exe fetch",
+        "git.exe -c core.pager=./git.exe log",
+        "git.exe --exec-path=./git.exe fetch",
+        "git -c core.pager=/tmp/x/git log",
+        "git --exec-path=/tmp/x/git fetch",
+    ] {
+        assert_eq!(script(command), Some(UnseenCode), "{command}");
+    }
+    for command in [
+        "git-lfs pull",
+        "git-log --oneline -5",
+        "git-config get user.name",
+        "git-config user.email a@example.com",
+        "git.exe status",
+        "git checkout-index -a --prefix=build/",
+        "git read-tree --index-output=/tmp/idx HEAD",
+        "git --work-tree=../wt checkout main -- .",
+        "cat docs/git-config.txt",
+        "echo \"$GIT_INDEX_FILE\"",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1159: the git helper checks stay linear in the line's length.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1159_checks_are_linear() {
+    for (label, unit) in [
+        ("git helpers", "git-config "),
+        ("git helper options", "-/git-config "),
+        ("git.exe words", "git.exe -c x "),
+        ("prefixes", "checkout-index --prefix=a/ "),
+        ("config values", "-f config -f git "),
+        ("git option names", "-ccolor.x=./git.exe "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("git {} status", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!("git-config {}", unit.repeat(400 * scale));
+            let _ = script(&line);
+        });
+    }
+}
+
 /// #1159: setting local command-bearing Git configuration is persistence.
 #[test]
 #[cfg_attr(
@@ -4100,5 +4202,88 @@ fn issue_1161_git_config_safe_writes_reads_and_deletions_stay_quiet() {
         "git config rename-section ab.cd",
     ] {
         assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1161: local key families and section renames also apply to Git helpers.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1161_git_helpers_keep_local_key_and_rename_checks() {
+    for helper in [
+        "git-config",
+        "/usr/lib/git-core/git-config",
+        "GIT-CONFIG",
+        "git-config.exe",
+        "git.exe config",
+    ] {
+        for args in [
+            "pager.log marker",
+            "filter.demo.clean marker",
+            "diff.demo.command marker",
+            "--rename-section harmless pager",
+            "rename-section harmless pager",
+            "--unknown-option user.name pager.log marker",
+        ] {
+            let command = format!("{helper} {args}");
+            assert_eq!(
+                script(&command),
+                Some(ProtectedActionKind::Persistence),
+                "{command}"
+            );
+        }
+    }
+    for command in [
+        "env LANG=C git-config pager.log marker",
+        "find . -exec git-config pager.log marker \\;",
+        "bash -lc 'git-config pager.log marker'",
+        "git.exe -C repo config pager.log marker",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1161_git_helper_reads_safe_keys_and_data_stay_quiet() {
+    for command in [
+        "git-config user.name pager.log",
+        "git-config --file fixture.cfg user.name pager.log",
+        "git-config --get pager.log",
+        "git-config get pager.log",
+        "git-config --unset pager.log",
+        "git-config unset pager.log",
+        "git-config --remove-section pager",
+        "git.exe config user.name pager.log",
+        "git-config.exe --get pager.log",
+        "command -v git-config pager.log marker",
+        "env --help git-config pager.log marker",
+        "git-log config pager.log marker",
+        "echo docs/git-config.txt pager.log marker",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1161_local_key_checks_keep_git_helper_scans_linear() {
+    for unit in ["git-config ", "git-config.exe ", "git.exe config "] {
+        work::assert_linear(unit, |scale| {
+            let line = format!("{}user.name marker", unit.repeat(400 * scale));
+            let _ = script(&line);
+        });
     }
 }
