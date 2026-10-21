@@ -27,9 +27,9 @@ use super::windows_paths;
 use super::work;
 use base64::Engine;
 
-/// Folders one command's words resolve against: the working folder, the
-/// folder the line has moved to, and folder flags' values. Past it the
-/// command fails closed.
+/// Folders a line may be in at once (and folder flags' values in one
+/// command); twice as many it may have been in. Past them the line fails
+/// closed.
 const MAX_FOLDERS: usize = 8;
 /// cmd and PowerShell commands (and aliases) that write, move or remove the
 /// paths after them, besides the POSIX [`WRITERS`].
@@ -128,6 +128,8 @@ pub(super) struct Command {
     /// Whether a command separator (`&`, `|`, `;`, a line end) or the end
     /// of the text ended it, rather than a brace.
     pub(super) separated: bool,
+    /// Whether `&&` ended it: what follows runs only if it succeeded.
+    pub(super) and_then: bool,
 }
 
 /// How a reading takes quotes: grouping a word, or separating words.
@@ -223,6 +225,10 @@ pub(super) fn commands(text: &str, quotes: Quotes) -> Vec<Command> {
             }
             '|' | '&' | ';' | '\n' | '\r' | '{' | '}' => {
                 flush(&mut word, &mut current, &mut redirect);
+                if ch == '&' && chars.get(at + 1) == Some(&'&') {
+                    current.and_then = true;
+                    at += 1;
+                }
                 let separated = !matches!(ch, '{' | '}');
                 end(&mut done, &mut current, &mut redirect, separated);
             }
@@ -398,18 +404,25 @@ fn encoded_parameter(word: &str) -> bool {
 fn attached_folder(word: &str) -> Option<&str> {
     ["chdir", "cd"].iter().find_map(|name| {
         word.strip_prefix(name)
-            .filter(|rest| rest.starts_with(['.', '\\', '/']))
+            .filter(|rest| rest.starts_with(['.', '\\', '/']) && *rest != "/d")
     })
 }
+
+/// Bytes of words and folders one action's Windows view may resolve (each
+/// word against each folder); past it the action fails closed. Many times
+/// any line's length, it bounds the view's work whatever the folders.
+pub(super) const RESOLVE_BUDGET: usize = 64 * super::MAX_CLASSIFIED_BYTES;
 
 /// Words after a folder-changing command looked at for its folder.
 const FOLDER_WINDOW: usize = 8;
 
-/// Where a line has been: its current folder, and every folder it has been
-/// in (the working folder first), normalized.
+/// Where a line may be: each folder it may be in now (a `cd` may have
+/// failed, so the folder before it stays possible unless the line goes on
+/// only on success, `cd x && ...`), and every folder it has been in (`popd`
+/// may return to any of them), normalized, the working folder first.
 pub(super) struct Folders {
-    current: String,
-    visited: Vec<String>,
+    possible: Vec<String>,
+    history: Vec<String>,
 }
 
 /// The folders a command names, each with the index of the word naming it
@@ -429,7 +442,9 @@ fn folder_targets<'a>(
         work::step();
         if let Some(target) = attached_folder(&lower[at]) {
             found.push((target, Some(at), true));
-        } else if CHANGE_FOLDER.contains(&names[at]) {
+        } else if CHANGE_FOLDER.contains(&names[at])
+            || matches!(lower[at].as_str(), "cd/d" | "chdir/d")
+        {
             // The first operand: `-Path:x` gives its value, other switches
             // (`/d`, `-Path`, `-PassThru`) are skipped.
             let operand = window(at + 1).find_map(|next| {
@@ -561,8 +576,8 @@ impl Classifier {
             for quotes in READINGS {
                 work::step();
                 let mut folders = Folders {
-                    current: cwd_path.clone(),
-                    visited: vec![cwd_path.clone()],
+                    possible: vec![cwd_path.clone()],
+                    history: vec![cwd_path.clone()],
                 };
                 for found in commands(&text, quotes) {
                     work::step();
@@ -581,7 +596,16 @@ impl Classifier {
         let names: Vec<&str> = lower.iter().map(|word| command_name(word)).collect();
         // Folder values are where a command runs, not what it reads.
         let mut folder_values = vec![false; words.len()];
+        let before = folders.possible.clone();
         let mut flagged: Vec<String> = Vec::new();
+        if names
+            .iter()
+            .any(|name| matches!(*name, "popd" | "pop-location"))
+        {
+            // Back to any folder the line has been in.
+            let history = folders.history.clone();
+            self.add_folders(&mut folders.possible, history, MAX_FOLDERS);
+        }
         for (target, at, moves) in folder_targets(words, &lower, &names, command.separated) {
             work::step();
             if let Some(at) = at {
@@ -590,41 +614,37 @@ impl Classifier {
             let Some(target) = candidates(target).pop() else {
                 continue;
             };
-            if on_another_drive(target, std::slice::from_ref(&folders.current)) {
+            if on_another_drive(target, &folders.possible) {
                 self.note(ProtectedActionKind::UnseenCode);
             }
-            let resolved = self.homes.resolve(target, &folders.current);
-            if resolved.len() > MAX_FOLDER_BYTES {
-                self.note(ProtectedActionKind::UnseenCode);
-            } else if moves {
-                if !folders.visited.contains(&resolved) {
-                    if folders.visited.len() >= MAX_FOLDERS {
-                        self.note(ProtectedActionKind::UnseenCode);
-                    } else {
-                        folders.visited.push(resolved.clone());
-                    }
+            // From each folder the line may be in.
+            let mut reached = Vec::new();
+            for folder in &folders.possible {
+                work::step();
+                let resolved = self.homes.resolve(target, folder);
+                if resolved.len() > MAX_FOLDER_BYTES {
+                    self.note(ProtectedActionKind::UnseenCode);
+                } else if !reached.contains(&resolved) {
+                    reached.push(resolved);
                 }
-                folders.current = resolved;
-            } else if flagged.len() >= MAX_FOLDERS {
-                self.note(ProtectedActionKind::UnseenCode);
-            } else {
-                flagged.push(resolved);
             }
+            if !moves {
+                self.add_folders(&mut flagged, reached, MAX_FOLDERS);
+                continue;
+            }
+            self.add_folders(&mut folders.history, reached.clone(), 2 * MAX_FOLDERS);
+            if command.and_then {
+                folders.possible = Vec::new();
+            }
+            self.add_folders(&mut folders.possible, reached, MAX_FOLDERS);
         }
         let mut bases: Vec<String> = Vec::new();
-        for base in folders
-            .visited
-            .iter()
-            .chain([&folders.current])
-            .chain(&flagged)
-        {
+        for base in [before, folders.possible.clone(), flagged] {
             work::step();
-            if !bases.contains(base) {
-                bases.push(base.clone());
-            }
+            self.add_folders(&mut bases, base, 3 * MAX_FOLDERS);
         }
         let bases = &bases;
-        let current = folders.current.clone();
+        let current = bases[0].clone();
         let writer = names.iter().position(|name| {
             WINDOWS_WRITERS.contains(name)
                 || WRITERS.contains(name)
@@ -654,16 +674,20 @@ impl Classifier {
                     .zip(&readers_flagged)
                     .any(|((reader, _), flagged)| *flagged && reader == name)
         });
-        // PowerShell's own parameters: after its name, before its command.
-        let powershell = names
-            .iter()
-            .position(|name| matches!(*name, "powershell" | "pwsh"))
-            .map(|at| {
-                let end = (at + 1..words.len())
-                    .find(|next| starts_the_code(&lower[*next]))
-                    .unwrap_or(words.len());
-                at + 1..end
-            });
+        // PowerShell's own parameters: after each `powershell`/`pwsh`,
+        // before its code.
+        let mut parameters = vec![false; words.len()];
+        let mut in_parameters = false;
+        for (index, name) in names.iter().enumerate() {
+            work::step();
+            if matches!(*name, "powershell" | "pwsh") {
+                in_parameters = true;
+            } else if in_parameters && starts_the_code(&lower[index]) {
+                in_parameters = false;
+            } else {
+                parameters[index] = in_parameters;
+            }
+        }
         let written = |index: usize| {
             command.redirected[index]
                 || writer.is_some_and(|at| index > at)
@@ -712,15 +736,18 @@ impl Classifier {
                     }
                 }
             }
-            if powershell
-                .as_ref()
-                .is_some_and(|parameters| parameters.contains(&(index.wrapping_sub(1))))
-                && encoded_parameter(&lower[index - 1])
-                && self.windows_decoded.insert(word.clone())
-            {
-                match decoded_command(word) {
-                    Some(text) => self.script(&text, &current, depth + 1),
-                    None => self.note(ProtectedActionKind::UnseenCode),
+            if index > 0 && parameters[index - 1] && encoded_parameter(&lower[index - 1]) {
+                // Run from each folder the line may be in, once each.
+                let decoded = decoded_command(word);
+                for base in bases {
+                    work::step();
+                    if !self.windows_decoded.insert((word.clone(), base.clone())) {
+                        continue;
+                    }
+                    match &decoded {
+                        Some(text) => self.script(text, base, depth + 1),
+                        None => self.note(ProtectedActionKind::UnseenCode),
+                    }
                 }
             }
             for candidate in candidates(word) {
@@ -737,6 +764,22 @@ impl Classifier {
         for (index, path) in joined_paths(words, &lower, &names) {
             work::step();
             self.windows_path(&path, bases, &current, written(index), recursive);
+        }
+    }
+
+    /// Add `more` to `folders`, without repeats. Past `limit` folders the
+    /// line fails closed.
+    fn add_folders(&mut self, folders: &mut Vec<String>, more: Vec<String>, limit: usize) {
+        for folder in more {
+            work::step();
+            if folders.contains(&folder) {
+                continue;
+            }
+            if folders.len() >= limit {
+                self.note(ProtectedActionKind::UnseenCode);
+                return;
+            }
+            folders.push(folder);
         }
     }
 
@@ -775,6 +818,12 @@ impl Classifier {
         }
         for base in bases {
             work::step();
+            let cost = candidate.len() + base.len();
+            if self.windows_budget < cost {
+                self.note(ProtectedActionKind::UnseenCode);
+                return;
+            }
+            self.windows_budget -= cost;
             let resolved = self.homes.resolve(candidate, base);
             if path_like {
                 self.path(&resolved);

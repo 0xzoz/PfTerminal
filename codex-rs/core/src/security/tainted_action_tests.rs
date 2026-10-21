@@ -3959,6 +3959,20 @@ fn issue_1240_windows_spellings_are_protected() {
             Persistence,
         ),
         (r"xcopy /d %USERPROFILE% E:\b /e /i", Credentials),
+        // Review 3: a cd that fails or a popd leaves earlier folders possible.
+        (
+            r"cd /d %USERPROFILE%\AppData & pushd Local & popd & cd .. & echo x>>.bashrc",
+            Persistence,
+        ),
+        (
+            r"cd /d %USERPROFILE%\AppData && pushd Local && popd && cd .. && echo x>>.bashrc",
+            Persistence,
+        ),
+        (
+            r"cd /d %USERPROFILE%\AppData & cd nosuch & cd .. & echo x>>.bashrc",
+            Persistence,
+        ),
+        (r"cd/d %USERPROFILE% & echo x>>.bashrc", Persistence),
     ] {
         assert_eq!(cmd(line), Some(expected), "cmd /c {line}");
     }
@@ -4122,6 +4136,16 @@ fn issue_1240_windows_spellings_are_protected() {
         windows_kind(&["pwsh", "-ea", "not base64!", "-c", "dir"]),
         Some(UnseenCode)
     );
+    // Review 3: a nested PowerShell's parameters; the payload runs from
+    // each folder the line may be in.
+    let add_bashrc = encoded("Add-Content .bashrc x");
+    for line in [
+        format!("pwsh -c pwsh -enc {}", encoded(r"Add-Content ~\.bashrc x")),
+        format!(r"cd /d %USERPROFILE% & cd nosuch & pwsh -enc {add_bashrc}"),
+        format!(r"cd /d %USERPROFILE% & pushd AppData & popd & pwsh -enc {add_bashrc}"),
+    ] {
+        assert_eq!(cmd(&line), Some(Persistence), "{line}");
+    }
     for script in ["Add-Content .bashrc x", "Get-Date; Add-Content .bashrc x"] {
         assert_eq!(
             windows_kind(&["pwsh", "-WorkingDirectory", "~", "-Command", script]),
@@ -4220,6 +4244,7 @@ fn issue_1240_ordinary_windows_commands_are_not_protected() {
         "cargo test -p codex-core",
         // Review 1: several folder changes are followed, not compounded.
         r"cd sub & cd sub2 & cd ..\sub3 & cd .. & dir",
+        r"cd a && make && cd .. && cd b && make && cd .. && cd c && make && cd ..",
         r"echo x > %TEMP%\out.txt",
         r"type C:README.md",
         "cargo test a::tests e:true: -- x:y",

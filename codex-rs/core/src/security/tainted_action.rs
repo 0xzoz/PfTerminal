@@ -534,6 +534,7 @@ impl Classifier {
             classified_lines: 0,
             compared: shadow::Budget::new(),
             windows_decoded: HashSet::new(),
+            windows_budget: windows_shell::RESOLVE_BUDGET,
         }
     }
 
@@ -757,9 +758,12 @@ struct Classifier {
     avoids_zsh: bool,
     /// #932: comparisons left with the grammar.
     compared: shadow::Budget,
-    /// #1240: PowerShell encoded commands the Windows view decoded, each
-    /// judged once.
-    windows_decoded: HashSet<String>,
+    /// #1240: PowerShell encoded commands the Windows view judged, with
+    /// the folder each was judged in: once each.
+    windows_decoded: HashSet<(String, String)>,
+    /// #1240: bytes of words and folders the Windows view may still
+    /// resolve; past it the action fails closed.
+    windows_budget: usize,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
