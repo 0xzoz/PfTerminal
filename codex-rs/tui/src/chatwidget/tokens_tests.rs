@@ -2712,6 +2712,27 @@ fn accounting_inspect_plain_wording_counts_attempts_and_names_every_route() {
     );
     // A provider you configured shows the slug: the name's brand is unknown.
     assert_eq!(model_name("my-zai", "glm-5.2"), "glm-5.2");
+    // #1196: a name without a route brand names the model on any route.
+    assert_eq!(
+        model_name("my-claude-proxy", "claude-opus-5-5"),
+        "Claude Opus 5.5"
+    );
+    assert_eq!(
+        model_name("openrouter", "claude-opus-5-5"),
+        "Claude Opus 5.5"
+    );
+    assert_eq!(model_name("my-openai", "gpt-6-sol"), "GPT-6 Sol");
+    // A brand of several words counts only when every word is in the name.
+    assert_eq!(
+        model_name("anthropic", "claude-opus-5-5-plan"),
+        "claude-opus-5-5-plan"
+    );
+    assert_eq!(model_name("kimi-code", "k3"), "Kimi Code K3");
+    assert_eq!(model_name("openrouter", "k3"), "k3");
+    assert_eq!(
+        model_name("openrouter", "deepseek-v4-pro"),
+        "deepseek-v4-pro"
+    );
 }
 
 #[test]
