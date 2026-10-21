@@ -14,6 +14,7 @@ use super::FileText;
 use super::Folders;
 use super::ProtectedActionKind;
 use super::WRITERS;
+use super::git_helpers;
 use super::indirect;
 use super::invocation;
 use super::invocation::Code;
@@ -272,6 +273,8 @@ impl Classifier {
                     .extend(pipeline_targets(commands, command));
             }
             found.written.extend(targets);
+            // D153: a git setting whose quoted text names git.
+            found.unreadable |= git_helpers::setting_holds_git_name(&command.words);
             let (starts, overflow) = sed::command_starts(&texts);
             found.unreadable |= overflow;
             let mut roles = vec![Role::Code; texts.len()];

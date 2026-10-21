@@ -2495,6 +2495,16 @@ async fn named_account_status_in(
             .expect("enable named accounts");
     }
     set_workspace_cwd(&mut config, test_path_buf("/workspace/tests").abs());
+    // #1193: what the background check found in this home's vault, unless
+    // the test set it (a vault it cannot read leaves it unknown).
+    let account_usage = account_usage.map(|mut summary| {
+        if summary.named_account_in_home.is_none() {
+            summary.named_account_in_home =
+                crate::provider_named_accounts::named_account_providers(temp_home.path())
+                    .map(|providers| providers.contains("zai"));
+        }
+        summary
+    });
     // The session's own token usage: what the account rows add up to.
     let usage = account_usage
         .as_ref()
@@ -2579,6 +2589,7 @@ async fn status_snapshot_account_usage_no_usage_yet() {
         /*named_accounts*/ true,
         Some("work"),
         Some(super::StatusAccountUsage {
+            named_account_in_home: None,
             rows: vec![("work".to_string(), TokenUsage::default())],
         }),
         /*width*/ 100,
@@ -2593,6 +2604,7 @@ async fn status_snapshot_account_usage_one_account() {
         /*named_accounts*/ true,
         Some("work"),
         Some(super::StatusAccountUsage {
+            named_account_in_home: None,
             rows: vec![(
                 "work".to_string(),
                 account_tokens(
@@ -2614,6 +2626,7 @@ async fn status_snapshot_account_usage_several_accounts() {
         /*named_accounts*/ true,
         /*account*/ None,
         Some(super::StatusAccountUsage {
+            named_account_in_home: None,
             rows: vec![
                 (
                     "default".to_string(),
@@ -2646,6 +2659,7 @@ fn model_provider_line(rendered: &str) -> &str {
 
 fn default_account_usage() -> Option<super::StatusAccountUsage> {
     Some(super::StatusAccountUsage {
+        named_account_in_home: None,
         rows: vec![(
             codex_vault::DEFAULT_PROVIDER_ACCOUNT.to_string(),
             account_tokens(
@@ -2672,6 +2686,15 @@ async fn status_snapshot_account_line_hidden_without_named_accounts() {
         line.contains("Z.AI") && !line.contains("account"),
         "{rendered}"
     );
+    // D125: nor the "Account usage" line: the card is exactly as with named
+    // accounts off.
+    assert!(!rendered.contains("Account usage"), "{rendered}");
+    let flag_off = named_account_status(
+        /*named_accounts*/ false, /*account*/ None, /*account_usage*/ None,
+        /*width*/ 100,
+    )
+    .await;
+    assert_eq!(rendered, flag_off);
     assert_snapshot!(rendered);
 }
 
@@ -2714,6 +2737,7 @@ async fn account_line_counts_only_this_providers_named_accounts() {
         !model_provider_line(&rendered).contains("account"),
         "{rendered}"
     );
+    assert!(!rendered.contains("Account usage"), "{rendered}");
 
     std::fs::write(
         home.path().join("secrets").join("local.age"),
@@ -2732,6 +2756,7 @@ async fn account_line_counts_only_this_providers_named_accounts() {
         model_provider_line(&rendered).contains("Z.AI · account default"),
         "{rendered}"
     );
+    assert!(rendered.contains("Account usage:"), "{rendered}");
 }
 
 /// D86: with named accounts off, an enrolled named account changes nothing.
@@ -2801,6 +2826,8 @@ async fn default_openai_status_is_unchanged_without_named_accounts() {
             /*refreshing_rate_limits*/ false,
             // What `status_account_usage` passes: rows only with the flag on.
             named_accounts.then(|| super::StatusAccountUsage {
+                // The background check found no named account.
+                named_account_in_home: Some(false),
                 rows: vec![(
                     codex_vault::DEFAULT_PROVIDER_ACCOUNT.to_string(),
                     usage.clone(),
