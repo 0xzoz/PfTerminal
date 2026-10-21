@@ -3277,6 +3277,10 @@ fn issue_1142_git_code_settings_are_unseen_code() {
         "touch PAGER; read PAGE[R] <<< id; git log",
         "alias git='git -c core.pager=id'",
         "alias -g g='git -c alias.x=!id x'",
+        // Review round 5.
+        "export E='!touch pwned'; alias g='git --config-env=alias.x=E'",
+        "alias g='git --exec-path=/tmp/d'",
+        "alias g.x='git -c alias.y=!id y'",
     ] {
         assert_eq!(script(command), unseen, "{command}");
     }

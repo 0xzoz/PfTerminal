@@ -1057,17 +1057,12 @@ impl Classifier {
                     .iter()
                     .skip_while(|word| word.starts_with('-'))
                     .map(|word| match word.split_once('=') {
-                        // A definition's start (`g=git`), not a split piece
-                        // of a body (`core.pager=x`; a body's `PAGER=x` is
-                        // judged as a word already).
-                        Some((alias, body))
-                            if !alias.is_empty()
-                                && alias
-                                    .chars()
-                                    .all(|ch| ch.is_ascii_alphanumeric() || "_-".contains(ch)) =>
-                        {
-                            body
-                        }
+                        // A definition's start (`g=git`, `g.x=git`; a name
+                        // holds no `=`). A split piece of a body is cut too
+                        // (`-c core.pager=x` reads `-c x`, still unsafe; a
+                        // body's `PAGER=x` is judged as a word already);
+                        // options stay whole (`--config-env=k=v`).
+                        Some((_, body)) if !word.starts_with('-') => body,
                         _ => word.as_str(),
                     })
                     .collect();
