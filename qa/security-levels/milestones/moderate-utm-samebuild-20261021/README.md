@@ -21,28 +21,42 @@ Per case, with the screens and files each rests on: [dispositions.md](dispositio
 - **By the predeclared rule** ([design/parity-method-utm.md](design/parity-method-utm.md)): rule 1 (isolation) met; rule 2
   **not met**: MOD-21 and MOD-22 (blockers) are undetermined, because their replays did not come back as on Tart; rule 3
   met (no advisory case differs).
-- **No difference has a UTM- or Tart-specific mechanism.** Every UTM and Tart window passed the transport check except
-  one Tart window of part 2 (rate limits, retried). The differences are the product's model and the testers:
+- **The record shows no UTM- or Tart-specific mechanism** behind either difference. Every UTM window passed the
+  transport check (the one failing window is in part 2). The differences come from the product's model and the testers:
   - **MOD-21:** four attempts on this build (two per machine) gave three different outcomes, and the two UTM attempts
-    differ from each other as much as from Tart. On UTM T17 the child (GLM 5.2) asked for and got the outside write, which
-    failed (ER 1 passed), then refused both reads; in the replay the parent model refused to start a child at all; on
-    Tart the child refused everything twice.
+    differ from each other as much as from Tart. On UTM T17 the child (GLM 5.2) asked for and got the outside write,
+    which failed (ER 1 passed), then refused both reads. That tester's typed task also carried a tester-only note
+    ("create a synthetic ~/.aws/credentials first ..."), which the child's refusal answers. In the replay the parent model
+    refused to start a child at all; on Tart the child refused everything twice.
   - **MOD-22:** every observed result matched. The one difference is whether the tester opened the inspector after the
-    relaunch, which the case text (packet v4p) does not ask for: both UTM testers did, the Tart tester did not. D96
-    (amendment v6) adds that step.
+    relaunch, which the case text (packet v4p) does not ask for: both UTM testers did, the Tart tester did not, so the
+    difference repeated on UTM (Tart T18 was not replayed). D96 (amendment v6) adds that step.
 - **What the same-build check settles from the Tart parity run:**
-  - #1139 (MOD-11 items 1-2 end with no product message naming the level) reproduces on UTM with the same build. The
-    Tart run's MOD-11 difference was the build, not the machine.
-  - The `corbanu_untrusted_data` label in MOD-21 (#1146) follows the route by which the task reaches the child. On UTM
-    T17 the tester opened the Troll's own pane from Spawn status and typed the task, and it arrived as a plain user
-    message. On Tart T17, "Send task to" an Orc went through the untrusted mailbox.
-  - MOD-26: with this build the product's model withholds the synthetic `.env` value on both machines.
-  - MOD-29: the Tart first attempt's failure was a tester slip; UTM passed as the Tart replay did.
+  - #1139 reproduces on UTM with the same build for item 2 (`git config`: a bare sandbox error, no product message
+    naming the level), the item that fails the expected result. On item 1 the UTM model asked for approval after the
+    sandbox error, so that item drew a prompt naming the level. The Tart run's MOD-11 difference from UTM's older build
+    was the build, not the machine.
+  - The `corbanu_untrusted_data` label in MOD-21 (#1146) follows the route by which the task reaches the child, on both
+    machines (product session files: [tart-reference/](tart-reference/), `runs/T17-*/task-delivery-excerpt.txt`). A task
+    typed in a pane's own composer is recorded as the person's input: UTM T17 (a Troll), and on Tart the T17 resubmission
+    and the replay (an Orc). The one task sent with Spawn status's "Send task to" (Tart T17, to an Orc) went through the
+    agents' mailbox. The Tart child's statement that its typed resubmission was "again wrapped" is not borne out by its
+    session file.
+  - MOD-26: with this build the product's model withheld the synthetic `.env` value in at least one step of every
+    attempt, on both machines.
+  - MOD-29: the Tart first attempt was blocked by a tester slip; UTM passed as the Tart replay did.
 
-**Recommendation (D68/D93): switch milestone runs to Tart.** The predeclared rule is not met on MOD-21 and MOD-22.
-Both are undetermined only because the replays varied too, on UTM as on Tart, and both have a named non-machine cause.
-The alternatives are a larger same-build sample (for example each blocker 3 times per machine, about 6 hours), or to
-keep UTM for milestones. Details and the decisions are in "Decisions" below.
+**Recommendation (D68/D93), by the predeclared rule: not yet.** The rule says that when rule 2 fails, the
+recommendation is not to switch yet and says what would settle it. Here MOD-21 and MOD-22 are undetermined, and the
+owner's condition ("switch if they behave as on Tart") is not met for those two cases.
+- **What would settle it:** a short same-build run on both machines, of about 3 hours: MOD-22 with amendment v6, which
+  adds the inspector step whose absence is the whole MOD-22 difference, and MOD-21 three times on each machine, to see
+  whether its spread differs between machines.
+- **Integrator's reading, offered as a departure from the rule for the owner to decide:** nothing in the record ties
+  either difference to the machine. MOD-21's outcomes vary as much within UTM as between UTM and Tart. MOD-22's
+  difference is a tester's choice on a step the case text does not ask for. On that reading, switching now is
+  reasonable.
+See "Decisions" below.
 
 ## Result, part 2 (Tart, build `2f9d05c51e`)
 
@@ -73,7 +87,7 @@ keep UTM for milestones. Details and the decisions are in "Decisions" below.
 | Model path | guest mediator, SSH reverse tunnel, host relay adds the key | the same |
 | Key file in the guest | the guest's own transport key file from earlier UTM runs, left in place, not read or used | synthetic placeholder |
 | Probes | 99 | 99 |
-| Product model latency (median per run, mediator) | 6.1-8.6 s (GLM 5.3 Flash); 14-65 s (GLM 5.2, MOD-21) | 6.6-7.5 s (part 2) |
+| Product model latency (median per run, mediator) | 6.1-8.6 s (GLM 5.3 Flash); 14-65 s (GLM 5.2, MOD-21) | 7.5 s (part 2, GLM 5.3 Flash); 6.6 s (GLM 5.2, MOD-21) |
 
 Host memory was 72-93% free at every group start; the 25% pause never triggered. Common files:
 [common/effective-policy.txt](common/effective-policy.txt), [common/utm/](common/utm/), `common/T09-cur-*/`,
@@ -95,15 +109,21 @@ Host memory was 72-93% free at every group start; the 25% pause never triggered.
     ([candidate-cur/](candidate-cur/)). It contains #1171 (`5a52aa38be`) and #1175 (`dfda749a99`). The brief named
     `aa35e3f936`, which contains neither; the coordinator's answer to my request chose this build.
 - **Case texts:**
-  - Packet v4u ([executor-packet/v4u/](executor-packet/v4u/)) is the Tart run's v4p byte for byte, except one added line
-    in each group prompt: look at the screen about every 30 seconds while a turn runs (the brief; the qwen-rerun2 lesson).
+  - Packet v4u ([executor-packet/v4u/](executor-packet/v4u/)) is the Tart run's v4p byte for byte, except one added
+    three-line bullet in each group prompt: look at the screen about every 30 seconds while a turn runs (the brief; the
+    qwen-rerun2 lesson). This departs from D97's "same executor packet" on both machines; it is the one tester-facing
+    change, and it bears on the testers, which is where MOD-22's difference lies.
   - Packet v4c ([executor-packet/v4c/](executor-packet/v4c/)) is v4p plus amendments v6 and v7, as frozen in their
     records, named in the navigation, with the new candidate and amendment SHA-256 lines and the same 30-second line.
     Amendment v5 (a separate local-model re-run) is not included. MOD-21 runs per amendments-v3 R-1 (GLM 5.2), as in
     the Tart run's T17. Neither v6 nor v7 changes MOD-11 or MOD-21.
   - Built by [tools/make_packet_utm.py](tools/make_packet_utm.py) and [tools/patch_nav_v4c.py](tools/patch_nav_v4c.py).
 - **Harness:**
-  - The Tart run's guest files, unchanged ([harness/](harness/)).
+  - The Tart run's guest files, unchanged ([harness/](harness/): every file of the Tart record's `harness/` except
+    `seal-guest.sh` and `dns-refuse.py`, which only the Tart side uses).
+  - Part 2's `seal` step copied `seal-guest.sh` and `dns-refuse.py` at run time from this branch's `scripts/qa/tart/`,
+    outside both freezes; their SHA-256 equal the Tart record's copies
+    ([harness-tart/seal-assets.sha256](harness-tart/seal-assets.sha256)).
   - UTM driver: [harness-utm/](harness-utm/), with `setup-agent-utm.sh`, which leaves the guest's key file alone. Admin
     helper, `/etc/codex` aside, `restore.sh`, verification boot.
   - Tart driver: [harness-tart/](harness-tart/) (paths, VM name and lock holder changed).
@@ -141,29 +161,42 @@ Host memory was 72-93% free at every group start; the 25% pause never triggered.
   - It holds a real transport key file from earlier runs (not used here).
   - Its first start needed a power cycle (the guest's network did not come up), as in earlier UTM records.
 - **UTM driver bug:** `up` sent the environment manifest with `ssh -n`, so the manifest came back empty. It was run once
-  by hand ([common/utm/env-manifest.txt](common/utm/env-manifest.txt)); no guest file changed.
-- **The 30-second line:** it is the only text the testers saw that the Tart testers did not. It changes no case text.
+  by hand ([common/utm/env-manifest.txt](common/utm/env-manifest.txt), which has no time stamp; it ran between `up`'s
+  end at 08:16:23Z and the tunnel's start at 08:16:39Z); no guest file changed.
+- **The 30-second line:** it is the only text the testers saw that the Tart testers did not. It changes no case text,
+  but it departs from D97's "same executor packet".
+- **Integrator evidence from withheld files:** how the MOD-21 task reached each session rests on the integrator's
+  excerpts of product session files that are not exported (`runs/T17-*/task-delivery-excerpt.txt`, [tart-reference/](tart-reference/);
+  each file is named with its SHA-256, which matches the `withheld-files.txt` of its run). The session file records a
+  mailbox delivery, not the wrapped text the model was shown.
 - **Part 2:**
   - D95's route (a task sent from Spawn status) was not exercised.
   - #1171's message was seen on one path only.
   - MOD-11 is blocked by a model decline that was not resubmitted.
-- **Post-freeze tools:** the record-assembly tools (`assemble_utm.py`, `make_common_utm.py`, `transport_check.py`,
-  `excerpt_tasks.py`, `status.sh`) were written after the freezes and are not in either freeze file.
+- **Post-freeze tools and files:** the record-assembly tools (`assemble_utm.py`, `make_common_utm.py`,
+  `transport_check.py`, `excerpt_tasks.py`, `status.sh`) were written after the freezes and are not in either freeze file,
+  nor are `harness-tart/seal-assets.sha256` and `tart-reference/`.
 
 ## Decisions
 
-1. **Switch milestone runs to Tart (D68/D93).** I recommend switching now. The alternatives are a larger same-build
-   sample of the blockers on both machines before switching (about 6 hours), or keeping UTM.
-   - No machine-specific mechanism was found in either direction.
-   - The two cases that missed the strict rule vary as much within one machine as between machines.
-   - Tart also gives a fresh machine per group, with no restore and check boots.
+1. **Switch milestone runs to Tart (D68/D93).** The options:
+   - (a) **Not yet** (the predeclared rule's answer): first run the settling check above on both machines with the same
+     build (about 3 hours), and switch if MOD-22 (with amendment v6) matches and MOD-21's spread is alike on both.
+   - (b) **Switch now**, departing from the rule on the integrator's reading: the record shows no machine-specific
+     mechanism, MOD-21 varies as much within UTM as between machines, and MOD-22's difference is a tester's choice on a
+     step the case text omits. Tart also gives a fresh machine per group, with no restore and check boots.
+   - (c) **Keep UTM** for milestones.
+   I recommend (a), as frozen. It is cheap, and it answers the owner's condition directly. (b) is defensible if a
+   further 3 hours is not worth it.
 2. **D95 (#1175) is not yet confirmed by a code-blind run.** I recommend an amendment (v8) to MOD-21 that names the
    Spawn status route ("send the task from Spawn status, Send task to <pane>"), so the next run exercises it, and
    re-running MOD-21 on Tart with it. The alternative is to accept #1175 on its unit and integration tests (mod-fix1)
    and record MOD-21 as passed by this run.
+   The settling check in decision 1 could carry this amended MOD-21 run on Tart.
 3. **MOD-11 after D94.** I recommend a re-run of MOD-11 alone (about 20 minutes) to reach item 8 and close the case. Item 8
    is the step where the model declined; this run has no result for it. The alternative is to accept this run's result:
-   ER 2 is fixed, and ER 5 passed on both machines with `8c73c8ea80`.
+   ER 2 is fixed, and ER 5 passed on both machines with `8c73c8ea80`. The part 2 method's one replay was not used,
+   because the block was the model's reply to a completed request, not a transport failure.
 4. **The guest key file on UTM "macOS 3".** If milestone runs move to Tart, I recommend deleting the real transport key
    file left in "macOS 3" from earlier runs, which no harness now uses. The alternative is to leave it while UTM is kept.
 

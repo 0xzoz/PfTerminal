@@ -1,8 +1,10 @@
 # AGMS harness, utm-par2 (2026-10-21 UTC): effective isolation policy. Part 1 (D93): UTM guest "macOS 3", build 8c73c8ea80.
 # Part 2 (D94/D95): one fresh Tart clone per group, build 2f9d05c51e.
 
-Both parts use the Tart parity run's guest harness unchanged (../harness/ = ../../moderate-tart-parity-20261020/harness/
-file for file; fixture.tar by SHA-256) and its network path (guest mediator -> SSH reverse tunnel -> host relay that adds
+Both parts use the Tart parity run's guest harness unchanged (../harness/ holds every file of
+../../moderate-tart-parity-20261020/harness/, byte for byte, except seal-guest.sh and dns-refuse.py; fixture.tar by
+SHA-256; part 2 copied those two at run time from scripts/qa/tart/, outside both freezes, with the same SHA-256 as the
+Tart record's copies: ../harness-tart/seal-assets.sha256) and its network path (guest mediator -> SSH reverse tunnel -> host relay that adds
 the Z.AI key on the host). Freezes: design/FROZEN.sha256 (part 1) pushed as 552601666c at 2026-10-21T08:09:37Z, before
 "macOS 3" was started (08:09:54Z); design/FROZEN-d94d95.sha256 (part 2) pushed as 04837d4f1a at 09:46:27Z, before the first
 clone (09:46:35Z). No frozen file changed after its freeze. One post-freeze manual step is disclosed below (env manifest).
@@ -27,7 +29,8 @@ Provisioned once (setup-agent-utm.sh, provision.sh, erase-etc-codex.sh), then on
 rotating lanes, each with a lane wipe before and after (the UTM qual method), then the closing below.
 
 Env manifest (post-freeze manual step): utm-run.sh's `up` sent env-manifest.sh to the guest with `ssh -n`, so its output was
-empty; the same script was run once by hand with stdin at 08:16Z (utm/env-manifest.txt). No guest file changed.
+empty; the same script was run once by hand with stdin between 08:16:23Z and 08:16:39Z (utm/env-manifest.txt; the file
+has no time stamp). No guest file changed.
 
 Accounts, network, gate, guard, product: as the Tart parity run (../../moderate-tart-parity-20261020/common/effective-policy.txt):
 executors agmx1-3 (agmx0 = gate lane), per-uid pf allowing only the loopback mediator, 99 probes, smoke turn, relay control,
