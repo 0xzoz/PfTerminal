@@ -1012,7 +1012,7 @@ fn killed_process_takes_git_and_its_helpers_with_it() {
         helper_pid,
         ..
     } = write_slow_fetch_git(dir.path());
-    let mut child = Command::new(std::env::current_exe().expect("test binary"))
+    let child = Command::new(std::env::current_exe().expect("test binary"))
         .args([
             "--exact",
             "startup_sync::tests::killed_sync_child",
@@ -1025,12 +1025,20 @@ fn killed_process_takes_git_and_its_helpers_with_it() {
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn the sync process");
+    // Killed and reaped however the test ends.
+    struct Reaped(Child);
+    impl Drop for Reaped {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let child = Reaped(child);
     wait_until("the fetch starts", || {
         git_pid.exists() && helper_pid.exists()
     });
 
-    child.kill().expect("SIGKILL the sync process");
-    child.wait().expect("reap the sync process");
+    drop(child);
 
     wait_until_gone(&[read_pid(&git_pid), read_pid(&helper_pid)]);
 }

@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Child;
 use std::process::Command;
 use std::process::Output;
@@ -812,7 +813,11 @@ fn run_git_command_with_timeout(
 /// its home. When the command finishes, dropping this kills what is left of
 /// the group and reaps the watchdog. The watchdog ignores the terminal's
 /// signals, so only the pipe or a kill ends it. If it can't start, `git` leads
-/// its own group as before and only the timeout and cancel flag stop it.
+/// its own group as before and only the timeout and cancel flag stop it. On
+/// macOS std sets close-on-exec on the pipe just after creating it, so a
+/// child another thread spawns in that moment may hold the write end open;
+/// then the watchdog fires only once that child exits too (cancel, timeout
+/// and the end of the command still kill the group).
 #[cfg(unix)]
 struct GitProcessGroup {
     watchdog: Option<(Child, libc::pid_t)>,
