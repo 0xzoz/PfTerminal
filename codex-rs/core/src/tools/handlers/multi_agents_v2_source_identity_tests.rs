@@ -295,7 +295,7 @@ fn issue1016_encrypted_payload_compares_provider_and_account() {
 }
 
 #[test]
-fn issue1016_snapshot_account_is_read_as_a_name() {
+fn issue1016_snapshot_account_is_read_as_provider_and_name() {
     for (snapshot, account) in [
         (None, None),
         (Some("myopenai:default"), None),
@@ -308,4 +308,52 @@ fn issue1016_snapshot_account_is_read_as_a_name() {
             "{snapshot:?}"
         );
     }
+    // An account of another provider carried onto `myopenai` keeps its
+    // provider.
+    assert_ne!(
+        ConfiguredRuntime::from_snapshot("myopenai", Some("openai:work")),
+        ConfiguredRuntime::new("myopenai", Some("work")),
+    );
+}
+
+/// #1127 review: accounts compare as `<provider>:<name>`. An account `work`
+/// of another provider carried onto `myopenai` (`with_account_from`) is not
+/// `myopenai`'s own `work`, and the refusal names it qualified.
+#[test]
+fn issue1127_same_name_account_of_another_provider_is_another_account() {
+    let mut carried = codex_model_provider_info::ModelProviderInfo::create_openai_provider(
+        /*base_url*/ None,
+    );
+    carried.account = Some(codex_model_provider_info::NamedProviderAccount {
+        provider_id: OPENAI_PROVIDER_ID.to_string(),
+        name: "work".to_string(),
+    });
+    let source = crate::tools::context::ToolCallSource::Direct;
+    let check = |target| {
+        ensure_message_encoding_matches_target(
+            ConfiguredRuntime::from_provider("myopenai", &carried),
+            OPENAI_PROVIDER_ID,
+            &source,
+            target,
+            CollaborationMessageEncoding::ProviderNative,
+            "followup_task",
+            PLAINTEXT_FOLLOWUP_TASK_TOOL,
+        )
+    };
+    assert_eq!(
+        check(ConfiguredRuntime::from_snapshot(
+            "myopenai",
+            Some("myopenai:work")
+        )),
+        Err(FunctionCallError::RespondToModel(format!(
+            "target account `work` of `myopenai` (this agent runs on account `openai:work`) cannot consume this OpenAI-encrypted collaboration payload. Call the function named `{PLAINTEXT_FOLLOWUP_TASK_TOOL}` directly with exactly the same `target` and the plaintext `message`; do not call `followup_task` again and do not add an `adapter` field. No message was admitted and no target turn was started."
+        )))
+    );
+    assert_eq!(
+        check(ConfiguredRuntime::from_snapshot(
+            "myopenai",
+            Some("openai:work")
+        )),
+        Ok(())
+    );
 }

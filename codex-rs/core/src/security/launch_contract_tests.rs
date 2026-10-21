@@ -458,6 +458,51 @@ fn pf_27_s06_protected_codex_home_dirs_are_protected_entries() {
     }
 }
 
+/// #1107: what Corbanu keeps in the home besides its databases (recovery's
+/// `db-backups`, pending accounting records and the GPU controller's lock)
+/// is unreadable, as in a separate database folder; the folders are denied
+/// before they exist on Windows.
+#[test]
+fn issue_1107_the_homes_database_folder_entries_are_protected() {
+    let fixture = fixture();
+    let cwd = fixture.workspace.as_path();
+    let backup = fixture.codex_home.join("db-backups/1/state_5.sqlite");
+    std::fs::create_dir_all(backup.as_path().parent().expect("parent")).expect("backups");
+    std::fs::write(backup.as_path(), "db").expect("backup");
+    let pending = fixture.codex_home.join("accounting-pending/x.json");
+    std::fs::create_dir_all(pending.as_path().parent().expect("parent")).expect("pending");
+    std::fs::write(pending.as_path(), "{}").expect("record");
+    std::fs::write(fixture.codex_home.join("gpu-controller.lock"), "").expect("gpu lock");
+    let protected = fixture
+        .contract
+        .protect_permissions(&workspace_profile(&fixture.workspace), cwd)
+        .expect("protectable");
+    let file_system = protected.file_system_sandbox_policy();
+    for path in [
+        fixture.codex_home.join("db-backups"),
+        backup,
+        fixture.codex_home.join("accounting-pending"),
+        pending,
+        fixture.codex_home.join("gpu-controller.lock"),
+    ] {
+        assert!(
+            !file_system.can_read_path_with_cwd(path.as_path(), cwd),
+            "{}",
+            path.display()
+        );
+    }
+    assert_eq!(fixture.contract.verify_permissions(&protected, cwd), Ok(()));
+    for entry in super::super::preflight::DATABASE_FOLDER_ENTRIES {
+        assert!(
+            super::PROTECTED_CODEX_HOME_ENTRIES.contains(entry),
+            "{entry}"
+        );
+    }
+    for dir in ["db-backups", "accounting-pending"] {
+        assert!(super::PROTECTED_CODEX_HOME_DIRS.contains(&dir), "{dir}");
+    }
+}
+
 /// The Google Cloud CLI's folder (Windows only, so placed by hand here) and
 /// what is in it are told apart from CLI token files.
 #[test]

@@ -375,7 +375,9 @@ pub(super) fn range_pages(
         {
             vec![InspectorPage {
                 title: "Recorded requests through checkpoint".into(),
-                text: vec!["No requests recorded in this bucket through that checkpoint.".into()],
+                text: vec![
+                    "Nothing recorded yet: this bucket starts after the ledger checkpoint.".into(),
+                ],
                 links: vec![],
                 parent: None,
                 selected: Arc::default(),

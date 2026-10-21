@@ -87,15 +87,26 @@ pub(super) fn plaintext_adapter_spec(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ConfiguredRuntime<'a> {
     pub(super) provider_id: &'a str,
-    pub(super) account: Option<&'a str>,
+    pub(super) account: Option<RuntimeAccount<'a>>,
+}
+
+/// A named account as `<provider>:<name>`: an account carried onto another
+/// connection keeps the provider it belongs to, so two accounts are the same
+/// only when both match (#1127 review).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RuntimeAccount<'a> {
+    pub(super) provider_id: &'a str,
+    pub(super) name: &'a str,
 }
 
 impl<'a> ConfiguredRuntime<'a> {
-    /// `provider_id` on `account` (its name; `None` is the default account).
+    /// `provider_id` on its own account `account` (its name; `None` is the
+    /// default account).
+    #[cfg(test)]
     pub(super) fn new(provider_id: &'a str, account: Option<&'a str>) -> Self {
         Self {
             provider_id,
-            account,
+            account: account.map(|name| RuntimeAccount { provider_id, name }),
         }
     }
 
@@ -105,24 +116,42 @@ impl<'a> ConfiguredRuntime<'a> {
         Self::new(provider_id, /*account*/ None)
     }
 
+    /// `provider_id` running on `provider`'s account, with the provider that
+    /// account belongs to.
+    pub(super) fn from_provider(
+        provider_id: &'a str,
+        provider: &'a codex_model_provider_info::ModelProviderInfo,
+    ) -> Self {
+        Self {
+            provider_id,
+            account: provider.account.as_ref().map(|account| RuntimeAccount {
+                provider_id: account.provider_id.as_str(),
+                name: account.name.as_str(),
+            }),
+        }
+    }
+
     /// From a thread snapshot's `<provider>:<name>` account.
     pub(super) fn from_snapshot(provider_id: &'a str, provider_account: Option<&'a str>) -> Self {
         let account = provider_account
-            .and_then(|selection| selection.rsplit_once(':'))
-            .map(|(_, name)| name)
-            .filter(|name| *name != "default");
-        Self::new(provider_id, account)
+            .and_then(|selection| selection.split_once(':'))
+            .filter(|(_, name)| *name != "default")
+            .map(|(provider_id, name)| RuntimeAccount { provider_id, name });
+        Self {
+            provider_id,
+            account,
+        }
     }
-}
 
-/// The named account `provider` runs on; `None` is the default account.
-pub(super) fn account_name(
-    provider: &codex_model_provider_info::ModelProviderInfo,
-) -> Option<&str> {
-    provider
-        .account
-        .as_ref()
-        .map(|account| account.name.as_str())
+    /// The account as shown: its name, qualified when it belongs to another
+    /// provider than the one it runs on.
+    fn shown_account(&self) -> String {
+        match self.account {
+            None => "default".to_string(),
+            Some(account) if account.provider_id == self.provider_id => account.name.to_string(),
+            Some(account) => format!("{}:{}", account.provider_id, account.name),
+        }
+    }
 }
 
 /// Refuses native (encrypted) collaboration content for a target that cannot
@@ -160,8 +189,8 @@ pub(super) fn ensure_message_encoding_matches_target(
     let recipient = if target_provider_id == configured_source.provider_id {
         format!(
             "target account `{}` of `{target_provider_id}` (this agent runs on account `{}`)",
-            target.account.unwrap_or("default"),
-            configured_source.account.unwrap_or("default"),
+            target.shown_account(),
+            configured_source.shown_account(),
         )
     } else {
         format!("target provider `{target_provider_id}`")

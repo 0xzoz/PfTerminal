@@ -196,6 +196,20 @@ async fn custom_source_native_spawn(
     Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError>,
     usize,
 ) {
+    custom_source_native_spawn_with(named_accounts, role, arguments, |_| {}).await
+}
+
+/// [`custom_source_native_spawn`], with `configure` applied to the parent's
+/// turn before the spawn.
+async fn custom_source_native_spawn_with(
+    named_accounts: bool,
+    role: bool,
+    arguments: serde_json::Value,
+    configure: impl FnOnce(&mut TurnContext),
+) -> (
+    Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError>,
+    usize,
+) {
     let (mut session, mut turn) = custom_source_context().await;
     if role {
         install_role_with_model_override(&mut turn).await;
@@ -216,6 +230,7 @@ async fn custom_source_native_spawn(
             .expect("write account");
         set_turn_config(&mut turn, config);
     }
+    configure(&mut turn);
     let manager = thread_manager();
     let root = manager
         .start_thread((*turn.config).clone())
@@ -294,4 +309,125 @@ async fn issue1016_custom_native_spawn_on_another_account_is_refused() {
         .await;
         assert_eq!((result.is_ok(), children), (true, 1), "{account}");
     }
+}
+
+/// #1144: under Aggressive, a native spawn onto another account is refused
+/// for the encrypted payload before any approval is asked, so the user is
+/// never asked for a spawn that would be refused anyway.
+#[tokio::test]
+async fn issue1144_aggressive_native_spawn_on_another_account_is_refused_before_asking() {
+    for approval in [AskForApproval::Never, AskForApproval::OnRequest] {
+        let spawn = custom_source_native_spawn_with(
+            /*named_accounts*/ true,
+            /*role*/ false,
+            json!({"message": "opaque-spawn", "task_name": "issue1144_child", "fork_turns": "none", "account": "work"}),
+            |turn| {
+                let mut config = (*turn.config).clone();
+                config.security_level = codex_security_policy::SecurityLevel::Aggressive;
+                set_turn_config(turn, config);
+                turn.approval_policy
+                    .set(approval)
+                    .expect("approval policy should be set");
+            },
+        );
+        let (result, children) = tokio::time::timeout(std::time::Duration::from_secs(20), spawn)
+            .await
+            .unwrap_or_else(|_| panic!("{approval:?}: the spawn waited for an answer"));
+        assert_eq!(
+            (result.err(), children),
+            (
+                Some(FunctionCallError::RespondToModel(
+                    "target account `work` of `myopenai` (this agent runs on account `default`) cannot consume this OpenAI-encrypted collaboration payload. Call the function named `spawn_agent_plaintext` directly with exactly the same `target` and the plaintext `message`; do not call `spawn_agent` again and do not add an `adapter` field. No message was admitted and no target turn was started.".to_string()
+                )),
+                0
+            ),
+            "{approval:?}"
+        );
+    }
+}
+
+/// #1127 follow-up: native `send_message` and `followup_task` to a child on
+/// another account of the parent's own provider are refused end to end,
+/// before anything reaches the child's mailbox, and the model is pointed to
+/// the plaintext tools.
+#[tokio::test]
+async fn issue1127_custom_native_send_followup_to_another_account_are_refused() {
+    let (mut session, mut turn) = custom_source_context().await;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::NamedAccounts)
+        .expect("feature");
+    codex_vault::Vault::new(config.codex_home.to_path_buf())
+        .write_provider_account(
+            "myopenai",
+            &codex_vault::ProviderAccountName::parse("work").expect("name"),
+            codex_vault::ProviderAccountKind::ApiKey,
+            "canary-1127-work",
+        )
+        .expect("write account");
+    set_turn_config(&mut turn, config);
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let work_path = AgentPath::try_from("/root/work_child").expect("path");
+    let mut child_config = (*turn.config).clone();
+    crate::config::stamp_provider_account("myopenai", &mut child_config.model_provider, "work")
+        .expect("stamp");
+    let work_child = session
+        .services
+        .agent_control
+        .spawn_agent_with_metadata(
+            child_config,
+            Vec::new(),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: Some(work_path.clone()),
+                agent_nickname: Some("Synthetic".to_string()),
+                agent_role: Some("orc".to_string()),
+                agent_class: None,
+            })),
+            crate::agent::control::SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("register a child on account `work` without inference");
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    for tool in ["send_message", "followup_task"] {
+        let call = invocation(
+            session.clone(),
+            turn.clone(),
+            tool,
+            function_payload(json!({"target":work_path, "message":"opaque-cross-account"})),
+        );
+        let result = if tool == "send_message" {
+            SendMessageHandlerV2.handle(call).await
+        } else {
+            FollowupTaskHandlerV2.handle(call).await
+        };
+        assert_eq!(
+            result.err(),
+            Some(FunctionCallError::RespondToModel(format!(
+                "target account `work` of `myopenai` (this agent runs on account `default`) cannot consume this OpenAI-encrypted collaboration payload. Call the function named `{tool}_plaintext` directly with exactly the same `target` and the plaintext `message`; do not call `{tool}` again and do not add an `adapter` field. No message was admitted and no target turn was started."
+            )))
+        );
+    }
+    let captured: Vec<_> = manager
+        .captured_ops()
+        .iter()
+        .filter_map(|(id, op)| {
+            if *id == work_child.thread_id
+                && let Op::InterAgentCommunication { communication } = op
+            {
+                return Some(communication.clone());
+            }
+            None
+        })
+        .collect();
+    assert_eq!(captured, Vec::new());
 }

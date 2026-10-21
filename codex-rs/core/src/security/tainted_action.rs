@@ -30,8 +30,12 @@ use std::path::Path;
 
 mod arithmetic;
 mod code_variables;
+// #932 phase 1: read only by its differential harness so far.
+#[cfg(test)]
+mod grammar;
 mod indirect;
 mod invocation;
+mod named_shell;
 mod nested;
 mod outbound;
 mod outputs;
@@ -382,17 +386,50 @@ pub(crate) fn classify(action: &ApprovalAction, codex_home: &Path) -> Option<Pro
     classify_with(action, codex_home, dirs::home_dir().as_deref())
 }
 
+/// [`classify`] for an action the host runs exactly as its argv says: a
+/// shell command line runs under the shell it names (not, for example,
+/// under the zsh exec bridge, which runs any `-c` script under zsh). D85:
+/// then a line that provably never reaches zsh skips the zsh-only checks.
+pub(crate) fn classify_as_named(
+    action: &ApprovalAction,
+    codex_home: &Path,
+) -> Option<ProtectedActionKind> {
+    classify_as_named_with(action, codex_home, dirs::home_dir().as_deref())
+}
+
 pub(super) fn classify_with(
     action: &ApprovalAction,
     codex_home: &Path,
     user_home: Option<&Path>,
 ) -> Option<ProtectedActionKind> {
-    classified(action, codex_home, user_home).found
+    classified(action, codex_home, user_home, /*as_named*/ false).found
 }
 
-/// The classifier after judging the action, with its counters.
-fn classified(action: &ApprovalAction, codex_home: &Path, user_home: Option<&Path>) -> Classifier {
+pub(super) fn classify_as_named_with(
+    action: &ApprovalAction,
+    codex_home: &Path,
+    user_home: Option<&Path>,
+) -> Option<ProtectedActionKind> {
+    classified(action, codex_home, user_home, /*as_named*/ true).found
+}
+
+/// The classifier after judging the action, with its counters. `as_named`:
+/// the host runs the action as its argv names (see [`classify_as_named`]).
+fn classified(
+    action: &ApprovalAction,
+    codex_home: &Path,
+    user_home: Option<&Path>,
+    as_named: bool,
+) -> Classifier {
+    let avoids_zsh = as_named
+        && match action {
+            ApprovalAction::Shell { command, .. } | ApprovalAction::ExecCommand { command, .. } => {
+                named_shell::avoids_zsh(command)
+            }
+            ApprovalAction::ApplyPatch { .. } => false,
+        };
     let mut classifier = Classifier {
+        avoids_zsh,
         homes: Homes::new(codex_home, user_home),
         found: None,
         scripts_read: 0,
@@ -609,6 +646,9 @@ struct Classifier {
     /// #1065: bytes of command text, and command lines, lexed so far.
     classified_bytes: usize,
     classified_lines: usize,
+    /// D85: the action's own command line never reaches zsh
+    /// ([`named_shell::avoids_zsh`]); nested lines are not covered.
+    avoids_zsh: bool,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
@@ -953,12 +993,18 @@ impl Classifier {
         // #937: arithmetic on a variable filled from command output or
         // `read` runs the substitutions in its value, like `eval`.
         // #1028: zsh `e`/`+` glob qualifiers run code the classifier does
-        // not read as commands.
+        // not read as commands; #1084: so may a value under glob
+        // substitution. D85: not on the action's own line when it never
+        // reaches zsh. #1142: a variable named at run time may be one git
+        // runs (`let "$n=1"`, `${(P)n=x}`).
+        let zsh_possible = !(depth == 0 && self.avoids_zsh);
         if (self.rebuilt == 0
             && self.not_shell == 0
             && (arithmetic.runs_unseen(command)
-                || arithmetic.runs_qualifier_code(command)
-                || arithmetic.assigns_unseen_name(command)))
+                || arithmetic.assigns_unseen_name(command)
+                || (zsh_possible
+                    && (arithmetic.runs_qualifier_code(command)
+                        || arithmetic.uses_glob_substitution(command)))))
             || folders.unfollowed
         {
             self.note(ProtectedActionKind::UnseenCode);

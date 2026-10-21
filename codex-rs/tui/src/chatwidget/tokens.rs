@@ -16,6 +16,7 @@
 
 mod charge;
 mod chart;
+mod empty_day;
 mod range;
 mod scope;
 mod warmup_resume;
@@ -413,8 +414,8 @@ fn unpriced_rows<'a>(
 /// An attempt that recorded tokens and has no price for any of them.
 fn has_no_price(quote: &ObservationQuote) -> bool {
     // Subscription work is not billed per token, so it has no money to be
-    // missing. Its own gap - an API equivalent the catalogue does not state -
-    // is already stated as such beside the plan rate that applied, and naming
+    // missing. Its own gap - an API equivalent with no rate or no complete
+    // count - is already stated beside the plan rate that applied, and naming
     // it here would assert unstated money next to a line saying the turn was
     // never billed that way.
     if !per_use(quote) {
@@ -583,12 +584,12 @@ fn plan(totals: &codex_state::accounting::DayTotals) -> Vec<String> {
         )
     } else if totals.equivalent_usd == Decimal::default() {
         format!(
-            "Same tokens at API rates: unavailable — the catalogue states no API price for {} of {} plan attempts",
+            "Same tokens at API rates: unavailable — no API rate or complete token count for {} of {} plan attempts",
             totals.unknown_equivalents, totals.plan_attempts
         )
     } else {
         format!(
-            "Same tokens at API rates: {} known, plus {} of {} plan attempts the catalogue does not price",
+            "Same tokens at API rates: at least {}; {} of {} plan attempts have no API rate or an incomplete token count",
             money(totals.equivalent_usd),
             totals.unknown_equivalents,
             totals.plan_attempts
@@ -675,7 +676,7 @@ fn resolved_counts<'a>(quotes: impl IntoIterator<Item = &'a ObservationQuote>) -
 /// that records costs, which creates the ledger with the first request it
 /// records, so collection is not "off" there.
 fn absent_state() -> &'static str {
-    "Unavailable — no requests recorded in this home yet; the accounting ledger is created when the first one is."
+    "Unavailable — nothing recorded in this home yet; the accounting ledger is created when the first request is."
 }
 
 /// What `/usage requests` says in a build that records no costs, instead of
@@ -1076,7 +1077,7 @@ fn inspection_pages_for(
     pages[0].text.splice(
         0..0,
         if t.attempts == 0 {
-            vec!["No recorded attempts in this conversation or its subagents; collection coverage unknown.".into()]
+            vec![empty_day::detail(ready.empty_day)]
         } else {
             estimate(t, EstimateGaps::of(ready.requests.values().flatten()))
         },
@@ -1109,7 +1110,14 @@ fn inspection_pages_for(
         ),
     ]);
     let (noncached, write) = resolved_counts(ready.requests.values().flatten());
-    for (index, (label, m)) in METRICS.iter().zip(&t.measured).enumerate() {
+    // FUP-02: a day with nothing recorded lists no token counts; zeros would
+    // read as no usage, which an empty day does not prove.
+    let measured = if t.attempts == 0 {
+        &[][..]
+    } else {
+        &t.measured[..]
+    };
+    for (index, (label, m)) in METRICS.iter().zip(measured).enumerate() {
         let n = match index {
             1 => noncached,
             3 => write,
@@ -1441,6 +1449,7 @@ fn inspection_pages_for(
         .any(ObservationQuote::is_plan);
     let overview = plain_overview(
         heading,
+        ready.empty_day,
         named,
         ready.requests.values().flatten(),
         outside,
@@ -1464,52 +1473,99 @@ fn inspection_pages_for(
     pages
 }
 
-/// The provider's display name ("Claude Account", "DeepSeek"), else its id.
-fn provider_name(id: &str) -> String {
+/// Built-in providers' names, by id.
+fn built_in_providers() -> &'static std::collections::HashMap<String, String> {
     static NAMES: std::sync::OnceLock<std::collections::HashMap<String, String>> =
         std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)
+            .into_iter()
+            .map(|(id, info)| (id, info.name))
+            .collect()
+    })
+}
+
+/// The provider's display name ("Claude Account", "DeepSeek"), else its id.
+fn provider_name(id: &str) -> String {
     if id.trim().is_empty() {
         return "Unknown provider".to_string();
     }
     // The built-in keeps its legacy brand name as an identity; the product,
     // and /providers, call it the Corbanu API.
-    if id == codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID {
-        return "Corbanu API".to_string();
+    // #352: both local providers share the built-in name "gpt-oss"; name
+    // them by the server that runs them.
+    match id {
+        codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID => return "Corbanu API".to_string(),
+        codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID => return "Ollama".to_string(),
+        codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID => return "LM Studio".to_string(),
+        _ => {}
     }
-    NAMES
-        .get_or_init(|| {
-            codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)
-                .into_iter()
-                .map(|(id, info)| (id, info.name))
-                .collect()
-        })
+    built_in_providers()
         .get(id)
         .cloned()
         .unwrap_or_else(|| id.to_string())
 }
 
-/// The model's catalogue display name ("GPT-6 Sol"), else its slug.
-fn model_name(slug: &str) -> String {
-    static NAMES: std::sync::OnceLock<std::collections::HashMap<String, String>> =
-        std::sync::OnceLock::new();
+/// The built-in provider a route belongs to: an Anthropic-wire route, or an
+/// alias, is its operator's.
+fn operator(id: &str) -> &str {
+    use codex_model_provider_info as ids;
+    match id {
+        ids::ZAI_ANTHROPIC_PROVIDER_ID => ids::ZAI_PROVIDER_ID,
+        ids::OPENROUTER_ANTHROPIC_PROVIDER_ID => ids::OPENROUTER_PROVIDER_ID,
+        ids::BASETEN_ANTHROPIC_PROVIDER_ID => ids::BASETEN_PROVIDER_ID,
+        ids::VERCEL_ANTHROPIC_PROVIDER_ID | ids::VERCEL_ANTHROPIC_FAST_PROVIDER_ID => {
+            ids::VERCEL_PROVIDER_ID
+        }
+        ids::PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID
+        | ids::CORBANU_PLAN_PROVIDER_ID
+        | ids::CORBANU_PLAN_ANTHROPIC_PROVIDER_ID
+        | ids::CORBANU_TERMINAL_PLAN_PROVIDER_ID => ids::PFTERMINAL_PLAN_PROVIDER_ID,
+        other => other,
+    }
+}
+
+/// The model's catalogue display name ("GPT-6 Sol"), else its slug. #352: the
+/// names carry their route's brand, so a row owned by another operator
+/// ("Ambient GLM 5.2" for `z-ai/glm-5.2` sent to OpenRouter) is not this
+/// route's name, and neither is it for a provider you configured: its id says
+/// nothing about whose model it serves.
+fn model_name(provider: &str, slug: &str) -> String {
+    /// Display name and owning provider, by slug.
+    type Names = std::collections::HashMap<String, (String, Option<String>)>;
+    static NAMES: std::sync::OnceLock<Names> = std::sync::OnceLock::new();
     if slug.trim().is_empty() {
         return "unknown model".to_string();
     }
-    NAMES
+    match NAMES
         .get_or_init(|| {
             codex_models_manager::bundled_models_response()
                 .map(|catalog| {
                     catalog
                         .models
                         .into_iter()
-                        .map(|model| (model.slug, model.display_name))
+                        .map(|model| {
+                            let owner = model
+                                .orchestration
+                                .as_ref()
+                                .map(|orchestration| orchestration.provider_id().to_string());
+                            (model.slug, (model.display_name, owner))
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
         })
         .get(slug)
-        .cloned()
-        .unwrap_or_else(|| slug.to_string())
+    {
+        Some((name, owner))
+            if owner
+                .as_deref()
+                .is_none_or(|owner| operator(owner) == operator(provider)) =>
+        {
+            name.clone()
+        }
+        _ => slug.to_string(),
+    }
 }
 
 /// "Provider · Model", or "Provider · account NAME · Model" where the view
@@ -1520,13 +1576,13 @@ fn route_name_in(quote: &ObservationQuote, named: bool) -> String {
             "{} · account {} · {}",
             provider_name(&quote.attempt.provider),
             quote.attempt.account_name(),
-            model_name(&quote.attempt.model)
+            model_name(&quote.attempt.provider, &quote.attempt.model)
         )
     } else {
         format!(
             "{} · {}",
             provider_name(&quote.attempt.provider),
-            model_name(&quote.attempt.model)
+            model_name(&quote.attempt.provider, &quote.attempt.model)
         )
     }
 }
@@ -1602,6 +1658,11 @@ fn basis_text(quote: &ObservationQuote) -> String {
     };
     match snapshot.basis_source {
         codex_state::accounting::BasisSource::UserConfig => format!("{basis} (set in your config)"),
+        // #352: the source is recorded on every attempt; say it either way.
+        // An undeclared basis has no default to name.
+        codex_state::accounting::BasisSource::BuiltIn if quote.basis() != Basis::Undeclared => {
+            format!("{basis} (built-in default)")
+        }
         codex_state::accounting::BasisSource::BuiltIn => basis.to_string(),
     }
 }
@@ -1609,7 +1670,9 @@ fn basis_text(quote: &ObservationQuote) -> String {
 /// #396: the basis inside a sentence that already ends in it, without a
 /// second pair of parentheses: "pay per use; set in your config".
 fn basis_clause(quote: &ObservationQuote) -> String {
-    basis_text(quote).replace(" (set in your config)", "; set in your config")
+    basis_text(quote)
+        .replace(" (set in your config)", "; set in your config")
+        .replace(" (built-in default)", "; built-in default")
 }
 /// #403: the turn-label prefix core gives the warm-up a reopened or forked
 /// conversation sends (core `accounting::REOPEN_PREWARM_LABEL`, pinned by
@@ -1910,7 +1973,7 @@ fn plain_billing(
         ),
         (None, None, Some(local), None) => (LOCAL, local),
         (None, None, None, Some(undeclared)) => (NOT_DECLARED, undeclared),
-        (None, None, None, None) => (PAY_PER_USE, "No requests".to_string()),
+        (None, None, None, None) => (PAY_PER_USE, "Nothing recorded".to_string()),
         (per_use, covered, local, undeclared) => (
             "Mixed",
             [
@@ -2258,7 +2321,7 @@ fn plain_header(quotes: &[&ObservationQuote], named: bool) -> Vec<String> {
         let route = (
             provider_name(&quote.attempt.provider),
             quote.attempt.account_name().to_string(),
-            model_name(&quote.attempt.model),
+            model_name(&quote.attempt.provider, &quote.attempt.model),
         );
         if !routes.contains(&route) {
             routes.push(route);
@@ -2391,6 +2454,7 @@ fn route_line(quotes: &[&ObservationQuote], named: bool) -> String {
 /// rather than showing nothing, so it never reads as a zero-cost day.
 fn plain_overview<'a>(
     heading: String,
+    empty: Option<codex_state::accounting::EmptyDay>,
     named: bool,
     quotes: impl IntoIterator<Item = &'a ObservationQuote>,
     outside: Vec<String>,
@@ -2399,7 +2463,7 @@ fn plain_overview<'a>(
 ) -> Vec<String> {
     let groups = by_route(quotes);
     let mut lines = if groups.is_empty() {
-        vec![format!("{heading} no recorded requests.")]
+        empty_day::overview(&heading, empty)
     } else {
         vec![heading]
     };

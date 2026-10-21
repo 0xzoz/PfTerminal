@@ -327,6 +327,9 @@ pub(super) struct Arithmetic {
     /// whose subscripts and `e`/`+` qualifiers the shell evaluates (#937,
     /// D57), decoded (`zsh -c $'print /*\\x28.[w])'`).
     qualifier_words: Vec<String>,
+    /// The line may use zsh glob substitution (#1084): a lexed word spells
+    /// it, or a command may turn on options the reader cannot name.
+    glob_subst: bool,
 }
 
 impl Arithmetic {
@@ -417,6 +420,16 @@ impl Arithmetic {
             })
             .collect();
         self.output_seen |= raw.iter().any(|word| command_output(word));
+        self.glob_subst |= words
+            .iter()
+            .chain(&raw)
+            .any(|word| shell::glob_substitution(word))
+            || renames_shell(&raw)
+            // A name built by expansion (`n=options; read -A $n`).
+            || simple.words.iter().zip(words).any(|(raw, word)| {
+                work::step();
+                raw != word && word.to_ascii_lowercase().contains("options")
+            });
         self.qualifier_words.extend(
             words
                 .iter()
@@ -437,6 +450,7 @@ impl Arithmetic {
             }
         }
         let mut start = 0;
+        let mut eval_scanned = false;
         // `eval let v`, zsh `noglob let v`: the rest is a command too. Each
         // level notes only what precedes its command, so this is linear.
         while start < raw.len().min(words.len()) {
@@ -456,6 +470,16 @@ impl Arithmetic {
                     }
                     if name == "eval" {
                         self.evaluates_text = true;
+                        // `eval 'print ${'$t'x}'`: an expansion in the text
+                        // may spell `${~x}` (#1084). Scanned at the first
+                        // `eval` only: later levels see a suffix (linear).
+                        if !eval_scanned {
+                            eval_scanned = true;
+                            self.glob_subst |= words[start + index + 1..].iter().any(|word| {
+                                work::step();
+                                word.contains(['$', '`']) || word.contains(shell::UNSEEN_OUTPUT)
+                            });
+                        }
                     }
                     self.note_one(&raw[..index], &redirect[start..], /*command*/ None);
                     start += index + 1;
@@ -569,6 +593,21 @@ impl Arithmetic {
         }
         if matches!(name, "source" | ".") {
             self.sources = true;
+        }
+        if sets_unnamed_options(name, args) {
+            self.glob_subst = true;
+        }
+        // `export ARG${:-V0}=sh`: a declared name the reader cannot
+        // complete may be `ARGV0` or `options`.
+        if DECLARING_BUILTINS.contains(&name)
+            && args.iter().any(|word| {
+                work::step();
+                let declared = word.split('=').next().unwrap_or(word);
+                !word.starts_with(['-', '+'])
+                    && (declared.contains(['$', '`']) || declared.contains(shell::UNSEEN_OUTPUT))
+            })
+        {
+            self.glob_subst = true;
         }
         if matches!(
             name,
@@ -911,6 +950,32 @@ impl Arithmetic {
             .map(|arg| joined(arg))
             .chain(self.qualifier_words.iter().cloned())
             .any(|text| runs(&text) || (text.contains('\\') && runs(&text.replace('\\', ""))))
+    }
+
+    /// Whether the line may use zsh glob substitution (#1084), under which
+    /// a value from anywhere (command output, input, the environment, a
+    /// file) is read as a pattern whose qualifiers may run code: a spelling
+    /// in the argv or a lexed word ([`shell::glob_substitution`]), a write
+    /// to zsh's `options` array, or a command that may turn on options the
+    /// reader cannot name. With or without command output on the line.
+    /// `text` is the line's argv.
+    pub(super) fn uses_glob_substitution(&self, text: &[String]) -> bool {
+        let options = |name: &str| name == "options";
+        self.glob_subst
+            || text
+                .iter()
+                .any(|arg| shell::glob_substitution(&joined(arg)))
+            || self.assigned.iter().any(|(name, _)| options(name))
+            || self
+                .filled
+                .iter()
+                .chain(&self.appended)
+                .chain(&self.namerefs)
+                .any(|name| options(name))
+            || self
+                .named
+                .iter()
+                .any(|word| options(word.split(['[', '=']).next().unwrap_or(word)))
     }
 
     /// Whether the line evaluates, as arithmetic, a variable filled from
@@ -2203,6 +2268,127 @@ fn braced(content: &str) -> (Option<&str>, bool) {
                     })
                 })));
     (Some(name), !plain)
+}
+
+/// Whether a command may turn on zsh options the reader cannot name
+/// (#1084): `setopt`/`unsetopt` with an expanded name, one built by a
+/// brace range or glob (`glob{s..s}ubst`, `glob?subst`) or by pattern
+/// (`-m`), `set`, `emulate` or a zsh with such an option or `-o` value, or
+/// `emulate` (also `zsh --emulate`) in a mode other than zsh: `csh`, `ksh`
+/// and `sh` turn on `GLOB_SUBST`. Also `zmv`, `zcp` and `zln` with an
+/// expanded pattern, which they glob as `${~pat}`.
+fn sets_unnamed_options(name: &str, args: &[String]) -> bool {
+    let expanded = |word: &str| word.contains(['$', '`']) || word.contains(shell::UNSEEN_OUTPUT);
+    // The lexer drops braces but keeps a range's `..`.
+    let unnamed = |word: &str| {
+        expanded(word) || word.contains(['{', '}', '*', '?', '[', '<', '(']) || word.contains("..")
+    };
+    let name = shell::basename(name);
+    // keeper's `keep` globs all its arguments as `$~*`.
+    if name == "keep" {
+        return args.iter().any(|word| expanded(word));
+    }
+    if matches!(name, "zmv" | "zcp" | "zln") {
+        let mut words = args.iter();
+        while let Some(word) = words.next() {
+            work::step();
+            if expanded(word) {
+                return true;
+            }
+            if word == "--" {
+                return words.next().is_some_and(|pattern| expanded(pattern));
+            }
+            let Some(cluster) = word.strip_prefix('-') else {
+                // The pattern.
+                return false;
+            };
+            // `-p prog`, `-np prog`: a value-taking letter at the end of
+            // its cluster takes the next word (`-pprog` holds its own).
+            if let Some(at) = cluster.find(['o', 'p', 'P'])
+                && at + 1 == cluster.len()
+            {
+                words.next();
+            }
+        }
+        return false;
+    }
+    if matches!(name, "setopt" | "unsetopt") {
+        return args
+            .iter()
+            .any(|word| unnamed(word) || (word.starts_with(['-', '+']) && word.contains('m')));
+    }
+    if !matches!(name, "set" | "emulate" | "zsh" | "-zsh") {
+        return false;
+    }
+    let emulate = name == "emulate";
+    let mut mode_seen = false;
+    let mut script_next = false;
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        work::step();
+        if word == "--" {
+            break;
+        }
+        if !(word.len() > 1 && word.starts_with(['-', '+'])) {
+            // `emulate zsh -c 'code'`, `zsh -c 'code'`: the rest is code,
+            // read as commands.
+            if (emulate && mode_seen) || script_next {
+                break;
+            }
+            // An expanded word where an option or mode may stand
+            // (`set $(cat f)`, `emulate $m`).
+            if expanded(word) {
+                return true;
+            }
+            if emulate && !mode_seen {
+                if word != "zsh" {
+                    return true;
+                }
+                mode_seen = true;
+                continue;
+            }
+            break;
+        }
+        if unnamed(word) {
+            return true;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            let mode = match long.strip_prefix("emulate") {
+                Some("") => words.next().map(String::as_str),
+                Some(value) => value.strip_prefix('='),
+                None => continue,
+            };
+            if mode.is_none_or(|mode| mode != "zsh") {
+                return true;
+            }
+            continue;
+        }
+        script_next |= name != "set" && !emulate && word.starts_with('-') && word.contains('c');
+        // `-o NAME` and clusters holding `o` (`-xo NAME`) take the next word.
+        if word[1..].contains('o') && words.next().is_some_and(|value| unnamed(value)) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether lexed words may start a zsh under another name (`exec -a csh
+/// zsh`, `exec -acsh zsh`, GNU `env -a csh zsh`), which it reads as an
+/// emulation mode (#1084): `exec` or `env`, a later option word with `a`
+/// and a later word that names a zsh or is expanded. One pass.
+fn renames_shell(words: &[String]) -> bool {
+    let (mut launcher, mut renamed, mut shell) = (false, false, false);
+    for word in words {
+        work::step();
+        if launcher {
+            renamed |= word.starts_with('-') && !word.starts_with("--") && word.contains('a');
+            shell |= shell::basename(word).contains("zsh")
+                || word.contains(['$', '`'])
+                || word.contains(shell::UNSEEN_OUTPUT);
+        }
+        launcher |= matches!(shell::basename(word), "exec" | "env");
+    }
+    renamed && shell
 }
 
 /// Text as the shell parses it: a backslash-newline joins the lines.
