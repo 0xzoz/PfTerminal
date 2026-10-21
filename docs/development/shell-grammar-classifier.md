@@ -108,11 +108,14 @@ readers agree on the commands. A refusal leaves today's behaviour unchanged.
    `CORBANU_GRAMMAR_REPORT=<file>` writes every disagreement. The harness
    reports and does not judge. CI runs it without real shells, as a
    no-panic and bounded-work check.
-2. **Grammar behind the cross-check, log only.** Wherever `quoted::commands`
-   reads a line, the grammar reads it too. A disagreement is logged at
-   debug level and decides nothing. The reader stays authoritative. This
-   phase adds work bounded by the 4 KiB cap and a per-classification byte
-   budget.
+2. **Grammar behind the cross-check, log only.** Each command line
+   `quoted_pass` reads (the action's own and nested shells' scripts, not
+   the quoted words it re-reads) is read by the grammar too. A disagreement
+   is logged at debug level, by kind only, and decides nothing. The reader
+   stays authoritative. The work is bounded by the 4 KiB cap per line and a
+   per-classification budget of 64 KiB, with each line costing 256 bytes
+   more than its length (at most 256 lines). A skipped line is logged once
+   per classification.
 3. **Authority where the grammar proves data.** The rules behind the
    D88/D90/D104 prompts, plus quoted text judged as code, use the grammar's
    reading where it proves a word is data. That holds only when the grammar

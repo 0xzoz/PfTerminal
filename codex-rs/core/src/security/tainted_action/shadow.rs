@@ -9,10 +9,34 @@ use super::grammar::Refusal;
 use super::quoted;
 use super::work;
 
-/// Bytes of shell text one classification gives the grammar; lines past it
-/// are not compared. With [`grammar::MAX_BYTES`] per line this bounds the
-/// grammar's work per classification.
+/// Bytes of shell text one classification gives the grammar, each line
+/// costing [`LINE_COST`] more than its length; lines past it are not
+/// compared. With [`grammar::MAX_BYTES`] per line this bounds the grammar's
+/// work, and the log events, per classification. Only the command lines
+/// `quoted_pass` reads (a line's own text and nested shells' scripts) are
+/// compared, not the quoted words it re-reads.
 pub(super) const MAX_COMPARED_BYTES: usize = 64 * 1024;
+
+/// What each compared line costs beyond its length, so the budget also
+/// bounds the number of lines (`bash -c '' -c '' ...`): at most 256.
+const LINE_COST: usize = 256;
+
+/// The comparisons one classification may still make.
+pub(super) struct Budget {
+    bytes: usize,
+    /// A line was not compared for want of budget, and that was logged
+    /// (once per classification).
+    skip_logged: bool,
+}
+
+impl Budget {
+    pub(super) fn new() -> Self {
+        Self {
+            bytes: MAX_COMPARED_BYTES,
+            skip_logged: false,
+        }
+    }
+}
 
 /// Reserved words the reader keeps as a command's words.
 const RESERVED: &[&str] = &[
@@ -42,10 +66,13 @@ pub(super) enum Comparison {
 
 /// Compare the reader's `reading` of the command line `text` with the
 /// grammar's and log a difference, spending `text`'s length from `budget`.
-pub(super) fn shadow(text: &str, reading: &quoted::Reading, budget: &mut usize) {
-    let (comparison, grammar) = compare(text, reading, budget);
+pub(super) fn shadow(text: &str, reading: &quoted::Reading, budget: &mut Budget) {
+    let (comparison, grammar) = compare(text, reading, &mut budget.bytes);
     #[cfg(test)]
     tests::RECORDED.with(|recorded| recorded.borrow_mut().push(comparison));
+    if comparison == Comparison::NotCompared && std::mem::replace(&mut budget.skip_logged, true) {
+        return;
+    }
     if comparison != Comparison::Agree {
         let data_words = grammar.as_ref().map(|grammar| {
             grammar
@@ -78,7 +105,11 @@ pub(super) fn compare(
     reading: &quoted::Reading,
     budget: &mut usize,
 ) -> (Comparison, Option<grammar::Reading>) {
-    let Some(left) = budget.checked_sub(text.len()) else {
+    // Refused unread, at no cost: the lines after it are still compared.
+    if text.len() > grammar::MAX_BYTES {
+        return (Comparison::GrammarRefused(Refusal::TooLarge), None);
+    }
+    let Some(left) = budget.checked_sub(text.len() + LINE_COST) else {
         return (Comparison::NotCompared, None);
     };
     *budget = left;
