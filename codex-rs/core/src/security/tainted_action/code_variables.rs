@@ -41,6 +41,10 @@ const CODE_VARIABLES: &[&str] = &[
     "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG_COUNT",
+    // #1159: a file git writes (the index) and the folder it writes the
+    // working tree to (`GIT_WORK_TREE=~ git checkout -- .zshrc`).
+    "GIT_INDEX_FILE",
+    "GIT_WORK_TREE",
     // Where git finds the user's config (`$HOME/.gitconfig`).
     "HOME",
     "XDG_CONFIG_HOME",
@@ -396,14 +400,22 @@ pub(super) fn git_runs_code(args: &[String], raw: &[String]) -> bool {
             .is_some_and(|word| unseen_text(word) || word.contains(['*', '?', '[']))
             || raw.get(at).is_some_and(|word| unseen_text(word))
     };
-    let is_git = |word: &str| shell::basename(word).eq_ignore_ascii_case("git");
+    // #1159: `git.exe` too (a dashed helper takes no git options, so it
+    // does not end them).
+    let is_git = |word: &str| {
+        shell::basename(word).eq_ignore_ascii_case("git")
+            || super::git_helpers::git_name(word) == Some(None)
+    };
     // Past the first word that is not an option: only settings with a
     // value, and unseen words, count.
     let mut past_subcommand = false;
     let mut index = 0;
     while let Some(word) = args.get(index) {
         work::step();
-        if is_git(word) {
+        // #1159: an option word ending in a git name (`-ccore.pager=./git`,
+        // `--exec-path=./git.exe`) is judged before the scan stops there.
+        let option = word.starts_with('-');
+        if !option && is_git(word) {
             return false;
         }
         let next = args.get(index + 1).map(String::as_str);
@@ -413,8 +425,9 @@ pub(super) fn git_runs_code(args: &[String], raw: &[String]) -> bool {
         if word == "-c" || word == "--config-env" {
             match next {
                 None => return !past_subcommand,
-                Some(value) if is_git(value) => return false,
+                // #1159: the setting first (`-c core.pager=./git`).
                 Some(value) if setting(value, index + 1) => return true,
+                Some(value) if is_git(value) => return false,
                 Some(_) => {}
             }
             index += 2;
@@ -435,6 +448,9 @@ pub(super) fn git_runs_code(args: &[String], raw: &[String]) -> bool {
                 return false;
             }
             past_subcommand = true;
+        }
+        if option && is_git(word) {
+            return false;
         }
         if !past_subcommand
             && GIT_VALUE_OPTIONS.contains(&word.as_str())
