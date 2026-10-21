@@ -3624,6 +3624,10 @@ fn issue_1141_output_files_are_written() {
         "git config --global core.fsmonitor 'touch pwned' --get",
         // Review round 3.
         "git fast-export --export-marks=~/.zshrc HEAD",
+        // Review round 8: reading options main does not count as reads.
+        "git config --global --get-color color.diff.new",
+        "git config --system --get-colorbool color.ui",
+        "git config --global --get-urlmatch http.proxy https://x",
     ] {
         assert_eq!(script(command), Some(Persistence), "{command}");
     }
