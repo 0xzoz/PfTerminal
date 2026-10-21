@@ -602,7 +602,7 @@ fn fake_process(proc_dir: &Path, pid: &str, namespace: &str, point: Option<&str>
 #[test]
 fn a_process_that_ends_mid_scan_does_not_hide_its_namespace() {
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let ended = fake_process(temp.path(), "101", "mnt:[1]", None);
+    let ended = fake_process(temp.path(), "101", "mnt:[1]", /*point*/ None);
     let live = fake_process(temp.path(), "102", "mnt:[1]", Some("/live-view"));
     let other = fake_process(temp.path(), "103", "mnt:[2]", Some("/other-view"));
 
@@ -621,7 +621,7 @@ fn a_namespace_whose_view_was_read_is_read_once() {
     let first = fake_process(temp.path(), "101", "mnt:[1]", Some("/first-view"));
     // Reading a folder as `mountinfo` fails the whole scan, so this view
     // must not be read: its namespace was already read through `first`.
-    let duplicate = fake_process(temp.path(), "102", "mnt:[1]", None);
+    let duplicate = fake_process(temp.path(), "102", "mnt:[1]", /*point*/ None);
     std::fs::create_dir(duplicate.join("mountinfo")).expect("unreadable view");
 
     assert_eq!(
@@ -633,7 +633,7 @@ fn a_namespace_whose_view_was_read_is_read_once() {
 #[test]
 fn an_unreadable_view_still_fails_the_scan() {
     let temp = tempfile::TempDir::new().expect("tempdir");
-    let unreadable = fake_process(temp.path(), "101", "mnt:[1]", None);
+    let unreadable = fake_process(temp.path(), "101", "mnt:[1]", /*point*/ None);
     std::fs::create_dir(unreadable.join("mountinfo")).expect("unreadable view");
     let live = fake_process(temp.path(), "102", "mnt:[1]", Some("/live-view"));
 
