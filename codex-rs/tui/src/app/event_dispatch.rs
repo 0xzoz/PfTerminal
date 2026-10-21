@@ -5384,6 +5384,14 @@ impl App {
                 }
                 let task = task.trim().to_string();
                 if task.is_empty() {
+                    // The sender is told, as before for a pane the person opened.
+                    let target_node_id = self.logical_native_node_for_thread(thread_id);
+                    self.record_spawn_dispatch_failed_for_task_with_turns(
+                        &target_node_id,
+                        &task,
+                        "spawn task cannot be empty",
+                        /*start_turns*/ !sent_while_kill_switch_on,
+                    );
                     self.chat_widget
                         .add_error_message("Spawn task cannot be empty.".to_string());
                     return Ok(AppRunControl::Continue);
@@ -5476,8 +5484,14 @@ impl App {
                         );
                         self.persist_pane_state();
                     }
+                    // D106: a pane the person opened is never re-created as a
+                    // saved agent; if Core has not loaded it, the task fails
+                    // (below) as it did when it had no live session.
                     Err(error)
-                        if AppServerSession::agent_message_target_not_found(&error, thread_id) =>
+                        if !is_operator_pane
+                            && AppServerSession::agent_message_target_not_found(
+                                &error, thread_id,
+                            ) =>
                     {
                         match self
                             .materialize_saved_native_spawn_thread_for_task(app_server, thread_id)

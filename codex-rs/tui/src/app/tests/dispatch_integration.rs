@@ -714,6 +714,9 @@ fn agent_task_to_person_opened_pane_arrives_as_mailbox_data() -> Result<()> {
         };
 
         // The route agents' tasks take (assignment fires, model dispatch).
+        // A /spawn crew that is read-only does not stop it: the pane is not
+        // part of that crew.
+        fixture.app.spawn_legacy_read_only = true;
         let agent_task = "agent task for a person-opened pane 1176";
         fixture
             .app
@@ -756,6 +759,8 @@ fn agent_task_to_person_opened_pane_arrives_as_mailbox_data() -> Result<()> {
                 .and_then(serde_json::Value::as_str),
             Some("dispatch-worker-model")
         );
+
+        fixture.app.spawn_legacy_read_only = false;
 
         // The person's own task from Spawn status: unchanged, their input.
         let person_task = "person task for a person-opened pane 1176";
@@ -1537,6 +1542,73 @@ fn issue_660_switch_off_names_a_codex_pane_whose_task_waits() -> Result<()> {
         route_for(&mut fixture, std::time::Duration::from_millis(200)).await?;
         let notice = transcript_since(&fixture.app, from);
         assert!(!notice.contains("Nothing restarted"), "{notice}");
+        fixture.server.shutdown().await?;
+        Ok(())
+    })
+}
+
+/// D106 review: an agent's task for a pane the person opened that Core has
+/// not loaded fails, as it did when the pane had no live session; the pane
+/// is never re-created as a saved agent, also when it is bound as the
+/// Nazgul.
+#[test]
+fn agent_task_to_unloaded_person_opened_pane_fails_without_recreating_it() -> Result<()> {
+    run_dispatch_integration(|| async {
+        let mock = MockServer::start().await;
+        let responses = mount_sse_repeating(&mock, sse_completed("pf1176-unloaded")).await;
+        let mut fixture = RealDispatchFixture::start(&mock, /*max_threads*/ 3).await?;
+        let pane = ThreadId::from_string("00000000-0000-0000-0000-000000011760")?;
+        fixture.app.upsert_agent_picker_thread(
+            pane,
+            Some("Restored".to_string()),
+            /*agent_role*/ None,
+            /*is_closed*/ false,
+        );
+        let pane_node = crate::spawn_orchestration::thread_node_id(pane);
+        fixture.app.set_spawn_nazgul_pane_binding(pane_node.clone());
+        let entry = fixture
+            .app
+            .agent_navigation
+            .get(&pane)
+            .expect("pane entry")
+            .clone();
+        assert!(fixture.app.is_operator_owned_codex_user_pane(pane, &entry));
+        let root = fixture.root;
+        let other_threads = move |app: &App| {
+            let mut threads = app
+                .thread_event_channels
+                .keys()
+                .copied()
+                .filter(|thread_id| *thread_id != pane && *thread_id != root)
+                .collect::<Vec<_>>();
+            threads.sort_by_key(ToString::to_string);
+            threads
+        };
+        // Let start-up work settle before taking the snapshot.
+        route_for(&mut fixture, std::time::Duration::from_secs(2)).await?;
+        let threads_before = other_threads(&fixture.app);
+        let navigation_before = fixture.app.agent_navigation.ordered_threads().len();
+
+        let before = fixture.app.transcript_cells.len();
+        fixture
+            .app
+            .send_native_task_event(pane, "pf1176 unloaded".to_string());
+        route_for(&mut fixture, std::time::Duration::from_secs(2)).await?;
+        let said = transcript_since(&fixture.app, before);
+        assert!(said.contains("Could not admit task"), "{said}");
+        assert!(said.contains("thread not found"), "{said}");
+        assert!(!said.contains("materialize"), "{said}");
+        assert!(responses.requests().is_empty(), "no turn started");
+        // No thread was started or resumed in the pane's place.
+        pretty_assertions::assert_eq!(other_threads(&fixture.app), threads_before);
+        pretty_assertions::assert_eq!(
+            fixture.app.agent_navigation.ordered_threads().len(),
+            navigation_before
+        );
+        pretty_assertions::assert_eq!(
+            fixture.app.spawn_nazgul_pane_id.as_deref(),
+            Some(pane_node.as_str())
+        );
         fixture.server.shutdown().await?;
         Ok(())
     })
