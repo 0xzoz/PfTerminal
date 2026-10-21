@@ -593,11 +593,11 @@ fn mount_points_for_processes(
         if !std::fs::metadata(&dir).is_ok_and(|metadata| metadata.uid() == euid) {
             continue;
         }
-        let namespace = std::fs::read_link(dir.join("ns/mnt")).ok();
-        if namespace
-            .as_ref()
-            .is_some_and(|namespace| seen.contains(namespace))
-        {
+        // mountinfo paths are relative to the process's root. Processes in
+        // one mount namespace can have different roots (for example, chroot).
+        // When either identity is unavailable, read the view without deduping.
+        let view = view_identity(&dir);
+        if view.as_ref().is_some_and(|view| seen.contains(view)) {
             continue;
         }
         let mounts = match std::fs::read(dir.join("mountinfo")) {
@@ -612,14 +612,14 @@ fn mount_points_for_processes(
             }
             Err(_) => return None,
         };
-        // A namespace counts as seen only once a view of it has been read,
-        // and only if the process is still in it (its pid was not reused by
-        // a process elsewhere while it was read): a process that ends before
-        // its view is read must not hide the views of the others in it.
-        if let Some(namespace) = namespace
-            && std::fs::read_link(dir.join("ns/mnt")).is_ok_and(|now| now == namespace)
+        // A view counts as seen only once it has been read, and only if the
+        // process still has it (its pid was not reused by a process with
+        // another view while it was read): a process that ends before its
+        // view is read must not hide the same view of the others.
+        if let Some(view) = view
+            && view_identity(&dir).is_some_and(|now| now == view)
         {
-            seen.insert(namespace);
+            seen.insert(view);
         }
         points.extend(
             mounts
@@ -629,6 +629,14 @@ fn mount_points_for_processes(
         );
     }
     Some(points)
+}
+
+/// The mount namespace and root of the process at `dir`, which together
+/// decide what its `mountinfo` lists, or `None` when either is unavailable.
+fn view_identity(dir: &Path) -> Option<(PathBuf, u64, u64)> {
+    let namespace = std::fs::read_link(dir.join("ns/mnt")).ok()?;
+    let root = std::fs::metadata(dir.join("root")).ok()?;
+    Some((namespace, root.dev(), root.ino()))
 }
 
 /// A mount point as `mountinfo` writes it (space, tab, newline and
