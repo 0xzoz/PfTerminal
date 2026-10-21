@@ -1,0 +1,278 @@
+//! PF-84-S06 slice B: [`AuthManager`]s bound to one named ChatGPT/OpenAI
+//! sign-in account. One manager (and so one refresh lock) is shared per
+//! (home, account) in a process; other processes see a refresh through the
+//! guarded reload from the vault.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::LazyLock;
+use std::sync::Mutex;
+use std::sync::RwLock;
+use std::sync::Weak;
+
+use codex_protocol::auth::AuthMode;
+use tokio::sync::Semaphore;
+use tokio::sync::watch;
+
+use super::AuthManager;
+use super::CachedAuth;
+use super::ChatgptAuth;
+use super::ChatgptAuthState;
+use super::CodexAuth;
+use super::OpenAiApiKeyEnv;
+use super::ProviderApiKeyCache;
+use super::create_default_auth_client;
+use super::refresh_token_endpoint;
+use super::revoke_auth_tokens;
+use crate::auth::named_chatgpt::NamedChatgptAccount;
+use crate::auth::named_chatgpt::VaultAccountAuthStorage;
+use crate::auth::named_chatgpt::sign_in_restriction;
+use crate::auth::storage::AuthDotJson;
+use crate::auth::storage::AuthStorageBackend;
+
+type Registry = HashMap<(PathBuf, NamedChatgptAccount), Weak<AuthManager>>;
+
+static NAMED_ACCOUNT_MANAGERS: LazyLock<Mutex<Registry>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+impl AuthManager {
+    /// The manager of one named sign-in account of this home, created on
+    /// first use with this manager's settings. It never reads the default
+    /// login, `OPENAI_API_KEY`, `CODEX_API_KEY` or externally provided tokens.
+    /// A ChatGPT or API-key sign-in is loaded here; other kinds load on the
+    /// first [`AuthManager::auth`].
+    pub fn for_named_account(self: &Arc<Self>, account: NamedChatgptAccount) -> Arc<AuthManager> {
+        let base = self.default_account_manager();
+        let key = (base.codex_home.clone(), account.clone());
+        let mut registry = NAMED_ACCOUNT_MANAGERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        registry.retain(|_, manager| manager.strong_count() > 0);
+        if let Some(manager) = registry.get(&key).and_then(Weak::upgrade) {
+            return manager;
+        }
+        let manager = Arc::new(base.new_named_account_manager(account, Arc::clone(&base)));
+        let auth = manager.load_named_account_auth_sync();
+        manager.set_cached_auth(auth);
+        registry.insert(key, Arc::downgrade(&manager));
+        manager
+    }
+
+    /// [`AuthManager::for_named_account`] with any sign-in kind loaded.
+    pub async fn for_named_account_loaded(
+        self: &Arc<Self>,
+        account: NamedChatgptAccount,
+    ) -> Arc<AuthManager> {
+        let manager = self.for_named_account(account);
+        if manager.auth_cached().is_none() {
+            manager.reload().await;
+        }
+        manager
+    }
+
+    /// The manager of the default login: this one, or the one a named
+    /// account's manager was created from.
+    pub fn default_account_manager(self: &Arc<Self>) -> Arc<AuthManager> {
+        self.base_manager
+            .clone()
+            .unwrap_or_else(|| Arc::clone(self))
+    }
+
+    /// The named account this manager serves, if any.
+    pub fn named_account(&self) -> Option<&NamedChatgptAccount> {
+        self.named_account.as_ref()
+    }
+
+    /// PF-84-S06 (#571): why this named account's manager has no usable
+    /// sign-in: none is stored, it cannot be read, or the login restrictions
+    /// refuse it. `None` for the default login's manager or when a sign-in
+    /// is available. Requests on the account are refused with this instead
+    /// of being sent without credentials.
+    pub fn named_sign_in_unavailable(&self) -> Option<String> {
+        let account = self.named_account.as_ref()?;
+        match self.named_account_auth_dot_json() {
+            Ok(Some(_)) => None,
+            Ok(None) => Some(format!(
+                "account `{}` has no sign-in; sign in with `corbanu login --account {}` \
+                 (add `--with-api-key` for an API key)",
+                account.name, account.name
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                Some(error.to_string())
+            }
+            Err(error) => Some(format!(
+                "the sign-in of account `{}` cannot be read: {error}",
+                account.name
+            )),
+        }
+    }
+
+    fn new_named_account_manager(
+        &self,
+        account: NamedChatgptAccount,
+        base: Arc<AuthManager>,
+    ) -> AuthManager {
+        let (auth_change_tx, _auth_change_rx) = watch::channel(0);
+        AuthManager {
+            codex_home: self.codex_home.clone(),
+            inner: RwLock::new(CachedAuth {
+                auth: None,
+                permanent_refresh_failure: None,
+            }),
+            auth_change_tx,
+            enable_codex_api_key_env: false,
+            openai_api_key_env: OpenAiApiKeyEnv::Ignore,
+            auth_credentials_store_mode: self.auth_credentials_store_mode,
+            keyring_backend_kind: self.keyring_backend_kind,
+            forced_chatgpt_workspace_id: RwLock::new(self.forced_chatgpt_workspace_id()),
+            chatgpt_base_url: self.chatgpt_base_url.clone(),
+            agent_identity_authapi_base_url: self.agent_identity_authapi_base_url.clone(),
+            refresh_lock: Semaphore::new(/*permits*/ 1),
+            agent_identity_lock: Semaphore::new(/*permits*/ 1),
+            agent_identity_bootstrap_cooldown: Default::default(),
+            external_auth: RwLock::new(None),
+            provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
+            auth_route_config: self.auth_route_config.clone(),
+            named_account: Some(account),
+            forced_login_method: self.forced_login_method,
+            base_manager: Some(base),
+            hide_restricted_default_login: false,
+            hidden_default_login_reason: RwLock::new(None),
+        }
+    }
+
+    fn named_account_storage(&self) -> std::io::Result<Option<Arc<dyn AuthStorageBackend>>> {
+        let Some(account) = self.named_account.as_ref() else {
+            return Ok(None);
+        };
+        Ok(Some(Arc::new(VaultAccountAuthStorage::new(
+            &self.codex_home,
+            account,
+        )?)))
+    }
+
+    /// The stored sign-in, when it is usable under this configuration's
+    /// login restrictions (a refused one is logged and treated as absent).
+    fn named_account_auth_dot_json(
+        &self,
+    ) -> std::io::Result<Option<(Arc<dyn AuthStorageBackend>, AuthDotJson)>> {
+        let Some(storage) = self.named_account_storage()? else {
+            return Ok(None);
+        };
+        let Some(auth_dot_json) = storage
+            .load()?
+            .filter(AuthDotJson::has_primary_auth_material)
+        else {
+            return Ok(None);
+        };
+        let forced_workspace = self.forced_chatgpt_workspace_id();
+        if let Some(account) = self.named_account.as_ref()
+            && let Some(reason) = sign_in_restriction(
+                account,
+                &auth_dot_json,
+                self.forced_login_method,
+                forced_workspace.as_deref(),
+            )
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                reason,
+            ));
+        }
+        Ok(Some((storage, auth_dot_json)))
+    }
+
+    /// A ChatGPT or API-key sign-in, built without awaiting so a manager
+    /// handed to synchronous readers is loaded from the start.
+    fn load_named_account_auth_sync(&self) -> Option<CodexAuth> {
+        let account = self.named_account.as_ref()?;
+        let result = (|| -> std::io::Result<Option<CodexAuth>> {
+            let Some((storage, auth_dot_json)) = self.named_account_auth_dot_json()? else {
+                return Ok(None);
+            };
+            match auth_dot_json.resolved_mode() {
+                AuthMode::ApiKey => Ok(auth_dot_json
+                    .openai_api_key
+                    .as_deref()
+                    .map(CodexAuth::from_api_key)),
+                AuthMode::Chatgpt => {
+                    let client = create_default_auth_client(
+                        &refresh_token_endpoint(),
+                        &self.auth_route_config,
+                    )?;
+                    Ok(Some(CodexAuth::Chatgpt(ChatgptAuth {
+                        state: ChatgptAuthState {
+                            auth_dot_json: Arc::new(std::sync::Mutex::new(Some(auth_dot_json))),
+                            client,
+                        },
+                        storage,
+                    })))
+                }
+                // Other kinds load on the first `auth()`.
+                _ => Ok(None),
+            }
+        })();
+        result.unwrap_or_else(|error| {
+            tracing::warn!(%account, %error, "named account sign-in unavailable");
+            None
+        })
+    }
+
+    /// The named account's sign-in from its vault store only. `None` when the
+    /// account has none, it is refused by a login restriction, or this is not
+    /// a named-account manager.
+    pub(super) async fn load_named_account_auth(&self) -> Option<CodexAuth> {
+        let account = self.named_account.as_ref()?;
+        match self.try_load_named_account_auth().await {
+            Ok(auth) => auth,
+            Err(error) => {
+                tracing::warn!(%account, %error, "named account sign-in unavailable");
+                None
+            }
+        }
+    }
+
+    async fn try_load_named_account_auth(&self) -> std::io::Result<Option<CodexAuth>> {
+        let Some((storage, auth_dot_json)) = self.named_account_auth_dot_json()? else {
+            return Ok(None);
+        };
+        let mode = auth_dot_json.storage_mode(self.auth_credentials_store_mode);
+        CodexAuth::from_auth_dot_json_with_storage(
+            &self.codex_home,
+            auth_dot_json,
+            mode,
+            self.chatgpt_base_url.as_deref(),
+            self.keyring_backend_kind,
+            self.agent_identity_authapi_base_url.as_deref(),
+            &self.auth_route_config,
+            Some(storage),
+        )
+        .await
+        .map(Some)
+    }
+
+    /// Logs out of the named account only: revokes the tokens stored now
+    /// (best effort) and deletes its vault store, also when the stored
+    /// sign-in cannot be read. `None` when this is not a named manager.
+    pub(super) async fn logout_named_account(&self, revoke: bool) -> Option<std::io::Result<bool>> {
+        let storage = match self.named_account_storage() {
+            Ok(storage) => storage?,
+            Err(error) => return Some(Err(error)),
+        };
+        if revoke
+            && let Ok(Some(auth_dot_json)) = storage.load()
+            && let Err(error) =
+                revoke_auth_tokens(Some(&auth_dot_json), &self.auth_route_config).await
+        {
+            tracing::warn!("failed to revoke named account tokens during logout: {error}");
+        }
+        let removed = storage.delete();
+        self.reload().await;
+        Some(removed)
+    }
+}
+
+#[cfg(test)]
+#[path = "manager_named_account_tests.rs"]
+mod tests;

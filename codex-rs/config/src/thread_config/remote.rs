@@ -18,6 +18,15 @@ use super::ThreadConfigSource;
 use super::UserThreadConfig;
 use proto::thread_config_loader_client::ThreadConfigLoaderClient;
 
+// tonic's generated server trait uses async-trait 0.1.89, which adds
+// `#[must_use]` to methods whose return type (a boxed future) is must-use
+// anyway; clippy 1.99 reports that as double_must_use. async-trait 0.1.90+
+// drops the attribute but pulls in syn 3 (#1031). `allow`, not `expect`:
+// clippy before 1.99 does not flag this, so an expectation would fail there.
+#[allow(
+    clippy::double_must_use,
+    reason = "tonic-generated #[async_trait] server trait; fixed in async-trait 0.1.90+ (#1031)"
+)]
 #[path = "proto/codex.thread_config.v1.rs"]
 mod proto;
 
@@ -173,6 +182,7 @@ fn model_provider_from_proto(
         }
     };
     let info = ModelProviderInfo {
+        account: None,
         name: provider.name,
         base_url: provider.base_url,
         env_key: provider.env_key,
@@ -199,6 +209,7 @@ fn model_provider_from_proto(
         requires_openai_auth: provider.requires_openai_auth,
         supports_websockets: provider.supports_websockets,
         supports_standalone_web_search: provider.supports_standalone_web_search,
+        billing: None,
     };
     Ok((id, info))
 }
@@ -232,6 +243,8 @@ fn model_provider_to_proto(
         requires_openai_auth,
         supports_websockets,
         supports_standalone_web_search,
+        billing: _,
+        account: _,
     } = provider;
 
     proto::ModelProvider {
@@ -539,6 +552,7 @@ mod tests {
 
     fn expected_provider() -> ModelProviderInfo {
         ModelProviderInfo {
+            account: None,
             name: "Local".to_string(),
             base_url: Some("http://127.0.0.1:8061/api/codex".to_string()),
             env_key: None,
@@ -575,6 +589,7 @@ mod tests {
             requires_openai_auth: false,
             supports_websockets: true,
             supports_standalone_web_search: true,
+            billing: None,
             aws: None,
             runtime_policy: Default::default(),
         }

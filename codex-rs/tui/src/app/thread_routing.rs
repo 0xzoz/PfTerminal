@@ -910,6 +910,14 @@ impl App {
                     }
                 }
                 if should_start_turn {
+                    if self
+                        .pending_permission_confirmation
+                        .as_ref()
+                        .is_some_and(|pending| pending.thread_id == thread_id)
+                    {
+                        self.chat_widget.defer_turn_for_permission_confirmation();
+                        return Ok(true);
+                    }
                     let config = self.chat_widget.config_ref();
                     let approvals_reviewer =
                         approvals_reviewer.unwrap_or(config.approvals_reviewer);
@@ -1173,6 +1181,7 @@ impl App {
             .infer_session_for_thread_notification(thread_id, &notification)
             .await;
         let is_turn_started = matches!(notification, ServerNotification::TurnStarted(_));
+        let is_thread_closed = matches!(notification, ServerNotification::ThreadClosed(_));
         let notification_status_change = SideParentStatusChange::for_notification(&notification);
         let (sender, store) = {
             let channel = self.ensure_thread_channel(thread_id);
@@ -1205,6 +1214,9 @@ impl App {
                 turn_stopped,
             )
         };
+        if is_turn_started || is_thread_closed {
+            self.clear_kill_switch_held_native_task(thread_id);
+        }
         if is_turn_started {
             self.agent_navigation.mark_running(thread_id);
         } else if turn_stopped {
@@ -1798,10 +1810,17 @@ impl App {
         );
         match event {
             ThreadBufferedEvent::Notification(notification) => {
+                let settings_updated = matches!(
+                    notification.as_ref(),
+                    ServerNotification::ThreadSettingsUpdated(_)
+                );
                 self.update_spawn_status_for_thread_notification(notification.as_ref());
                 self.cache_collab_receiver_threads_for_notification(notification.as_ref());
                 self.chat_widget
                     .handle_server_notification(*notification, /*replay_kind*/ None);
+                if settings_updated {
+                    self.observe_permission_confirmation();
+                }
             }
             ThreadBufferedEvent::Request(request) => {
                 if self

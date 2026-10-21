@@ -25,6 +25,7 @@ const RETRY_PROMPT: &str = "Handle the safety-buffered request";
 const COMMITTED_STEER: &str = "Keep the accepted steer";
 const UNSENT_DRAFT: &str = "Keep this unsent draft";
 const RETRY_GOAL: &str = "Preserve this goal across the retry";
+const GOAL_CONTINUATION_REPLY: &str = "goal continued";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SafetyRetryScenario {
@@ -358,7 +359,7 @@ async fn run_safety_retry(
         gate: None,
         body: responses::sse(vec![
             ev_response_created("goal-continuation-response"),
-            ev_assistant_message("goal-continuation-message", "done"),
+            ev_assistant_message("goal-continuation-message", GOAL_CONTINUATION_REPLY),
             ev_completed_with_tokens("goal-continuation-response", /*total_tokens*/ 1_000),
         ]),
     }]);
@@ -445,6 +446,9 @@ goals = true
     )
     .await
     .expect("state db should initialize");
+    // Core charges an active goal real elapsed wall-clock seconds, so bound the source goal's
+    // time by how long this test kept the goal active instead of assuming the turn took <1s.
+    let goal_active_since = std::time::Instant::now();
     state_db
         .thread_goals()
         .replace_thread_goal(
@@ -658,13 +662,28 @@ goals = true
     }
 
     drive_until_request_count(&mut app, &mut app_server, &server, expected_request_count).await;
+    // The goal continuation's reply may or may not have rendered when its request arrives, so
+    // wait for it: the history is then the same on every run.
     let mut replayed_history = String::new();
-    while let Ok(event) = app_event_rx.try_recv() {
-        if let AppEvent::InsertHistoryCell(cell) = event {
-            replayed_history.push_str(&lines_to_single_string(
-                &cell.transcript_lines(/*width*/ 80),
-            ));
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(/*secs*/ 5);
+    loop {
+        while let Ok(event) = app_event_rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                replayed_history.push_str(&lines_to_single_string(
+                    &cell.transcript_lines(/*width*/ 80),
+                ));
+                replayed_history.push('\n');
+            }
         }
+        if replayed_history.contains(GOAL_CONTINUATION_REPLY) {
+            break;
+        }
+        let event = tokio::time::timeout_at(deadline, app_server.next_event())
+            .await
+            .expect("the goal continuation's reply should render")
+            .expect("app-server event stream should remain open");
+        Box::pin(app.handle_app_server_event(&app_server, event)).await;
+        drain_active_thread_events(&mut app);
     }
     assert_eq!(
         replayed_history.contains("Conversation interrupted"),
@@ -736,10 +755,16 @@ goals = true
         .await?
         .goal
         .expect("retry goal");
+    let goal_active_seconds =
+        i64::try_from(goal_active_since.elapsed().as_secs()).expect("test goal window fits in i64");
     let expected_source_tokens = if committed_steer.is_some() { 150 } else { 50 };
     assert_eq!(source_goal.objective, RETRY_GOAL);
     assert_eq!(source_goal.tokens_used, expected_source_tokens);
-    assert_eq!(source_goal.time_used_seconds, 12);
+    assert!(
+        (12..=12 + goal_active_seconds).contains(&source_goal.time_used_seconds),
+        "source goal should keep its 12s and gain at most the {goal_active_seconds}s it was active, got {}",
+        source_goal.time_used_seconds
+    );
     assert_eq!(retry_goal.objective, RETRY_GOAL);
     assert!(retry_goal.tokens_used >= expected_source_tokens);
     assert!(retry_goal.time_used_seconds >= 12);
