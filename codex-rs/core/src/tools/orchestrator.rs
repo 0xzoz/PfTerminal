@@ -2744,6 +2744,7 @@ mod tests {
 #[path = "orchestrator_stale_tests.rs"]
 mod stale_tests;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
+#[cfg(target_os = "linux")]
 #[path = "orchestrator_namespace_note_tests.rs"]
 mod namespace_note_tests;
