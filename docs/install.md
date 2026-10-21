@@ -70,13 +70,14 @@ Corbanu Terminal runs natively on Windows; WSL2 is not required. In PowerShell:
 irm https://github.com/CorbanuCore/CorbanuTerminal/releases/latest/download/install.ps1 | iex
 ```
 
-The installer downloads the `x86_64-pc-windows-msvc` package from the release,
+On x64 Windows the installer downloads the `x86_64-pc-windows-msvc` package,
 verifies its SHA-256 digest, installs the `corbanu` command in
 `%LOCALAPPDATA%\Programs\Corbanu Terminal\bin`, and adds that folder to your
 user `PATH` (restart PowerShell windows that were already open). State
 resolves as on Linux and macOS, with `%USERPROFILE%\.corbanu` as the default
 home. `CORBANU_INSTALL_DIR` and `CORBANU_HOME` override the defaults. Releases
-publish an x64 Windows package only; there is no Arm64 package yet.
+publish an x64 Windows package only: on Arm64 Windows the installer looks for an
+`aarch64-pc-windows-msvc` package, finds none, and stops with an error.
 
 For the Windows sandbox modes, see [Sandbox](sandbox.md). If an upgrade refuses
 to retarget a junction or still runs an old version, see the
