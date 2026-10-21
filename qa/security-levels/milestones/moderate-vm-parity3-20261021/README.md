@@ -64,7 +64,7 @@ Per attempt, with the screens and files each rests on: [dispositions.md](disposi
 | Model path | guest mediator, SSH reverse tunnel, host relay adds the key | the same |
 | Key file in the guest | the guest's own transport key file from earlier UTM runs, left in place, not read or used | synthetic placeholder |
 | Times (UTC) | groups 17:54-19:28 | groups 19:34-21:27 |
-| Product request latency (median per run, mediator, all product requests in the window) | T17 (mostly GLM 5.2): 36-160 s; T18 (GLM 5.3 Flash): 6.3-7.2 s | T17: 24-39 s; T18: 5.6-7.1 s; T09: 5.3 s |
+| Product request latency (upper median per run of the product requests in the tester's window, mediator; Tart windows include the clone's gate requests) | T17 (mostly GLM 5.2): 36-160 s; T18 (GLM 5.3 Flash): 6.3-7.2 s | T17: 24-39 s; T18: 5.6-7.1 s; T09: 5.3 s |
 
 - Host memory was 44-50% free at every group start; the 25% pause never triggered.
 - The guest mediators forwarded 807 requests and the host relay 808 (the 807 plus one integrator check at relay
@@ -149,8 +149,11 @@ Per attempt, with the screens and files each rests on: [dispositions.md](disposi
    closed the gaps behind them (v6, v9). No parity record shows a machine-specific mechanism: the Tart parity run's two
    MOD-11 results counted as environment came from its tie-break rule, and utm-par2 then found MOD-11 matched on the
    same build. Tart also gives a fresh machine per group, with no restore or check boots.
-2. **The real key file in UTM "macOS 3" (D142).** It is `/Users/agent/.pf83-auth/zai_api_key`. It was not read here;
-   the state check only tested that it exists. If you confirm (a) above, I recommend deleting it, as D142 says. Since
+2. **The real key file in UTM "macOS 3" (D142).** It is `/Users/agent/.pf83-auth/zai_api_key`. It was not read here:
+   the state check only tested that it exists, the gate's probes try to open it as the executor accounts and are denied,
+   and the policy capture lists its metadata. The same folder also holds `auth.json` (600, agent; also from earlier
+   runs, also not read; [common/utm/policy-root-start.txt](common/utm/policy-root-start.txt)); D142 names only the key
+   file, so it is listed here for your decision. If you confirm (a) above, I recommend deleting it, as D142 says. Since
    it is a real Z.AI key that sat in a VM image, also consider rotating that key. Nothing in the current harness uses
    it. I did not delete it.
 3. **MOD-21.** All six attempts are accepted under D39: the child's model declined before any product protection was

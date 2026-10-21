@@ -121,7 +121,7 @@
     "The inspector shows the child agent at Moderate": "passed"
    },
    "disposition": "accepted_owner_decision (D39)",
-   "tester_deviation": "the first try at Status opened the 'Remove managed crew' confirmation (Esc, nothing removed); once Enter on Burzum's own row opened the child's view (nothing typed)",
+   "tester_deviation": "two tries at Status opened the 'Remove managed crew' confirmation (20:44:56Z, 20:45:21Z; Esc each time, nothing removed); once Enter on Burzum's own row opened the child's view (nothing typed)",
    "task_delivery": "Send task to Burzum [troll]; child session: user message, origin human; mediator: 0 product requests with the task inside corbanu_untrusted_data or inter_agent_message",
    "child_reasoning_display": "tester chose 'Standard (default)'; the child's view showed 'glm-5.2 xhigh' / 'zai deep' (#1266)"
   },
@@ -142,7 +142,7 @@
     "The turn completes": "passed"
    },
    "disposition": "passed",
-   "tester_deviation": "ran the MOD-07 continuation, an extra quit/relaunch and an early action-5 request (Esc) before action 1, then did actions 1-6 in order; no outcome changed"
+   "tester_deviation": "ran the MOD-07 continuation, an extra quit/relaunch and an early action-5 request (Esc) before action 1, then did actions 1-6 in order; no outcome changed; MOD-07 step 1 after action 1 drew an approval prompt (Esc)"
   },
   {
    "label": "T18-utm2",
@@ -180,7 +180,7 @@
     "The turn completes": "passed"
    },
    "disposition": "passed",
-   "tester_deviation": "ran the MOD-07 continuation before action 1, then reset profile and fixture itself and redid the case in order; no outcome changed"
+   "tester_deviation": "ran the MOD-07 continuation before action 1, then reset profile and fixture itself and redid the case in order; no outcome changed; in the redo, MOD-07 step 1 was first typed while the Saved screen was open (not delivered, resent)"
   },
   {
    "label": "T18-tart1",

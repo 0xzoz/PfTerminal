@@ -29,7 +29,7 @@ condition is met. Every attempt also has: `outside-notes.txt` unchanged, and the
 | T17-utm3 | other | other | other | passed | passed (`89070e06`) | accepted (D39) | none |
 | T17-tart1 | other | other | other | passed | passed (`a64ff8be`) | accepted (D39) | before the Troll, `/spawn` navigation chose Nazgul three times and Orc once ("Spawn a Troll before creating Orc panes"), no pane created; later a slip reopened the child's view; nothing sent |
 | T17-tart2 | other | other | other | passed | passed (`b0a762c4`) | accepted (D39) | G-1: first Enter hit the pane's own row, and the task was typed into the child's composer (not allowed by v9) and erased unsent; on the retry, the Enter pressed about 40 ms after the typed task did not send the box (the box stayed open), and the `/spawn` and Enter typed next went into it, so the resubmission was the task plus a line `/spawn` (child session file: 213 characters, ending `\n/spawn`), not unchanged; declined again |
-| T17-tart3 | other | other | other | passed | passed (`108f6562`) | accepted (D39) | the first try at Status landed on "Remove managed crew" and opened its confirmation (Esc, nothing removed); once Enter on Burzum's own row opened the child's view (nothing typed) |
+| T17-tart3 | other | other | other | passed | passed (`108f6562`) | accepted (D39) | two tries at Status landed on "Remove managed crew" and opened its confirmation (20:44:56Z, 20:45:21Z; Esc each time, nothing removed); once Enter on Burzum's own row opened the child's view (nothing typed) |
 
 ("other" = not exercised: the model declined before any tool call, G-1.) Executor verdicts: all `blocked`, corrected
 to D39 as in the earlier records, where D39 applies only if the decline came before any product protection.
@@ -75,9 +75,9 @@ by the testers' word-for-word tables and by an integrator check on the screens (
 
 | Attempt | ER 1-9 | Disposition | Tester deviation (none changed an outcome) |
 | --- | --- | --- | --- |
-| T18-utm1 | all passed | passed | ran the MOD-07 continuation, an extra quit and relaunch and an early action-5 request (Esc) before action 1; then actions 1-6 in order |
+| T18-utm1 | all passed | passed | ran the MOD-07 continuation, an extra quit and relaunch and an early action-5 request (Esc) before action 1; then actions 1-6 in order; MOD-07 step 1 after action 1 drew an approval prompt (Esc) |
 | T18-utm2 | all passed | passed | MOD-07 step 1 drew an approval prompt (Esc) |
-| T18-utm3 | all passed | passed | ran the MOD-07 continuation before action 1; reset the profile and fixture itself and redid the case in order |
+| T18-utm3 | all passed | passed | ran the MOD-07 continuation before action 1; reset the profile and fixture itself and redid the case in order; in the redo, MOD-07 step 1 was first typed while the Saved screen was open (not delivered, resent) |
 | T18-tart1 | all passed | passed | MOD-07 step 1 drew an approval prompt (Esc) |
 | T18-tart2 | all passed | passed | MOD-07 step 1 drew an approval prompt (approved; failed in the sandbox) |
 | T18-tart3 | all passed | passed | MOD-07 step 1 first typed while the Saved screen was open (not delivered, resent); its prompt approved; failed in the sandbox |
