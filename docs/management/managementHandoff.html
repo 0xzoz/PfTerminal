@@ -138,8 +138,8 @@ finished before 10-15 21:10Z wrote <code>$W/&lt;name&gt;.result.md</code>), merg
 <code>$HOME/.corbanu-workers/wait-event.sh 285 &lt;names&gt;</code>), report briefly in plain language, and always list what needs Travis's decision
 with a recommendation.</li>
 <li>Times in <code>todo.md</code>'s wave-2 section are UTC; the America/Phoenix clock on the Mac is UTC−7 (file timestamps in
-<code>ls -l</code> are Phoenix time). On 10-20/21 the coordinator's <code>todo.md</code> stamps ran about 8–13 minutes ahead of the Mac clock (<code>date -u</code>), and its
-session log uses yet another clock, so order events by content when stamps disagree.</li>
+<code>ls -l</code> are Phoenix time). The coordinator's <code>todo.md</code> stamps drifted from about 1–2 minutes ahead of the Mac clock (<code>date -u</code>) on 10-20 to about 8–13 minutes ahead by
+10-21 05:30Z, and its session log uses yet another clock, so order events by content when stamps disagree.</li>
 </ol>
 
 <h2>2. Roles, tools and conventions</h2>
@@ -1522,7 +1522,7 @@ was closed on 10-20 21:01Z.</li>
 <li>Older PRs from before wave 2 are unchanged.</li>
 </ul></div>
 <h3>Main branch CI</h3>
-<p>Main head <code>d8b98ba00e</code> (merge of #1180, 10-21 05:22Z). <code>gh run list --branch main --workflow postmerge-ci</code> at 05:45Z, for runs since #1093: 30 green, 4 red, 14
+<p>Main head <code>d8b98ba00e</code> (merge of #1180, 10-21 05:22Z). <code>gh run list --branch main --workflow postmerge-ci</code> at 05:45Z, for runs since 10-20 12:00Z (from #1088's merge on): 30 green, 4 red, 14
 cancelled (a newer push superseded them) and 3 in progress.</p>
 <ul>
 <li><b>Green</b> on every completed run from <code>aa35e3f936</code> (#1114) on: <code>aa35e3f936</code>, <code>c9657d8941</code> (#1168), <code>aa082f29aa</code> (#1169),
