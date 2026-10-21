@@ -3639,6 +3639,93 @@ fn register_native_dispatch_pair(app: &mut App) -> (ThreadId, ThreadId) {
     (troll_thread_id, orc_thread_id)
 }
 
+fn issue_1208_layout(edges: &[(&str, &str)]) -> crate::claude_panes::PaneLayoutState {
+    crate::claude_panes::PaneLayoutState {
+        spawn_parent_by_node: edges
+            .iter()
+            .map(|(child, parent)| (child.to_string(), parent.to_string()))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+const ISSUE_1208_MAIN: &str = "thread:00000000-0000-0000-0000-000000001208";
+const ISSUE_1208_CHILD: &str = "thread:00000000-0000-0000-0000-000000001209";
+const ISSUE_1208_GRANDCHILD: &str = "thread:00000000-0000-0000-0000-000000001210";
+
+#[test]
+fn model_spawned_sub_agents_alone_are_not_a_legacy_spawn_hierarchy() {
+    // #1208: the spawn-agent tool records only thread -> thread edges.
+    let native_only = issue_1208_layout(&[
+        (ISSUE_1208_CHILD, ISSUE_1208_MAIN),
+        (ISSUE_1208_GRANDCHILD, ISSUE_1208_CHILD),
+    ]);
+    assert_eq!(
+        crate::spawn_orchestration::pane_layout_has_legacy_spawn_hierarchy(&native_only),
+        false
+    );
+
+    // A /spawn Troll without a Nazgul binding hangs off the Main pane node.
+    let legacy_pane_root = issue_1208_layout(&[
+        (ISSUE_1208_CHILD, "pane:codex-main"),
+        (ISSUE_1208_GRANDCHILD, ISSUE_1208_CHILD),
+    ]);
+    assert_eq!(
+        crate::spawn_orchestration::pane_layout_has_legacy_spawn_hierarchy(&legacy_pane_root),
+        true
+    );
+
+    // A /spawn hierarchy bound to a native Nazgul has only thread edges plus the binding.
+    let legacy_bound_nazgul = crate::claude_panes::PaneLayoutState {
+        spawn_nazgul_pane_id: Some(ISSUE_1208_MAIN.to_string()),
+        ..issue_1208_layout(&[(ISSUE_1208_CHILD, ISSUE_1208_MAIN)])
+    };
+    assert_eq!(
+        crate::spawn_orchestration::pane_layout_has_legacy_spawn_hierarchy(&legacy_bound_nazgul),
+        true
+    );
+
+    // A /spawn Claude member is a pane node.
+    let legacy_claude_member = issue_1208_layout(&[("pane:claude-1", ISSUE_1208_MAIN)]);
+    assert_eq!(
+        crate::spawn_orchestration::pane_layout_has_legacy_spawn_hierarchy(&legacy_claude_member),
+        true
+    );
+}
+
+#[tokio::test]
+async fn resume_with_only_model_spawned_sub_agents_shows_no_legacy_spawn_notice() -> Result<()> {
+    let native_only = issue_1208_layout(&[(ISSUE_1208_CHILD, ISSUE_1208_MAIN)]);
+    let legacy = issue_1208_layout(&[(ISSUE_1208_CHILD, "pane:codex-main")]);
+    for (layout, expect_notice) in [(native_only, false), (legacy, true)] {
+        let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+        // The flag App construction sets from the restored layout.
+        app.spawn_legacy_read_only =
+            crate::spawn_orchestration::pane_layout_has_legacy_spawn_hierarchy(&layout);
+        let mut app_server = start_config_write_test_app_server(&app).await?;
+
+        app.restore_native_spawn_panes_from_saved_state(&mut app_server)
+            .await;
+
+        let mut rendered = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                rendered.push_str(&lines_to_single_string(&cell.display_lines(/*width*/ 200)));
+            }
+        }
+        assert_eq!(
+            (
+                app.spawn_legacy_read_only,
+                rendered.contains("Restored a legacy /spawn hierarchy in read-only mode")
+            ),
+            (expect_notice, expect_notice),
+            "layout edges {:?}; rendered: {rendered}",
+            layout.spawn_parent_by_node
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn restored_legacy_spawn_hierarchy_is_inspectable_but_rejects_mutation() {
     let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;

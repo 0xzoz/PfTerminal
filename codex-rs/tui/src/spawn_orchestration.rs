@@ -5585,6 +5585,24 @@ fn saved_spawn_child_identity(
     })
 }
 
+/// Whether a restored pane layout holds a pre-CrewSpec `/spawn` hierarchy, which stays read-only.
+///
+/// A `/spawn` hierarchy always has a pane root (`pane:codex-main` or a Claude pane), a bound
+/// Nazgul, Claude panes, or pending dispatches. Sub-agents started by the model's spawn-agent
+/// tool are recorded only as `thread:` -> `thread:` edges; they are not `/spawn` panes and keep
+/// working after resume, so they alone do not make the layout legacy (#1208).
+pub(crate) fn pane_layout_has_legacy_spawn_hierarchy(
+    layout: &crate::claude_panes::PaneLayoutState,
+) -> bool {
+    !layout.spawn_pending_dispatches.is_empty()
+        || layout.spawn_crew.is_none()
+            && (layout.spawn_nazgul_pane_id.is_some()
+                || layout.spawn_parent_by_node.iter().any(|(child, parent)| {
+                    node_id_thread(child).is_none() || node_id_thread(parent).is_none()
+                })
+                || !layout.claude_pane_ids.is_empty())
+}
+
 pub(crate) fn thread_node_id(thread_id: ThreadId) -> String {
     format!("thread:{thread_id}")
 }
