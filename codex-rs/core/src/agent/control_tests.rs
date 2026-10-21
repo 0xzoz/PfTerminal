@@ -79,6 +79,7 @@ async fn test_config_with_cli_overrides(
     }
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cli_overrides(cli_overrides)
         .build()
         .await

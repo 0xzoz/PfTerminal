@@ -3012,6 +3012,7 @@ async fn inline_instructions_set_base_instructions() -> std::io::Result<()> {
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home)
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .build()
         .await?;
 
@@ -4290,6 +4291,7 @@ async fn recorded_account_of_another_provider_is_applied_to_that_provider() -> s
         ConfigBuilder::default()
             .codex_home(codex_home.path().to_path_buf())
             .harness_overrides(ConfigOverrides {
+                cwd: Some(crate::session::tests::kept_test_cwd()),
                 provider_account: explicit.map(str::to_string),
                 ..Default::default()
             })
@@ -4352,6 +4354,7 @@ async fn inherited_account_is_replaced_only_by_an_explicit_account_of_its_provid
             )]
         };
         let overrides = ConfigOverrides {
+            cwd: Some(crate::session::tests::kept_test_cwd()),
             provider_account: explicit.map(str::to_string),
             inherited_provider_account: inherited.map(str::to_string),
             ..Default::default()
@@ -4417,6 +4420,7 @@ async fn recorded_agent_account_is_restored_or_refused() -> std::io::Result<()> 
         .expect("write config");
         ConfigBuilder::default()
             .codex_home(codex_home.path().to_path_buf())
+            .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
             .build()
     };
     codex_vault::Vault::new(codex_home.path().to_path_buf())
@@ -4480,6 +4484,7 @@ async fn recorded_borrowed_account_is_refused_with_its_name() -> std::io::Result
         ConfigBuilder::default()
             .codex_home(codex_home.path().to_path_buf())
             .harness_overrides(ConfigOverrides {
+                cwd: Some(crate::session::tests::kept_test_cwd()),
                 inherited_provider_account: inherited.map(str::to_string),
                 ..Default::default()
             })
