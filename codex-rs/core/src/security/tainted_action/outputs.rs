@@ -28,18 +28,11 @@ pub(super) fn output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
     let has = |word: &str| args.iter().any(|arg| arg == word);
     // `git config --file FILE key value` writes FILE; `git bundle create
     // FILE` writes its operand (a writer's operands are written).
-    let reading = [
-        "--get",
-        "--get-all",
-        "--get-regexp",
-        "--list",
-        "-l",
-        "get",
-        "list",
-    ]
-    .iter()
-    .any(|word| has(word));
-    let config_file = name == "git" && has("config") && !reading;
+    let config_file = name == "git"
+        && args
+            .iter()
+            .position(|arg| arg == "config")
+            .is_some_and(|at| !git_config_reads(&args[at + 1..]));
     let mut found = name == "git" && has("bundle") && has("create");
     let mut files = Vec::new();
     if config_file {
@@ -47,6 +40,76 @@ pub(super) fn output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
     }
     found |= option_values(args, long, *short, &mut files);
     found.then_some(files)
+}
+
+/// git config options that take no value (others may take the next word).
+const GIT_CONFIG_FLAGS: &[&str] = &[
+    "--global",
+    "--system",
+    "--local",
+    "--worktree",
+    "--show-origin",
+    "--show-scope",
+    "--null",
+    "--name-only",
+    "--includes",
+    "--no-includes",
+    "--bool",
+    "--int",
+    "--bool-or-int",
+    "--path",
+    "--expiry-date",
+    "--fixed-value",
+    "--all",
+    "--no-type",
+];
+/// git config options that make it read, not write.
+const GIT_CONFIG_READS: &[&str] = &[
+    "--get",
+    "--get-all",
+    "--get-regexp",
+    "--get-urlmatch",
+    "--get-color",
+    "--get-colorbool",
+    "--list",
+    "-l",
+];
+
+/// Whether `git config` with these words (those after `config`) only reads:
+/// its first word is the `get` or `list` subcommand, or a reading option
+/// is an option, not a value (`--comment --get`, `-- --get`, `k --get` with
+/// an unknown option before it are values). Read conservatively: a word
+/// that may be a value is one. Stops at the next `git` (#1102: each word is
+/// scanned once per line).
+pub(super) fn git_config_reads(words: &[String]) -> bool {
+    if words
+        .first()
+        .is_some_and(|word| matches!(word.as_str(), "get" | "list"))
+    {
+        return true;
+    }
+    let mut value_next = false;
+    for word in words {
+        work::step();
+        if std::mem::take(&mut value_next) {
+            continue;
+        }
+        if word == "--" || super::shell::basename(word) == "git" {
+            return false;
+        }
+        if GIT_CONFIG_READS.contains(&word.as_str()) {
+            return true;
+        }
+        if word.starts_with('-')
+            && !word.contains('=')
+            && !GIT_CONFIG_FLAGS.contains(&word.as_str())
+        {
+            // An unknown option, a group (`-zf`) or `-f`/`--file`: its value
+            // may be the next word.
+            value_next = true;
+        }
+    }
+    false
 }
 
 /// Push the values of `long` (or a prefix of it) and `short` in `args` to

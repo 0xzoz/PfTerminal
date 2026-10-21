@@ -363,6 +363,8 @@ const MAX_CLASSIFIED_LINES: usize = 4096;
 /// stack is shared, not copied, by the readings of quoted text.
 const MAX_FOLDER_STACK: usize = 64;
 const MAX_FOLDER_BYTES: usize = 1024;
+/// `-C`-style folders one command chains (#1141); more fail closed.
+const MAX_CHAINED_FOLDERS: usize = 8;
 /// Magic numbers of executables, which are not read as scripts.
 const BINARY_MAGIC: &[&[u8]] = &[
     b"\x7fELF",
@@ -483,13 +485,9 @@ fn persistence_command(name: &str, args: &[String]) -> bool {
                 return false;
             };
             let config = &args[at + 1..];
-            let reading = config.iter().any(|arg| {
-                matches!(
-                    arg.as_str(),
-                    "--get" | "--get-all" | "--get-regexp" | "--list" | "-l" | "get" | "list"
-                )
-            });
-            !reading
+            // #1141: a reading word given as a value (`git config -f f k
+            // get`) does not make it a read.
+            !outputs::git_config_reads(config)
                 && (config
                     .iter()
                     .any(|arg| matches!(arg.as_str(), "--global" | "--system"))
@@ -504,6 +502,21 @@ fn persistence_command(name: &str, args: &[String]) -> bool {
         "systemctl" => has("--user") && ["enable", "link", "edit"].iter().any(|verb| has(verb)),
         _ => false,
     }
+}
+
+/// The folders a command's words resolve against: the last `-C`-style
+/// folder (resolved against the working folder), each folder of the chain
+/// (each resolved against the one before) and the working folder, without
+/// repeats.
+fn folder_bases(folder: &str, chained: &[String], cwd: &str) -> Vec<String> {
+    let mut bases = vec![folder.to_string()];
+    for base in chained.iter().map(String::as_str).chain([cwd]) {
+        work::step();
+        if !bases.iter().any(|known| known == base) {
+            bases.push(base.to_string());
+        }
+    }
+    bases
 }
 
 /// The CLI subcommand: the first word that is neither a flag nor a flag's value.
@@ -1104,6 +1117,11 @@ impl Classifier {
         // Words resolve against the folder of a `-C`/`--directory` flag
         // (`tar -C ~ ...`, `git -C ~/.codex ...`) once one has been given.
         let mut folder = cwd.clone();
+        // #1141: each relative `-C` resolves against the one before it
+        // (`git -C ~ -C . ...` runs in `~`). Words resolve against every
+        // folder of the chain too: the word lexer drops empty words, so
+        // `-C ~ -C '' log` reads as `-C ~ -C log`.
+        let mut chained: Vec<String> = Vec::new();
         let mut previous: Option<&str> = None;
         for (position, word) in words.iter().enumerate() {
             work::step();
@@ -1115,11 +1133,13 @@ impl Classifier {
                 && FOLDER_FLAGS.contains(&flag)
             {
                 folder = self.homes.resolve(word, &cwd);
+                self.chain_folder(&mut chained, word, &cwd);
                 folder_value = true;
             } else if let Some((flag, value)) = word.split_once('=')
                 && FOLDER_FLAGS.contains(&flag)
             {
                 folder = self.homes.resolve(value, &cwd);
+                self.chain_folder(&mut chained, value, &cwd);
                 folder_value = true;
             }
             previous = Some(word.as_str());
@@ -1141,11 +1161,7 @@ impl Classifier {
                 };
                 // `-C` means something else to some commands (`grep -C 3`):
                 // resolve against both folders.
-                let bases = if folder == cwd {
-                    vec![folder.clone()]
-                } else {
-                    vec![folder.clone(), cwd.clone()]
-                };
+                let bases = folder_bases(&folder, &chained, &cwd);
                 for base in bases {
                     work::step();
                     let resolved = self.homes.resolve(candidate, &base);
@@ -1162,11 +1178,7 @@ impl Classifier {
                 self.script(&payload, &cwd, depth + 1);
             }
         }
-        let bases = if folder == cwd {
-            vec![cwd.clone()]
-        } else {
-            vec![folder, cwd.clone()]
-        };
+        let bases = folder_bases(&folder, &chained, &cwd);
         for file in outputs.iter().flatten() {
             work::step();
             for base in &bases {
@@ -1179,6 +1191,21 @@ impl Classifier {
             }
         }
         self.scripts_of(simple, words, unseen, command.as_ref(), &cwd, depth);
+    }
+
+    /// Follow a relative `-C` from the folder before it. Past
+    /// `MAX_CHAINED_FOLDERS` folders, or a folder name past
+    /// `MAX_FOLDER_BYTES`, the chain is not followed (#1102: `-C a -C a ...`
+    /// would grow it without bound) and the line asks.
+    fn chain_folder(&mut self, chained: &mut Vec<String>, value: &str, cwd: &str) {
+        let next = self
+            .homes
+            .resolve(value, chained.last().map_or(cwd, String::as_str));
+        if chained.len() >= MAX_CHAINED_FOLDERS || next.len() > MAX_FOLDER_BYTES {
+            self.note(ProtectedActionKind::UnseenCode);
+        } else {
+            chained.push(next);
+        }
     }
 
     /// Read what the command runs from files: its script, a local Python

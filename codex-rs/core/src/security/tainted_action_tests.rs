@@ -3177,6 +3177,14 @@ fn issue_1141_output_files_are_written() {
         "sort -o ~/.zshrc list",
         "git config --file ~/.zshrc a.b '$(touch pwned)'",
         "git bundle create ~/.zshrc HEAD",
+        // Review round 1: a reading word as the value, chained `-C`.
+        "git config --file ~/.zshenv 'x.$(touch pwned).y' get",
+        "git config --comment --get -f ~/.zshenv 'x.$(touch pwned).y' z",
+        "git config -f ~/.zshenv 'x.$(touch pwned).y' -- --get",
+        "git -C ~ -C . config -f .zshenv 'x.$(touch pwned).y' z",
+        "git -C ~ -C . log --output=.zshrc",
+        "git -C ~ -C '' log --output=.zshrc",
+        "git --global config --file ~/.zshrc a.b x list",
     ] {
         assert_eq!(script(command), Some(Persistence), "{command}");
     }
@@ -3210,6 +3218,9 @@ fn issue_1142_git_code_settings_are_unseen_code() {
         "declare -u n=pager; printf -v \"$n\" %s 'touch pwned'; git log",
         "HOME=/tmp/h git log",
         "GIT_TRACE=/tmp/t git status",
+        "GIT_TEST_FSMONITOR='touch pwned;:' git status",
+        "n=$(cat name); env \"$n=touch pwned;:\" git diff --no-index a b",
+        "n=$(printf GIT_EXTERNAL_;printf DIFF); env \"$n=touch pwned;:\" git diff",
     ] {
         assert_eq!(script(command), unseen, "{command}");
     }
@@ -3222,7 +3233,30 @@ fn issue_1142_git_code_settings_are_unseen_code() {
         "git commit -c HEAD",
         "echo \"$PAGER\" ${EDITOR}",
         "sort -o sorted.txt list",
+        "git config --global --get user.name",
+        "git config get user.email",
+        "git config --type bool --get core.bare",
     ] {
         assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1102: the #1141/#1142 checks stay linear in the line's length.
+#[test]
+fn issue_1141_1142_checks_are_linear() {
+    for (label, unit) in [
+        ("git words", "-/git -c x "),
+        ("git config words", "git config "),
+        ("chained folders", "-C a "),
+        ("output options", "--output=x -o y "),
+        ("code variables", "PAGER=x ${EDITOR:=y} "),
+        ("naming operands", "$a "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("git {} status", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!("read {}", unit.repeat(400 * scale));
+            let _ = script(&line);
+        });
     }
 }

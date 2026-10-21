@@ -52,12 +52,14 @@ const CODE_VARIABLES: &[&str] = &[
     "BROWSER",
 ];
 /// `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` set config keys,
-/// `GIT_TRACE*` names a file git writes, `LESSKEY*` a file that sets less's
+/// `GIT_TRACE*` names a file git writes, `GIT_TEST_*` are test hooks (some
+/// run commands: `GIT_TEST_FSMONITOR`), `LESSKEY*` a file that sets less's
 /// variables.
 const CODE_VARIABLE_PREFIXES: &[&str] = &[
     "GIT_CONFIG_KEY_",
     "GIT_CONFIG_VALUE_",
     "GIT_TRACE",
+    "GIT_TEST_",
     "LESSKEY",
 ];
 /// Builtins whose operands name the variables they set.
@@ -190,6 +192,15 @@ pub(super) fn sets_code_variable(
     {
         return true;
     }
+    let dynamic = |word: &str| word.contains('$') || word.contains(shell::UNSEEN_OUTPUT);
+    // An assignment before the command (`"$n=x" git`, `env "$n=x" git`)
+    // whose name the classifier cannot see.
+    let before = command.map_or(words.len(), |(index, _)| *index);
+    if words[..before].iter().any(|word| {
+        !word.starts_with('-') && word.split_once('=').is_some_and(|(name, _)| dynamic(name))
+    }) {
+        return true;
+    }
     let Some((index, name)) = command else {
         return false;
     };
@@ -204,7 +215,6 @@ pub(super) fn sets_code_variable(
             || simple.here_string == Some(at)
             || simple.writes_to.contains(&at)
     };
-    let dynamic = |word: &str| word.contains('$') || word.contains(shell::UNSEEN_OUTPUT);
     // A name the classifier cannot see, or one in any case when it came
     // from a variable: a value given the uppercase attribute (`declare -u
     // n=pager; printf -v "$n"`) names `PAGER`.
@@ -319,8 +329,10 @@ pub(super) fn git_runs_code(args: &[String]) -> bool {
             || (word.starts_with("-c") && !word.starts_with("--") && unsafe_key(&word[2..]))
         {
             return true;
-        } else if !word.starts_with('-') {
-            // The subcommand: its own options follow (`commit -c HEAD`).
+        } else if !word.starts_with('-') || shell::basename(word) == "git" {
+            // The subcommand: its own options follow (`commit -c HEAD`). A
+            // later `git` is checked on its own (#1102: each word is
+            // scanned once).
             return false;
         }
         index += 1 + usize::from(GIT_VALUE_OPTIONS.contains(&word.as_str()));
@@ -379,6 +391,9 @@ mod tests {
             &["GIT_TRACE=/tmp/t", "git", "status"],
             &["HOME=/tmp/h", "git", "log"],
             &["LESSKEYIN=/tmp/k", "less", "f"],
+            &["GIT_TEST_FSMONITOR=x", "git", "status"],
+            &["env", "$n=x", "git", "diff"],
+            &["\u{1}unseen-output\u{1}=x", "git", "diff"],
         ] {
             assert!(sets(words), "{words:?}");
         }
@@ -392,6 +407,8 @@ mod tests {
             &["declare", "-u", "name=value"],
             &["cd", "$HOME/src"],
             &["MY_EDITOR=x"],
+            &["X=$(date)", "git", "log"],
+            &["sudo", "-u", "$user", "git", "log"],
             &["git", "commit", "-m", "fix editor crash"],
         ] {
             assert!(!sets(words), "{words:?}");
