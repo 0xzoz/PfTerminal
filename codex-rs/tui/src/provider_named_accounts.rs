@@ -199,6 +199,34 @@ pub(crate) fn named_account_providers(codex_home: &Path) -> Option<BTreeSet<Stri
         })
 }
 
+/// D86/#1193: works out off the UI thread which providers have a named
+/// account in this home and caches the answer in `catalog`, where `/status`
+/// reads it (until it is known, `/status` names the account rather than hide
+/// it). Runs at session start, after every account change, when `/providers`
+/// opens and after each `/status` (so a change made by another process shows
+/// on the next one); only the newest answer is kept. With named accounts off,
+/// or outside a Tokio runtime, the vault is not read.
+pub(crate) fn check_named_account_providers(
+    catalog: &std::sync::Arc<crate::model_catalog::ModelCatalog>,
+    config: &Config,
+) {
+    if !config
+        .features
+        .enabled(codex_features::Feature::NamedAccounts)
+    {
+        return;
+    }
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let generation = catalog.begin_named_account_check();
+    let catalog = std::sync::Arc::clone(catalog);
+    let codex_home = config.codex_home.to_path_buf();
+    runtime.spawn_blocking(move || {
+        catalog.set_named_account_providers(generation, named_account_providers(&codex_home));
+    });
+}
+
 fn holds_named_account_where(
     codex_home: &Path,
     provider_id: &str,

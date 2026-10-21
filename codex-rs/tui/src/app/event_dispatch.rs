@@ -3809,6 +3809,11 @@ impl App {
             }
             AppEvent::VaultCredentialDeleted { label, result } => {
                 self.chat_widget.on_vault_credential_deleted(label, result);
+                // #1193: the deleted entry may have been a named account.
+                crate::provider_named_accounts::check_named_account_providers(
+                    &self.model_catalog,
+                    &self.config,
+                );
             }
             AppEvent::VaultMenuCredentialsReady { result } => {
                 self.chat_widget.on_vault_menu_credentials_ready(result);

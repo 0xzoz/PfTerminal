@@ -210,7 +210,7 @@ impl App {
             &self.app_event_tx,
         );
         // D86/#1193: and whether the provider has a named account (`/status`).
-        super::provider_management_status::check_named_account_providers(
+        crate::provider_named_accounts::check_named_account_providers(
             &self.model_catalog,
             &self.config,
         );

@@ -75,31 +75,6 @@ pub(super) fn check_named_bedrock_account(
     });
 }
 
-/// D86/#1193: works out off the UI thread which providers have a named
-/// account in this home and caches the answer in `catalog`, where `/status`
-/// reads it (until it is known, `/status` names the account rather than hide
-/// it). Runs at session start, after every account change and when
-/// `/providers` opens; only the newest answer is kept. With named accounts
-/// off the vault is not read.
-pub(super) fn check_named_account_providers(
-    catalog: &std::sync::Arc<crate::model_catalog::ModelCatalog>,
-    config: &crate::legacy_core::config::Config,
-) {
-    if !config
-        .features
-        .enabled(codex_features::Feature::NamedAccounts)
-    {
-        return;
-    }
-    let generation = catalog.begin_named_account_check();
-    let catalog = std::sync::Arc::clone(catalog);
-    let codex_home = config.codex_home.to_path_buf();
-    spawn_provider_status_job(move || {
-        let providers = crate::provider_named_accounts::named_account_providers(&codex_home);
-        catalog.set_named_account_providers(generation, providers);
-    });
-}
-
 /// Whether a named Bedrock account can be reached from this session's
 /// config (feature on, Bedrock configured, an AWS-profile account in the
 /// vault); `None` when the vault cannot be read. Blocking (it reads the vault
@@ -176,7 +151,10 @@ impl App {
     pub(super) fn open_provider_manager(&mut self, _app_server: &AppServerSession) {
         sync_provider_manager_model_policy(&self.model_catalog, &self.config);
         check_named_bedrock_account(&self.model_catalog, &self.config, &self.app_event_tx);
-        check_named_account_providers(&self.model_catalog, &self.config);
+        crate::provider_named_accounts::check_named_account_providers(
+            &self.model_catalog,
+            &self.config,
+        );
         let generation = self.next_provider_management_generation();
         self.provider_management_host = None;
         let config = self.config.clone();
@@ -423,14 +401,14 @@ mod tests {
             .features
             .disable(codex_features::Feature::NamedAccounts)
             .unwrap();
-        check_named_account_providers(&catalog, &config);
+        crate::provider_named_accounts::check_named_account_providers(&catalog, &config);
         assert_eq!(catalog.begin_named_account_check(), 1, "no check ran");
 
         config
             .features
             .enable(codex_features::Feature::NamedAccounts)
             .unwrap();
-        check_named_account_providers(&catalog, &config);
+        crate::provider_named_accounts::check_named_account_providers(&catalog, &config);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while catalog.provider_has_named_account("zai").is_none() {
             assert!(std::time::Instant::now() < deadline, "check never answered");
