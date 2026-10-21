@@ -174,8 +174,9 @@ fn wait_for_release_in_child(
     }
     #[cfg(target_os = "linux")]
     {
-        // SAFETY: plain integer arguments.
-        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) } != 0 {
+        // SAFETY: plain integer arguments; the kernel reads the signal as an
+        // unsigned long.
+        if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL as libc::c_ulong) } != 0 {
             return Err(std::io::Error::last_os_error());
         }
         // The parent may have died before the signal was armed.
