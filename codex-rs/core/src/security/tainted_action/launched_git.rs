@@ -36,6 +36,9 @@ pub(super) struct LaunchedGit<'a> {
     fed: bool,
     /// A `find` or `fd`, whose exec options start such a command.
     finder: bool,
+    /// The launcher puts input where placeholders (`{}`) are: `find -exec`,
+    /// `fd -x`, `parallel`.
+    placeholders: bool,
     /// The next word may be a replacement string (`xargs -I R`).
     replacement_next: bool,
     replacements: Vec<String>,
@@ -47,18 +50,35 @@ pub(super) struct LaunchedGit<'a> {
 }
 
 impl<'a> LaunchedGit<'a> {
-    pub(super) fn new(words: &'a [String], lower: &'a [String], braces: bool) -> Self {
+    /// `launched`: the words are in a script a launcher puts its input in
+    /// (`xargs -I% sh -c 'cd x && git config %'`), so any may be input.
+    pub(super) fn new(
+        words: &'a [String],
+        lower: &'a [String],
+        braces: bool,
+        launched: bool,
+    ) -> Self {
         Self {
             words,
             lower,
             braces,
-            fed: false,
+            fed: launched,
             finder: false,
+            placeholders: false,
             replacement_next: false,
             replacements: Vec::new(),
-            any_replacement: false,
+            any_replacement: launched,
             seen: None,
         }
+    }
+
+    /// Whether a launcher's input words may be put inside the words that
+    /// follow (rather than only after them).
+    fn replaces(&self) -> bool {
+        self.fed
+            && (self.any_replacement
+                || !self.replacements.is_empty()
+                || (self.braces && self.placeholders))
     }
 
     /// Takes in `words[index]` after it is judged.
@@ -71,23 +91,16 @@ impl<'a> LaunchedGit<'a> {
         if self.fed {
             self.replacement_option(word);
         }
-        if matches!(name, "xargs" | "parallel")
-            || (self.finder
-                && matches!(
-                    word,
-                    "-exec"
-                        | "-execdir"
-                        | "-ok"
-                        | "-okdir"
-                        | "-x"
-                        | "-X"
-                        | "--exec"
-                        | "--exec-batch"
-                ))
-        {
+        let finder_exec = self.finder
+            && matches!(
+                word,
+                "-exec" | "-execdir" | "-ok" | "-okdir" | "-x" | "-X" | "--exec" | "--exec-batch"
+            );
+        self.placeholders |= finder_exec || name == "parallel";
+        if matches!(name, "xargs" | "gxargs" | "parallel") || finder_exec {
             self.fed = true;
         }
-        self.finder |= matches!(name, "find" | "fd" | "fdfind");
+        self.finder |= matches!(name, "find" | "gfind" | "fd" | "fdfind");
     }
 
     /// A launcher's replacement-string option: `xargs -I R`, `-IR`, `-i`,
@@ -192,10 +205,40 @@ impl<'a> LaunchedGit<'a> {
 fn holds_positional(word: &str) -> bool {
     word.match_indices('$').any(|(at, _)| {
         let after = &word[at + 1..];
-        let after = after.strip_prefix('{').unwrap_or(after);
-        after
-            .chars()
-            .next()
-            .is_some_and(|ch| ch == '@' || ch == '*' || ch.is_ascii_digit())
+        // zsh and fish name them `$argv`.
+        let (braced, after) = match after.strip_prefix('{') {
+            Some(inside) => (true, inside),
+            None => (false, after),
+        };
+        after.starts_with("argv")
+            || after.chars().next().is_some_and(|ch| {
+                ch == '@' || ch == '*' || ch.is_ascii_digit() || (braced && ch == '!')
+            })
     })
+}
+
+/// #1268: for each of a command's words (as the quoted reader gives them),
+/// whether a launcher before it adds input words to the line it runs, and
+/// whether it puts them inside that line's words (`xargs -I%`, `find -exec`
+/// with a `{}`). `braces`: the line as written holds a brace.
+pub(super) fn launches(texts: &[String], braces: bool) -> Vec<Launch> {
+    let lower: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
+    let mut launched = LaunchedGit::new(texts, &lower, braces, /*launched*/ false);
+    let mut each = Vec::with_capacity(texts.len());
+    for index in 0..texts.len() {
+        work::step();
+        each.push(Launch {
+            fed: launched.fed,
+            replaced: launched.replaces(),
+        });
+        launched.step(index);
+    }
+    each
+}
+
+/// What a launcher does with its input at one word.
+#[derive(Clone, Copy)]
+pub(super) struct Launch {
+    pub(super) fed: bool,
+    pub(super) replaced: bool,
 }

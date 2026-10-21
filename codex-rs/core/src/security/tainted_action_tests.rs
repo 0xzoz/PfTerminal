@@ -4290,7 +4290,7 @@ fn issue_1268_git_given_input_words_asks() {
         ("xargs sh -c 'git config \"$@\"' _", Persistence),
         (
             "find . -exec sh -c 'git config \"$1\" \"$2\"' _ {} \\;",
-            Persistence,
+            UnseenCode,
         ),
         ("sh -c 'git config $1 $2'", Persistence),
         ("git config \"${@}\"", Persistence),
@@ -4298,6 +4298,32 @@ fn issue_1268_git_given_input_words_asks() {
         ("env -S'git config core.pager sh'", Persistence),
         ("env --split-string='git config core.pager sh'", Persistence),
         ("env -iS'git -c core.pager=sh log'", UnseenCode),
+        // A launcher's input after `env -S` (review of #1273).
+        (
+            "printf 'core.pager sh' | xargs env -S'git config'",
+            UnseenCode,
+        ),
+        (
+            "printf -- '-c core.pager=sh log' | xargs env -Sgit",
+            UnseenCode,
+        ),
+        ("xargs env --split-string=git", UnseenCode),
+        ("env -S'git config' core.pager sh", Persistence),
+        ("env -S 'git config' core.pager sh", Persistence),
+        // Input put into a shell's script, after a separator there too.
+        (
+            "printf 'core.pager sh\\n' | xargs -I% sh -c 'cd . && git config %'",
+            UnseenCode,
+        ),
+        ("xargs -a keys -I% sh -c 'true; git config %'", UnseenCode),
+        ("xargs -I% sh -c 'git % log'", UnseenCode),
+        ("xargs env -S'git log' --oneline", UnseenCode),
+        ("find . -exec sh -c 'cd . && git config {}' \\;", UnseenCode),
+        ("xargs -I% sh -c 'sh -c \"git config %\"'", Persistence),
+        ("xargs sh -c 'git config \"${!#}\" x' _", UnseenCode),
+        ("xargs zsh -c 'git config $argv'", Persistence),
+        ("gxargs git config", Persistence),
+        ("gfind . -exec git {} +", UnseenCode),
         // Wrappers that take no input words were already judged.
         ("nice -n 5 git config core.pager sh", Persistence),
         ("nohup git config -e", Persistence),
@@ -4323,6 +4349,9 @@ fn issue_1268_git_given_input_words_asks() {
         "git config --get \"$1\"",
         "git config get \"$@\"",
         "sh -c 'git log \"$1\"' _ x",
+        "xargs sh -c 'git log --oneline'",
+        "find . -type d -name .git -execdir sh -c 'git pull' \\;",
+        "env -S'git log' --oneline",
     ] {
         assert_eq!(script(command), None, "{command}");
     }

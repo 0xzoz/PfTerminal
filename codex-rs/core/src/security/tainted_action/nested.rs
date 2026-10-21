@@ -18,6 +18,7 @@ use super::git_helpers;
 use super::indirect;
 use super::invocation;
 use super::invocation::Code;
+use super::launched_git;
 use super::outbound;
 use super::outputs;
 use super::quoted;
@@ -61,8 +62,12 @@ const PURE_FILTERS: &[&str] = &[
 /// What the pass found in one command line.
 #[derive(Default)]
 struct Found {
-    /// Scripts that nested shells run, with the folder they run in.
-    scripts: Vec<(String, String)>,
+    /// Scripts that nested shells run, with the folder they run in, and
+    /// whether a launcher puts its input into them (#1268).
+    scripts: Vec<(String, String, bool)>,
+    /// The line as written holds a brace: a launcher's placeholder (`{}`)
+    /// may be in it.
+    braces: bool,
     seds: Vec<Sed>,
     /// sed commands found (each may be read more than one way).
     sed_commands: usize,
@@ -185,7 +190,10 @@ impl Classifier {
             stack: std::rc::Rc::default(),
             unfollowed: false,
         };
-        let mut found = Found::default();
+        let mut found = Found {
+            braces: command.iter().any(|arg| arg.contains('{')),
+            ..Found::default()
+        };
         self.walk(&[argv], &mut folders, /*level*/ 0, &mut found);
         // Shell text a shell would refuse may split differently from this
         // reading (text of other languages is read loosely).
@@ -209,9 +217,9 @@ impl Classifier {
         }
         self.written.extend(found.written.iter().cloned());
         let mut judged = HashSet::new();
-        for (script, cwd) in std::mem::take(&mut found.scripts) {
+        for (script, cwd, launched) in std::mem::take(&mut found.scripts) {
             work::step();
-            if !judged.insert((script.clone(), cwd.clone())) {
+            if !judged.insert((script.clone(), cwd.clone(), launched)) {
                 continue;
             }
             self.nested_scripts += 1;
@@ -219,7 +227,9 @@ impl Classifier {
                 self.note(ProtectedActionKind::UnseenCode);
                 break;
             }
+            self.launched_scripts += usize::from(launched);
             self.script(&script, &cwd, depth + 1);
+            self.launched_scripts -= usize::from(launched);
         }
         for sed in std::mem::take(&mut found.seds) {
             work::step();
@@ -275,6 +285,8 @@ impl Classifier {
             found.written.extend(targets);
             // D153: a git setting whose quoted text names git.
             found.unreadable |= git_helpers::setting_holds_git_name(&command.words);
+            // #1268: where a launcher's input reaches the words.
+            let launches = launched_git::launches(&texts, found.braces);
             let (starts, overflow) = sed::command_starts(&texts);
             found.unreadable |= overflow;
             let mut roles = vec![Role::Code; texts.len()];
@@ -305,10 +317,13 @@ impl Classifier {
                     if is_watch && std::mem::replace(&mut watched, true) {
                         continue;
                     }
-                    for (word, script) in runner_scripts(&texts, wrapper) {
+                    for (word, script) in runner_scripts(&texts, wrapper, &mut found.unreadable) {
                         work::step();
                         roles[word] = Role::Script;
-                        found.scripts.push((script, folders.cwd.clone()));
+                        // Input words a launcher adds go to the wrapper's
+                        // line (`xargs env -S'git config'`).
+                        let launched = launches[wrapper].fed;
+                        found.scripts.push((script, folders.cwd.clone(), launched));
                         runners += 1;
                     }
                     // Too many shell strings in one command: fail closed.
@@ -375,9 +390,11 @@ impl Classifier {
                         for candidate in candidates {
                             work::step();
                             roles[candidate] = Role::Script;
-                            found
-                                .scripts
-                                .push((texts[candidate].clone(), folders.cwd.clone()));
+                            found.scripts.push((
+                                texts[candidate].clone(),
+                                folders.cwd.clone(),
+                                launches[at].replaced,
+                            ));
                         }
                     }
                     // A here-string or here-document the shell reads.
@@ -385,9 +402,11 @@ impl Classifier {
                         input_role = Role::Script;
                         for input in &command.input {
                             work::step();
-                            found
-                                .scripts
-                                .push((input.text.clone(), folders.cwd.clone()));
+                            found.scripts.push((
+                                input.text.clone(),
+                                folders.cwd.clone(),
+                                launches[at].replaced,
+                            ));
                         }
                     }
                     _ => {}
@@ -709,8 +728,8 @@ fn file_operand(word: &str) -> &str {
 /// holds each: `watch CMD...`, `su -c CMD`, `runuser -c`, `flock F -c`,
 /// `script -c`, `env -S STRING`, also in a group of short options
 /// (`su -lc`, `script -qc`). Options are looked for among the next
-/// `MAX_JUDGED_POSITIONS` words.
-fn runner_scripts(texts: &[String], at: usize) -> Vec<(usize, String)> {
+/// `MAX_JUDGED_POSITIONS` words. `cut`: a script was cut short.
+fn runner_scripts(texts: &[String], at: usize, cut: &mut bool) -> Vec<(usize, String)> {
     let wrapper = name(&texts[at]);
     let args = at + 1..texts.len().min(at + 1 + outbound::MAX_JUDGED_POSITIONS);
     match wrapper.as_str() {
@@ -758,6 +777,29 @@ fn runner_scripts(texts: &[String], at: usize) -> Vec<(usize, String)> {
                         scripts.push((index, rest.to_string()));
                     }
                 }
+            }
+            // #1268: env runs the split string with its later words after
+            // it (`env -S'git config' core.pager sh`), judged besides the
+            // string alone. Past the words read here, the line is not seen
+            // in full: fail closed.
+            if wrapper == "env" {
+                let mut with_later = Vec::new();
+                for (index, script) in &scripts {
+                    work::step();
+                    let later = &texts[*index + 1..];
+                    if later.is_empty() {
+                        continue;
+                    }
+                    *cut |= later.len() > outbound::MAX_JUDGED_POSITIONS;
+                    let mut line = script.clone();
+                    for word in later.iter().take(outbound::MAX_JUDGED_POSITIONS) {
+                        work::step();
+                        line.push(' ');
+                        line.push_str(word);
+                    }
+                    with_later.push((*index, line));
+                }
+                scripts.extend(with_later);
             }
             scripts
         }
