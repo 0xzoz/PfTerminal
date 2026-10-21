@@ -1,103 +1,64 @@
-//! #1159: local Git settings that install a command or another config file.
-//!
-//! Only the key of a write is judged here. A key-shaped value, comment or
-//! file-option operand is data, and a bare key is a query. The older
-//! global/known-key checks remain separate; this adds no permission route.
+//! #1159: local Git writes outside the shared command-free key allowlist.
+//! The existing read detector rules out reads; uncertain options must not
+//! turn a possible persistent code setting into a silent action.
 
 use super::basename;
+use super::code_variables;
+use super::outputs;
 use super::work;
 
-/// Additional executable or include settings reported in #1159. `key` is
-/// lowercase; section and variable names are case-insensitive in Git.
-fn code_key(key: &str) -> bool {
-    if matches!(
-        key,
-        "diff.external"
-            | "sequence.editor"
-            | "gpg.program"
-            | "gpg.ssh.defaultkeycommand"
-            | "core.gitproxy"
-            | "include.path"
-            | "interactive.difffilter"
-    ) {
-        return true;
-    }
-    let Some((section, rest)) = key.split_once('.') else {
-        return false;
-    };
-    if section == "pager" {
-        return !rest.is_empty();
-    }
-    let Some((subsection, variable)) = rest.rsplit_once('.') else {
-        return false;
-    };
-    if subsection.is_empty() {
-        return false;
-    }
-    matches!(
-        (section, variable),
-        ("diff", "command" | "textconv")
-            | ("filter", "clean" | "smudge" | "process")
-            | ("gpg", "program")
-            | ("includeif", "path")
-            | ("remote", "uploadpack" | "receivepack")
-            | ("submodule", "update")
-            | ("hook", "command")
-    )
-}
-
-/// Find `config` in Git's command position, consuming the documented global
-/// options that have a separate operand. Unknown forms are left to the other
-/// classifier checks, rather than interpreting their operands as commands.
+/// Find `config`, sharing Git's global value-option boundaries. Unknown
+/// options are not a reason to stop checking. Stop at the next Git word so
+/// the caller's per-word scan never rescans a later invocation (#1102).
 fn config_args(args: &[String]) -> Option<&[String]> {
     let mut at = 0;
     while let Some(word) = args.get(at) {
         work::step();
-        match word.as_str() {
-            "config" => return Some(&args[at + 1..]),
-            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env"
-            | "--super-prefix" | "--attr-source" => at += 2,
-            "--no-pager"
-            | "--paginate"
-            | "-p"
-            | "-P"
-            | "--bare"
-            | "--no-replace-objects"
-            | "--literal-pathspecs"
-            | "--glob-pathspecs"
-            | "--noglob-pathspecs"
-            | "--icase-pathspecs"
-            | "--no-optional-locks"
-            | "--no-lazy-fetch"
-            | "--no-advice" => at += 1,
-            _ if word.starts_with("--git-dir=")
-                || word.starts_with("--work-tree=")
-                || word.starts_with("--namespace=")
-                || word.starts_with("--config-env=")
-                || word.starts_with("--super-prefix=")
-                || word.starts_with("--attr-source=")
-                || (word.len() > 2 && (word.starts_with("-C") || word.starts_with("-c"))) =>
+        if basename(word).eq_ignore_ascii_case("git") {
+            return None;
+        }
+        if word == "config" {
+            return Some(&args[at + 1..]);
+        }
+        if code_variables::GIT_VALUE_OPTIONS.contains(&word.as_str())
+            || matches!(word.as_str(), "-c" | "--config-env")
+        {
+            if args
+                .get(at + 1)
+                .is_some_and(|value| basename(value).eq_ignore_ascii_case("git"))
             {
-                at += 1;
+                return None;
             }
-            _ => return None,
+            at += 2;
+        } else if word.starts_with('-') {
+            at += 1;
+        } else {
+            return None;
         }
     }
     None
 }
 
-/// Whether the resolved Git invocation writes one of the additional code
-/// settings. Supports `config set` and legacy `config [options] key value`;
-/// queries, deletion actions and incomplete writes do not install a value.
+/// Whether a possible local write sets a key outside the same allowlist
+/// used for `git -c`. Values do not make an unsafe key safe: even `false`
+/// or `rebase` asks after untrusted content. Section renames can install
+/// previously harmless keys in a program-running family and also ask.
 pub(super) fn writes_code_setting(args: &[String]) -> bool {
     let Some(args) = config_args(args) else {
         return false;
     };
+    if outputs::git_config_reads(args) {
+        return false;
+    }
     let mut at = 0;
     let mut action_seen = false;
     let mut options = true;
+    let mut maybe_value = false;
     while let Some(word) = args.get(at) {
         work::step();
+        if basename(word).eq_ignore_ascii_case("git") {
+            return false;
+        }
         if options && word == "--" {
             options = false;
             at += 1;
@@ -105,32 +66,55 @@ pub(super) fn writes_code_setting(args: &[String]) -> bool {
         }
         if options && word.starts_with('-') {
             let option = word.split_once('=').map_or(word.as_str(), |(name, _)| name);
-            match option {
-                "--file" | "-f" | "--type" | "-t" | "--comment" | "--value" => {
-                    at += if word.contains('=') { 1 } else { 2 };
-                }
-                "--local" | "--worktree" | "--global" | "--system" | "--includes"
-                | "--no-includes" | "--add" | "--replace-all" | "--all" | "--append"
-                | "--fixed-value" | "--bool" | "--int" | "--bool-or-int" | "--bool-or-str"
-                | "--path" | "--expiry-date" => at += 1,
-                _ if !word.starts_with("--")
-                    && word.len() > 2
-                    && (word.starts_with("-f") || word.starts_with("-t")) =>
-                {
-                    at += 1;
-                }
-                _ => return false,
+            if matches!(
+                option,
+                "--unset" | "--unset-all" | "--remove-section" | "--help" | "-h"
+            ) {
+                return false;
+            }
+            if option == "--rename-section" {
+                return args.get(at + 2).is_some();
+            }
+            if outputs::GIT_CONFIG_VALUES.contains(&option) || option == "-t" {
+                at += if word.contains('=') { 1 } else { 2 };
+            } else if outputs::GIT_CONFIG_FLAGS.contains(&option)
+                || matches!(
+                    option,
+                    "-z" | "--add" | "--replace-all" | "--append" | "--bool-or-str"
+                )
+                || word.contains('=')
+            {
+                at += 1;
+            } else if !word.starts_with("--")
+                && let Some((offset, flag)) =
+                    word.char_indices().find(|(_, ch)| matches!(ch, 'f' | 't'))
+            {
+                // A short option group (`-zf FILE`) or attached value.
+                at += 1 + usize::from(offset + flag.len_utf8() == word.len());
+            } else {
+                // Could be an abbreviated flag or a value-taking option.
+                // Judge both possible key positions; never silently give up.
+                maybe_value = true;
+                at += 1;
             }
             continue;
         }
-        if options && !action_seen && word == "set" {
-            action_seen = true;
-            at += 1;
-            continue;
+        if options && !action_seen {
+            match word.as_str() {
+                "unset" | "remove-section" => return false,
+                "rename-section" => return args.get(at + 2).is_some(),
+                "set" => {
+                    action_seen = true;
+                    at += 1;
+                    continue;
+                }
+                _ => {}
+            }
         }
-        // A read action is not a key. Once a key is reached, later words
-        // (even `get`, `list` or `--get`) are values, not read selectors.
-        return args.get(at + 1).is_some() && code_key(&word.to_ascii_lowercase());
+        let safe = |key: &str| code_variables::safe_git_key(&key.to_ascii_lowercase());
+        return args.get(at + 1).is_some_and(|next| {
+            !safe(word) || (maybe_value && args.get(at + 2).is_some() && !safe(next))
+        });
     }
     false
 }
@@ -157,47 +141,10 @@ pub(super) fn inspection_only_prefix(prefix: &[String]) -> bool {
             continue;
         }
         // Operand boundaries are the same as the unchanged shared resolver.
-        let (value_options, mut operands): (&[&str], usize) = match name.as_str() {
-            "sudo" => (
-                &["-u", "-g", "-h", "-p", "-C", "-D", "-r", "-t", "-U", "-T"],
-                0,
-            ),
-            "doas" => (&["-u", "-C"], 0),
-            "env" => (&["-u", "-C", "--unset", "--chdir"], 0),
-            "nice" => (&["-n", "--adjustment"], 0),
-            "time" => (&["-f", "-o", "--format", "--output"], 0),
-            "timeout" => (&["-s", "--signal", "-k", "--kill-after"], 1),
-            "exec" => (&["-a"], 0),
-            "xargs" => (
-                &[
-                    "-I",
-                    "-L",
-                    "-n",
-                    "-P",
-                    "-s",
-                    "-d",
-                    "-E",
-                    "-a",
-                    "--max-args",
-                    "--max-procs",
-                    "--delimiter",
-                    "--arg-file",
-                    "--replace",
-                ],
-                0,
-            ),
-            "stdbuf" => (&["-i", "-o", "-e"], 0),
-            "caffeinate" => (&["-t", "-w"], 0),
-            "ionice" => (&["-c", "-n", "-p", "-P", "-u"], 0),
-            "chrt" | "sg" => (&[], 1),
-            "taskset" => (&["-c", "--cpu-list"], 1),
-            "flock" => (&["-w", "-E", "--timeout", "--conflict-exit-code"], 1),
-            "runuser" => (&["-u", "-g", "-G"], 0),
-            "nsenter" => (&["-t", "--target"], 0),
-            "systemd-run" => (&["-p", "--property", "-u", "--unit"], 0),
-            "watch" => (&["-n", "--interval"], 0),
-            _ => (&[], 0),
-        };
+        let (value_options, mut operands) = super::indirect::WRAPPERS
+            .iter()
+            .find(|(wrapper, _, _)| *wrapper == name)
+            .map_or((&[][..], 0), |(_, options, operands)| (*options, *operands));
         let mut options = true;
         while let Some(option) = prefix.get(at) {
             work::step();

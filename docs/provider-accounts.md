@@ -101,7 +101,10 @@ unchanged.
 
 With the feature on, `/status` names the session's account on the provider
 line and adds an **Account usage** line: the tokens this session used on each
-account of the current provider, as the provider reported them. It covers the
+account of the current provider, as the provider reported them. The provider
+line names the account only when that provider has a named account in this
+home (or the vault can't be read), or the session is on or used one; otherwise
+it reads as it does without the feature. The Account usage line covers the
 whole session: spawned agents (each toward its own account), side
 conversations, automatic and `/review` reviews, and memory extraction. Only
 token counts are shown: no prices and no cost records.
@@ -137,6 +140,14 @@ with neither, the request shows `no price available`. Request and attempt pages
 say which was used on their `Price basis` line. Codex Auto Review, the
 automatic approval reviewer, is one of these on an OpenAI API key: OpenAI
 doesn't publish a price for it, and `/cost` says so.
+
+A day with nothing recorded for the conversation says "no requests recorded"
+only when the whole UTC day ends before the conversation started (as dated by
+the clock that also dates its requests). Otherwise it
+says "nothing recorded" (or "not recorded" for a day before this home's
+accounting began): a request that failed to record, or one sent from a build
+without developer accounting, leaves no record, so an empty day is not proof
+that none was sent.
 
 A provider you configure at Moonshot's Kimi Open Platform
 (`base_url = "https://api.moonshot.ai/v1"`, Chat Completions, API key) is priced

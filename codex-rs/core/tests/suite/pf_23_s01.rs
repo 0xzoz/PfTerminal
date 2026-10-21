@@ -883,7 +883,7 @@ fn canary_home() -> anyhow::Result<(Arc<TempDir>, String, String)> {
     let path = path.to_string_lossy().into_owned();
     // Split inside the home folder's own name: neither part names the home.
     let folder = path.len() - "/pf23-notes.txt".len();
-    let (head, tail) = (&path[..folder - 2], &path[folder - 2..folder]);
+    let (head, tail) = split_home_name(&path[..folder]);
     let evading = format!("cat \"$(printf '{head}%s/pf23-notes.txt' {tail})\"");
     Ok((home, evading, format!("cat '{path}'")))
 }
@@ -1396,7 +1396,7 @@ async fn issue_245_additional_permissions_never_reopen_a_protected_read() -> any
         std::fs::write(&dummy, CANARY)?;
         // Split inside the home folder's own name: neither part names it.
         let folder = root.to_string_lossy().into_owned();
-        let (head, tail) = folder.split_at(folder.len() - 2);
+        let (head, tail) = split_home_name(&folder);
         let command = if literal {
             format!("cat '{}'", dummy.display())
         } else {
@@ -1484,7 +1484,7 @@ async fn issue_245_a_grant_never_carries_a_protected_path_into_later_commands() 
     let dummy = root.join("wallet/pf23-notes.txt");
     std::fs::write(&dummy, CANARY)?;
     let folder = root.to_string_lossy().into_owned();
-    let (head, tail) = folder.split_at(folder.len() - 2);
+    let (head, tail) = split_home_name(&folder);
     let evading = format!("cat \"$(printf '{head}%s/wallet/pf23-notes.txt' {tail})\"");
     let grant = RequestPermissionProfile {
         file_system: Some(FileSystemPermissions::from_read_write_roots(
@@ -2151,7 +2151,7 @@ async fn issue_562_missing_runtime_entries_cannot_be_created() -> anyhow::Result
         let root = home.path().canonicalize()?;
         let path = root.to_string_lossy().into_owned();
         // Split inside the home folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
+        let (head, tail) = split_home_name(&path);
         let command = format!(
             "h=\"$(printf '{head}%s' {tail})\"; a=\"AGE$(printf NTS)\"; \
              printf x > \"$h/$a.md\"; printf x > \"$h/$a.override.md\"; \
@@ -2234,7 +2234,7 @@ async fn issue_587_the_corbanu_home_cannot_be_moved_aside() -> anyhow::Result<()
         ));
         let path = root.to_string_lossy().into_owned();
         // Split inside the home folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
+        let (head, tail) = split_home_name(&path);
         let command = format!(
             "h=\"$(printf '{head}%s' {tail})\"; mv \"$h\" \"$h.old\"; echo mv=$?; \
              mkdir \"$h\" && echo planted > \"$h/AGENTS.md\"; echo ran-587"
@@ -2332,7 +2332,7 @@ impl LinkedHome {
     fn command(&self, read: bool) -> String {
         let path = self.root.to_string_lossy().into_owned();
         // Split inside the folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
+        let (head, tail) = split_home_name(&path);
         let read = if read {
             format!("cat '{}'; echo; ", self.real().join("auth.json").display())
         } else {
@@ -2566,7 +2566,7 @@ async fn issue_583_missing_corbanu_home_entries_cannot_be_created() -> anyhow::R
         std::fs::create_dir_all(root.join("worktrees/w"))?;
         let path = root.to_string_lossy().into_owned();
         // Split inside the home folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
+        let (head, tail) = split_home_name(&path);
         let command = format!(
             "h=\"$(printf '{head}%s' {tail})\"; r=\"ru$(printf les)\"; \
              mkdir -p \"$h/$r\"; \
@@ -2655,7 +2655,7 @@ async fn issue_583_git_still_commits_in_a_corbanu_home_worktree() -> anyhow::Res
     )?;
     assert!(added.status.success(), "{added:?}");
     let path = root.to_string_lossy().into_owned();
-    let (head, tail) = path.split_at(path.len() - 2);
+    let (head, tail) = split_home_name(&path);
     let command = format!(
         "git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m second \
          && echo committed-583; h=\"$(printf '{head}%s' {tail})\"; printf x > \"$h/new-entry\"; \
@@ -2731,7 +2731,7 @@ async fn issue_603_a_command_in_the_corbanu_home_cannot_create_names_corbanu_rea
             };
             let path = root.to_string_lossy().into_owned();
             // Split inside the home folder's own name: neither part names it.
-            let (head, tail) = path.split_at(path.len() - 2);
+            let (head, tail) = split_home_name(&path);
             let sub = if in_other { "other/" } else { "" };
             let command = format!(
                 "h=\"$(printf '{head}%s' {tail})\"; r=\"ru$(printf les)\"; \
@@ -2835,7 +2835,7 @@ async fn issue_586_missing_db_init_lock_cannot_be_created_or_held() -> anyhow::R
             let lock = root.join("pfterminal_db_init.lock");
             let path = root.to_string_lossy().into_owned();
             // Split inside the home folder's own name: neither part names it.
-            let (head, tail) = path.split_at(path.len() - 2);
+            let (head, tail) = split_home_name(&path);
             let attempts = if missing {
                 "hold \"$h/$n\" lower; hold \"$h/PFTERMINAL_DB_$(printf INIT).LOCK\" upper"
             } else {
@@ -2922,7 +2922,7 @@ async fn issue_611_a_separate_database_folder_is_protected() -> anyhow::Result<(
         let lock = folder.join("pfterminal_db_init.lock");
         let path = folder.to_string_lossy().into_owned();
         // Split inside the folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
+        let (head, tail) = split_home_name(&path);
         let command = format!(
             "d=\"$(printf '{head}%s' {tail})\"; s=\"sql$(printf ite)\"; \
              cat \"$d/canary.$s\"; echo; printf x >> \"$d/canary.$s\"; \
@@ -3022,7 +3022,7 @@ async fn issue_650_other_worktrees_git_folders_stay_read_only() -> anyhow::Resul
         let other = common.join("worktrees/other");
         let path = x.to_string_lossy().into_owned();
         // Split inside the folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
+        let (head, tail) = split_home_name(&path);
         let command = format!(
             "x=\"$(printf '{head}%s' {tail})\"; o=\"$x/main/.g$(printf it)/worktrees/other\"; \
              printf /planted > \"$o/common$(printf dir)\"; \
@@ -3166,7 +3166,7 @@ async fn issue_651_a_missing_database_folder_is_protected() -> anyhow::Result<()
         let folder = base.path().canonicalize()?.join("databases");
         let path = folder.to_string_lossy().into_owned();
         // Split inside the folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
+        let (head, tail) = split_home_name(&path);
         let command = format!(
             "d=\"$(printf '{head}%s' {tail})\"; [ -f \"$d\" ] && echo placeholder-651; \
              mkdir -p \"$d/accounting-$(printf pending)\"; printf x > \"$d/planted\"; \
@@ -3274,7 +3274,7 @@ async fn shared_database_folder_scenario() -> anyhow::Result<()> {
         let lock = folder.join("pfterminal_db_init.lock");
         let path = folder.to_string_lossy().into_owned();
         // Split inside the folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
+        let (head, tail) = split_home_name(&path);
         let command = format!(
             "d=\"$(printf '{head}%s' {tail})\"; s=\"sql$(printf ite)\"; \
              cat \"$d/notes-651.txt\"; echo; printf x > \"$d/scratch-651\" && echo wrote-651; \
@@ -3422,7 +3422,7 @@ async fn issue_652_home_below_a_root_reached_through_a_nested_link_stays_protect
         std::fs::create_dir_all(home_real.join("skills"))?;
         let path = home_real.to_string_lossy().into_owned();
         // Split inside the home folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
+        let (head, tail) = split_home_name(&path);
         let command = format!(
             "h=\"$(printf '{head}%s' {tail})\"; printf x > \"$h/hoo$(printf ks).json\"; \
              printf x > \"$h/sk$(printf ills)/planted\"; printf x > ./file652; echo ran-652"
@@ -3518,7 +3518,7 @@ async fn issue_605_minimal_reads_keep_git_below_tmp_read_only() -> anyhow::Resul
         )?;
         let path = x.to_string_lossy().into_owned();
         // Split inside the folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
+        let (head, tail) = split_home_name(&path);
         let command = format!(
             "x=\"$(printf '{head}%s' {tail})\"; g=\".g$(printf it)\"; \
              echo x > \"$x/main/$g/hooks/pre-commit\"; echo x >> \"$x/main/$g/worktrees/wt/HEAD\"; \
@@ -3605,7 +3605,7 @@ async fn issue_649_minimal_reads_keep_denied_paths_below_tmp_unreadable() -> any
         std::fs::write(base.path().join("scratch"), "scratch-649")?;
         let path = home.path().to_string_lossy().into_owned();
         // Split inside the home folder's own name: neither part names it.
-        let (head, tail) = path.split_at(path.len() - 2);
+        let (head, tail) = split_home_name(&path);
         let command = format!(
             "cat \"$(printf '{head}%s/pf23-notes.txt' {tail})\"; echo; cat '{}'; echo; echo ran-649",
             base.path().join("scratch").display()
@@ -3759,7 +3759,7 @@ async fn pf_23_s02_typing_into_a_shell_started_before_untrusted_content_is_confi
     // The shell proves it is confined: it cannot read a Corbanu home store
     // (named at run time, so only the sandbox can stop it).
     let steps = |home: &str| {
-        let (head, tail) = home.split_at(home.len() - 2);
+        let (head, tail) = split_home_name(home);
         let read = format!("echo typed-one; cat \"$(printf '{head}%s/au%s' {tail} th.json)\"\n");
         vec![
             call(
@@ -3812,4 +3812,29 @@ async fn pf_23_s02_typing_into_a_shell_started_before_untrusted_content_is_confi
         assert!(output_text(&requests[3], "call-again").contains("typed-two"));
     }
     Ok(())
+}
+
+/// Splits `folder` (a temporary home's path) inside its own name for a
+/// `printf '{head}%s' {tail}` command, so neither part names the folder.
+/// #744: the tail is the name's last two characters, or its last one when
+/// those two read as a link program: the random name ending in `ln` made
+/// `… {tail}` an `ln` word, and the Aggressive #623 link check (rightly,
+/// over-refusal is accepted) refused the whole command.
+pub(crate) fn split_home_name(folder: &str) -> (&str, &str) {
+    let at = if folder[folder.len() - 2..].eq_ignore_ascii_case("ln") {
+        folder.len() - 1
+    } else {
+        folder.len() - 2
+    };
+    folder.split_at(at)
+}
+
+/// #744: a home whose random name ends in `ln` (any case) is never split
+/// into an `ln` word; other names keep their two-character tail.
+#[test]
+fn issue_744_a_home_name_is_never_split_into_a_link_program() {
+    assert_eq!(split_home_name("/tmp/.tmpAbcdLn"), ("/tmp/.tmpAbcdL", "n"));
+    assert_eq!(split_home_name("/tmp/.tmpAbcdln"), ("/tmp/.tmpAbcdl", "n"));
+    assert_eq!(split_home_name("/tmp/.tmpAbcdx9"), ("/tmp/.tmpAbcd", "x9"));
+    assert_eq!(split_home_name("/tmp/.tmpAbcgln"), ("/tmp/.tmpAbcgl", "n"));
 }
