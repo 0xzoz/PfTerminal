@@ -1,4 +1,4 @@
-$ corbanu exec -m gpt-5.6-luna   (no --account: default login = fake API key)
+$ corbanu exec --skip-git-repo-check -s read-only --ephemeral -m gpt-5.6-luna "Reply with exactly: PF84-LIVE-OK"   (no --account: default login = fake API key)
 Reading additional input from stdin...
 Corbanu Terminal v0.1.48
 --------

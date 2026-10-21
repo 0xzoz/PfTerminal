@@ -1,5 +1,6 @@
-# Extracts copied verbatim from the run's terminal output (sanitized: <email-hint>, <L> = throwaway run dir).
-# They cover steps whose screens were not saved to separate capture files.
+# Terminal extracts for steps whose screens were not saved to separate capture files.
+# Lines starting with `$`, `›`, `•` or a path, and the quoted product output, are verbatim (sanitized: <email-hint>,
+# <L> = throwaway run dir). `#` comments, `->` notes and the timing and hash-table lines summarise the run's output.
 
 ## Sign-in timing (UTC)
 08:38:47Z  device-code URL + code written to the coordinator handoff file
@@ -38,7 +39,7 @@ after logout --account t1                     : 14d0483703725bc9eb55ae96cc0c0f18
 › Reply with exactly: PF84-RESUME-OK
 • PF84-RESUME-OK
 
-## Switch to Z.AI and back (row 7)
+## Switch to Z.AI and back (row 7); the first message is the #1205 wording defect
 • Switched to the default account; model list refreshed. If your login restrictions (`forced_login_method`, `forced_chatgpt_workspace_id`) rule out the default
 login, this session cannot use it and its next request is refused with the reason; sign in with `corbanu login`, or pick a named account in /providers.
 • Model changed to GLM 5.3 Flash · Z.AI (OpenAI-style) low
@@ -50,6 +51,9 @@ login, this session cannot use it and its next request is refused with the reaso
 › Reply with exactly: PF84-SWITCHBACK-OK
 • PF84-SWITCHBACK-OK
 
-## Operator's real home, checked after cleanup (run started 01:30 MST = 08:30Z)
+## Operator's real Corbanu home (.codex-work/corbanu-terminal/home, not ~), checked after cleanup (run started 01:30 MST = 08:30Z)
 $ ls -l .codex-work/corbanu-terminal/home/auth.json     -> modified 2026-10-15T13:44 (before the run)
-$ find <real home>/auth.json <real home>/secrets -maxdepth 1 -newermt '2026-10-21 01:30'   -> (no output)
+$ find .codex-work/corbanu-terminal/home/auth.json .codex-work/corbanu-terminal/home/secrets -maxdepth 1 -newermt '2026-10-21 01:30'   -> (no output)
+
+## First, stricter sandbox profile (also denied com.apple.SecurityServer), dropped because TLS failed
+Error signing in account `t1`: error sending request for url (https://auth.openai.com/api/accounts/deviceauth/usercode)
