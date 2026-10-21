@@ -322,10 +322,12 @@ fn user_message_count(thread: &Thread, prompt: &str) -> usize {
 
 /// Names the step a hung run is on. In #349 this test was once killed at nextest's 60 s limit
 /// with no output, although each event wait here has its own 5 s timeout. The watchdog is a plain
-/// thread, so it reports even if the runtime stops making progress. A run killed without its line
-/// had finished the test body, which puts the hang in runtime shutdown.
+/// thread, so it reports even if the runtime stops making progress. Under nextest, a run killed
+/// without its line had finished the test body, which puts the hang in runtime shutdown (or, far
+/// less likely, before the watchdog started). Plain `cargo test` captures the line unless run with
+/// `--nocapture`.
 struct StepWatchdog {
-    step: std::sync::Arc<std::sync::Mutex<&'static str>>,
+    step: std::sync::Arc<std::sync::Mutex<(&'static str, std::time::Instant)>>,
     _body_running: std::sync::mpsc::Sender<()>,
 }
 
@@ -335,7 +337,10 @@ impl StepWatchdog {
     // Nextest shows a killed test's stderr, so the report goes there.
     #[allow(clippy::print_stderr)]
     fn start() -> Self {
-        let step = std::sync::Arc::new(std::sync::Mutex::new("starting"));
+        let step = std::sync::Arc::new(std::sync::Mutex::new((
+            "starting",
+            std::time::Instant::now(),
+        )));
         let (body_running, body_finished) = std::sync::mpsc::channel::<()>();
         let current = std::sync::Arc::clone(&step);
         std::thread::spawn(move || {
@@ -343,12 +348,13 @@ impl StepWatchdog {
             if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
                 body_finished.recv_timeout(Self::REPORT_AFTER)
             {
-                let step = *current
+                let (step, since) = *current
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 eprintln!(
-                    "safety retry test still running after {:?}; current step: {step}",
-                    Self::REPORT_AFTER
+                    "safety retry test still running after {:?}; current step: {step} (for {:?})",
+                    Self::REPORT_AFTER,
+                    since.elapsed()
                 );
             }
         });
@@ -362,7 +368,7 @@ impl StepWatchdog {
         *self
             .step
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = step;
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = (step, std::time::Instant::now());
     }
 }
 
@@ -716,8 +722,11 @@ goals = true
             let _ = release_active_response.send(());
         }
         let _ = release_steered_response.send(());
+        watchdog.step("shutting down the app server");
         app_server.shutdown().await?;
+        watchdog.step("shutting down the Responses server");
         server.shutdown().await;
+        watchdog.step("dropping test state");
         return Ok(());
     }
 
@@ -905,6 +914,7 @@ goals = true
     app_server.shutdown().await?;
     watchdog.step("shutting down the Responses server");
     server.shutdown().await;
+    watchdog.step("dropping test state");
     Ok(())
 }
 
