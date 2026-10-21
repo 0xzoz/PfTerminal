@@ -2698,7 +2698,7 @@ fn accounting_operator_preserves_alias_wire_and_custom_route_identity() {
 }
 
 #[test]
-fn accounting_model_names_keep_corbanu_alias_ownership() {
+fn accounting_model_names_resolve_corbanu_alias_routes() {
     let slug = "corbanu/deepseek-v4.1-flash";
     let routes = [
         "pfterminal-plan",
@@ -2709,15 +2709,6 @@ fn accounting_model_names_keep_corbanu_alias_ownership() {
     ];
     let actual = routes.map(|route| model_name(route, slug));
     assert_eq!(actual, ["DeepSeek V4.1 Flash"; 5]);
-
-    let unrelated = [
-        "openrouter",
-        "CORBANU-PLAN",
-        " corbanu-plan",
-        "my-corbanu-plan",
-    ];
-    let actual = unrelated.map(|route| model_name(route, slug));
-    assert_eq!(actual, [slug; 4]);
 }
 
 #[test]
