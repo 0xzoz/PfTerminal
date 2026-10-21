@@ -67,6 +67,7 @@ pub(super) fn shadow(text: &str, reading: &quoted::Reading, budget: &mut usize) 
             }),
             parse_checks = ?grammar.as_ref().map(|grammar| grammar.parse_checks),
             zsh_unsure = ?grammar.as_ref().map(|grammar| grammar.zsh_unsure),
+            bash_only = ?grammar.as_ref().map(|grammar| grammar.bash_only),
             "#932: the grammar's reading of a command line differs from the reader's"
         );
     }
