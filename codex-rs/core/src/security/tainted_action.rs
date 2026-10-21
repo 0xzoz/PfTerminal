@@ -1095,46 +1095,6 @@ impl Classifier {
                 self.note(ProtectedActionKind::UnseenCode);
             }
             self.change_folder(name, args, folders, variables);
-            // #1142: an alias body is code a later line runs (`alias
-            // git='git -c core.pager=x'`). The lexer splits the quoted body
-            // into words, which are read again as a script.
-            if name == "alias" {
-                // A word with `=` may start a definition (`g=git`,
-                // `g.x=git`; a name holds no `=`) or be a split piece of a
-                // body (`core.pager=x`, a path). Two bodies are read: one
-                // with each such word as written and then cut (`g=git git`,
-                // `core.pager=x x`), and one with it only cut, since an
-                // added word can shift what an option's value is
-                // (`--comment x=--get`). Options stay whole
-                // (`--config-env=k=v`).
-                let mut both: Vec<&str> = Vec::new();
-                let mut cut: Vec<&str> = Vec::new();
-                for word in args.iter().skip_while(|word| word.starts_with('-')) {
-                    work::step();
-                    both.push(word);
-                    match word.split_once('=') {
-                        Some((_, rest)) if !word.starts_with('-') => {
-                            both.push(rest);
-                            cut.push(rest);
-                        }
-                        _ => cut.push(word),
-                    }
-                }
-                // Read plainly (substitutions run), and with each word
-                // quoted, so a word such as `#` or `'` cannot hide the rest.
-                for body in [both, cut] {
-                    work::step();
-                    if body.is_empty() {
-                        continue;
-                    }
-                    let quoted: Vec<String> = body
-                        .iter()
-                        .map(|word| format!("'{}'", word.replace('\'', "'\\''")))
-                        .collect();
-                    self.script(&body.join(" "), &folders.cwd, depth + 1);
-                    self.script(&quoted.join(" "), &folders.cwd, depth + 1);
-                }
-            }
         }
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.

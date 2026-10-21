@@ -3609,11 +3609,6 @@ fn issue_1141_output_files_are_written() {
         "git config --file ~/.zshrc a.b '$(touch pwned)'",
         "git bundle create ~/.zshrc HEAD",
         "printf 'protocol=x\\n' | git credential-store --file ~/.zshrc store",
-        // Review round 6: an alias body's path holding `=`.
-        "alias g='git diff --output /a=b/../home/fixture/.zshrc'",
-        // Review round 7: a cut piece read as an option.
-        "alias g='git config --comment x=--get --global core.pager \"touch pwned\"'",
-        "alias g='git config --comment x=--get --file ~/.zshrc a.b v'",
         // Review round 1: a reading word as the value, chained `-C`.
         "git config --file ~/.zshenv 'x.$(touch pwned).y' get",
         "git config --comment --get -f ~/.zshenv 'x.$(touch pwned).y' z",
@@ -3711,17 +3706,8 @@ fn issue_1142_git_code_settings_are_unseen_code() {
         "git --exec-pat[h]=d x",
         "touch PAGER=id; env PAG?R=* git log",
         "touch PAGER; read PAGE[R] <<< id; git log",
-        "alias git='git -c core.pager=id'",
-        "alias -g g='git -c alias.x=!id x'",
-        // Review round 5.
-        "export E='!touch pwned'; alias g='git --config-env=alias.x=E'",
-        "alias g='git --exec-path=/tmp/d'",
-        "alias g.x='git -c alias.y=!id y'",
-        // Review round 6.
-        "alias g='git -c \"core.pager=color.x;touch pwned\" log'",
-        "alias g='git -c \"core.pager=user.name;touch pwned\" log'",
-        "alias g='git --namespace \"#\" -c core.pager=id log'",
-        "alias g='git --namespace \"'\"'\" -c core.pager=id log'",
+        // D105: shell `alias` bodies (`alias git='git -c core.pager=x'`)
+        // are not read here, as on main; tracked under #932.
     ] {
         assert_eq!(script(command), unseen, "{command}");
     }
