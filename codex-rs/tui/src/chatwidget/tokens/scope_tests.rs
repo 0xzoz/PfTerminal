@@ -972,7 +972,7 @@ fn unpriced_request_without_usage_names_its_own_provider() {
         let first = first_screen(&pages[0]);
         assert_eq!(
             first[1],
-            "• zainousage · Z.AI GLM 5.2 — Pay per use. 1 request, tokens not reported. Estimated cost: no price available."
+            "• zainousage · glm-5.2 — Pay per use. 1 request, tokens not reported. Estimated cost: no price available."
         );
         let step = "Next step for requests with no price: check the bill from zainousage. No published price covers them, so no cost is shown for them here.";
         assert!(first.contains(&step.to_string()), "{first:#?}");
@@ -1219,12 +1219,18 @@ fn only_pay_per_use_work_can_lack_a_price() {
             .find(|line| line.starts_with("Billing basis:"))
             .unwrap()
     };
-    assert_eq!(basis_line("kimi-code"), "Billing basis: subscription");
+    assert_eq!(
+        basis_line("kimi-code"),
+        "Billing basis: subscription (built-in default)"
+    );
     assert_eq!(
         basis_line("my-gateway"),
         "Billing basis: pay per use (set in your config)"
     );
-    assert_eq!(basis_line("ollama"), "Billing basis: local, no charge");
+    assert_eq!(
+        basis_line("ollama"),
+        "Billing basis: local, no charge (built-in default)"
+    );
     assert_eq!(basis_line("my-llm"), "Billing basis: not declared");
     let undeclared = attempt_text("my-llm");
     assert!(
