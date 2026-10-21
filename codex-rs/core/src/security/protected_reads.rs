@@ -410,7 +410,12 @@ impl ReadPolicyInputs {
     /// in `.husky`), or may be (a program or path the text does not show:
     /// `npx husky install | tee ../log` keeps the offer).
     fn unliftable_note(&self, command: &[String], cwd: &Path) -> Option<ProtectedNote> {
-        let writes = writes::writes(command);
+        let mut writes = writes::writes(command);
+        if !writes.understood {
+            // #1182: `cd DIR && echo x >> ../notes.txt`. Only ever adds a
+            // note: without it this command is not explained (and offered).
+            writes = writes::writes_following_cd(command);
+        }
         let denials = self.denials();
         let policy = self.base_policy();
         let effective = policy.effective_writes_with_cwd(self.turn_cwd.as_path());
