@@ -64,7 +64,7 @@ Per attempt, with the screens and files each rests on: [dispositions.md](disposi
 | Model path | guest mediator, SSH reverse tunnel, host relay adds the key | the same |
 | Key file in the guest | the guest's own transport key file from earlier UTM runs, left in place, not read or used | synthetic placeholder |
 | Times (UTC) | groups 17:54-19:28 | groups 19:34-21:27 |
-| Product request latency (upper median per run of the product requests in the tester's window, mediator; Tart windows include the clone's gate requests) | T17 (mostly GLM 5.2): 36-160 s; T18 (GLM 5.3 Flash): 6.3-7.2 s | T17: 24-39 s; T18: 5.6-7.1 s; T09: 5.3 s |
+| Product request latency (upper median per run of the product requests in the tester's window, mediator; the first window on each machine, every Tart clone's and UTM's T17-utm1, includes gate requests) | T17 (mostly GLM 5.2): 36-160 s; T18 (GLM 5.3 Flash): 6.3-7.2 s | T17: 24-39 s; T18: 5.6-7.1 s; T09: 5.3 s |
 
 - Host memory was 44-50% free at every group start; the 25% pause never triggered.
 - The guest mediators forwarded 807 requests and the host relay 808 (the 807 plus one integrator check at relay
