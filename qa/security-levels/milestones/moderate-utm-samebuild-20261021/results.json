@@ -225,7 +225,7 @@
      ]
     }
    ],
-   "note": "ER 1, 2, 6 passed; ER 3 the .git limit D43 accepts; ER 4 not exercised (no 'don't ask again' on the item 6/7 path); ER 5 not exercised: the product's model declined the item 8 write ('I can't run that command ...') with no tool call and the tester did not resubmit (G-1), so blocked, not accepted. 5 Z.AI rate-limit (429) responses in the window, each retried with the identical request and completed with 200 (transport.json)."
+   "note": "ER 1, 2, 6 passed; ER 3 the .git limit D43 accepts; ER 4 not exercised (no 'don't ask again' on the item 6/7 path); ER 5 not observed: the product's model declined the item 8 write ('I can't run that command ...') with no tool call and the tester did not resubmit (G-1), so blocked, not accepted. 5 Z.AI rate-limit (429) responses in the window, each followed by a same-size request (equal request_bytes) that completed with 200 (transport.json)."
   },
   {
    "id": "MOD-21",
