@@ -78,6 +78,116 @@ const FIND_ACTIONS: [&str; 9] = [
 /// Shell scripts inside scripts (`bash -c '…'`) looked into.
 const MAX_SCRIPT_DEPTH: usize = 4;
 
+/// #1182: `curl` options that write no local file and take no value.
+const CURL_FLAGS: [&str; 52] = [
+    "silent",
+    "show-error",
+    "head",
+    "include",
+    "show-headers",
+    "location",
+    "location-trusted",
+    "fail",
+    "fail-with-body",
+    "fail-early",
+    "insecure",
+    "verbose",
+    "progress-bar",
+    "no-progress-meter",
+    "no-buffer",
+    "globoff",
+    "get",
+    "compressed",
+    "ipv4",
+    "ipv6",
+    "http1.0",
+    "http1.1",
+    "http2",
+    "http2-prior-knowledge",
+    "http3",
+    "http3-only",
+    "netrc",
+    "netrc-optional",
+    "list-only",
+    "junk-session-cookies",
+    "parallel",
+    "parallel-immediate",
+    "raw",
+    "tr-encoding",
+    "path-as-is",
+    "no-keepalive",
+    "tcp-nodelay",
+    "retry-all-errors",
+    "retry-connrefused",
+    "proxytunnel",
+    "digest",
+    "basic",
+    "ntlm",
+    "negotiate",
+    "anyauth",
+    "ssl",
+    "ssl-reqd",
+    "tlsv1.2",
+    "tlsv1.3",
+    "disable",
+    "help",
+    "version",
+];
+
+/// #1182: `curl` options that write no local file and take a value (sent,
+/// read, or a limit).
+const CURL_VALUE_OPTIONS: [&str; 43] = [
+    "request",
+    "header",
+    "data",
+    "data-raw",
+    "data-binary",
+    "data-ascii",
+    "data-urlencode",
+    "json",
+    "form",
+    "form-string",
+    "user",
+    "user-agent",
+    "referer",
+    "cookie",
+    "max-time",
+    "connect-timeout",
+    "retry",
+    "retry-delay",
+    "retry-max-time",
+    "proxy",
+    "proxy-user",
+    "resolve",
+    "connect-to",
+    "url",
+    "range",
+    "max-redirs",
+    "max-filesize",
+    "cacert",
+    "capath",
+    "cert",
+    "key",
+    "interface",
+    "noproxy",
+    "limit-rate",
+    "upload-file",
+    "oauth2-bearer",
+    "unix-socket",
+    "time-cond",
+    "speed-limit",
+    "speed-time",
+    "proto",
+    "request-target",
+    "write-out",
+];
+
+/// #1182: short `curl` flags of [`CURL_FLAGS`] (`-sSL`), and short options
+/// that take a value of [`CURL_VALUE_OPTIONS`] (`-H x`, `-Hx`), `w` included;
+/// `-o` is `--output`.
+const CURL_SHORT_FLAGS: &str = "sSIiLfkvNgG46nljZpq#";
+const CURL_SHORT_VALUE_OPTIONS: &str = "XHdFuAebmxUrETywYz";
+
 /// What a command writes, as far as its text shows.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Writes {
@@ -130,10 +240,10 @@ pub(super) fn write_targets(command: &[String]) -> Vec<String> {
 }
 
 /// What one simple command (already split into words) writes.
-fn simple_command_writes(words: &[String], depth: usize) -> Writes {
+fn simple_command_writes(original: &[String], depth: usize) -> Writes {
     // Skip `VAR=value` prefixes and `sudo`/`command`/`env`/`exec`/`nohup`.
-    let all = words.len();
-    let words: Vec<&str> = words
+    let all = original.len();
+    let words: Vec<&str> = original
         .iter()
         .map(String::as_str)
         .skip_while(|word| {
@@ -144,6 +254,22 @@ fn simple_command_writes(words: &[String], depth: usize) -> Writes {
     let Some((program, arguments)) = words.split_first() else {
         return Writes::known(Vec::new());
     };
+    // #1182: `command -v` and `-V` only report what a name runs; `command
+    // -p` runs it.
+    let skipped = all - words.len();
+    let command_flags = program.strip_prefix('-').filter(|flags| {
+        !flags.is_empty() && flags.chars().all(|flag| matches!(flag, 'p' | 'v' | 'V'))
+    });
+    if let Some(flags) = command_flags
+        && skipped > 0
+        && original[skipped - 1] == "command"
+    {
+        if flags.contains(['v', 'V']) {
+            return Writes::known(Vec::new());
+        }
+        let rest: Vec<String> = arguments.iter().map(|word| (*word).to_string()).collect();
+        return simple_command_writes(&rest, depth);
+    }
     let program = program.rsplit('/').next().unwrap_or(program);
     // A variable set for it may move a config file (`GIT_CONFIG_GLOBAL`,
     // `HOME=. git config --global`, `NPM_CONFIG_USERCONFIG`).
@@ -235,6 +361,8 @@ fn simple_command_writes(words: &[String], depth: usize) -> Writes {
         } else {
             Writes::known(Vec::new())
         }
+    } else if program == "curl" {
+        curl_writes(arguments)
     } else if WRITES_NOTHING.contains(&program) {
         Writes::known(Vec::new())
     } else {
@@ -326,6 +454,69 @@ fn sed_script_only_reads(script: &str) -> bool {
                         .get(index + 1)
                         .is_none_or(|next| next.is_whitespace() || ",;!}".contains(*next)))
         })
+}
+
+/// #1182: what `curl` writes: the file of each `-o`/`--output`, and
+/// nothing else with only the options of [`CURL_FLAGS`] and
+/// [`CURL_VALUE_OPTIONS`], which send, show or limit a transfer. Any other
+/// option (`-O`, `-D`, `-c`, `-K`, `--output-dir`, `--trace`, `--etag-save`,
+/// `--hsts`, `--alt-svc`, …), an output name with a glob reference (`#1`),
+/// or a `-w` format that writes a file (`%output{…}`) or is read from one
+/// (`@file`) is not understood. As for every program here, its own config
+/// (`.curlrc`) is not read.
+fn curl_writes(arguments: &[&str]) -> Writes {
+    let mut targets = Vec::new();
+    let mut words = arguments.iter().copied();
+    while let Some(word) = words.next() {
+        let (name, value) = if let Some(long) = word.strip_prefix("--") {
+            if long.is_empty() {
+                return Writes::unknown();
+            }
+            match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None if CURL_FLAGS.contains(&long) => continue,
+                None => (long, None),
+            }
+        } else if let Some(flags) = word.strip_prefix('-').filter(|flags| !flags.is_empty()) {
+            let mut option = None;
+            for (index, flag) in flags.char_indices() {
+                if CURL_SHORT_FLAGS.contains(flag) {
+                    continue;
+                }
+                let name = match flag {
+                    'o' => "output",
+                    'w' => "write-out",
+                    _ if CURL_SHORT_VALUE_OPTIONS.contains(flag) => "",
+                    _ => return Writes::unknown(),
+                };
+                let rest = &flags[index + flag.len_utf8()..];
+                option = Some((name, (!rest.is_empty()).then_some(rest)));
+                break;
+            }
+            match option {
+                Some(option) => option,
+                None => continue,
+            }
+        } else {
+            // A URL.
+            continue;
+        };
+        if !name.is_empty() && name != "output" && !CURL_VALUE_OPTIONS.contains(&name) {
+            return Writes::unknown();
+        }
+        let Some(value) = value.or_else(|| words.next()) else {
+            return Writes::unknown();
+        };
+        match name {
+            "output" if value.contains('#') => return Writes::unknown(),
+            "output" => targets.push(value.to_string()),
+            "write-out" if value.starts_with('@') || value.contains("%output{") => {
+                return Writes::unknown();
+            }
+            _ => {}
+        }
+    }
+    Writes::known(targets)
 }
 
 /// #737: the config file `git config` writes (`--global`: `~/.gitconfig`;
@@ -513,6 +704,7 @@ fn script_writes(script: &str, depth: usize) -> Writes {
     let words = shlex::split(script)
         .unwrap_or_else(|| script.split_whitespace().map(str::to_string).collect());
     let mut segment: Vec<String> = Vec::new();
+    let mut folder = ScriptFolder::default();
     let mut redirect_next = false;
     let mut input_next = false;
     for word in words {
@@ -522,7 +714,7 @@ fn script_writes(script: &str, depth: usize) -> Writes {
             redirect_next = false;
             writes
                 .targets
-                .push(trimmed.trim_end_matches(['&', '|', ')']).to_string());
+                .push(folder.spell(trimmed.trim_end_matches(['&', '|', ')'])));
         } else if input_next {
             // `< file` is read, not written.
             input_next = false;
@@ -531,7 +723,7 @@ fn script_writes(script: &str, depth: usize) -> Writes {
             if target.is_empty() {
                 redirect_next = !ends_segment;
             } else {
-                writes.targets.push(target.to_string());
+                writes.targets.push(folder.spell(target));
             }
         } else if trimmed.starts_with('<') {
             // `<file`, `<<EOF`; a lone `<` takes the next word.
@@ -553,7 +745,7 @@ fn script_writes(script: &str, depth: usize) -> Writes {
                 // A file descriptor, not a file.
                 (true, _) => {}
                 (false, true) => redirect_next = !ends_segment,
-                (false, false) => writes.targets.push(target.to_string()),
+                (false, false) => writes.targets.push(folder.spell(target)),
             }
         } else if !trimmed.is_empty() && !matches!(trimmed, "&&" | "||" | "|" | "&") {
             if trimmed.contains([';', '|', '&', '(', ')', '{', '}']) {
@@ -562,11 +754,93 @@ fn script_writes(script: &str, depth: usize) -> Writes {
             segment.push(trimmed.to_string());
         }
         if ends_segment {
-            writes.add(simple_command_writes(&std::mem::take(&mut segment), depth));
+            let separator = if word.ends_with(';') {
+                ";"
+            } else {
+                word.as_str()
+            };
+            folder.end_segment(
+                &mut writes,
+                &std::mem::take(&mut segment),
+                Some(separator),
+                depth,
+            );
         }
     }
-    writes.add(simple_command_writes(&segment, depth));
+    folder.end_segment(&mut writes, &segment, /*separator*/ None, depth);
     writes
+}
+
+/// #1182: the folder the rest of a script runs in after `cd DIR && …`, as
+/// spelled relative to where it started (`None`: there). Text-based like
+/// the rest: `CDPATH` is not looked at.
+#[derive(Default)]
+struct ScriptFolder {
+    folder: Option<String>,
+    /// A `;`, `||` or `&` after such a `cd`: the next command runs there or
+    /// where the script started, depending on whether the `cd` worked.
+    uncertain: bool,
+}
+
+impl ScriptFolder {
+    /// `target` as spelled from where the script started.
+    fn spell(&self, target: &str) -> String {
+        join(self.folder.as_deref(), target)
+    }
+
+    /// Ends one simple command of the script, followed by `separator`
+    /// (`None` at the end of the script): adds what it writes, or for a
+    /// `cd` moves the folder of the commands it is joined to with `&&`.
+    fn end_segment(
+        &mut self,
+        writes: &mut Writes,
+        segment: &[String],
+        separator: Option<&str>,
+        depth: usize,
+    ) {
+        if segment.is_empty() {
+            return;
+        }
+        if self.uncertain {
+            writes.understood = false;
+        }
+        if segment[0] == "cd" {
+            match (cd_folder(&segment[1..]), separator) {
+                (Some(folder), Some("&&")) => self.folder = Some(self.spell(&folder)),
+                // Nothing runs after it.
+                (Some(_), None) => {}
+                // Where the rest runs depends on whether it worked, or it
+                // runs in a subshell (`|`), or it is not understood.
+                _ => writes.understood = false,
+            }
+            return;
+        }
+        if self.folder.is_some() && matches!(separator, Some(";" | "||" | "&")) {
+            self.uncertain = true;
+        }
+        let mut segment_writes = simple_command_writes(segment, depth);
+        for target in &mut segment_writes.targets {
+            *target = self.spell(target);
+        }
+        writes.add(segment_writes);
+    }
+}
+
+/// The folder `cd` moves to (`~` without one), or `None` for `cd -`, a
+/// glob or an option it does not know.
+fn cd_folder(arguments: &[String]) -> Option<String> {
+    let operands: Vec<&str> = arguments
+        .iter()
+        .map(String::as_str)
+        .skip_while(|word| matches!(*word, "-P" | "-L"))
+        .collect();
+    match operands.as_slice() {
+        [] => Some("~".to_string()),
+        [folder] if !folder.starts_with('-') && !folder.contains(['*', '?', '[']) => {
+            Some((*folder).to_string())
+        }
+        _ => None,
+    }
 }
 
 /// #736: whether `command` runs macOS's `security` tool with a keychain
