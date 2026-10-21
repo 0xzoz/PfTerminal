@@ -2752,8 +2752,7 @@ async fn account_line_stays_off_with_named_accounts_off() {
 }
 
 /// D86: the default OpenAI provider in a home without named accounts has no
-/// "Model provider" line, as with named accounts off. The renders are
-/// compared without any "Account usage" line, which is not part of D86.
+/// "Model provider" line: it renders exactly as with named accounts off.
 #[tokio::test]
 async fn default_openai_status_is_unchanged_without_named_accounts() {
     async fn render(named_accounts: bool) -> String {
@@ -2811,14 +2810,6 @@ async fn default_openai_status_is_unchanged_without_named_accounts() {
         sanitize_directory(render_lines(&composite.display_lines(/*width*/ 100))).join("\n")
     }
     let on = render(/*named_accounts*/ true).await;
-    let off = render(/*named_accounts*/ false).await;
     assert!(!on.contains("Model provider"), "{on}");
-    let without_account_usage = |rendered: &str| {
-        rendered
-            .lines()
-            .filter(|line| !line.contains("Account usage:"))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    assert_eq!(without_account_usage(&on), off);
+    assert_eq!(on, render(/*named_accounts*/ false).await);
 }
