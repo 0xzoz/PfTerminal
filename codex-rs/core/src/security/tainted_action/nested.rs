@@ -192,8 +192,11 @@ impl Classifier {
         for script in scripts {
             work::step();
             let reading = quoted::commands(script);
-            // #932 phase 2: compared and logged; decides nothing.
-            shadow::shadow(script, &reading, &mut self.compared);
+            // #932 phase 2: compared and logged; decides nothing. Once per
+            // action: not again in the Windows view (#1240).
+            if !self.homes.is_windows() {
+                shadow::shadow(script, &reading, &mut self.compared);
+            }
             found.unreadable |=
                 reading.too_deep || reading.unsure || (strict && reading.unterminated);
             self.walk(
