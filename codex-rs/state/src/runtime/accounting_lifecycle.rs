@@ -567,8 +567,10 @@ impl Journal<'_> {
             && !recorded
             && expired
             && day >= crate::runtime::accounting::aggregate_day_floor(read_at_ms)
-            // Without budget for this check, the tree's scan and the start's,
-            // the window stays unavailable rather than make the range too large.
+            // Without budget for this check, this day's tree scan and the
+            // start's, the window stays unavailable. Later days and this day's
+            // candidates are not reserved for: a range near the budget can
+            // still become too large, which claims nothing.
             && work.spare_scan(/*reserve*/ 2)
             && !sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(SELECT 1 FROM draft_accounting_attempts

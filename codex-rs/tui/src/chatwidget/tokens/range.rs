@@ -317,6 +317,7 @@ pub(super) fn range_pages(
         let mut merged: Option<codex_state::accounting::Inspection> = None;
         let mut diagnostics = Vec::new();
         let mut detail_unavailable = false;
+        let mut skipped = false;
         for day in bucket.days {
             match day {
                 InspectionDay::Ready(view) => {
@@ -345,7 +346,7 @@ pub(super) fn range_pages(
                     }
                 }
                 // Days not reached yet have nothing to report.
-                InspectionDay::CheckpointLag if progress.is_some() => {}
+                InspectionDay::CheckpointLag if progress.is_some() => skipped = true,
                 other => {
                     detail_unavailable |= matches!(other, InspectionDay::DetailUnavailable { .. });
                     diagnostics.extend(inspection_pages(Ok(other)).remove(0).text);
@@ -353,11 +354,17 @@ pub(super) fn range_pages(
             }
         }
         // A claim about days holds for the bucket only if the whole bucket,
-        // days skipped above included, ends before what the claim dates.
+        // days skipped above included, ends before what the claim dates. A
+        // skipped day was never checked for threads of unknown ancestry, so
+        // it leaves the conversation's start unproven.
         if let Some(view) = &mut merged {
             let ends_by = |day: i64| bucket.end_ms <= day.saturating_mul(86_400_000);
             view.empty_day = view.empty_day.map(|empty| match empty {
-                EmptyDay::BeforeConversation { started_day } if ends_by(started_day) => empty,
+                EmptyDay::BeforeConversation { started_day }
+                    if !skipped && ends_by(started_day) =>
+                {
+                    empty
+                }
                 EmptyDay::BeforeLedger { ledger_started_day } if ends_by(ledger_started_day) => {
                     empty
                 }

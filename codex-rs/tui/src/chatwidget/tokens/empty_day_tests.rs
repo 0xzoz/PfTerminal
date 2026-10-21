@@ -254,15 +254,21 @@ fn range_of(
         read_at_ms: READ_AT,
         buckets: buckets
             .into_iter()
-            .map(
-                |(start_ms, end_ms, days)| codex_state::accounting::InspectionBucket {
+            .map(|(start_ms, end_ms, mut days)| {
+                // Every day was read from the same ledger snapshot.
+                for day in &mut days {
+                    if let InspectionDay::Ready(view) = day {
+                        view.coverage.completed_as_of_ms = completed_as_of_ms;
+                    }
+                }
+                codex_state::accounting::InspectionBucket {
                     start_ms,
                     end_ms,
                     effective: Some((start_ms, end_ms.min(completed_as_of_ms + 1))),
                     partial: end_ms > completed_as_of_ms + 1,
                     days,
-                },
-            )
+                }
+            })
             .collect(),
     }
 }
@@ -388,6 +394,24 @@ fn a_bucket_containing_the_start_is_never_before_it() {
         assert!(!text.contains("after this bucket"), "{text}");
         assert!(text.contains(NOT_PROOF), "{text}");
     }
+    // A bucket recorded through a checkpoint inside it, ending before the
+    // start: its lagging days were never checked for unknown ancestry.
+    let checkpoint_inside = (STARTED - 6) * DAY_MS - 1;
+    let mut days: Vec<InspectionDay> = (0..4)
+        .map(|offset| empty_view(STARTED - 10 + offset, before))
+        .collect();
+    days.extend((0..3).map(|_| InspectionDay::CheckpointLag));
+    let text = bucket_pages(range_of(
+        InspectionGrouping::Week,
+        checkpoint_inside,
+        vec![((STARTED - 10) * DAY_MS, (STARTED - 3) * DAY_MS, days)],
+    ))
+    .join("\n");
+    assert!(
+        !text.to_lowercase().contains("no requests recorded"),
+        "{text}"
+    );
+    assert!(text.contains(NOT_PROOF), "{text}");
     // The whole-day buckets before it keep the claim.
     let pages = bucket_pages(range_of(
         InspectionGrouping::Day,
