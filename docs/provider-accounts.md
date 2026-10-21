@@ -101,7 +101,10 @@ unchanged.
 
 With the feature on, `/status` names the session's account on the provider
 line and adds an **Account usage** line: the tokens this session used on each
-account of the current provider, as the provider reported them. It covers the
+account of the current provider, as the provider reported them. The provider
+line names the account only when that provider has a named account in this
+home (or the vault can't be read), or the session is on or used one; otherwise
+it reads as it does without the feature. The Account usage line covers the
 whole session: spawned agents (each toward its own account), side
 conversations, automatic and `/review` reviews, and memory extraction. Only
 token counts are shown: no prices and no cost records.

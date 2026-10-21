@@ -82,6 +82,11 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   account or `[provider_accounts]` selects one. A server started without one
   starts holding them from the first conversation on an account added while it
   runs, and never goes back to the default login (#1085).
+- **`/status` names the account only where named accounts exist.** With named
+  accounts on, the provider line read "OpenAI · account default" (or
+  "Z.AI · account default") in every home. It now names the account only when
+  that provider has a named account in the home, or the session is on or used
+  one; otherwise the line is what it was without the feature (D86).
 
 ## `corbanu login status`
 
