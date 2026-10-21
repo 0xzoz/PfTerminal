@@ -222,3 +222,110 @@ async fn empty_day_snapshots() {
         );
     }
 }
+
+/// #1196: a range over empty days, as the store returns it: one bucket per
+/// `(start, end, days)`, each day a ready view classified as `empty`.
+fn empty_range(
+    grouping: codex_state::accounting::InspectionGrouping,
+    buckets: &[(i64, i64, &[Option<EmptyDay>])],
+) -> InspectionDay {
+    let view = |utc_day, empty| {
+        let InspectionDay::Ready(mut view) = empty_day(empty) else {
+            unreachable!()
+        };
+        view.utc_day = utc_day;
+        view.other_conversations = None;
+        InspectionDay::Ready(view)
+    };
+    let floor = match empty_day(/*empty_day*/ None) {
+        InspectionDay::Ready(view) => view.coverage.aggregate_day_floor,
+        _ => unreachable!(),
+    };
+    InspectionDay::Range {
+        requested: codex_state::accounting::InspectionRange {
+            start_ms: buckets[0].0,
+            end_ms: buckets[buckets.len() - 1].1,
+            grouping,
+        },
+        aggregate_day_floor: Some(floor),
+        completed_as_of_ms: Some(READ_AT),
+        read_at_ms: READ_AT,
+        buckets: buckets
+            .iter()
+            .map(
+                |&(start_ms, end_ms, days)| codex_state::accounting::InspectionBucket {
+                    start_ms,
+                    end_ms,
+                    effective: Some((start_ms, end_ms)),
+                    partial: false,
+                    days: days
+                        .iter()
+                        .enumerate()
+                        .map(|(offset, &empty)| view(start_ms / DAY_MS + offset as i64, empty))
+                        .collect(),
+                },
+            )
+            .collect(),
+    }
+}
+
+/// The bucket pages' text, in order.
+fn bucket_pages(range: InspectionDay) -> Vec<String> {
+    inspection_pages(Ok(range))
+        .into_iter()
+        .skip(1)
+        .filter(|page| page.parent == Some(0))
+        .map(|page| page.text.join("\n"))
+        .collect()
+}
+
+#[test]
+fn range_buckets_read_empty_days_as_the_day_view_does() {
+    use codex_state::accounting::InspectionGrouping;
+    let before = Some(EmptyDay::BeforeConversation {
+        started_day: STARTED,
+    });
+    let hour = DAY * DAY_MS + 3 * 3_600_000;
+    let pages = bucket_pages(empty_range(
+        InspectionGrouping::Hour,
+        &[(hour, hour + 3_600_000, &[before])],
+    ));
+    insta::assert_snapshot!("cost_range_empty_hour_before_conversation", pages[0]);
+    assert!(
+        pages[0].contains("after this UTC hour.")
+            && pages[0].contains("this UTC hour ends before the conversation started")
+            && pages[0].contains("anything on this hour's UTC day."),
+        "{}",
+        pages[0]
+    );
+    // A bucket is as proven as its least proven day.
+    let week = (DAY - 3) * DAY_MS;
+    let pages = bucket_pages(empty_range(
+        InspectionGrouping::Week,
+        &[
+            (week, week + 2 * DAY_MS, &[before, before]),
+            (
+                week + 2 * DAY_MS,
+                week + 4 * DAY_MS,
+                &[before, Some(EmptyDay::NotRecorded)],
+            ),
+            (week + 4 * DAY_MS, week + 5 * DAY_MS, &[None]),
+        ],
+    ));
+    assert!(pages[0].contains("no requests recorded — this conversation started on 2026-10-20 (UTC), after this bucket."), "{}", pages[0]);
+    assert!(
+        pages[0].contains("anything on this bucket's UTC days."),
+        "{}",
+        pages[0]
+    );
+    for page in &pages[1..] {
+        assert!(
+            page.contains("nothing recorded.") && page.contains(NOT_PROOF),
+            "{page}"
+        );
+        assert!(
+            !page.to_lowercase().contains("no requests recorded"),
+            "{page}"
+        );
+    }
+}

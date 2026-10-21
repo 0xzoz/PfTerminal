@@ -332,6 +332,14 @@ pub(super) fn range_pages(
                         }
                         target.unknown_parent_unavailable_threads +=
                             view.unknown_parent_unavailable_threads;
+                        // #1196: the bucket is as proven as its least proven day.
+                        target.empty_day = match (target.empty_day, view.empty_day) {
+                            (Some(first), Some(next)) if first == next => Some(first),
+                            (Some(_), Some(_)) => {
+                                Some(codex_state::accounting::EmptyDay::NotRecorded)
+                            }
+                            _ => None,
+                        };
                     } else {
                         merged = Some(view);
                     }
@@ -457,6 +465,22 @@ pub(super) fn range_pages(
                         },
                     )
                     .replace("attempts on other days", "attempts outside this bucket")
+                    .replace(
+                        "after this day",
+                        if requested.grouping == InspectionGrouping::Hour {
+                            "after this UTC hour"
+                        } else {
+                            "after this bucket"
+                        },
+                    )
+                    .replace(
+                        "anything on this day.",
+                        if requested.grouping == InspectionGrouping::Hour {
+                            "anything on this hour's UTC day."
+                        } else {
+                            "anything on this bucket's UTC days."
+                        },
+                    )
                     .replace(
                         "threads have unavailable day detail",
                         "thread-day entries have unavailable detail",
