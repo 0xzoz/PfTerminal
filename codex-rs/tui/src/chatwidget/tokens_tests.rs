@@ -1217,8 +1217,8 @@ fn money_day(known: Decimal, unknown: i64, attempts: i64) -> DayTotals {
 }
 
 /// A day of subscription work: plan attempts, the consumption they imply, and
-/// the API equivalent, with `unknown_equivalents` for rows the catalogue does
-/// not price.
+/// the API equivalent, with `unknown_equivalents` for attempts with no API rate
+/// or an incomplete token count.
 fn plan_day(equivalent: Decimal, burn_milli_tokens: i64, unknown_equivalents: i64) -> DayTotals {
     DayTotals {
         attempts: 2,
@@ -1250,8 +1250,28 @@ fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
     No recorded attempt here was billed per token.
     Subscription capacity: 2 of 2 attempts, not billed per token
     Plan consumption: 280 tokens at the plan rate that applied
-    Same tokens at API rates: unavailable — no API rate was recorded with 2 of 2 plan attempts
+    Same tokens at API rates: unavailable — no API rate or complete token count for 2 of 2 plan attempts
     ");
+    // #352: a plan attempt with API rates but no cache-write count (OpenAI on
+    // a ChatGPT login reports none) has a known part and no complete figure.
+    let mut q = quote();
+    q.snapshot = Some(native_snapshot(
+        serde_json::json!({"noncached":"1","read":"0.1","write":"1.25","output":"4"}),
+        "PlanEquivalent",
+        /*basis_source*/ None,
+        /*plan_burn_millis*/ Some(1000),
+    ));
+    q.known_subtotal = Decimal::default();
+    q.subtotal_display = Decimal::default().display();
+    q.known_equivalent = decimal("0.00018");
+    q.all_buckets_equivalent = None;
+    q.plan_burn_millis = Some(1000);
+    q.plan_burn_milli_tokens = Some(160_000);
+    let partial = DayTotals::from_quotes([&q]).unwrap();
+    assert_eq!(
+        plan(&partial).last().unwrap(),
+        "Same tokens at API rates: at least $0.000180; 1 of 1 plan attempts have no API rate or an incomplete token count"
+    );
     // A day with no plan work says nothing about plans at all.
     assert_eq!(
         estimate(
@@ -1468,9 +1488,10 @@ const PRICE_METADATA: [&str; 6] = [
 fn accounting_inspect_basis_only_request_shows_no_price_metadata() {
     let none = serde_json::json!({"noncached":null,"read":null,"write":null,"output":null});
     for (basis, source, shown) in [
-        ("PlanEquivalent", None, "subscription"),
-        ("Billed", None, "pay per use"),
-        ("Local", None, "local, no charge"),
+        ("PlanEquivalent", None, "subscription (built-in default)"),
+        ("Billed", None, "pay per use (built-in default)"),
+        ("Local", None, "local, no charge (built-in default)"),
+        // An undeclared basis has no default to name.
         ("Undeclared", None, "not declared"),
         (
             "PlanEquivalent",
@@ -1485,10 +1506,13 @@ fn accounting_inspect_basis_only_request_shows_no_price_metadata() {
             source,
             /*plan_burn_millis*/ None,
         ));
-        let text = attempt_text(&q).join("\n");
-        assert!(text.contains(&format!("Billing basis: {shown}")), "{text}");
+        let lines = attempt_text(&q);
+        let text = lines.join("\n");
+        assert!(lines.contains(&format!("Billing basis: {shown}")), "{text}");
         // #396: no parentheses inside the sentence's own clause.
-        let clause = shown.replace(" (set in your config)", "; set in your config");
+        let clause = shown
+            .replace(" (set in your config)", "; set in your config")
+            .replace(" (built-in default)", "; built-in default");
         assert!(
             text.contains(&format!(
                 "Price: none recorded — this request records only its billing basis: {clause}"
@@ -1496,6 +1520,7 @@ fn accounting_inspect_basis_only_request_shows_no_price_metadata() {
             "{text}"
         );
         assert!(!text.contains("(set in your config))"), "{text}");
+        assert!(!text.contains("(built-in default))"), "{text}");
         for absent in PRICE_METADATA
             .iter()
             .chain(&["no dispatch-time price snapshot"])
@@ -2670,8 +2695,14 @@ fn accounting_inspect_plain_wording_counts_attempts_and_names_every_route() {
         model_name("openrouter", "z-ai/glm-5.3-flash"),
         "OpenRouter GLM 5.3 Flash"
     );
-    // A provider you configured keeps the catalogue's name.
-    assert_eq!(model_name("my-zai", "glm-5.2"), "Z.AI GLM 5.2");
+    // An Anthropic-wire route is its operator's.
+    assert_eq!(model_name("zai-anthropic", "glm-5.2"), "Z.AI GLM 5.2");
+    assert_eq!(
+        model_name("vercel-anthropic-fast", "zai/glm-5.2"),
+        "Vercel GLM 5.2"
+    );
+    // A provider you configured shows the slug: the name's brand is unknown.
+    assert_eq!(model_name("my-zai", "glm-5.2"), "glm-5.2");
 }
 
 #[test]

@@ -413,8 +413,8 @@ fn unpriced_rows<'a>(
 /// An attempt that recorded tokens and has no price for any of them.
 fn has_no_price(quote: &ObservationQuote) -> bool {
     // Subscription work is not billed per token, so it has no money to be
-    // missing. Its own gap - an API equivalent the catalogue does not state -
-    // is already stated as such beside the plan rate that applied, and naming
+    // missing. Its own gap - an API equivalent with no rate or no complete
+    // count - is already stated beside the plan rate that applied, and naming
     // it here would assert unstated money next to a line saying the turn was
     // never billed that way.
     if !per_use(quote) {
@@ -583,12 +583,12 @@ fn plan(totals: &codex_state::accounting::DayTotals) -> Vec<String> {
         )
     } else if totals.equivalent_usd == Decimal::default() {
         format!(
-            "Same tokens at API rates: unavailable — no API rate was recorded with {} of {} plan attempts",
+            "Same tokens at API rates: unavailable — no API rate or complete token count for {} of {} plan attempts",
             totals.unknown_equivalents, totals.plan_attempts
         )
     } else {
         format!(
-            "Same tokens at API rates: {} known, plus {} of {} plan attempts with no API rate recorded",
+            "Same tokens at API rates: at least {}; {} of {} plan attempts have no API rate or an incomplete token count",
             money(totals.equivalent_usd),
             totals.unknown_equivalents,
             totals.plan_attempts
@@ -1483,12 +1483,10 @@ fn provider_name(id: &str) -> String {
     }
     // The built-in keeps its legacy brand name as an identity; the product,
     // and /providers, call it the Corbanu API.
-    if id == codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID {
-        return "Corbanu API".to_string();
-    }
-    // #352: both local providers share the built-in name "gpt-oss"; name them
-    // as /providers does.
+    // #352: both local providers share the built-in name "gpt-oss"; name
+    // them by the server that runs them.
     match id {
+        codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID => return "Corbanu API".to_string(),
         codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID => return "Ollama".to_string(),
         codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID => return "LM Studio".to_string(),
         _ => {}
@@ -1499,11 +1497,30 @@ fn provider_name(id: &str) -> String {
         .unwrap_or_else(|| id.to_string())
 }
 
-/// The model's catalogue display name ("GPT-6 Sol"), else its slug. #352: a
-/// catalogue row that belongs to another built-in provider ("Ambient GLM 5.2"
-/// for `z-ai/glm-5.2` sent to OpenRouter) is not this route's name. A provider
-/// you configured keeps the catalogue's name: its id says nothing about whose
-/// model it serves.
+/// The built-in provider a route belongs to: an Anthropic-wire route, or an
+/// alias, is its operator's.
+fn operator(id: &str) -> &str {
+    use codex_model_provider_info as ids;
+    match id {
+        ids::ZAI_ANTHROPIC_PROVIDER_ID => ids::ZAI_PROVIDER_ID,
+        ids::OPENROUTER_ANTHROPIC_PROVIDER_ID => ids::OPENROUTER_PROVIDER_ID,
+        ids::BASETEN_ANTHROPIC_PROVIDER_ID => ids::BASETEN_PROVIDER_ID,
+        ids::VERCEL_ANTHROPIC_PROVIDER_ID | ids::VERCEL_ANTHROPIC_FAST_PROVIDER_ID => {
+            ids::VERCEL_PROVIDER_ID
+        }
+        ids::PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID
+        | ids::CORBANU_PLAN_PROVIDER_ID
+        | ids::CORBANU_PLAN_ANTHROPIC_PROVIDER_ID
+        | ids::CORBANU_TERMINAL_PLAN_PROVIDER_ID => ids::PFTERMINAL_PLAN_PROVIDER_ID,
+        other => other,
+    }
+}
+
+/// The model's catalogue display name ("GPT-6 Sol"), else its slug. #352: the
+/// names carry their route's brand, so a row owned by another operator
+/// ("Ambient GLM 5.2" for `z-ai/glm-5.2` sent to OpenRouter) is not this
+/// route's name, and neither is it for a provider you configured: its id says
+/// nothing about whose model it serves.
 fn model_name(provider: &str, slug: &str) -> String {
     /// Display name and owning provider, by slug.
     type Names = std::collections::HashMap<String, (String, Option<String>)>;
@@ -1532,8 +1549,9 @@ fn model_name(provider: &str, slug: &str) -> String {
         .get(slug)
     {
         Some((name, owner))
-            if owner.as_deref().is_none_or(|owner| owner == provider)
-                || !built_in_providers().contains_key(provider) =>
+            if owner
+                .as_deref()
+                .is_none_or(|owner| operator(owner) == operator(provider)) =>
         {
             name.clone()
         }
