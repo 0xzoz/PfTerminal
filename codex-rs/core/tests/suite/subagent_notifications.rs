@@ -19,6 +19,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::user_input::UserInput;
+use codex_state::AgentMailboxPhase;
 use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::assert_parent_turn;
@@ -912,14 +913,43 @@ async fn subagent_notification_is_included_without_wait() -> Result<()> {
     })
     .await?;
     let state_db = test.codex.state_db().expect("mailbox state db");
-    tokio::time::timeout(POSITIVE_WAIT, async {
+    let message_id = tokio::time::timeout(POSITIVE_WAIT, async {
         loop {
-            if !state_db
+            if let Some(message) = state_db
                 .list_recoverable_agent_messages(test.session_configured.thread_id)
                 .await
                 .expect("parent mailbox")
-                .is_empty()
+                .into_iter()
+                .next()
             {
+                break message
+                    .communication
+                    .message_id
+                    .expect("mailbox row should have a message id");
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    // #1177: the row is recoverable (`Ready`) before AgentControl hands the
+    // notification to the parent session, which marks it `Submitted` only
+    // after the hand-off. Submit turn 2 after that: the parent handles
+    // submissions in order, so the notification is queued ahead of turn 2.
+    tokio::time::timeout(POSITIVE_WAIT, async {
+        loop {
+            let phase = state_db
+                .get_agent_message(&message_id)
+                .await
+                .expect("parent mailbox row")
+                .expect("parent mailbox row should exist")
+                .phase;
+            if !matches!(
+                phase,
+                AgentMailboxPhase::Admitted
+                    | AgentMailboxPhase::Ready
+                    | AgentMailboxPhase::Submitting
+                    | AgentMailboxPhase::RetryableFailure
+            ) {
                 break;
             }
             sleep(Duration::from_millis(10)).await;
