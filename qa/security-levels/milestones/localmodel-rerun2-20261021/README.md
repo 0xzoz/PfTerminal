@@ -74,8 +74,9 @@ Details per case, with the screens they rest on: [dispositions.md](dispositions.
   attempts, recording); how much of each case runs (AGG-18 whole; ACC-04 from a one-turn conversation instead of
   ACC-01..03; MOD-09 items 5 and 7 only); AGG-20 adds a parent baseline and spells out the child and the full-access
   request; MOD-09 item 7's expected result follows D72 and #1091. No other expected result was replaced.
-- **Freeze:** SHA-256 of every design file at the freeze (prompts, outputs, amendment versions; the designer's and
-  reviewer's event logs were added at export), every packet and harness file, the group plan, the packet builder, the group driver
+- **Freeze:** SHA-256 of the design prompts, outputs, amendment versions and packet hash lists (not the designer's and
+  reviewer's event logs and start/end times, copied at export), every packet file, every harness file except
+  `harness/*.sha256` (checksums of the listed `rg` binary and fixture tarball), the group plan, the packet builder, the group driver
   and the candidate's manifests ([design/FROZEN.sha256](design/FROZEN.sha256); it does not list itself; the `rg` binary
   is listed, the release's published checksum file `tools/ripgrep-…tar.gz.sha256`, committed with the freeze, is not),
   pushed as `b32470e3e6` at
@@ -156,7 +157,8 @@ Details per case, with the screens they rest on: [dispositions.md](dispositions.
 
 ## Review budget
 
-[review-ledger.md](review-ledger.md): all 5 rounds used: designer (1), design review (2), evidence checks (3-5). Every
+[review-ledger.md](review-ledger.md): all 5 rounds used, plus one granted limited round: designer (1), design review (2), evidence checks (3-5). Every
 evidence check supported all six dispositions and failed the record on written claims; their corrections are applied.
-The budget is spent, so round 5's two corrections (the #1182 observation in AGG-20, a wording fix in #1181) are applied
-but not re-checked; no extension was requested, since no disposition or product defect was in question.
+Round 5's two corrections (the #1182 observation in AGG-20, a wording fix in #1181) were then confirmed by a sixth,
+limited round the coordinator granted (`qwen-rerun2.grant.md`; dispositions out of scope), which asked only for wording
+fixes; those are applied and verified by the integrator as wording-only, as the grant allows.
