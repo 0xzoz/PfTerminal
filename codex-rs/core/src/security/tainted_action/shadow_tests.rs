@@ -75,7 +75,7 @@ fn differences_are_recorded_by_kind() {
 #[test]
 fn the_budget_bounds_the_lines_compared() {
     let reading = quoted::commands("ls");
-    let mut budget = 3;
+    let mut budget = LINE_COST + 3;
     assert_eq!(compare("ls", &reading, &mut budget).0, Comparison::Agree);
     assert_eq!(budget, 1);
     assert_eq!(
@@ -83,6 +83,53 @@ fn the_budget_bounds_the_lines_compared() {
         Comparison::NotCompared
     );
     assert_eq!(budget, 1);
+    // A line too long to read costs nothing.
+    let long = "a".repeat(grammar::MAX_BYTES + 1);
+    let mut budget = LINE_COST;
+    assert_eq!(
+        compare(&long, &quoted::commands(&long), &mut budget).0,
+        Comparison::GrammarRefused(Refusal::TooLarge)
+    );
+    assert_eq!(budget, LINE_COST);
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn empty_scripts_cannot_multiply_the_comparisons() {
+    let mut command = vec!["bash".to_string()];
+    for _ in 0..2000 {
+        command.push("-c".to_string());
+        command.push(String::new());
+    }
+    RECORDED.with(|recorded| recorded.borrow_mut().clear());
+    let action = ApprovalAction::Shell {
+        id: "call".into(),
+        environment_id: "local".into(),
+        command,
+        cwd: PathUri::from_abs_path(
+            &AbsolutePathBuf::from_absolute_path_checked("/work").expect("absolute"),
+        ),
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        additional_permissions: None,
+        justification: None,
+    };
+    let _ = classify_with(
+        &action,
+        Path::new("/home/fixture/.corbanu"),
+        Some(Path::new("/home/fixture")),
+    );
+    let recorded = RECORDED.with(RefCell::take);
+    let compared = recorded
+        .iter()
+        .filter(|comparison| **comparison != Comparison::NotCompared)
+        .count();
+    assert!(
+        compared <= MAX_COMPARED_BYTES / LINE_COST,
+        "{compared} lines compared"
+    );
 }
 
 #[test]

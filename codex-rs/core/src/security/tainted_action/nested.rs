@@ -192,7 +192,7 @@ impl Classifier {
             work::step();
             let reading = quoted::commands(script);
             // #932 phase 2: compared and logged; decides nothing.
-            shadow::shadow(script, &reading, &mut self.compared_bytes_left);
+            shadow::shadow(script, &reading, &mut self.compared);
             found.unreadable |=
                 reading.too_deep || reading.unsure || (strict && reading.unterminated);
             self.walk(
