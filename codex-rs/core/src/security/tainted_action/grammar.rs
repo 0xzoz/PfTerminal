@@ -592,7 +592,7 @@ impl<'a> Walk<'a> {
                 // dash before 0.5.13 reads `$'a'` as `$a`: not data.
                 let chars: Vec<char> = source.chars().skip(2).collect();
                 let mut decoded = String::new();
-                ansi_c(&chars, 0, &mut decoded);
+                ansi_c(&chars, /*index*/ 0, &mut decoded);
                 Word {
                     text: decoded,
                     dynamic: false,

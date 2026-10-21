@@ -21,8 +21,9 @@ fn words(text: &str) -> Vec<Vec<(String, bool)>> {
         .collect()
 }
 
-fn w(text: &str, data: bool) -> (String, bool) {
-    (text.to_string(), data)
+/// A word that is data.
+fn d(text: &str) -> (String, bool) {
+    (text.to_string(), true)
 }
 
 #[test]
@@ -30,12 +31,12 @@ fn quoted_and_plain_words_are_data() {
     assert_eq!(
         words(r#"git commit -m 'a; b $(c)' "d e" f=g:h/i,j"#),
         vec![vec![
-            w("git", true),
-            w("commit", true),
-            w("-m", true),
-            w("a; b $(c)", true),
-            w("d e", true),
-            w("f=g:h/i,j", true),
+            d("git"),
+            d("commit"),
+            d("-m"),
+            d("a; b $(c)"),
+            d("d e"),
+            d("f=g:h/i,j"),
         ]]
     );
 }
