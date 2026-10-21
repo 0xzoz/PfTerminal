@@ -116,8 +116,9 @@ readers agree on the commands. A refusal leaves today's behaviour unchanged.
 3. **Authority where the grammar proves data.** The rules behind the
    D88/D90/D104 prompts, plus quoted text judged as code, use the grammar's
    reading where it proves a word is data. That holds only when the grammar
-   read the line, `zsh_unsure` is clear or zsh cannot run it, and the
-   commands agree. Anything else falls back to today's rule. This phase
+   read the line, `zsh_unsure` (and `bash_only` under dash) is clear or that
+   shell cannot run it, D85's plain-words parse holds and the commands
+   agree. Anything else falls back to today's rule. This phase
    stops at a pull request with the harness results, and the coordinator
    decides on the merge.
 
@@ -149,7 +150,8 @@ longer ask for a top-level line under a system zsh (or bash, dash, sh) when
 `named_shell::grammar_proves_data` holds:
 
 - the host runs the argv as named, a system shell with `-c`/`-lc`;
-- the grammar reads the line, with no refusal and nothing `zsh_unsure`;
+- the grammar reads the line, with no refusal, nothing `zsh_unsure` and
+  nothing `bash_only`;
 - `shadow::compare` agrees with the quote-aware reader;
 - every word of every command is grammar-proven data (no expansion,
   substitution, unquoted glob, brace, `~`, leading `=` or parenthesis);
