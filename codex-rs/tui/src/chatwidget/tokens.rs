@@ -16,6 +16,7 @@
 
 mod charge;
 mod chart;
+mod empty_day;
 mod range;
 mod scope;
 mod warmup_resume;
@@ -675,7 +676,7 @@ fn resolved_counts<'a>(quotes: impl IntoIterator<Item = &'a ObservationQuote>) -
 /// that records costs, which creates the ledger with the first request it
 /// records, so collection is not "off" there.
 fn absent_state() -> &'static str {
-    "Unavailable — no requests recorded in this home yet; the accounting ledger is created when the first one is."
+    "Unavailable — nothing recorded in this home yet; the accounting ledger is created when the first request is."
 }
 
 /// What `/usage requests` says in a build that records no costs, instead of
@@ -1076,7 +1077,7 @@ fn inspection_pages_for(
     pages[0].text.splice(
         0..0,
         if t.attempts == 0 {
-            vec!["No recorded attempts in this conversation or its subagents; collection coverage unknown.".into()]
+            vec![empty_day::detail(ready.empty_day)]
         } else {
             estimate(t, EstimateGaps::of(ready.requests.values().flatten()))
         },
@@ -1109,7 +1110,14 @@ fn inspection_pages_for(
         ),
     ]);
     let (noncached, write) = resolved_counts(ready.requests.values().flatten());
-    for (index, (label, m)) in METRICS.iter().zip(&t.measured).enumerate() {
+    // FUP-02: a day with nothing recorded lists no token counts; zeros would
+    // read as no usage, which an empty day does not prove.
+    let measured = if t.attempts == 0 {
+        &[][..]
+    } else {
+        &t.measured[..]
+    };
+    for (index, (label, m)) in METRICS.iter().zip(measured).enumerate() {
         let n = match index {
             1 => noncached,
             3 => write,
@@ -1441,6 +1449,7 @@ fn inspection_pages_for(
         .any(ObservationQuote::is_plan);
     let overview = plain_overview(
         heading,
+        ready.empty_day,
         named,
         ready.requests.values().flatten(),
         outside,
@@ -1910,7 +1919,7 @@ fn plain_billing(
         ),
         (None, None, Some(local), None) => (LOCAL, local),
         (None, None, None, Some(undeclared)) => (NOT_DECLARED, undeclared),
-        (None, None, None, None) => (PAY_PER_USE, "No requests".to_string()),
+        (None, None, None, None) => (PAY_PER_USE, "Nothing recorded".to_string()),
         (per_use, covered, local, undeclared) => (
             "Mixed",
             [
@@ -2391,6 +2400,7 @@ fn route_line(quotes: &[&ObservationQuote], named: bool) -> String {
 /// rather than showing nothing, so it never reads as a zero-cost day.
 fn plain_overview<'a>(
     heading: String,
+    empty: Option<codex_state::accounting::EmptyDay>,
     named: bool,
     quotes: impl IntoIterator<Item = &'a ObservationQuote>,
     outside: Vec<String>,
@@ -2399,7 +2409,7 @@ fn plain_overview<'a>(
 ) -> Vec<String> {
     let groups = by_route(quotes);
     let mut lines = if groups.is_empty() {
-        vec![format!("{heading} no recorded requests.")]
+        empty_day::overview(&heading, empty)
     } else {
         vec![heading]
     };
