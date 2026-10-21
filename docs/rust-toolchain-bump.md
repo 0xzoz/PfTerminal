@@ -74,16 +74,20 @@ bumps (#1030). The date appears in:
   lockfile and checksums as above;
 - any `#[allow(..., reason = "...")]` in `codex-rs` that names the nightly
   (`rg -F nightly-<date> codex-rs`): remove it once the nightly moves.
-- the prebuilt package behind `just argument-comment-lint <args>` (#1130).
-  After the PR merges, run `gh workflow run
-  rust-release-argument-comment-lint.yml --ref main -f publish=true`. It
-  publishes a prerelease tagged `argument-comment-lint-<nightly>-<sha>`;
-  copy that release's `argument-comment-lint` asset over
-  `tools/argument-comment-lint/argument-comment-lint` in a follow-up PR,
-  then check `tools/argument-comment-lint/run-prebuilt-linter.py -p
-  codex-core`. Republish the same way when the lint itself changes. CI builds
-  the lint from source, so it doesn't wait for this; until then, use
-  `run.py` for targeted runs.
+
+After the nightly (or the lint itself) changes, republish the prebuilt package
+that `just argument-comment-lint <args>` uses (#1130). Once the PR is merged:
+
+```bash
+gh workflow run rust-release-argument-comment-lint.yml --ref main -f publish=true
+```
+
+That creates a prerelease tagged `argument-comment-lint-<nightly>-<sha>`. In a
+follow-up PR, copy its `argument-comment-lint` asset over
+`tools/argument-comment-lint/argument-comment-lint` and check
+`tools/argument-comment-lint/run-prebuilt-linter.py -p codex-core`. CI builds
+the lint from source, so it doesn't wait for this; until then, use `run.py`
+for targeted runs.
 
 Picking the nightly:
 
