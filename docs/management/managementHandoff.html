@@ -42,8 +42,8 @@ cause tied to either machine, so by the frozen rule milestone runs don't switch 
 on <b>D126</b>. #1158 (#1141/#1142) merged at 12:30Z under D104/D105, and #1155 was closed with a note. sec-1159 has <b>#1230</b> open for #1159's gaps already on main.</li>
 <li><b>Needs security sign-off:</b> <b>#1220</b> (#1176, D106): agents' tasks to panes the person opened now go through the untrusted mailbox. Green, 2 review rounds APPROVE,
 head <code>f42907f937</code>; waits on <b>D147</b> (with D148/D149).</li>
-<li><b>CI:</b> every completed postmerge run from <code>aa35e3f936</code> on is green, including all 30 merges since #1184; #1223 and #1228 are in progress. The scheduled nightly was red
-five nights in a row through 10-20 (#636); the 10-21 run hasn't started yet. PRs now run the schema-fixture tests (#1167, D100).</li>
+<li><b>CI:</b> every completed postmerge run from <code>aa35e3f936</code> on is green (since #1184, #1079's run was cancelled when the next merge started); #1223 and #1228 are in
+progress. Every scheduled nightly from 10-15 to 10-20 was red, six in a row (#636); the 10-21 run hasn't started yet. PRs now run the schema-fixture tests (#1167, D100).</li>
 <li><b>Installed build:</b> main <code>9750861c2a</code> (#1211; installed 10-21 12:20Z, Rust 1.99.1; section 7), after an intermediate install of <code>2f9d05c51e</code> (#1189) at 08:43Z.</li>
 <li><b>New coordinator rules</b> (section 3): the CONTRIBUTOR-FIRST RULE; coordinator-verified attribute-only or rustfmt-only test changes need no new review round; sign-in handoff
 files (<code>*.signin.md</code>) go to Travis at once; and the REVIEWER LAUNCH RULE (14:00Z): run reviewers in the foreground, never as a background job.</li>
@@ -353,7 +353,7 @@ before and after, and record it on the PR. Any conflict or changed patch-id mean
 Before the final review of a PR that touches that file, the worker writes <code>$W/&lt;name&gt;.hold.md</code>. While it exists the coordinator merges no other PR that touches
 <code>orchestrator.rs</code>, and the worker deletes it after merging. First used by gpc-943b for #1103. Check <code>ls $W/*.hold.md</code> every round; none exists now.</li>
 <li><b>Rust toolchain.</b> The coordinator moved <code>dev-build.sh</code>, <code>dev-build-online.sh</code> and <code>sec-common.md</code> to 1.99.1 at 15:10Z (backups
-<code>*.bak-195</code>). Bump by hand every 2–3 stable releases or for a security release, following <code>docs/rust-toolchain-bump.md</code> (#1121). D101/D102 are pending.</li>
+<code>*.bak-195</code>). Bump by hand every 2–3 stable releases or for a security release, following <code>docs/rust-toolchain-bump.md</code> (#1121). D101 (skip 1.100; measure 1.101 the same way) and D102 (keep the lint on <code>nightly-2026-08-08</code>) were answered on 10-21 (section 9).</li>
 <li><b>Lockfile PRs are slow:</b> any change to <code>Cargo.lock</code> (or <code>MODULE.bazel.lock</code>) starts the V8 canary Bazel builds, about 2.5 h, before a PR can go green
 (#1148 waited for them). Plan dependency bumps with that in mind.</li>
 <li><b>Requests and grants since #1093</b> (all in <code>$W</code>, recorded in <code>todo.md</code>):
@@ -380,7 +380,7 @@ requests as a courteous normal comment (not a GitHub “request changes” revie
 <li><b>Fork CI approval</b> (D119): “Approve and run” is allowed for contributor fork PRs we plan to review, only if the PR changes nothing under <code>.github/</code> (check the
 file list first); <code>gh api -X POST repos/CorbanuCore/CorbanuTerminal/actions/runs/&lt;id&gt;/approve</code> for runs in <code>action_required</code>.</li>
 <li><b>Attribute-only or rustfmt-only test changes</b> that the coordinator has verified need no new review round. Extends the 03:50Z rustfmt rule: sec-1141c's grant2 (12:04Z)
-merged #1158 at <code>7f8ac66010</code> after the coordinator checked that it only added two <code>#[cfg_attr(windows, ignore = …)]</code> attributes identical to the file's
+merged #1158's head <code>7f8ac66010</code> (as <code>85bce28112</code>) after the coordinator checked that it only added two <code>#[cfg_attr(windows, ignore = …)]</code> attributes identical to the file's
 existing ones (test file only), covered by round 9's APPROVE.</li>
 <li><b>Sign-in handoff files</b> (<code>$W/&lt;name&gt;.signin.md</code>): a worker that needs Travis to approve a device-code sign-in (for example with the D79 test account) writes the
 URL and code there. The coordinator relays it to Travis <b>at once</b>; codes expire within minutes (pf84-live1 approved its first one about 2 minutes after posting it). pf84-live1's two extra codes (for the optional mid-session removal check)
@@ -508,8 +508,10 @@ The installed signed binary (<code>~/.local/bin/corbanu</code>) is fine.</li>
 item that doesn't exist; nothing found or changed, no prompt, search list unchanged). Since then (<code>wave2-common.md</code>, <code>AGENTS.md</code>
 via #785): run such binaries only inside a sandbox profile that denies the three keychain services, and give every <code>security</code> command
 an explicit throwaway keychain path.</li>
-<li>Never use Travis's real ChatGPT login or real <code>auth.json</code> in tests. No disposable ChatGPT account or test AWS account exists yet: D79 (Travis creates a free
-ChatGPT test account; it signs in only inside a disposable VM through a device code he approves) and D99 (Bedrock live check, recommended mock-only), section 11.</li>
+<li>Never use Travis's real ChatGPT login or real <code>auth.json</code> in tests. Since 10-21 a free ChatGPT test account exists (D79). Use it only in a throwaway home or
+disposable VM with the keychain kept out (<code>CORBANU_TEST_NO_NATIVE_KEYRING=1</code> plus file-based login storage, inside a sandbox that blocks <code>security</code>), through a
+device code Travis approves, relayed to him at once via <code>$W/&lt;name&gt;.signin.md</code> (section 3); sign it out and delete the home afterwards, as pf84-live1 did (#1206).
+There is no test AWS account: Bedrock stays mock-only (D99 (b)).</li>
 <li><b>MEMORY RULE</b> (coordinator, 2026-10-19, in <code>wave2-common.md</code>): on 10-19 sec-937's fail-before test grew to 91.7 GB while mlx-serve held 88 GB, and
 macOS's jetsam killed system daemons (homed, secd, trustd, accountsd …); Travis got low-memory alerts. Never run a test or probe on the Mac that is expected to exhaust
 memory or grow without bound: prove it with a bounded input and a counter/size assertion, or run it on glitch under a hard cap
@@ -573,7 +575,7 @@ since D75. Don't touch it.</li>
 Photos at 6 GB and DockHelper at 2 GB.</li>
 <li>The internal disk had 21.9 GB free on 10-20 00:21Z, with 22 local Time Machine snapshots (thinning them needs sudo). Travis then freed space: 144 GB free, swap 5.6 GB.</li>
 <li>10-20 15:30Z: internal free space fell about 1 GB a minute (128 → 102 GB); the writer was macOS iCloud sync (<code>cloudd</code>/<code>fileproviderd</code>), not our workers,
-whose targets and temp folders are on CorbanuDrive. Travis was told. At handoff-doc8: 90 GB free; D109 then deleted 36 stale Chrome code-sign copies, but as APFS clones they freed only ~5.6 GB. At this update: 83 GB free, memory 58% free.</li>
+whose targets and temp folders are on CorbanuDrive. Travis was told. At handoff-doc8: 90 GB free; D109 then deleted 36 stale Chrome code-sign copies, but as APFS clones they freed only ~5.6 GB. At this update (measured 13:45Z): 83 GB free, memory 58% free.</li>
 <li>Check <code>memory_pressure</code> and <code>df -h /System/Volumes/Data</code> before a heavy launch.</li>
 </ul></li>
 </ul>
@@ -1328,7 +1330,7 @@ otherwise and tests per case. Its review bar: any display that claims zero spend
 <li><b>Since #1184:</b> cost-1 merged <b>#1185</b> (D77). The ledger keeps no record of when the writer ran or which writes failed (#314), so an empty day proves nothing except
 by timing: “no requests recorded” appears only when the whole UTC day ends before the conversation started; “not recorded” when the day is before the home's ledger existed; otherwise
 “nothing recorded”, with a line saying why that isn't proof. It also merged <b>#1190</b> (#352 items 1, 2, 4 and 5; #352 closed). flake-5 merged #1217 and #1218 (#1196 items 1 and 3;
-#1196 is closed, but item 2, the duplicated provider alias table, is open in citadelculture's #1210). cost-1's question on #314 item 1 (provable empty days need a new ledger record)
+#1196 is closed, but item 2, the duplicated provider alias table, remains; citadelculture's #1210 may cover it, not yet assessed). cost-1's question on #314 item 1 (provable empty days need a new ledger record)
 is carried in section 11. Contributor #1123 fixed the accounting spool lock (#928). The accounting follow-up records count <b>30 passed / 1 failed / 6 blocked</b> after ACC-04 passed
 with the local model (#1191, D113).</li>
 </ul>
@@ -1728,7 +1730,7 @@ don't merge) and the preserved WIPs #632 and #630.</li>
 <li><b>Green</b> on every completed run from <code>aa35e3f936</code> (#1114, 03:08Z) on, including <code>d8b98ba00e</code> (#1180), <code>289f1c7599</code> (#1174) and
 <code>3cb3564920</code> (#1173), which were in progress at the last update, the installed <code>9750861c2a</code> (#1211), and the newest completed, <code>203e9dbaf3</code> (#1218).</li>
 <li><b>In progress:</b> <code>c634a1b6c3</code> (#1223) and <code>3b56e6952e</code> (#1228).</li>
-<li><b>Nightly:</b> the scheduled runs of 10-16 to 10-20 all failed (the last on <code>bac579e541</code>), and the 10-21 run hadn't started at 13:45Z. The last green nightly is still the
+<li><b>Nightly:</b> the scheduled runs of 10-15 to 10-20 all failed, six in a row (the last on <code>bac579e541</code>), and the 10-21 run hadn't started at 13:45Z. The last green nightly is still the
 10-14 dispatch 38646928235, and <b>#636 stays open</b>. Worth a worker when a slot is free.</li>
 </ul>
 <div class="warn"><b>Recurring Windows-only breaks — guarded on PRs</b> (unchanged): Windows clippy (#730), the argument-comment lint (#771) and native Windows tests on
@@ -1850,7 +1852,7 @@ section 3 rules, and record the answer in <code>todo.md</code> and on the PR.</l
 </ul>
 The overnight window runs 08:30Z–16:30Z; during it launch only decision-free work.</li>
 <li><b>Merge this update's PR.</b></li>
-<li><b>Main CI:</b> confirm the postmerge runs of #1223 and #1228 (in progress) go green, and look at the 10-21 scheduled nightly (#636; five red nights through 10-20). Install the
+<li><b>Main CI:</b> confirm the postmerge runs of #1223 and #1228 (in progress) go green, and look at the 10-21 scheduled nightly (#636; six red scheduled nights, 10-15 to 10-20). Install the
 next dev build when convenient: it adds #1158, #1217, #1218 and #1223 among product changes (section 7). Close #1143 (fixed by #1148, still open). When a slot frees, launch a
 nightly worker for #636.</li>
 <li><b>When each running worker finishes</b>, read its result and bring its decisions to Travis:
@@ -1935,7 +1937,7 @@ acceptance: <code>qa/provider-auth/pf-84/</code> (live ChatGPT check <code>live-
 <li>Worker evidence since #1093 (outside the repo): review outputs and logs in <code>$W/gpc-finish2/</code>, <code>$W/gpc-943b/</code>, <code>$W/sf9/</code>, <code>$W/sec-1141/</code>
 (including the #1155 closing note) and <code>$HOME/.corbanu-workers/&lt;name&gt;/</code>; pf84-ga2's flag-on failure list <code>$W/pf84-ga2-1080-fullci-fails.txt</code>; glitch logs under
 <code>~/corbanu-rtx/</code> (<code>gpcf2-logs-archive</code>, <code>gpc943b-logs</code>, <code>sf9-logs</code>, <code>ci-sub1-logs</code>, <code>flake2-*</code>, <code>t1120-*</code>).</li>
-<li>Worker evidence since #1184: contrib-1's close drafts and replies in <code>$W/contrib-1/</code>; review transcripts in <code>$HOME/.corbanu-workers/&lt;name&gt;/</code> (e.g. <code>pf84-d86/</code>, <code>sf11-review/</code>); glitch logs <code>~/corbanu-rtx/flake3-logs/</code>, <code>flake4-logs/</code> and <code>sec2-logs/</code>; the design note for #932 <code>docs/development/shell-grammar-classifier.md</code>; contributor policy <code>docs/contributing.md</code> (D117).</li>
+<li>Worker evidence since #1184: contrib-1's close drafts and replies in <code>$W/contrib-1/</code>; review transcripts in <code>$HOME/.corbanu-workers/&lt;name&gt;/</code> (e.g. <code>pf84-d86/</code>, <code>sf11-review/</code>); glitch logs <code>~/corbanu-rtx/flake3-logs/</code>, <code>flake4-logs/</code>, <code>sec2-logs/</code> and <code>csec3-logs/</code>; the design note for #932 <code>docs/development/shell-grammar-classifier.md</code>; contributor policy <code>docs/contributing.md</code> (D117).</li>
 </ul>
 </body>
 </html>
