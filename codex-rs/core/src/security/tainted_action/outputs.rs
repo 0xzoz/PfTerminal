@@ -91,10 +91,17 @@ const GIT_CONFIG_FLAGS: &[&str] = &[
     "--all",
     "--no-type",
 ];
-/// git config options that make it read, not write. As on main, only
-/// these: `--get-color`, `--get-colorbool` and `--get-urlmatch` are not
-/// counted, so `git config --global --get-color k` asks (review round 8).
-const GIT_CONFIG_READS: &[&str] = &["--get", "--get-all", "--get-regexp", "--list", "-l"];
+/// git config options that make it read, not write.
+const GIT_CONFIG_READS: &[&str] = &[
+    "--get",
+    "--get-all",
+    "--get-regexp",
+    "--get-urlmatch",
+    "--get-color",
+    "--get-colorbool",
+    "--list",
+    "-l",
+];
 
 /// Whether `git config` with these words (those after `config`) only reads:
 /// its first word is the `get` or `list` subcommand, or a reading option
