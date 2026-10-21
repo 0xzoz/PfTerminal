@@ -122,6 +122,31 @@ These are from 5460 distinct texts (2607 test literals, 65 corpus lines and
   `$~x`, `${ cmd; }`), `<>` redirections, and `\`+newline continuations.
   Each costs nothing beyond today's behaviour.
 
+## Phase 3, first slice (held for the coordinator)
+
+The zsh-only checks (#1028 glob qualifiers, #1084 glob substitution) no
+longer ask for a top-level line under a system zsh (or bash, dash, sh) when
+`named_shell::grammar_proves_data` holds:
+
+- the host runs the argv as named, a system shell with `-c`/`-lc`;
+- the grammar reads the line, with no refusal and nothing `zsh_unsure`;
+- `shadow::compare` agrees with the quote-aware reader;
+- every word of every command is grammar-proven data (no expansion,
+  substitution, unquoted glob, brace, `~`, leading `=` or parenthesis);
+- the line is D85's plain commands of programs that never run their words
+  (`echo`, `ls`, `cat`, `grep`, data-only `git` subcommands, ...). `cd` is
+  excluded (zsh `chpwd` hooks), and so is `''` (zsh `RC_QUOTES`).
+
+With no unquoted glob character and no expansion left, zsh has nothing to
+apply a qualifier or glob substitution to. This is D85 extended from bash
+to zsh users (the macOS default), per D92. Everything else keeps today's
+checks: nested lines, other argv shapes, shells named without a system
+path.
+
+Harness: 78 corpus texts qualify (75 test literals, 2 corpus lines, 1
+generated). All are plain `echo`, `cat`, `ls`, `grep` and `git`
+status/log/commit lines. None of the review-history bypass lines qualifies.
+
 ## Limits phase 3 must respect
 
 - "Data" means the shell does not expand the text. Builtins may still

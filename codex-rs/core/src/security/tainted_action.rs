@@ -419,7 +419,7 @@ fn classified(
     let avoids_zsh = as_named
         && match action {
             ApprovalAction::Shell { command, .. } | ApprovalAction::ExecCommand { command, .. } => {
-                named_shell::avoids_zsh(command)
+                named_shell::avoids_zsh(command) || named_shell::grammar_proves_data(command)
             }
             ApprovalAction::ApplyPatch { .. } => false,
         };

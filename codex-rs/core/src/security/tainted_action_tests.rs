@@ -3082,6 +3082,48 @@ fn issue_1084_glob_substitution_is_unseen_code() {
     assert_eq!(wrong, Vec::<String>::new());
 }
 
+/// #932 phase 3: under zsh too, the zsh-only checks do not ask for plain
+/// commands of programs that never run their words when the bash grammar
+/// proves every word is data (quoted or plain characters, no expansion).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_932_zsh_lines_of_proven_data_skip_the_zsh_only_checks() {
+    let named = |command: &[&str]| {
+        classify_as_named_with(
+            &shell_in("/work", command),
+            Path::new(HOME),
+            Some(Path::new(USER_HOME)),
+        )
+    };
+    let mut wrong = Vec::new();
+    for shell in ["/bin/zsh", "/usr/bin/zsh", "/bin/bash"] {
+        for line in [
+            "git commit -m \"fix(tests)\"",
+            "git commit -m 'fix(tests): keep *(N) and /*(e:true:)'",
+            "echo '${~x} ${(e)y} setopt globsubst' && git status",
+            "grep -n 'x$~y' notes.txt | head -n 3",
+            "git add 'src/*(N)'; git status",
+        ] {
+            let found = named(&[shell, "-lc", line]);
+            if found.is_some() {
+                wrong.push(format!("{shell} {line:?}: {found:?}, expected None"));
+            }
+        }
+    }
+    // Run as the argv names only: otherwise the checks ask as before.
+    let found = classify_fixture(&shell_in(
+        "/work",
+        &["/bin/zsh", "-lc", "git commit -m 'fix(tests)'"],
+    ));
+    if found != Some(ProtectedActionKind::UnseenCode) {
+        wrong.push(format!("not as named: {found:?}"));
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
 /// D85: the zsh-only checks (#1028 glob qualifiers, #1084 glob substitution)
 /// ask only where zsh may run: not on a line a system bash, dash or sh runs
 /// as plain commands of programs that never hand their words to a shell,
@@ -3155,8 +3197,16 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
     // argv shape.
     let qualifier = "git commit -m '/*(e:true:)'";
     for command in [
-        vec!["/bin/zsh", "-lc", qualifier],
-        vec!["/usr/bin/zsh", "-c", "git commit -m \"fix(tests)\""],
+        // #932 phase 3: under zsh, only words the grammar does not prove
+        // data keep the checks.
+        vec!["/bin/zsh", "-lc", "git commit -m \"$m\" -m '/*(e:true:)'"],
+        vec!["/usr/bin/zsh", "-c", "git commit -m fix(tests)"],
+        vec!["/bin/zsh", "-lc", "cd '/*(e:true:)'"],
+        vec!["/bin/zsh", "-lc", "echo 'it''s /*(e:true:)'"],
+        vec!["/bin/zsh", "-lc", "git commit -m \\'/*(e:true:)\\'"],
+        vec!["/bin/zsh", "-lc", "set -o globsubst; echo '/*(e:true:)'"],
+        vec!["/bin/fish", "-c", qualifier],
+        vec!["zsh", "-lc", qualifier],
         vec!["/bin/bash", "-lc", "zsh -c 'print -l /*(e:true:)'"],
         vec![
             "/bin/bash",
