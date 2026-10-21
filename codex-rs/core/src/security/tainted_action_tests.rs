@@ -4366,3 +4366,51 @@ fn issue_1161_local_key_cache_keeps_parser_states_separate() {
         );
     }
 }
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1161_git_looking_keys_and_option_values_do_not_hide_writes() {
+    for command in [
+        "git config filter.a/git-x.clean 'sh -c evil'",
+        "git config diff.a/git-x.textconv 'sh -c evil'",
+        "git config remote.a/git-x.uploadpack 'sh -c evil'",
+        "git-config filter.a/git-x.clean 'sh -c evil'",
+        "git -C /tmp/git-x config filter.a.clean 'sh -c evil'",
+        "git --work-tree /src/git-tools config filter.a.clean 'sh -c evil'",
+        "git -c color.ui=/a/git-y config filter.a.clean 'sh -c evil'",
+        "git --work-tree=../git-x config sequence.editor 'sh -c evil'",
+        "git config includeIf.gitdir:/tmp/git-x.path /tmp/evil.cfg",
+        "git config 'credential.https://github.com/git-lfs.helper' /tmp/payload",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1161_git_looking_global_values_keep_scans_linear() {
+    for unit in [
+        "-C git ",
+        "-C /tmp/git-x ",
+        "--work-tree=../git-wt ",
+        "-c color.ui=/a/git-y ",
+    ] {
+        work::assert_linear(unit, |scale| {
+            let line = format!(
+                "git {}config filter.a.clean marker",
+                unit.repeat(400 * scale)
+            );
+            assert_eq!(script(&line), Some(ProtectedActionKind::Persistence));
+        });
+    }
+}

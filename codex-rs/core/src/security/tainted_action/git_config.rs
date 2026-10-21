@@ -8,37 +8,47 @@ use super::git_helpers;
 use super::outputs;
 use super::work;
 
-fn is_git(word: &str) -> bool {
-    basename(word).eq_ignore_ascii_case("git") || git_helpers::git_name(word).is_some()
+enum ConfigArgs<'a> {
+    Found(&'a [String]),
+    NotConfig,
+    Uncertain,
 }
 
-/// Find `config`, sharing Git's global value-option boundaries. Unknown
-/// options are not a reason to stop checking. Stop at the next Git word so
-/// the caller's per-word scan never rescans a later invocation (#1102).
-fn config_args(args: &[String]) -> Option<&[String]> {
+/// Find `config`, sharing Git's global value-option boundaries. Only plain
+/// Git lets the caller restart with the same suffix. A dashed-helper-looking
+/// path or option value cannot safely end this check without asking.
+fn config_args(args: &[String]) -> ConfigArgs<'_> {
     let mut at = 0;
     while let Some(word) = args.get(at) {
         work::step();
-        if is_git(word) {
-            return None;
+        let takes_value = code_variables::GIT_VALUE_OPTIONS.contains(&word.as_str())
+            || matches!(word.as_str(), "-c" | "--config-env");
+        let boundary = if takes_value {
+            args.get(at + 1)
+        } else {
+            Some(word)
+        };
+        if let Some(boundary) = boundary {
+            let git_name = git_helpers::git_name(boundary);
+            if basename(boundary).eq_ignore_ascii_case("git") || git_name == Some(None) {
+                return ConfigArgs::NotConfig;
+            }
+            if git_name.is_some() {
+                return ConfigArgs::Uncertain;
+            }
         }
         if word == "config" {
-            return Some(&args[at + 1..]);
+            return ConfigArgs::Found(&args[at + 1..]);
         }
-        if code_variables::GIT_VALUE_OPTIONS.contains(&word.as_str())
-            || matches!(word.as_str(), "-c" | "--config-env")
-        {
-            if args.get(at + 1).is_some_and(|value| is_git(value)) {
-                return None;
-            }
+        if takes_value {
             at += 2;
         } else if word.starts_with('-') {
             at += 1;
         } else {
-            return None;
+            return ConfigArgs::NotConfig;
         }
     }
-    None
+    ConfigArgs::NotConfig
 }
 
 /// Local config writes, sharing work across all Git words in a command.
@@ -71,8 +81,9 @@ impl<'a> Writes<'a> {
             Some("config") => args,
             Some(_) => return false,
             None => match config_args(args) {
-                Some(args) => args,
-                None => return false,
+                ConfigArgs::Found(args) => args,
+                ConfigArgs::NotConfig => return false,
+                ConfigArgs::Uncertain => return true,
             },
         };
         let mut at = words.len() - args.len();
@@ -138,9 +149,8 @@ impl<'a> Writes<'a> {
                 }
                 continue;
             }
-            if is_git(word) {
-                break false;
-            }
+            // At the key position, a Git-looking word is still a key. The
+            // suffix memo keeps overlapping invocations linear.
             // After any option, Git uses legacy key/value syntax. Only the
             // first argument can select a subcommand such as `unset`.
             if options && first {
