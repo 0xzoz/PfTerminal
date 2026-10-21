@@ -119,13 +119,42 @@ impl Sandboxable for Probe {
                 1,
                 "commit only after approval of the original generation",
             );
+            let before = self
+                .session
+                .services
+                .authority_marker()
+                .expect("the fixture has an initialized policy");
+            // Reapplying Moderate with empty revocations is a no-op. A real
+            // synthetic grant revocation moves D50's marker without changing
+            // the level whose D48 warning the second round must show.
+            let mut revocations = RevocationState::new();
+            let event = codex_security_policy::RevocationEvent::new(
+                PolicyPrincipal::new(PrincipalKind::Human, "human:issue-1048").unwrap(),
+                codex_security_policy::RevocationTarget::Grant {
+                    grant_id: codex_security_policy::BoundedText::new("issue-1048-grant").unwrap(),
+                },
+                codex_security_policy::RevocationReason::HumanRequest,
+                /*created_at_unix_seconds*/ 1,
+            )
+            .unwrap();
+            assert!(
+                revocations
+                    .apply(&event)
+                    .expect("apply synthetic revocation")
+            );
             let change = self
                 .controller
-                .confirm_level_change(SecurityLevel::Moderate, RevocationState::new())
+                .confirm_level_change(SecurityLevel::Moderate, revocations)
                 .expect("confirm the synthetic transition");
             self.controller
                 .apply_confirmed_change(change)
                 .expect("commit transition");
+            assert_eq!(
+                self.session.services.authority_marker(),
+                Some((before.0 + 1, before.1 + 1)),
+                "the revocation must advance both parts of D50's marker",
+            );
+            assert!(self.session.services.transition_since(Some(before)));
             self.session
                 .services
                 .model_client()
