@@ -56,6 +56,22 @@ Details per case, with the screens they rest on: [dispositions.md](dispositions.
   3 blocked; accounting 30 passed, 1 failed, 6 blocked; Moderate as D72 already counts it
   ([dispositions.md](dispositions.md#what-changes-if-these-results-count)).
 
+## Owner decisions on these results (2026-10-21)
+
+Dated addendum; the dispositions above are the record's own and are unchanged.
+
+- **D113:** AGG-18, AGG-R10 and ACC-04 are recorded as passed, and MOD-09 items 5 and 7 as meeting D72. Aggressive is
+  60 passed, 1 failed, 3 blocked; accounting 30 passed, 1 failed, 6 blocked; Moderate 31 passed, 0 failed, 3 accepted
+  (MOD-09 stays accepted under D72, because item 6 has never been exercised).
+- **D110:** AGG-R07 is accepted as intended. Its pass rule is amended by
+  [amendment 7](../aggressive-amendment7-20261021/README.md): entry names the model repeats from the product's own
+  fixed permission instructions don't count. Judged against the amended rule on this record's evidence (R02), AGG-R07
+  **passed**, so Aggressive is **61 passed, 0 failed, 3 blocked** of 64. #1181 is the issue for the product side.
+- **D111:** a person-defined-role case, AGG-20P, is designed in amendment 7 for the next local-model run
+  ([case list](../next-localmodel-run.md)). AGG-20's named limit stands until that case runs.
+- **D114:** future tester packets tell testers to check about every 30 s while a long turn runs
+  ([tester-packet-rules.md](../tester-packet-rules.md)), after this run's late Esc presses (R01, R04).
+
 ## Design and freeze
 
 - **Case texts, byte-identical:** the executor packet v8 ([executor-packet/v8/](executor-packet/v8/)) holds the three
