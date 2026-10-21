@@ -2733,6 +2733,25 @@ fn accounting_inspect_plain_wording_counts_attempts_and_names_every_route() {
         model_name("openrouter", "deepseek-v4-pro"),
         "deepseek-v4-pro"
     );
+    // The brand is the operator's: Vercel owns its Anthropic-wire fast route.
+    assert_eq!(
+        model_name("openrouter", "zai/glm-5.2-fast"),
+        "zai/glm-5.2-fast"
+    );
+    // No catalogue name read on another route says how a route sells the model.
+    let catalogue = codex_models_manager::bundled_models_response().unwrap();
+    for model in catalogue.models {
+        let name = model_name("my-route", &model.slug);
+        let lower = name.to_lowercase();
+        assert!(
+            name == model.slug
+                || !lower
+                    .split_whitespace()
+                    .any(|word| ["plan", "(direct)", "free"].contains(&word)),
+            "{} reads as {name:?} on another route",
+            model.slug
+        );
+    }
 }
 
 #[test]

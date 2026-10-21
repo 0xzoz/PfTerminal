@@ -1571,14 +1571,23 @@ fn model_name(provider: &str, slug: &str) -> String {
 
 /// Whether a catalogue name carries the brand of the route that owns its row:
 /// every word of the owning operator's built-in name is a word of it ("Z.AI
-/// GLM 5.2" for Z.AI, "Claude Opus 5.5 Plan" for Claude Plan). An owner with
-/// no built-in name is taken to carry one, so its name is never borrowed.
+/// GLM 5.2" for Z.AI, "Claude Opus 5.5 Plan" for Claude Plan), ignoring case.
+/// A word that names how a route sells the model ("Plan", "(Direct)",
+/// "Free") is a brand too, as are an empty name and an owner with no
+/// built-in name, so such names are never borrowed.
 fn carries_route_brand(name: &str, owner: &str) -> bool {
     let Some(brand) = built_in_providers().get(operator(owner)) else {
         return true;
     };
-    let words: std::collections::HashSet<&str> = name.split_whitespace().collect();
-    brand.split_whitespace().all(|word| words.contains(word))
+    let words: std::collections::HashSet<String> =
+        name.split_whitespace().map(str::to_lowercase).collect();
+    words.is_empty()
+        || ["plan", "(direct)", "free"]
+            .iter()
+            .any(|word| words.contains(*word))
+        || brand
+            .split_whitespace()
+            .all(|word| words.contains(&word.to_lowercase()))
 }
 
 /// "Provider · Model", or "Provider · account NAME · Model" where the view
