@@ -23,6 +23,7 @@ use super::quoted;
 use super::quoted::Command;
 use super::quoted::Word;
 use super::sed;
+use super::shadow;
 use super::shell::SHELLS;
 use super::shell::basename;
 use super::work;
@@ -191,6 +192,8 @@ impl Classifier {
         for script in scripts {
             work::step();
             let reading = quoted::commands(script);
+            // #932 phase 2: compared and logged; decides nothing.
+            shadow::shadow(script, &reading, &mut self.compared);
             found.unreadable |=
                 reading.too_deep || reading.unsure || (strict && reading.unterminated);
             self.walk(

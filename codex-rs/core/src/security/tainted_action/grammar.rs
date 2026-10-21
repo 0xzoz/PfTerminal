@@ -12,9 +12,11 @@
 //! only together with an independent check, for narrow forms (see the
 //! design note's "What the reading promises").
 //!
-//! Phase 1 of docs/development/shell-grammar-classifier.md: the differential
+//! See docs/development/shell-grammar-classifier.md. The differential
 //! harness (`grammar_harness_tests.rs`) compares this reading with
-//! `quoted.rs` and with real shells. Nothing is classified by it yet.
+//! `quoted.rs` and with real shells; `shadow.rs` compares it on every
+//! command line the classifier reads and logs a difference. Nothing is
+//! classified by it yet.
 
 use super::shell::UNSEEN_OUTPUT;
 use super::shell::ansi_c;

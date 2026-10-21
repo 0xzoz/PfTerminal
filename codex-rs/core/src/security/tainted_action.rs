@@ -30,8 +30,6 @@ use std::path::Path;
 
 mod arithmetic;
 mod code_variables;
-// #932 phase 1: read only by its differential harness so far.
-#[cfg(test)]
 mod grammar;
 mod indirect;
 mod invocation;
@@ -42,6 +40,7 @@ mod outputs;
 mod paths;
 mod quoted;
 mod sed;
+mod shadow;
 mod shell;
 mod work;
 
@@ -446,6 +445,7 @@ fn classified(
         },
         classified_bytes: 0,
         classified_lines: 0,
+        compared: shadow::Budget::new(),
     };
     match action {
         ApprovalAction::Shell { command, cwd, .. }
@@ -649,6 +649,8 @@ struct Classifier {
     /// D85: the action's own command line never reaches zsh
     /// ([`named_shell::avoids_zsh`]); nested lines are not covered.
     avoids_zsh: bool,
+    /// #932: comparisons left with the grammar.
+    compared: shadow::Budget,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
