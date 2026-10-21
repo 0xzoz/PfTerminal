@@ -295,7 +295,11 @@ impl ChatWidget {
                     .map(|account| account.name.as_str())
             })
             .unwrap_or(codex_vault::DEFAULT_PROVIDER_ACCOUNT);
-        Some(self.session_account_usage.for_provider(provider_id, active))
+        let mut usage = self.session_account_usage.for_provider(provider_id, active);
+        // D86/#1193: the cached background answer; the vault is never read
+        // here, on the UI thread.
+        usage.named_account_in_home = self.model_catalog.provider_has_named_account(provider_id);
+        Some(usage)
     }
 
     /// PF-84: records a thread's latest per-account usage report.

@@ -299,3 +299,53 @@ async fn status_account_usage_lists_the_active_providers_accounts() {
     assert!(rendered.contains("work (active)"), "{rendered}");
     assert!(rendered.contains("· account work"), "{rendered}");
 }
+
+/// #1193: `/status` decides whether to name the account from the answer the
+/// background check cached, never from the vault: each step below renders
+/// the opposite of what reading the vault would give. Until the answer is
+/// known the account is shown rather than hidden.
+#[tokio::test]
+async fn status_reads_the_cached_named_account_answer_not_the_vault() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    zai_session_with_account_usage(&mut chat, /*named_accounts*/ true);
+    // Only `default` has usage, so the session's own rows say nothing.
+    chat.session_account_usage.clear();
+    let vault = codex_vault::Vault::new(chat.config.codex_home.to_path_buf());
+    let add = |provider_id: &str, name: &str| {
+        vault
+            .create_provider_account(
+                provider_id,
+                &codex_vault::ProviderAccountName::parse(name).expect("account name"),
+                codex_vault::ProviderAccountKind::ApiKey,
+                "test-key-not-a-secret",
+            )
+            .expect("add named account");
+    };
+    let shows_account = |rendered: &str| {
+        let named = rendered.contains("Z.AI · account default");
+        assert_eq!(named, rendered.contains("Account usage:"), "{rendered}");
+        named
+    };
+
+    // Not known yet; the vault holds no Z.AI account.
+    add("kimi", "alt");
+    assert!(shows_account(&render_status(&mut chat, &mut rx)));
+
+    // Known: no Z.AI account; the vault now holds one.
+    add("zai", "work");
+    chat.model_catalog
+        .set_named_account_providers(/*generation*/ 1, Some(["kimi".to_string()].into()));
+    assert!(!shows_account(&render_status(&mut chat, &mut rx)));
+
+    // Known: a Z.AI account. An older check answering late changes nothing.
+    chat.model_catalog
+        .set_named_account_providers(/*generation*/ 3, Some(["zai".to_string()].into()));
+    chat.model_catalog
+        .set_named_account_providers(/*generation*/ 2, Some(Default::default()));
+    assert!(shows_account(&render_status(&mut chat, &mut rx)));
+
+    // The vault could not be read: unknown again, so shown.
+    chat.model_catalog
+        .set_named_account_providers(/*generation*/ 4, /*providers*/ None);
+    assert!(shows_account(&render_status(&mut chat, &mut rx)));
+}
