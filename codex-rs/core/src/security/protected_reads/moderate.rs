@@ -316,6 +316,10 @@ fn explain_denied(
     // sandbox keeps it read-only inside a writable folder; under Moderate no
     // approval runs a command outside the sandbox (#747, D3), so Moderate is
     // why it stays read-only. Explanation only: nothing else changes.
+    // A relative path is resolved against the command's folder, which is
+    // not where it wrote if it changed folder (`cd`, `git -C`, ...): then
+    // only an absolute path is attributed.
+    let relative_ok = !changes_folder(command);
     let git_write = |path: &Path| git_folder_write(&base, path, cwd);
     let word = super::written_word(
         command,
@@ -325,7 +329,8 @@ fn explain_denied(
         &git_write,
         Some(denial_lines),
     )
-    .or_else(|| git_path_in_lines(cwd, lines, &git_write))?;
+    .filter(|word| relative_ok || Path::new(word).is_absolute())
+    .or_else(|| git_path_in_lines(cwd, lines, relative_ok, &git_write))?;
     Some(if contract.is_some() {
         (Denied::KeptGitWrite, kept_git_write_explanation(&word))
     } else {
@@ -355,6 +360,7 @@ fn git_folder_write(base: &FileSystemSandboxPolicy, path: &Path, cwd: &Path) -> 
 fn git_path_in_lines(
     cwd: &Path,
     lines: &[String],
+    relative_ok: bool,
     accept: &dyn Fn(&Path) -> bool,
 ) -> Option<String> {
     lines
@@ -365,12 +371,30 @@ fn git_path_in_lines(
                 .trim_matches(|c: char| matches!(c, '\'' | '"' | '`' | '‘' | '’' | ':' | ',' | ';'))
         })
         .filter(|token| {
-            Path::new(token)
-                .components()
-                .any(|c| c.as_os_str() == ".git")
+            let path = Path::new(token);
+            (relative_ok || path.is_absolute())
+                && path.components().any(|c| c.as_os_str() == ".git")
         })
         .find(|token| accept(&cwd.join(token)))
         .map(str::to_string)
+}
+
+/// #1139 review: whether `command` may run in, or point git at, another
+/// folder than its own (`cd`, `pushd`, `git -C`, `--git-dir`, `--work-tree`,
+/// `GIT_DIR=`, `GIT_WORK_TREE=`), so a relative path it reports may not be
+/// relative to its folder.
+fn changes_folder(command: &[String]) -> bool {
+    command.iter().any(|argument| {
+        argument
+            .split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|' | '(' | ')' | '`'))
+            .any(|word| {
+                matches!(word, "cd" | "pushd" | "popd" | "-C")
+                    || word.starts_with("--git-dir")
+                    || word.starts_with("--work-tree")
+                    || word.starts_with("GIT_DIR=")
+                    || word.starts_with("GIT_WORK_TREE=")
+            })
+    })
 }
 
 /// #1139 (D94): the explanation for a write into the project's `.git`

@@ -494,6 +494,48 @@ fn issue_1139_moderate_git_folder_write_names_the_level() {
         ),
         Some(write_explanation(".git/config", WayForward::Permissive))
     );
+    // #1139 review: a command that changed folder may have written another
+    // repository's `.git`; a relative path it reports is not attributed.
+    let outside = format!("{}/repo", fixture.home.display());
+    for (script, line) in [
+        (
+            format!("cd '{outside}' && git config user.name x"),
+            config_line,
+        ),
+        (
+            format!("git -C '{outside}' config user.name x"),
+            config_line,
+        ),
+        (
+            format!("GIT_DIR='{outside}/.git' git config user.name x"),
+            config_line,
+        ),
+        (
+            format!("cd '{outside}' && printf x > .git/hooks/pre-commit"),
+            hook_line,
+        ),
+    ] {
+        assert_eq!(
+            fixture.explain(Fixture::profile(), /*contract*/ None, &script, line),
+            None,
+            "{script}"
+        );
+    }
+    // An absolute path in the project still is.
+    let project_config = format!("{}/.git/config", fixture.project.display());
+    assert_eq!(
+        fixture.explain(
+            Fixture::profile(),
+            /*contract*/ None,
+            &format!(
+                "cd /tmp && git -C '{}' config user.name x",
+                fixture.project.display()
+            ),
+            &format!("error: could not lock config file {project_config}: Operation not permitted")
+        ),
+        Some(git_write_explanation(&project_config))
+    );
+
     // A denied write that involves no `.git` is not attributed either.
     assert_eq!(
         fixture.explain(
