@@ -1251,30 +1251,20 @@ impl App {
         task.trim().to_string()
     }
 
-    /// Route native work according to thread ownership. Managed `/spawn` agents consume the Core
-    /// mailbox, while operator-created `/panes` threads accept ordinary user turns.
+    /// Send an agent's task (assignment fires, model dispatch) to a native pane. Every native
+    /// pane takes it from its Core mailbox as inter-agent data, also a pane the person opened
+    /// (D106, #1176): an agent's task never arrives as the person's own input. The person's own
+    /// task from Spawn status takes [`AppEvent::SubmitSpawnAgentTaskFromPerson`] instead.
     pub(crate) fn send_native_task_event(&self, thread_id: ThreadId, task: String) {
-        let is_operator_pane = self
-            .agent_navigation
-            .get(&thread_id)
-            .is_some_and(|entry| self.is_operator_owned_codex_user_pane(thread_id, entry));
         // #660: only agents (assignment fires, model dispatch) send through
         // here; a task sent while the switch is on never starts a turn, even
         // when it is handled just after switch-off.
         let sent_while_kill_switch_on = self.kill_switch_on_now();
-        if is_operator_pane {
-            self.app_event_tx.send(AppEvent::SubmitCodexUserPaneTask {
-                thread_id,
-                task,
-                sent_while_kill_switch_on,
-            });
-        } else {
-            self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
-                thread_id,
-                task,
-                sent_while_kill_switch_on,
-            });
-        }
+        self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
+            thread_id,
+            task,
+            sent_while_kill_switch_on,
+        });
     }
 
     /// #660 follow-up: a task for the managed Codex pane `thread_id` waits in
