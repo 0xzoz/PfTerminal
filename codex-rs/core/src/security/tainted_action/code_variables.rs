@@ -335,7 +335,20 @@ pub(super) fn git_runs_code(args: &[String]) -> bool {
             // scanned once).
             return false;
         }
-        index += 1 + usize::from(GIT_VALUE_OPTIONS.contains(&word.as_str()));
+        if GIT_VALUE_OPTIONS.contains(&word.as_str())
+            && let Some(value) = next
+        {
+            // A value that is a `git` is checked on its own (#1102). One
+            // that looks like an option is read as one: the lexer drops
+            // empty words, so `-C '' -c k=v` reads as `-C -c k=v`.
+            if shell::basename(value) == "git" {
+                return false;
+            }
+            if !value.starts_with('-') {
+                index += 1;
+            }
+        }
+        index += 1;
     }
     false
 }
@@ -463,6 +476,8 @@ mod tests {
             &["--config-env", "diff.x.textconv=T", "diff"],
             &["--exec-path=/tmp/x", "log"],
             &["-c"],
+            &["-C", "-c", "core.fsmonitor=x", "status"],
+            &["--namespace", "-c", "alias.x=!sh", "x"],
         ] {
             assert!(git_runs_code(&strings(args)), "{args:?}");
         }
@@ -472,6 +487,7 @@ mod tests {
             &["-c", "user.name=x", "-c", "color.ui=always", "commit"],
             &["commit", "-c", "HEAD"],
             &["--exec-path"],
+            &["-C", "git", "-c", "core.pager=x", "log"],
         ] {
             assert!(!git_runs_code(&strings(args)), "{args:?}");
         }

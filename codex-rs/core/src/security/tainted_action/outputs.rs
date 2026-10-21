@@ -42,6 +42,18 @@ pub(super) fn output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
     found.then_some(files)
 }
 
+/// git config options that take the next word as their value (`-zf FILE`
+/// too).
+const GIT_CONFIG_VALUES: &[&str] = &[
+    "-f",
+    "--file",
+    "--blob",
+    "--type",
+    "--default",
+    "--comment",
+    "--value",
+    "--url",
+];
 /// git config options that take no value (others may take the next word).
 const GIT_CONFIG_FLAGS: &[&str] = &[
     "--global",
@@ -77,10 +89,11 @@ const GIT_CONFIG_READS: &[&str] = &[
 
 /// Whether `git config` with these words (those after `config`) only reads:
 /// its first word is the `get` or `list` subcommand, or a reading option
-/// is an option, not a value (`--comment --get`, `-- --get`, `k --get` with
-/// an unknown option before it are values). Read conservatively: a word
-/// that may be a value is one. Stops at the next `git` (#1102: each word is
-/// scanned once per line).
+/// comes before the first word that is not an option. git stops reading
+/// options there, so every later word is a key, value or pattern (`k v
+/// --get`, `--comment --get`, `-- --get` write). Read conservatively: a
+/// word that may be a value is one. Stops at the next `git` (#1102: each
+/// word is scanned once per line).
 pub(super) fn git_config_reads(words: &[String]) -> bool {
     if words
         .first()
@@ -88,25 +101,37 @@ pub(super) fn git_config_reads(words: &[String]) -> bool {
     {
         return true;
     }
+    // The previous word was an option that takes a value, or an unknown
+    // one that may.
     let mut value_next = false;
+    let mut maybe_value_next = false;
     for word in words {
         work::step();
         if std::mem::take(&mut value_next) {
             continue;
         }
-        if word == "--" || super::shell::basename(word) == "git" {
+        let option = word.starts_with('-');
+        if std::mem::take(&mut maybe_value_next) && option {
+            // A value (`--comment -l`), not an option.
+            continue;
+        }
+        // A word that is not an option may be the key (after an unknown
+        // option too), which ends the options.
+        if word == "--" || !option || super::shell::basename(word) == "git" {
             return false;
         }
         if GIT_CONFIG_READS.contains(&word.as_str()) {
             return true;
         }
-        if word.starts_with('-')
-            && !word.contains('=')
-            && !GIT_CONFIG_FLAGS.contains(&word.as_str())
+        if word.contains('=') || GIT_CONFIG_FLAGS.contains(&word.as_str()) {
+            continue;
+        }
+        if GIT_CONFIG_VALUES.contains(&word.as_str())
+            || (!word.starts_with("--") && word.ends_with('f'))
         {
-            // An unknown option, a group (`-zf`) or `-f`/`--file`: its value
-            // may be the next word.
             value_next = true;
+        } else {
+            maybe_value_next = true;
         }
     }
     false

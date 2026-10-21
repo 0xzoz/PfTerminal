@@ -3185,6 +3185,11 @@ fn issue_1141_output_files_are_written() {
         "git -C ~ -C . log --output=.zshrc",
         "git -C ~ -C '' log --output=.zshrc",
         "git --global config --file ~/.zshrc a.b x list",
+        // Review round 2: a reading option after the key is a value.
+        "git config --file ~/.zshenv 'x.$(touch pwned).y' z --get",
+        "git config -f ~/.zshenv k --list",
+        "git config -f ~/.zshenv --add 'x.$(touch pwned).y' -l",
+        "git config --global core.fsmonitor 'touch pwned' --get",
     ] {
         assert_eq!(script(command), Some(Persistence), "{command}");
     }
@@ -3221,6 +3226,29 @@ fn issue_1142_git_code_settings_are_unseen_code() {
         "GIT_TEST_FSMONITOR='touch pwned;:' git status",
         "n=$(cat name); env \"$n=touch pwned;:\" git diff --no-index a b",
         "n=$(printf GIT_EXTERNAL_;printf DIFF); env \"$n=touch pwned;:\" git diff",
+        // Review round 2: an empty `-C`/`--namespace` value (the lexer drops
+        // empty words) and names built at run time and set by arithmetic or
+        // zsh `(P)`.
+        "git -C '' -c core.fsmonitor='touch pwned' status",
+        "git -C \"\" -c alias.x='!touch pwned' x",
+        "git --namespace '' -c alias.x='!touch pwned' x",
+        "n=${LOGNAME/*/HO}ME; let \"$n=1\"; git status",
+        "n=${LOGNAME/*/HO}ME; (( $n = 1 )); git status",
+        "n=${LOGNAME/*/HO}ME; : $(( $n = 1 )); git status",
+        "n=${LOGNAME/*/HO}ME; [[ \"$n=1\" -eq 1 ]]; git status",
+        "n=${LOGNAME/*/HO}ME; a[$n=1]=1; git status",
+        "n=${LOGNAME/*/HO}ME; declare -i x; x=$n=1; git status",
+        "n=${LOGNAME/*/HO}ME=1; (( n )); git status",
+        "n=${LOGNAME/*/HO}ME; m=\"$n=1\"; k=$m; (( k )); git status",
+        "n=${LOGNAME/*/HO}ME; : ${(P)n::=/tmp/h}; git status",
+        "n=${LOGNAME/*/HO}ME; : ${(P)n=/tmp/h}; git status",
+        // ... and names from outside the line.
+        "let \"$x=1\"; git status",
+        "m=$x$y; (( m )); git status",
+        "m=\"$x=1\"; (( m )); git status",
+        ": ${(P)x::=/tmp/h}; git status",
+        ": ${(P)x=/tmp/h}; git status",
+        ": ${!x:=1}; git status",
     ] {
         assert_eq!(script(command), unseen, "{command}");
     }
@@ -3236,6 +3264,12 @@ fn issue_1142_git_code_settings_are_unseen_code() {
         "git config --global --get user.name",
         "git config get user.email",
         "git config --type bool --get core.bare",
+        "i=0; (( i = i + 1 )); a[i]=2; let j=i+1; git status",
+        "for ((i = 0; i < 3; i++)); do git log -1; done",
+        "n=3; m=$n; (( m > 2 )) && git status",
+        ": ${PORT:=8080} ${HOST:=x}; (( PORT > 1 )) && git status",
+        "x=$((i + 1)); a[x]=1; (( x > 2 )) && git status",
+        "echo ${(U)name} ${(L)x}; git status",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
@@ -3251,6 +3285,11 @@ fn issue_1141_1142_checks_are_linear() {
         ("output options", "--output=x -o y "),
         ("code variables", "PAGER=x ${EDITOR:=y} "),
         ("naming operands", "$a "),
+        ("git option values", "-C git "),
+        ("git dir values", "--git-dir git "),
+        ("arithmetic assignments", "$((a[b[$x]]=$y=1)) "),
+        ("named assignments", "${(P)a=1} ${!b:=1} "),
+        ("built values", "m=$x=1 ${c:=1}$d=1 "),
     ] {
         work::assert_linear(label, |scale| {
             let line = format!("git {} status", unit.repeat(400 * scale));

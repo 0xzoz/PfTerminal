@@ -956,7 +956,9 @@ impl Classifier {
         // not read as commands.
         if (self.rebuilt == 0
             && self.not_shell == 0
-            && (arithmetic.runs_unseen(command) || arithmetic.runs_qualifier_code(command)))
+            && (arithmetic.runs_unseen(command)
+                || arithmetic.runs_qualifier_code(command)
+                || arithmetic.assigns_unseen_name(command)))
             || folders.unfollowed
         {
             self.note(ProtectedActionKind::UnseenCode);
