@@ -3180,6 +3180,9 @@ fn issue_1141_output_files_are_written() {
         "printf 'protocol=x\\n' | git credential-store --file ~/.zshrc store",
         // Review round 6: an alias body's path holding `=`.
         "alias g='git diff --output /a=b/../home/fixture/.zshrc'",
+        // Review round 7: a cut piece read as an option.
+        "alias g='git config --comment x=--get --global core.pager \"touch pwned\"'",
+        "alias g='git config --comment x=--get --file ~/.zshrc a.b v'",
         // Review round 1: a reading word as the value, chained `-C`.
         "git config --file ~/.zshenv 'x.$(touch pwned).y' get",
         "git config --comment --get -f ~/.zshenv 'x.$(touch pwned).y' z",

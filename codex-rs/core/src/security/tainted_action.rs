@@ -1055,22 +1055,32 @@ impl Classifier {
             if name == "alias" {
                 // A word with `=` may start a definition (`g=git`,
                 // `g.x=git`; a name holds no `=`) or be a split piece of a
-                // body (`core.pager=x`, a path): it is read both ways, as
-                // written and then cut (`g=git git`, `core.pager=x x`).
-                // Options stay whole (`--config-env=k=v`).
-                let mut body: Vec<&str> = Vec::new();
+                // body (`core.pager=x`, a path). Two bodies are read: one
+                // with each such word as written and then cut (`g=git git`,
+                // `core.pager=x x`), and one with it only cut, since an
+                // added word can shift what an option's value is
+                // (`--comment x=--get`). Options stay whole
+                // (`--config-env=k=v`).
+                let mut both: Vec<&str> = Vec::new();
+                let mut cut: Vec<&str> = Vec::new();
                 for word in args.iter().skip_while(|word| word.starts_with('-')) {
                     work::step();
-                    body.push(word);
-                    if let Some((_, rest)) = word.split_once('=')
-                        && !word.starts_with('-')
-                    {
-                        body.push(rest);
+                    both.push(word);
+                    match word.split_once('=') {
+                        Some((_, rest)) if !word.starts_with('-') => {
+                            both.push(rest);
+                            cut.push(rest);
+                        }
+                        _ => cut.push(word),
                     }
                 }
                 // Read plainly (substitutions run), and with each word
                 // quoted, so a word such as `#` or `'` cannot hide the rest.
-                if !body.is_empty() {
+                for body in [both, cut] {
+                    work::step();
+                    if body.is_empty() {
+                        continue;
+                    }
                     let quoted: Vec<String> = body
                         .iter()
                         .map(|word| format!("'{}'", word.replace('\'', "'\\''")))
