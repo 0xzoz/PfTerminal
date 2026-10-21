@@ -3815,6 +3815,11 @@ fn issue_1159_git_helpers_and_path_writes() {
         "git read-tree --index-output=~/.zshrc HEAD",
         "git --work-tree=~ checkout HEAD -- .zshrc",
         "git --work-tree ~ checkout HEAD -- .zshrc",
+        // Review round 1: a prefix that makes new names (`.` + `git/hooks/x`).
+        "git checkout-index -f --prefix=. git/hooks/pre-commit",
+        "git checkout-index -fa --prefix=.",
+        "git checkout-index -a --prefix=.gi",
+        "git-checkout-index -a --prefix=.",
     ] {
         assert_eq!(script(command), Some(Persistence), "{command}");
     }
@@ -3826,6 +3831,15 @@ fn issue_1159_git_helpers_and_path_writes() {
         "find . -exec git-$sub --global core.pager x \\;",
         "GIT_INDEX_FILE=~/.zshrc git add x",
         "export GIT_WORK_TREE=~; git checkout HEAD -- .zshrc",
+        // Review round 1: a setting whose value ends in a git name is judged
+        // before the scan stops there.
+        "git -c core.pager=./git.exe log",
+        "git -ccore.pager=./git.exe log",
+        "git --exec-path=./git.exe fetch",
+        "git.exe -c core.pager=./git.exe log",
+        "git.exe --exec-path=./git.exe fetch",
+        "git -c core.pager=/tmp/x/git log",
+        "git --exec-path=/tmp/x/git fetch",
     ] {
         assert_eq!(script(command), Some(UnseenCode), "{command}");
     }
@@ -3857,6 +3871,8 @@ fn issue_1159_checks_are_linear() {
         ("git helper options", "-/git-config "),
         ("git.exe words", "git.exe -c x "),
         ("prefixes", "checkout-index --prefix=a/ "),
+        ("config values", "-f config -f git "),
+        ("git option names", "-ccolor.x=./git.exe "),
     ] {
         work::assert_linear(label, |scale| {
             let line = format!("git {} status", unit.repeat(400 * scale));

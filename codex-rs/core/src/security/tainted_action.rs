@@ -513,12 +513,11 @@ fn rank(kind: ProtectedActionKind) -> u8 {
 }
 
 /// Commands that install something to run later outside the sandbox:
-/// global git config or a git key that runs a program, cron, launchd and
-/// systemd user units (PF-23-S02). `args` are lowercase.
+/// cron, launchd and systemd user units (PF-23-S02; git config is judged by
+/// [`GitConfigWrites`]). `args` are lowercase.
 fn persistence_command(name: &str, args: &[String]) -> bool {
     let has = |word: &str| args.iter().any(|arg| arg == word);
     match name {
-        "git" => git_config_persists(/*subcommand*/ None, args),
         "crontab" => !has("-l"),
         "launchctl" => ["load", "bootstrap", "submit", "enable"]
             .iter()
@@ -528,27 +527,71 @@ fn persistence_command(name: &str, args: &[String]) -> bool {
     }
 }
 
-/// Whether `git <subcommand> args` (or `git args`) writes global config or a
-/// git key that runs a program. #1159: a dashed helper (`git-config`) gives
-/// its subcommand apart from its arguments.
-fn git_config_persists(subcommand: Option<&str>, args: &[String]) -> bool {
-    let config = if subcommand == Some("config") {
-        args
-    } else {
-        let Some(at) = args.iter().position(|arg| arg == "config") else {
-            return false;
+/// #1159: whether `git config` writes global config or a git key that runs
+/// a program, for each git word of a simple command (`git`, `git.exe`, a
+/// dashed helper such as `git-config` that gives its subcommand apart).
+/// What follows each word is worked out once, on the first git word, so
+/// judging every git word of a line (`git config git config …`) stays
+/// linear.
+struct GitConfigWrites<'a> {
+    /// The command's words, lowercase.
+    words: &'a [String],
+    seen: Option<FollowingWords>,
+}
+
+/// For each word of a command (and its end), what it and the words after it
+/// hold.
+struct FollowingWords {
+    /// Where the first `config` is.
+    next_config: Vec<Option<usize>>,
+    /// Whether one is `--global`/`--system` or a key that runs a program.
+    persisting: Vec<bool>,
+    /// Whether, as the words after `config`, they only read.
+    reads: Vec<bool>,
+}
+
+impl<'a> GitConfigWrites<'a> {
+    fn new(words: &'a [String]) -> Self {
+        Self { words, seen: None }
+    }
+
+    /// Whether `git <subcommand> words[from..]` (or `git words[from..]`)
+    /// writes such config.
+    fn persists(&mut self, from: usize, subcommand: Option<&str>) -> bool {
+        let words = self.words;
+        let seen = self.seen.get_or_insert_with(|| {
+            let mut next_config = vec![None; words.len() + 1];
+            let mut persisting = vec![false; words.len() + 1];
+            for (at, word) in words.iter().enumerate().rev() {
+                work::step();
+                next_config[at] = if word == "config" {
+                    Some(at)
+                } else {
+                    next_config[at + 1]
+                };
+                persisting[at] = persisting[at + 1]
+                    || matches!(word.as_str(), "--global" | "--system")
+                    || GIT_RUN_KEYS.contains(&word.as_str())
+                    || word.starts_with("alias.");
+            }
+            FollowingWords {
+                next_config,
+                persisting,
+                // #1141: a reading word given as a value (`git config -f f k
+                // get`) does not make it a read.
+                reads: outputs::git_config_reads_each(words),
+            }
+        });
+        let start = if subcommand == Some("config") {
+            from
+        } else {
+            match seen.next_config.get(from).copied().flatten() {
+                Some(at) => at + 1,
+                None => return false,
+            }
         };
-        &args[at + 1..]
-    };
-    // #1141: a reading word given as a value (`git config -f f k get`) does
-    // not make it a read.
-    !outputs::git_config_reads(config)
-        && (config
-            .iter()
-            .any(|arg| matches!(arg.as_str(), "--global" | "--system"))
-            || config
-                .iter()
-                .any(|arg| GIT_RUN_KEYS.contains(&arg.as_str()) || arg.starts_with("alias.")))
+        start < seen.reads.len() && !seen.reads[start] && seen.persisting[start]
+    }
 }
 
 /// The folders a command's words resolve against: the last `-C`-style
@@ -1108,6 +1151,7 @@ impl Classifier {
             }
             self.change_folder(name, args, folders, variables);
         }
+        let mut git_config = GitConfigWrites::new(&lower);
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.
         for (index, word) in lower.iter().enumerate() {
@@ -1123,9 +1167,8 @@ impl Classifier {
             let helper = git_helpers::git_name(word);
             let subcommand = helper.as_ref().and_then(Option::as_deref);
             if persistence_command(name, args)
-                || helper
-                    .as_ref()
-                    .is_some_and(|_| git_config_persists(subcommand, args))
+                || ((name == "git" || helper.is_some())
+                    && git_config.persists(index + 1, subcommand))
             {
                 self.note(ProtectedActionKind::Persistence);
             }
@@ -1193,6 +1236,12 @@ impl Classifier {
         let outputs = command
             .as_ref()
             .and_then(|(index, name)| outputs::output_files(name, &words[index + 1..]));
+        if command
+            .as_ref()
+            .is_some_and(|(index, name)| outputs::joins_names(name, &words[index + 1..]))
+        {
+            self.note(ProtectedActionKind::Persistence);
+        }
         let writer = command.as_ref().map(|(index, name)| {
             (
                 *index,

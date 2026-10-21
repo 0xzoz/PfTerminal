@@ -83,6 +83,25 @@ pub(super) fn output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
     found.then_some(files)
 }
 
+/// #1159: `git checkout-index --prefix=P` writes P followed by each path it
+/// checks out. A prefix that does not end with `/` makes new names
+/// (`--prefix=.` and a tracked `git/hooks/x` write `.git/hooks/x`): what it
+/// writes is not known. `name` and `args` as for [`output_files`].
+pub(super) fn joins_names(name: &str, args: &[String]) -> bool {
+    let helper = git_helpers::git_name(name);
+    let subcommand = helper.as_ref().and_then(Option::as_deref);
+    if !(name == "git" || helper.is_some())
+        || !(subcommand == Some("checkout-index") || args.iter().any(|arg| arg == "checkout-index"))
+    {
+        return false;
+    }
+    let mut prefixes = Vec::new();
+    option_values(args, "--prefix", NO_SHORT, &mut prefixes);
+    prefixes
+        .iter()
+        .any(|prefix| !prefix.is_empty() && !prefix.ends_with('/'))
+}
+
 /// The folder a path prefix writes in, ending with `/`: itself when it ends
 /// with `/`, else the folder that holds it (`./` when it names none).
 fn prefix_folder(prefix: &str) -> String {
@@ -145,51 +164,95 @@ const GIT_CONFIG_READS: &[&str] = &[
 /// word that may be a value is one. Stops at the next `git` (#1102: each
 /// word is scanned once per line).
 pub(super) fn git_config_reads(words: &[String]) -> bool {
-    if words
-        .first()
-        .is_some_and(|word| matches!(word.as_str(), "get" | "list"))
-    {
+    if reads_by_subcommand(words) {
         return true;
     }
-    // The previous word was an option that takes a value, or an unknown
-    // one that may.
-    let mut value_next = false;
-    let mut maybe_value_next = false;
+    let mut next = ConfigWord::Option;
     for word in words {
         work::step();
-        if std::mem::take(&mut value_next) {
-            continue;
-        }
-        let option = word.starts_with('-');
-        if std::mem::take(&mut maybe_value_next) && option {
-            // A value (`--comment -l`), not an option.
-            continue;
-        }
-        // A word that is not an option may be the key (after an unknown
-        // option too), which ends the options.
-        // #1159: a git helper (`git-config`) starts another git line too.
-        if word == "--"
-            || !option
-            || super::shell::basename(word) == "git"
-            || git_helpers::git_name(word).is_some()
-        {
-            return false;
-        }
-        if GIT_CONFIG_READS.contains(&word.as_str()) {
-            return true;
-        }
-        if word.contains('=') || GIT_CONFIG_FLAGS.contains(&word.as_str()) {
-            continue;
-        }
-        if GIT_CONFIG_VALUES.contains(&word.as_str())
-            || (!word.starts_with("--") && word.ends_with('f'))
-        {
-            value_next = true;
-        } else {
-            maybe_value_next = true;
+        match config_word(word, next) {
+            Ok(reads) => return reads,
+            Err(state) => next = state,
         }
     }
     false
+}
+
+/// #1159: [`git_config_reads`] of `words[at..]` for every `at` (and the
+/// empty end), worked out in one pass from the end: what a word does depends
+/// only on it and on what the word before it made it.
+pub(super) fn git_config_reads_each(words: &[String]) -> Vec<bool> {
+    const STATES: [ConfigWord; 3] = [
+        ConfigWord::Option,
+        ConfigWord::Value,
+        ConfigWord::MaybeValue,
+    ];
+    // From each word on, read in each state.
+    let mut after = [false; 3];
+    let mut each = vec![false; words.len() + 1];
+    for (at, word) in words.iter().enumerate().rev() {
+        work::step();
+        let mut here = [false; 3];
+        for (slot, state) in here.iter_mut().zip(STATES) {
+            work::step();
+            *slot = match config_word(word, state) {
+                Ok(reads) => reads,
+                Err(next) => after[next as usize],
+            };
+        }
+        after = here;
+        each[at] = reads_by_subcommand(&words[at..]) || here[ConfigWord::Option as usize];
+    }
+    each
+}
+
+fn reads_by_subcommand(words: &[String]) -> bool {
+    words
+        .first()
+        .is_some_and(|word| matches!(word.as_str(), "get" | "list"))
+}
+
+/// What the next `git config` word may be.
+#[derive(Clone, Copy)]
+enum ConfigWord {
+    Option = 0,
+    /// The value of the option before it.
+    Value = 1,
+    /// The value of an unknown option before it, when it looks like an
+    /// option (`--comment -l`).
+    MaybeValue = 2,
+}
+
+/// One `git config` word read as `state` says: `Ok(reads)` when it decides,
+/// else what the next word may be.
+fn config_word(word: &str, state: ConfigWord) -> Result<bool, ConfigWord> {
+    let option = word.starts_with('-');
+    match state {
+        ConfigWord::Value => return Err(ConfigWord::Option),
+        ConfigWord::MaybeValue if option => return Err(ConfigWord::Option),
+        ConfigWord::Option | ConfigWord::MaybeValue => {}
+    }
+    // A word that is not an option may be the key (after an unknown option
+    // too), which ends the options. #1159: a git helper (`git-config`)
+    // starts another git line too.
+    if word == "--"
+        || !option
+        || super::shell::basename(word) == "git"
+        || git_helpers::git_name(word).is_some()
+    {
+        return Ok(false);
+    }
+    if GIT_CONFIG_READS.contains(&word) {
+        return Ok(true);
+    }
+    if word.contains('=') || GIT_CONFIG_FLAGS.contains(&word) {
+        return Err(ConfigWord::Option);
+    }
+    if GIT_CONFIG_VALUES.contains(&word) || (!word.starts_with("--") && word.ends_with('f')) {
+        Err(ConfigWord::Value)
+    } else {
+        Err(ConfigWord::MaybeValue)
+    }
 }
 
 /// Push the values of `long` (or a prefix of it) and `short` in `args` to
@@ -228,8 +291,36 @@ fn option_values(args: &[String], long: &str, short: char, files: &mut Vec<Strin
 
 #[cfg(test)]
 mod tests {
+    use super::git_config_reads;
+    use super::git_config_reads_each;
     use super::output_files;
     use pretty_assertions::assert_eq;
+
+    /// #1159: the one-pass reading agrees with reading each start alone.
+    #[test]
+    fn config_reads_each_start() {
+        for line in [
+            "get k",
+            "-f f k get",
+            "--comment --get -f f k z",
+            "-f f k -- --get",
+            "--global --get user.name",
+            "-zf f --list",
+            "--type bool --get core.bare",
+            "--comment -l k v",
+            "-f config -f git -f config --get",
+            "--get-colorbool x git --list config -l",
+            "-/git --get",
+            "--file --get k --unknown -x --get-all",
+        ] {
+            let words: Vec<String> = line.split(' ').map(str::to_string).collect();
+            let each = git_config_reads_each(&words);
+            let alone: Vec<bool> = (0..=words.len())
+                .map(|at| git_config_reads(&words[at..]))
+                .collect();
+            assert_eq!(each, alone, "{line}");
+        }
+    }
 
     fn files(name: &str, args: &[&str]) -> Option<Vec<String>> {
         let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();

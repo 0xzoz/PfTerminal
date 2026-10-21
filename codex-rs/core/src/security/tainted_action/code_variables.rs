@@ -412,7 +412,10 @@ pub(super) fn git_runs_code(args: &[String], raw: &[String]) -> bool {
     let mut index = 0;
     while let Some(word) = args.get(index) {
         work::step();
-        if is_git(word) {
+        // #1159: an option word ending in a git name (`-ccore.pager=./git`,
+        // `--exec-path=./git.exe`) is judged before the scan stops there.
+        let option = word.starts_with('-');
+        if !option && is_git(word) {
             return false;
         }
         let next = args.get(index + 1).map(String::as_str);
@@ -422,8 +425,9 @@ pub(super) fn git_runs_code(args: &[String], raw: &[String]) -> bool {
         if word == "-c" || word == "--config-env" {
             match next {
                 None => return !past_subcommand,
-                Some(value) if is_git(value) => return false,
+                // #1159: the setting first (`-c core.pager=./git`).
                 Some(value) if setting(value, index + 1) => return true,
+                Some(value) if is_git(value) => return false,
                 Some(_) => {}
             }
             index += 2;
@@ -444,6 +448,9 @@ pub(super) fn git_runs_code(args: &[String], raw: &[String]) -> bool {
                 return false;
             }
             past_subcommand = true;
+        }
+        if option && is_git(word) {
+            return false;
         }
         if !past_subcommand
             && GIT_VALUE_OPTIONS.contains(&word.as_str())
