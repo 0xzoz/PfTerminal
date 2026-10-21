@@ -306,6 +306,10 @@ impl TuiInputDrainWatchdog {
         self.pending_events.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[allow(
+        deprecated,
+        reason = "Rust 1.99 renames fetch_update to try_update, which is unstable on the argument-comment-lint nightly (nightly-2025-09-18)"
+    )]
     fn note_drainer_send_failed(&self) {
         self.pending_events
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
@@ -314,6 +318,10 @@ impl TuiInputDrainWatchdog {
             .ok();
     }
 
+    #[allow(
+        deprecated,
+        reason = "Rust 1.99 renames fetch_update to try_update, which is unstable on the argument-comment-lint nightly (nightly-2025-09-18)"
+    )]
     fn note_handled(&self) {
         self.last_handled_ms
             .store(self.elapsed_ms(), Ordering::Relaxed);

@@ -2,6 +2,7 @@
 #![cfg(unix)]
 
 use super::*;
+use crate::security::launch_contract::KeptFile;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -240,12 +241,13 @@ fn issue_841_reads_kept_by_the_launch_contract_are_recognised() {
     let contract = fixture.contract();
     let inputs = fixture.inputs(Fixture::profile());
     let named = |script: String| {
-        super::super::kept_read_named(
+        super::super::kept_read_note(
             &inputs,
             &contract,
             &["/bin/bash".to_string(), "-c".to_string(), script],
             &fixture.project,
         )
+        .is_some()
     };
     assert!(named(format!(
         "cat '{}/config.toml'",
@@ -253,6 +255,71 @@ fn issue_841_reads_kept_by_the_launch_contract_are_recognised() {
     )));
     assert!(named(format!("cat '{}/auth.json'", fixture.home.display())));
     assert!(!named("cat README.md".to_string()));
+}
+
+/// #1077 (MOD-09 item 7): the prompt names the file approving cannot unlock
+/// and what it is: a CLI token such as `~/.aws/credentials` is not called
+/// one of Corbanu's own files. A file approval does unlock (`~/.ssh/config`)
+/// gets no note.
+#[test]
+fn issue_1077_the_kept_read_note_names_the_file_and_what_it_is() {
+    let fixture = Fixture::new();
+    let contract = fixture.contract();
+    let inputs = fixture.inputs(Fixture::profile());
+    let note = |script: &str| {
+        super::super::kept_read_note(
+            &inputs,
+            &contract,
+            &[
+                "/bin/bash".to_string(),
+                "-c".to_string(),
+                script.to_string(),
+            ],
+            &fixture.project,
+        )
+    };
+    let notes = [
+        "cat ~/.aws/credentials",
+        "cat ~/.ssh/config ~/.netrc",
+        "cat \"$CODEX_HOME/config.toml\"",
+        "cat ~/.ssh/config",
+    ]
+    .map(|script| {
+        format!(
+            "{script}\n{}",
+            note(script).unwrap_or_else(|| "(no note)".to_string())
+        )
+    });
+    insta::assert_snapshot!(notes.join("\n\n"));
+    if cfg!(target_os = "macos") {
+        assert_eq!(
+            note("ls ~/Library/Keychains"),
+            Some(
+                "`~/Library/Keychains` is part of your keychains: secretless agent launch keeps \
+                 it unreadable to agent commands at every security level, even if you approve, \
+                 so approving cannot unlock it. If you approve, the command runs, but that \
+                 read fails."
+                    .to_string()
+            )
+        );
+    }
+}
+
+/// The Google Cloud CLI's folder on Windows (`%APPDATA%\gcloud`) holds its
+/// credentials and config, so the note calls it that folder, not a CLI
+/// token file; a file inside it is "in" the folder.
+#[test]
+fn the_kept_read_note_names_the_google_cloud_cli_folder() {
+    let notes = [
+        (r"%APPDATA%\gcloud", KeptFile::GoogleCloudCliFolder),
+        (
+            r"%APPDATA%\gcloud\credentials.db",
+            KeptFile::InGoogleCloudCliFolder,
+        ),
+        ("~/.netrc", KeptFile::CliToken),
+    ]
+    .map(|(path, kept)| super::super::moderate_kept_read_note(path, kept));
+    insta::assert_snapshot!(notes.join("\n\n"));
 }
 
 /// #839: what an explained denial was, for the inspector's recent denials:
@@ -286,5 +353,77 @@ fn issue_839_explained_denials_say_what_was_denied() {
             "reading a protected file",
             "denied by the sandbox under Moderate"
         )
+    );
+}
+
+/// #1087 (MOD-09 item 5): an in-process file tool's read (the image tool's)
+/// that Moderate's rules refused names Moderate; one the secretless launch
+/// contract keeps (already in the tool's own permissions) is attributed to
+/// the contract, as for a command; what neither refused, such as a project
+/// file the contract's fail-closed profile denies, is not explained.
+#[test]
+fn issue_1087_file_tool_denials_name_the_level() {
+    use codex_security_policy::SecurityLevel;
+    let fixture = Fixture::new();
+    let inputs = fixture.inputs(Fixture::profile());
+    let own = Fixture::profile().file_system_sandbox_policy();
+    let protected = inputs
+        .denials()
+        .apply(&inputs.profile)
+        .expect("the rules apply")
+        .file_system_sandbox_policy();
+    let denied_all = FileSystemSandboxPolicy::restricted(Vec::new());
+    let contract = fixture.contract();
+    let auth = fixture.home.join("auth.json");
+    let shown = auth.display().to_string();
+    let image = fixture.project.join("a.png");
+    let explain =
+        |level, contract: Option<&LaunchContract>, own: &FileSystemSandboxPolicy, path: &Path| {
+            super::super::explain_file_tool_denial(
+                level,
+                &inputs,
+                contract,
+                own,
+                &protected,
+                &fixture.project,
+                path,
+            )
+        };
+
+    assert_eq!(
+        explain(SecurityLevel::Moderate, None, &own, &auth),
+        Some((
+            "reading a protected file",
+            Some("denied by the sandbox under Moderate"),
+            read_explanation(&shown, WayForward::Permissive),
+        ))
+    );
+    assert_eq!(explain(SecurityLevel::Moderate, None, &own, &image), None);
+    assert_eq!(
+        explain(SecurityLevel::Moderate, Some(&contract), &denied_all, &auth),
+        Some((
+            "reading Corbanu's own files or CLI tokens",
+            Some(
+                "denied by the sandbox; secretless agent launch keeps it at every level, even when you approve"
+            ),
+            kept_read_explanation(&shown),
+        ))
+    );
+    assert_eq!(
+        explain(
+            SecurityLevel::Moderate,
+            Some(&contract),
+            &denied_all,
+            &image
+        ),
+        None
+    );
+    assert_eq!(
+        explain(SecurityLevel::Aggressive, None, &own, &auth),
+        Some((
+            "reading a protected file",
+            None,
+            super::super::explanation(&shown),
+        ))
     );
 }

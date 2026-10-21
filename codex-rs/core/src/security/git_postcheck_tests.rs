@@ -8,6 +8,7 @@ use super::unix::report;
 use super::*;
 use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::fs::symlink;
 use std::path::Path;
@@ -644,9 +645,10 @@ fn issue_874_a_remote_behind_an_unreadable_git_folder_is_reported() {
 }
 
 /// Review r4 (nit 3): a repository deleted and cloned again in the same
-/// place gets a first look, not "replaced".
+/// place isn't reported as "replaced" (its config and hooks would be as
+/// new, #943).
 #[test]
-fn issue_874_a_recloned_repository_gets_a_first_look() {
+fn issue_874_a_recloned_repository_isnt_reported_as_replaced() {
     let project = Project::new();
     let git = project.git();
     let (thread, repos) = baseline(&project);
@@ -832,4 +834,660 @@ fn issue_874_an_empty_config_forgotten_by_another_session() {
         kinds(&check(thread, &repos)),
         vec![format!("config {}", git.join("config.worktree").display())]
     );
+}
+
+/// #943 (1): a `.git` that went missing at a look and is made again, a
+/// different one, by a later command gets a full look (compared with an
+/// empty git folder), not a first look: its config, hooks and remotes are
+/// reported.
+#[test]
+fn issue_943_a_git_folder_made_again_later_gets_a_full_look() {
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    std::fs::rename(&git, project.base.join("moved-git")).expect("moved away");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    for folder in ["objects", "refs/heads", "hooks", "remotes"] {
+        std::fs::create_dir_all(git.join(folder)).expect("git folder");
+    }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(git.join("config"), "[core]\n\tfsmonitor = /tmp/run-me\n").expect("config");
+    std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\n").expect("hook");
+    std::fs::write(git.join("remotes/x"), "URL: /tmp/elsewhere\n").expect("remote");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![
+            format!("config {}", git.join("config").display()),
+            format!("config {}", git.join("hooks").display()),
+            format!("remote {}", git.join("remotes/x").display()),
+        ]
+    );
+    let mut held = project.held();
+    held.sort();
+    assert_eq!(
+        held,
+        shown(&[git.join("config"), git.join("hooks"), git.join("remotes/x")])
+    );
+    // Told once.
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+}
+
+/// #943 (1): made again empty (the Linux sandbox's mount point where `.git`
+/// was missing), nothing is reported until something is put in it.
+#[test]
+fn issue_943_an_empty_git_folder_made_again_is_reported_once_filled() {
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    std::fs::rename(&git, project.base.join("moved-git")).expect("moved away");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    std::fs::create_dir(&git).expect("empty .git");
+    std::fs::write(git.join("config"), "").expect("empty config");
+    std::fs::create_dir(git.join("hooks")).expect("empty hooks");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    assert_eq!(project.held(), Vec::<String>::new());
+    fill(&git.join("config"));
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("config {}", git.join("config").display())]
+    );
+}
+
+/// #943 (1): a worktree's `.git` file made again for the same git folders
+/// is compared with the last look there (its common folder's config and
+/// hooks aren't new).
+#[test]
+fn issue_943_a_worktree_git_file_made_again_compares_with_the_last_look() {
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let repos = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &repos, "Moderate"), None);
+    std::fs::remove_file(worktree.join(".git")).expect("removed");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    std::fs::write(worktree.join(".git"), &text).expect("made again");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    // What is new there since the last look still is.
+    std::fs::write(worktree_git.join("config.worktree"), "[core]\n").expect("config");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!(
+            "config {}",
+            worktree_git.join("config.worktree").display()
+        )]
+    );
+}
+
+/// #943 review r1: a worktree removed and added again in a later command
+/// (a new git folder below the common one) isn't reported for its
+/// `commondir`; one naming another folder is.
+#[test]
+fn issue_943_a_worktree_added_again_later() {
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    let add = |commondir: &str| {
+        std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+        std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+        std::fs::write(worktree_git.join("commondir"), commondir).expect("commondir");
+    };
+    add("../..\n");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let repos = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &repos, "Moderate"), None);
+    // Moved aside, not deleted: a deleted file's or folder's inode number
+    // can come back for the next one (Linux), which the look would take for
+    // the same one moved back (recorded on #943).
+    let removed = std::cell::Cell::new(0);
+    let remove = || {
+        removed.set(removed.get() + 1);
+        let aside = project.base.join(format!("removed-{}", removed.get()));
+        std::fs::create_dir(&aside).expect("aside");
+        std::fs::rename(worktree.join(".git"), aside.join("git-file")).expect("removed");
+        std::fs::rename(&worktree_git, aside.join("git-folder")).expect("removed");
+        assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    };
+    remove();
+    add("../..\n");
+    std::fs::write(worktree.join(".git"), &text).expect("added again");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    assert_eq!(project.held(), Vec::<String>::new());
+    // As git writes it for a real path: quiet too.
+    remove();
+    add(&format!("{}\n", project.git().display()));
+    std::fs::write(worktree.join(".git"), &text).expect("added again");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    // Review r2: through a link that leads to the common folder now and
+    // could lead elsewhere later; another folder.
+    let link = project.outside.join("common-link");
+    symlink(project.git(), &link).expect("link");
+    for commondir in [&link, &project.outside] {
+        remove();
+        add(&format!("{}\n", commondir.display()));
+        std::fs::write(worktree.join(".git"), &text).expect("added again");
+        let mut expected = vec![format!(
+            "config {}",
+            worktree_git.join("commondir").display()
+        )];
+        // Review r4: naming another folder, that folder is looked at as the
+        // common one (its git folders found again): the link there is new.
+        if commondir == &project.outside {
+            expected.insert(0, format!("link {}", link.display()));
+        }
+        assert_eq!(kinds(&check(thread, &repos)), expected);
+    }
+}
+
+/// #943 review r4: a worktree's `.git` file removed in one command and a
+/// `git init` there in a later one (a `.git` folder now) gets a full look at
+/// its own git folder, found again, also where the next command's look
+/// (`recheck`) is the first to see it; what it reports holds there.
+#[test]
+fn issue_943_a_worktree_git_file_made_again_as_a_folder() {
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let repos = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &repos, "Moderate"), None);
+    std::fs::remove_file(worktree.join(".git")).expect("removed");
+    let (message, _) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    assert_eq!(message, None);
+    let git = worktree.join(".git");
+    for folder in ["objects", "refs/heads", "hooks"] {
+        std::fs::create_dir_all(git.join(folder)).expect("git folder");
+    }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(git.join("config"), "[core]\n\tfsmonitor = /tmp/run-me\n").expect("config");
+    std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\n").expect("hook");
+    let (message, held) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    let message = message.expect("reported");
+    let git = git.canonicalize().expect("canonical");
+    assert!(
+        message.contains(&git.join("config").display().to_string()),
+        "{message}"
+    );
+    let mut held = held;
+    held.sort();
+    assert_eq!(held, shown(&[git.join("config"), git.join("hooks")]));
+}
+
+/// #943 review r5: the same, where a command's own look (`finish`, with its
+/// git folders found again) is the first to see the remade `.git`: later
+/// looks (`recheck`) walk it too, and what is new there afterwards is
+/// reported.
+#[test]
+fn issue_943_a_remade_git_folder_seen_first_by_a_command() {
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let old = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &old, "Moderate"), None);
+    std::fs::remove_file(worktree.join(".git")).expect("removed");
+    assert_eq!(kinds(&check(thread, &old)), Vec::<String>::new());
+    let git = worktree.join(".git");
+    for folder in ["objects", "refs/heads", "hooks"] {
+        std::fs::create_dir_all(git.join(folder)).expect("git folder");
+    }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(git.join("config"), "[core]\n\tfsmonitor = /tmp/run-me\n").expect("config");
+    let fresh = repos(&[worktree.as_path()]);
+    let git = git.canonicalize().expect("canonical");
+    assert_eq!(
+        kinds(&check(thread, &fresh)),
+        vec![format!("config {}", git.join("config").display())]
+    );
+    // The next command's look walks the new git folder, not the old ones.
+    let (message, _) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    assert_eq!(message, None);
+    std::fs::write(git.join("config.worktree"), "[core]\n").expect("config.worktree");
+    assert_eq!(
+        kinds(&check(thread, &fresh)),
+        vec![format!("config {}", git.join("config.worktree").display())]
+    );
+}
+
+/// #943 review r6: a worktree's `.git` file replaced by a `.git` folder in
+/// one command (no look saw it missing) is reported as replaced, and its own
+/// git folder gets a full look: its config and hooks are reported and hold
+/// there, and later looks walk it.
+#[test]
+fn issue_943_a_worktree_git_file_replaced_by_a_folder_in_one_command() {
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let old = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &old, "Moderate"), None);
+    // One command: `rm .git && git init && …`.
+    std::fs::remove_file(worktree.join(".git")).expect("removed");
+    let git = worktree.join(".git");
+    for folder in ["objects", "refs/heads", "hooks"] {
+        std::fs::create_dir_all(git.join(folder)).expect("git folder");
+    }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(git.join("config"), "[core]\n\tfsmonitor = /tmp/run-me\n").expect("config");
+    std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\n").expect("hook");
+    let git = git.canonicalize().expect("canonical");
+    let found = kinds(&check(thread, &old));
+    for expected in [
+        format!("config {}", git.join("config").display()),
+        format!("config {}", git.join("hooks").display()),
+    ] {
+        assert!(found.contains(&expected), "{found:?}");
+    }
+    assert!(
+        found.iter().any(|kind| kind.starts_with("replaced")),
+        "{found:?}"
+    );
+    let held = held_for(std::slice::from_ref(&git));
+    for path in shown(&[git.join("config"), git.join("hooks")]) {
+        assert!(held.contains(&path), "{held:?}");
+    }
+    // The next command's look walks the new git folder, and what is new
+    // there afterwards is reported.
+    let (message, _) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    assert_eq!(message, None);
+    std::fs::write(git.join("config.worktree"), "[core]\n").expect("config.worktree");
+    assert_eq!(
+        kinds(&check(thread, &repos(&[worktree.as_path()]))),
+        vec![format!("config {}", git.join("config.worktree").display())]
+    );
+}
+
+/// #943 item 11 (review r1): the folder a command runs in is never left out
+/// by the cap on repositories looked at, nor when what holds it is worked
+/// out.
+#[test]
+fn issue_943_the_command_folder_is_not_left_out_by_the_cap() {
+    let projects: Vec<Project> = (0..=unix::MAX_REPOS).map(|_| Project::new()).collect();
+    let (last, others) = projects.split_last().expect("projects");
+    let folders: Vec<&Path> = others
+        .iter()
+        .map(|project| project.root.as_path())
+        .collect();
+    assert_eq!(repos(&folders).len(), unix::MAX_REPOS);
+    let found = repos_and(&folders, Some(last.root.as_path()));
+    assert_eq!(found.len(), unix::MAX_REPOS + 1);
+    // Its finding holds a command there, past the cap too.
+    let (thread, _) = baseline(last);
+    symlink(
+        last.outside.join("zshrc"),
+        last.git().join("COMMIT_EDITMSG"),
+    )
+    .expect("link");
+    let mut all = folders.clone();
+    all.push(last.root.as_path());
+    let (_, held) = recheck(thread, "Moderate", &all);
+    assert_eq!(
+        held,
+        vec![last.git().join("COMMIT_EDITMSG").display().to_string()]
+    );
+}
+
+/// #943 item 13: after a worktree's `.git` file is replaced by a `.git`
+/// folder in one command while its old git folder can't be read, that look
+/// is incomplete; once the new git folder is seen in full the project is no
+/// longer held as "not checked fully" (it stayed so until a restart), while
+/// the main project, whose folders hold the unreadable one, still is until
+/// it can be read.
+#[test]
+fn issue_943_a_replaced_git_seen_in_full_is_no_longer_held_as_incomplete() {
+    // Root reads any folder.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    const NOT_FULLY: &str = "(not checked fully)";
+    let project = Project::new();
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    let thread = ThreadId::new();
+    let old = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &old, "Moderate"), None);
+    // One command: `rm .git && git init`, and the old git folder made
+    // unreadable.
+    std::fs::remove_file(worktree.join(".git")).expect("removed");
+    let git = worktree.join(".git");
+    for folder in ["objects", "refs/heads"] {
+        std::fs::create_dir_all(git.join(folder)).expect("git folder");
+    }
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    let git = git.canonicalize().expect("canonical");
+    std::fs::set_permissions(&worktree_git, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let found = kinds(&check(thread, &old));
+    let held_then = held_for(std::slice::from_ref(&git));
+    // The next look walks only the new git folder, in full.
+    let (_, held_now) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    let main_held = project.held();
+    std::fs::set_permissions(&worktree_git, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert!(
+        found.contains(&format!("incomplete {}", worktree.join(".git").display())),
+        "{found:?}"
+    );
+    assert!(
+        held_then.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held_then:?}"
+    );
+    assert!(
+        !held_now.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held_now:?}"
+    );
+    assert!(
+        main_held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{main_held:?}"
+    );
+    // Readable again and seen in full by a look at the main project (the
+    // replaced `.git` still holds it).
+    let (main_thread, main_repos) = (ThreadId::new(), project.repos());
+    assert_eq!(begin(main_thread, &main_repos, "Moderate"), None);
+    let main_held = project.held();
+    assert!(
+        !main_held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{main_held:?}"
+    );
+}
+
+/// #943 item 13 review r1: a look whose git folders overlap in other roles
+/// (a `.git` file naming a folder inside the project's git folder, with a
+/// `commondir` back to it) sees less of the project's git folder than a
+/// look of it alone: complete, it doesn't clear the project's incomplete
+/// entry.
+#[test]
+fn issue_943_an_overlapping_look_does_not_clear_another_incomplete_one() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    const NOT_FULLY: &str = "(not checked fully)";
+    let project = Project::new();
+    let git = project.git();
+    let hidden = git.join("info/objects/y");
+    std::fs::create_dir_all(&hidden).expect("hidden folder");
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let thread = ThreadId::new();
+    let found = kinds(&check(thread, &project.repos()));
+    let elsewhere = project.base.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    std::fs::write(git.join("info/commondir"), "..\n").expect("commondir");
+    std::fs::write(
+        elsewhere.join(".git"),
+        format!("gitdir: {}\n", git.join("info").display()),
+    )
+    .expect("git file");
+    let overlapping = repos(&[elsewhere.as_path()]);
+    let other_found = kinds(&check(ThreadId::new(), &overlapping));
+    let held = project.held();
+    std::fs::set_permissions(&hidden, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert_eq!(found, vec![format!("incomplete {}", git.display())]);
+    assert_eq!(
+        overlapping.first().map(|repo| repo.probes().len()),
+        Some(1 + 2 * 4),
+        "{overlapping:?}"
+    );
+    assert!(
+        !other_found
+            .iter()
+            .any(|kind| kind.starts_with("incomplete")),
+        "{other_found:?}"
+    );
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+}
+
+/// #943 item 13 review r2: a worktree's look walks its git folder from its
+/// own depth; where the project's git folder alone is nested too deep below
+/// it, that look doesn't clear the project's incomplete entry.
+#[test]
+fn issue_943_a_worktree_look_does_not_clear_a_too_deep_project() {
+    const NOT_FULLY: &str = "(not checked fully)";
+    let project = Project::new();
+    let git = project.git();
+    let worktree_git = git.join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), "../..\n").expect("commondir");
+    // 17 levels below the project's git folder, 15 below the worktree's.
+    let deep = (0..13).fold(worktree_git.join("logs/refs"), |dir, _| dir.join("x"));
+    std::fs::create_dir_all(&deep).expect("deep folders");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    std::fs::write(
+        worktree.join(".git"),
+        format!("gitdir: {}\n", worktree_git.display()),
+    )
+    .expect("git file");
+    let found = kinds(&check(ThreadId::new(), &project.repos()));
+    assert_eq!(found, vec![format!("incomplete {}", git.display())]);
+    let worktree_found = kinds(&check(ThreadId::new(), &repos(&[worktree.as_path()])));
+    assert_eq!(worktree_found, Vec::<String>::new());
+    let held = project.held();
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+}
+
+/// #943 item 13 review r3: a repository whose `.git` names two git folders
+/// (a `gitdir:` and a `commondir` an agent can write) can be incomplete for
+/// too many entries while a look of each folder alone is complete: those
+/// looks don't clear its entry, only a complete look of its own does.
+#[test]
+fn issue_943_looks_of_its_git_folders_one_by_one_do_not_clear_a_repository() {
+    const NOT_FULLY: &str = "(not checked fully)";
+    // Over half the cap in each.
+    let fill = |git: &Path| {
+        let tags = git.join("refs/tags");
+        std::fs::create_dir_all(&tags).expect("tags");
+        for n in 0..unix::MAX_ENTRIES / 2 + 1 {
+            std::fs::write(tags.join(format!("t{n}")), "").expect("tag");
+        }
+    };
+    let common = Project::new();
+    fill(&common.git());
+    let other = common.base.join("other/.git");
+    for folder in ["objects", "refs/heads"] {
+        std::fs::create_dir_all(other.join(folder)).expect("git folder");
+    }
+    std::fs::write(other.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(
+        other.join("commondir"),
+        format!("{}\n", common.git().display()),
+    )
+    .expect("commondir");
+    fill(&other);
+    let both = common.base.join("both");
+    std::fs::create_dir_all(&both).expect("both");
+    std::fs::write(both.join(".git"), format!("gitdir: {}\n", other.display())).expect("git file");
+    let thread = ThreadId::new();
+    let both_repos = repos(&[both.as_path()]);
+    let found = kinds(&check(thread, &both_repos));
+    assert_eq!(
+        found,
+        vec![format!("incomplete {}", both.join(".git").display())]
+    );
+    for folder in [common.root.clone(), common.base.join("other")] {
+        assert_eq!(
+            kinds(&check(thread, &repos(&[folder.as_path()]))),
+            Vec::<String>::new()
+        );
+    }
+    let held = held_for(&[common.git(), other.clone()]);
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+    // Review r4: nor once the session forgot it (past its repository
+    // limit): its entry wasn't left behind by a swap.
+    let others: Vec<Project> = (0..16).map(|_| Project::new()).collect();
+    for project in &others {
+        assert_eq!(
+            kinds(&check(thread, &project.repos())),
+            Vec::<String>::new()
+        );
+    }
+    for folder in [common.root.clone(), common.base.join("other")] {
+        assert_eq!(
+            kinds(&check(thread, &repos(&[folder.as_path()]))),
+            Vec::<String>::new()
+        );
+    }
+    let held = held_for(&[common.git(), other]);
+    assert!(
+        held.iter().any(|held| held.ends_with(NOT_FULLY)),
+        "{held:?}"
+    );
+}
+
+/// A linked worktree of `project` named `feature`, its git folder's
+/// `commondir` holding `commondir`.
+fn add_worktree(project: &Project, commondir: &str) -> (PathBuf, PathBuf, String) {
+    let worktree_git = project.git().join("worktrees/feature");
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(worktree_git.join("commondir"), commondir).expect("commondir");
+    let worktree = project.base.join("feature");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    let text = format!("gitdir: {}\n", worktree_git.display());
+    std::fs::write(worktree.join(".git"), &text).expect("git file");
+    (worktree, worktree_git, text)
+}
+
+/// #943 item 12: a worktree's `.git` file seen missing and back as the same
+/// one (moved back here; on Linux a new file can also get the freed inode
+/// number), whose git folder was added again with a `commondir` naming
+/// another folder, gets a full look: the `commondir` is reported.
+#[test]
+fn issue_943_a_git_file_back_as_the_same_one_with_another_commondir() {
+    let project = Project::new();
+    let (worktree, worktree_git, _) = add_worktree(&project, "../..\n");
+    let thread = ThreadId::new();
+    let repos = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &repos, "Moderate"), None);
+    let aside = project.base.join("aside");
+    std::fs::create_dir(&aside).expect("aside");
+    std::fs::rename(worktree.join(".git"), aside.join("git-file")).expect("moved aside");
+    std::fs::rename(&worktree_git, aside.join("git-folder")).expect("moved aside");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+    std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+    std::fs::write(
+        worktree_git.join("commondir"),
+        format!("{}\n", project.outside.display()),
+    )
+    .expect("commondir");
+    // Review r1: and meanwhile config in the common folder it named before.
+    std::fs::write(project.git().join("config.worktree"), "[core]\n").expect("config");
+    std::fs::rename(aside.join("git-file"), worktree.join(".git")).expect("moved back");
+    let found = kinds(&check(thread, &repos));
+    for path in [
+        worktree_git.join("commondir"),
+        project.git().join("config.worktree"),
+    ] {
+        assert!(
+            found.contains(&format!("config {}", path.display())),
+            "{found:?}"
+        );
+    }
+}
+
+/// #943 item 12: a worktree removed and added again, its `commondir`
+/// through a link to the common folder (which could lead elsewhere later),
+/// is reported also where the new `.git` file gets the old one's inode
+/// number (Linux reuses a freed one at once), told apart by when it was
+/// made.
+#[test]
+fn issue_943_a_worktree_added_again_on_a_reused_inode() {
+    let project = Project::new();
+    let (worktree, worktree_git, text) = add_worktree(&project, "../..\n");
+    let link = project.outside.join("common-link");
+    symlink(project.git(), &link).expect("link");
+    let thread = ThreadId::new();
+    let repos = repos(&[worktree.as_path()]);
+    assert_eq!(begin(thread, &repos, "Moderate"), None);
+    let mut reused = 0;
+    for round in 0..8 {
+        // Its git folder moved aside (its inode stays taken), the `.git`
+        // file deleted: the freed inode is the one the next file may get.
+        std::fs::rename(&worktree_git, project.base.join(format!("aside-{round}")))
+            .expect("moved aside");
+        let old = std::fs::symlink_metadata(worktree.join(".git"))
+            .expect("git file")
+            .ino();
+        std::fs::remove_file(worktree.join(".git")).expect("removed");
+        assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+        // A later command: file systems stamp creation times with a coarse
+        // clock (ext4: a few milliseconds).
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(worktree.join(".git"), &text).expect("added again");
+        std::fs::create_dir_all(&worktree_git).expect("worktree git folder");
+        std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").expect("HEAD");
+        std::fs::write(
+            worktree_git.join("commondir"),
+            format!("{}\n", link.display()),
+        )
+        .expect("commondir");
+        let new = std::fs::symlink_metadata(worktree.join(".git"))
+            .expect("git file")
+            .ino();
+        reused += usize::from(new == old);
+        let found = kinds(&check(thread, &repos));
+        // Where creation times aren't recorded (or on macOS, where they
+        // aren't compared), a reused inode is the documented limit.
+        let born = std::fs::symlink_metadata(worktree.join(".git"))
+            .expect("git file")
+            .created()
+            .is_ok();
+        if new == old && (!born || cfg!(target_os = "macos")) {
+            continue;
+        }
+        assert!(
+            found.contains(&format!(
+                "config {}",
+                worktree_git.join("commondir").display()
+            )),
+            "round {round}, inode reused: {}: {found:?}",
+            new == old
+        );
+    }
+    // How often the case under test came up (Linux reuses freed inodes).
+    #[allow(clippy::print_stderr)]
+    {
+        eprintln!("the .git file got its old inode number back {reused} of 8 times");
+    }
 }
