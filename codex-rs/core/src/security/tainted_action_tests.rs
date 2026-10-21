@@ -3750,35 +3750,59 @@ fn issue_1142_flag_groups_cut_inside_a_character() {
     let _ = script(&line);
 }
 
-/// #1102: the #1141/#1142 checks stay linear in the line's length.
-#[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
-fn issue_1141_1142_checks_are_linear() {
-    for (label, unit) in [
-        ("git words", "-/git -c x "),
-        ("git config words", "git config "),
-        ("chained folders", "-C a "),
-        ("output options", "--output=x -o y "),
-        ("code variables", "PAGER=x ${EDITOR:=y} "),
-        ("naming operands", "$a "),
-        ("git option values", "-C git "),
-        ("git dir values", "--git-dir git "),
-        ("git upper-case values", "-C GIT "),
-        ("git after the subcommand", "-C d log x "),
-        ("arithmetic assignments", "$((a[b[$x]]=$y=1)) "),
-        ("named assignments", "${(P)a=1} ${!b:=1} "),
-        ("built values", "m=$x=1 ${c:=1}$d=1 "),
-    ] {
-        work::assert_linear(label, |scale| {
-            let line = format!("git {} status", unit.repeat(400 * scale));
-            let _ = script(&line);
-            let line = format!("read {}", unit.repeat(400 * scale));
-            let _ = script(&line);
-        });
-    }
+/// #1102: the #1141/#1142 checks stay linear in the line's length: each
+/// unit repeated in a `git ... status` line and in a `read` line, each line
+/// checked on its own. #1244: one test per unit and line, so that no single
+/// test runs long in a debug build (the work counted is unchanged).
+macro_rules! issue_1141_1142_checks_are_linear {
+    ($($name:ident: $unit:literal,)*) => {
+        mod issue_1141_1142_checks_are_linear {
+            use super::*;
+            $(
+                mod $name {
+                    use super::*;
+
+                    #[test]
+                    #[cfg_attr(
+                        windows,
+                        ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+                    )]
+                    fn in_git_lines() {
+                        work::assert_linear(concat!(stringify!($name), " in git lines"), |scale| {
+                            let _ = script(&format!("git {} status", $unit.repeat(400 * scale)));
+                        });
+                    }
+
+                    #[test]
+                    #[cfg_attr(
+                        windows,
+                        ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+                    )]
+                    fn in_read_lines() {
+                        work::assert_linear(concat!(stringify!($name), " in read lines"), |scale| {
+                            let _ = script(&format!("read {}", $unit.repeat(400 * scale)));
+                        });
+                    }
+                }
+            )*
+        }
+    };
+}
+
+issue_1141_1142_checks_are_linear! {
+    git_words: "-/git -c x ",
+    git_config_words: "git config ",
+    chained_folders: "-C a ",
+    output_options: "--output=x -o y ",
+    code_variables: "PAGER=x ${EDITOR:=y} ",
+    naming_operands: "$a ",
+    git_option_values: "-C git ",
+    git_dir_values: "--git-dir git ",
+    git_upper_case_values: "-C GIT ",
+    git_after_the_subcommand: "-C d log x ",
+    arithmetic_assignments: "$((a[b[$x]]=$y=1)) ",
+    named_assignments: "${(P)a=1} ${!b:=1} ",
+    built_values: "m=$x=1 ${c:=1}$d=1 ",
 }
 
 /// #1159: git under another name is judged as git (a dashed helper in git's
