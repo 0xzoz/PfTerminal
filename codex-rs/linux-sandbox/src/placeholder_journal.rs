@@ -567,25 +567,36 @@ fn mounted_anywhere(paths: &[&Path]) -> bool {
 /// The mount points in the mount namespaces of this user's processes, or
 /// `None` when they cannot all be read.
 fn mount_points() -> Option<HashSet<Vec<u8>>> {
-    let processes = std::fs::read_dir("/proc").ok()?;
+    mount_points_for_processes(
+        std::fs::read_dir("/proc")
+            .ok()?
+            .flatten()
+            .map(|process| process.path()),
+    )
+}
+
+fn mount_points_for_processes(
+    processes: impl Iterator<Item = PathBuf>,
+) -> Option<HashSet<Vec<u8>>> {
     // SAFETY: `geteuid` has no preconditions.
     let euid = unsafe { libc::geteuid() };
     let mut seen = HashSet::new();
     let mut points = HashSet::new();
-    for process in processes.flatten() {
-        if !process
+    for dir in processes {
+        if !dir
             .file_name()
-            .to_str()
+            .and_then(|name| name.to_str())
             .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
         {
             continue;
         }
-        let dir = process.path();
         if !std::fs::metadata(&dir).is_ok_and(|metadata| metadata.uid() == euid) {
             continue;
         }
-        if let Ok(namespace) = std::fs::read_link(dir.join("ns/mnt"))
-            && !seen.insert(namespace)
+        let namespace = std::fs::read_link(dir.join("ns/mnt")).ok();
+        if namespace
+            .as_ref()
+            .is_some_and(|namespace| seen.contains(namespace))
         {
             continue;
         }
@@ -601,6 +612,15 @@ fn mount_points() -> Option<HashSet<Vec<u8>>> {
             }
             Err(_) => return None,
         };
+        // A namespace counts as seen only once a view of it has been read,
+        // and only if the process is still in it (its pid was not reused by
+        // a process elsewhere while it was read): a process that ends before
+        // its view is read must not hide the views of the others in it.
+        if let Some(namespace) = namespace
+            && std::fs::read_link(dir.join("ns/mnt")).is_ok_and(|now| now == namespace)
+        {
+            seen.insert(namespace);
+        }
         points.extend(
             mounts
                 .split(|byte| *byte == b'\n')
