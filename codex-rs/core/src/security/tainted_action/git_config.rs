@@ -14,26 +14,30 @@ enum ConfigArgs<'a> {
     Uncertain,
 }
 
-/// Find `config`, sharing Git's global value-option boundaries. Only plain
-/// Git lets the caller restart with the same suffix. A dashed-helper-looking
-/// path or option value cannot safely end this check without asking.
+/// Find `config`, sharing Git's global value-option boundaries. The word
+/// lexer splits quoted values, so after an option a plain word may still be
+/// its value. Only plain Git followed by an option lets the caller restart
+/// with the same suffix; a helper-looking value remains uncertain.
 fn config_args(args: &[String]) -> ConfigArgs<'_> {
     let mut at = 0;
+    let mut after_option = false;
     while let Some(word) = args.get(at) {
         work::step();
         let takes_value = code_variables::GIT_VALUE_OPTIONS.contains(&word.as_str())
             || matches!(word.as_str(), "-c" | "--config-env");
-        let boundary = if takes_value {
-            args.get(at + 1)
-        } else {
-            Some(word)
-        };
-        if let Some(boundary) = boundary {
+        let boundary_at = at + usize::from(takes_value);
+        if let Some(boundary) = args.get(boundary_at) {
             let git_name = git_helpers::git_name(boundary);
-            if basename(boundary).eq_ignore_ascii_case("git") || git_name == Some(None) {
+            let plain_git =
+                basename(boundary).eq_ignore_ascii_case("git") || git_name == Some(None);
+            if plain_git
+                && args
+                    .get(boundary_at + 1)
+                    .is_none_or(|after| after.starts_with('-'))
+            {
                 return ConfigArgs::NotConfig;
             }
-            if git_name.is_some() {
+            if !plain_git && git_name.is_some() {
                 return ConfigArgs::Uncertain;
             }
         }
@@ -41,8 +45,10 @@ fn config_args(args: &[String]) -> ConfigArgs<'_> {
             return ConfigArgs::Found(&args[at + 1..]);
         }
         if takes_value {
+            after_option = true;
             at += 2;
-        } else if word.starts_with('-') {
+        } else if word.starts_with('-') || after_option {
+            after_option = true;
             at += 1;
         } else {
             return ConfigArgs::NotConfig;
@@ -61,8 +67,12 @@ pub(super) struct Writes<'a> {
 
 struct FollowingWrites {
     reads: Vec<bool>,
-    /// A suffix's result for each combination of the two parser flags.
-    writes: Vec<[Option<bool>; 4]>,
+    /// Whether a later word is `config`, including this word.
+    has_config: Vec<bool>,
+    /// Whether any possible key, excluding the final value, is unsafe.
+    unsafe_keys: Vec<bool>,
+    /// A suffix's result for each combination of the three parser flags.
+    writes: Vec<[Option<bool>; 8]>,
 }
 
 impl<'a> Writes<'a> {
@@ -76,33 +86,53 @@ impl<'a> Writes<'a> {
     /// previously harmless keys in a program-running family and also ask.
     pub(super) fn writes_code_setting(&mut self, from: usize, subcommand: Option<&str>) -> bool {
         let words = self.words;
-        let args = &words[from..];
-        let args = match subcommand {
-            Some("config") => args,
+        let start = match subcommand {
+            Some("config") => Some(from),
             Some(_) => return false,
-            None => match config_args(args) {
-                ConfigArgs::Found(args) => args,
+            None => match config_args(&words[from..]) {
+                ConfigArgs::Found(args) => Some(words.len() - args.len()),
                 ConfigArgs::NotConfig => return false,
-                ConfigArgs::Uncertain => return true,
+                ConfigArgs::Uncertain => None,
             },
         };
-        let mut at = words.len() - args.len();
-        let seen = self.seen.get_or_insert_with(|| FollowingWrites {
-            reads: outputs::git_config_reads_each(words),
-            writes: vec![[None; 4]; words.len()],
+        let seen = self.seen.get_or_insert_with(|| {
+            let mut has_config = vec![false; words.len() + 1];
+            let mut unsafe_keys = vec![false; words.len() + 1];
+            for (at, word) in words.iter().enumerate().rev() {
+                work::step();
+                has_config[at] = word == "config" || has_config[at + 1];
+                unsafe_keys[at] = unsafe_keys[at + 1]
+                    || (at + 1 < words.len()
+                        && !code_variables::safe_git_key(&word.to_ascii_lowercase()));
+            }
+            FollowingWrites {
+                reads: outputs::git_config_reads_each(words),
+                has_config,
+                unsafe_keys,
+                writes: vec![[None; 8]; words.len()],
+            }
         });
+        let Some(mut at) = start else {
+            // A helper-looking value before `status` or `log` is not
+            // evidence of a config write. The suffix is shared by every
+            // Git start, so this additional check stays linear.
+            return seen.has_config[from];
+        };
         if seen.reads[at] {
             return false;
         }
         let mut subcommand_position = true;
         let mut options = true;
+        let mut after_value_option = false;
         let mut visited = Vec::new();
         let writes = loop {
             work::step();
             let Some(word) = words.get(at) else {
                 break false;
             };
-            let state = usize::from(options) | (usize::from(subcommand_position) << 1);
+            let state = usize::from(options)
+                | (usize::from(subcommand_position) << 1)
+                | (usize::from(after_value_option) << 2);
             if let Some(writes) = seen.writes[at][state] {
                 break writes;
             }
@@ -125,6 +155,7 @@ impl<'a> Writes<'a> {
                     break words.get(at + 2).is_some();
                 }
                 if outputs::GIT_CONFIG_VALUES.contains(&option) || option == "-t" {
+                    after_value_option = true;
                     at += if word.contains('=') { 1 } else { 2 };
                 } else if outputs::GIT_CONFIG_FLAGS.contains(&word.as_str())
                     || matches!(
@@ -140,6 +171,7 @@ impl<'a> Writes<'a> {
                     && short[..offset].chars().all(|ch| ch == 'z')
                 {
                     // A short option group (`-zf FILE`) or attached value.
+                    after_value_option = true;
                     at += 1 + usize::from(offset + flag.len_utf8() == short.len());
                 } else {
                     // An abbreviation can rename a section or take the next
@@ -165,7 +197,15 @@ impl<'a> Writes<'a> {
                 }
             }
             let safe = |key: &str| code_variables::safe_git_key(&key.to_ascii_lowercase());
-            break words.get(at + 1).is_some() && !safe(word);
+            // A value split at blanks or commas can leave a safe-looking
+            // fragment where the key would be. Every following word except
+            // the final value must be safe before this write can stay quiet.
+            break words.get(at + 1).is_some()
+                && if after_value_option {
+                    seen.unsafe_keys[at]
+                } else {
+                    !safe(word)
+                };
         };
         // Each word/state is scanned at most once across all invocations.
         for (at, state) in visited {

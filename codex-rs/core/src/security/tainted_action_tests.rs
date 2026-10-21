@@ -4365,7 +4365,6 @@ fn issue_1159_local_git_code_key_spellings_in_data_stay_quiet() {
         "git config --comment pager.log user.name marker",
         "git config set --comment=diff.external user.name marker",
         "git config --file diff.external user.name marker",
-        "git config -fpager.log user.name marker",
         "git config set --value pager.log user.name marker",
         "git config user.name marker pager.log",
         "git log --format=config pager.log marker",
@@ -4714,6 +4713,25 @@ fn issue_1161_local_key_cache_keeps_parser_states_separate() {
 }
 
 #[test]
+fn issue_1161_local_key_cache_keeps_split_value_state_separate() {
+    let words = "--comment note user.name filter.a.clean marker"
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for (from, want) in [([2, 0], [false, true]), ([0, 2], [true, false])] {
+        let mut writes = git_config::Writes::new(&words);
+        assert_eq!(
+            [
+                writes.writes_code_setting(from[0], Some("config")),
+                writes.writes_code_setting(from[1], Some("config")),
+            ],
+            want,
+            "{from:?}"
+        );
+    }
+}
+
+#[test]
 #[cfg_attr(
     windows,
     ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
@@ -4750,6 +4768,8 @@ fn issue_1161_git_looking_global_values_keep_scans_linear() {
         "-C /tmp/git-x ",
         "--work-tree=../git-wt ",
         "-c color.ui=/a/git-y ",
+        "-C 'a b' ",
+        "--namespace 'a git b' ",
     ] {
         work::assert_linear(unit, |scale| {
             let line = format!(
@@ -4759,4 +4779,95 @@ fn issue_1161_git_looking_global_values_keep_scans_linear() {
             assert_eq!(script(&line), Some(ProtectedActionKind::Persistence));
         });
     }
+}
+
+/// #1161 review round 4: global option values can become several shell words.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1161_split_global_option_values_do_not_hide_config_writes() {
+    for command in [
+        "git -C 'My Project' config filter.a.clean /tmp/x",
+        "git -c 'user.name=A B' config filter.a.clean /tmp/x",
+        "git -c user.name=a,b config filter.a.clean /tmp/x",
+        "git --namespace 'a b' config diff.x.textconv /tmp/x",
+        "git --namespace 'a git b' config filter.a.clean /tmp/x",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+}
+
+/// A safe-key-looking fragment of a config option value is not the actual key.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1161_split_config_option_values_do_not_hide_config_writes() {
+    for command in [
+        "git config --comment 'note user.name' filter.a.clean /tmp/x",
+        "git config --comment='note user.name' filter.a.clean /tmp/x",
+        "git config set --comment 'x user.name' filter.a.clean /tmp/x",
+        // The named file may be a symlink to .git/config.
+        "git config -f 'l user.name' filter.a.clean /tmp/x",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1161_safe_option_values_and_commands_without_config_stay_quiet() {
+    for command in [
+        "git config --type bool pull.rebase true",
+        "git config --comment note user.email a@b",
+        "git -C ~/src/git-tools status",
+        "git -C /tmp/git-x status",
+        "git --work-tree /src/git-tools status",
+        "git -C 'My Project' status",
+        "git --namespace 'a git b' status",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1161_git_name_in_setting_keeps_inherited_unseen_code_prompt() {
+    // D153's quoted pass treats a git name inside a -c setting as unreadable,
+    // even for a safe key. Without config, keep that inherited classification.
+    assert_eq!(
+        script("git -c color.ui=/a/git-y status"),
+        Some(ProtectedActionKind::UnseenCode)
+    );
+}
+
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1161_attached_file_value_keeps_inherited_editor_prompt() {
+    // #1262's editor check reads the `e` in this attached filename as an edit
+    // flag. Maintainers track that conservative over-prompt separately on main.
+    assert_eq!(
+        script("git config -fpager.log user.name marker"),
+        Some(ProtectedActionKind::Persistence)
+    );
 }
