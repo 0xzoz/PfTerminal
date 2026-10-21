@@ -113,7 +113,24 @@ first, with or without command output on the line:
 
 - zsh glob qualifiers that run code: `e` and `oe` with code
   (`ls *(e:'rm x':)`) and `+name` (`ls *(+f)`) (#1028). Quoted text that zsh
-  would read that way asks too, such as `git commit -m "fix(tests): x"`.
+  would read that way asks too, such as `git commit -m "fix(tests): x"`, but
+  only where zsh may run the line (#1172, D85). A line that runs as
+  `-c` or `-lc` under a system `bash` or `dash` (`/bin/bash`,
+  `/usr/bin/bash`, `/bin/dash`, `/usr/bin/dash`, or a `/bin/sh` or
+  `/usr/bin/sh` that is one of them, as on macOS) doesn't ask for this when
+  it holds only plain commands of these programs: `echo`, `cd`, `pwd`,
+  `true`, `false`, `ls`, `cat`, `head`, `tail`, `wc`, `grep`, `mkdir`,
+  `touch`, and `git status`, `diff`, `log`, `show`, `add`, `commit`,
+  `restore`, `switch`, `checkout`, `branch`, `rm`, `mv` or `stash` (with no
+  option before the subcommand, no `--output` and no unquoted `{`, `*`, `?`
+  or `[`). Plain means literal words joined by `;`, `&&`, `||` or `|`: no
+  `$(...)`, variables, redirections, groups, assignments, `if` or loops,
+  comments or backslashes. So `git commit -m "fix(tests): x"` under
+  `/bin/bash` runs without a question. The same line still asks under zsh
+  (for example when your shell is zsh), under a shell named without its
+  system path, with any other program on it, and for every command when
+  the zsh-fork shell is on. zsh lines keep asking until phase 3 of the
+  shell-grammar classifier (#932).
 - bash's prompt expansion `${v@P}`, which runs any `$(...)` in the value, as
   `eval` would (#1012). Other ways a shell runs a variable's value
   (`PS4` with `set -x`, zsh's `${(e)v}` and `print -P`, `trap "$v"`) aren't
