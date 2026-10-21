@@ -322,6 +322,11 @@ impl AgentControl {
             self.touch_loaded_v2_residency(&state, thread_id).await;
             return Ok(());
         }
+        // The caller's runtime provider, before the stored runtime replaces it.
+        let caller = (
+            config.model_provider_id.clone(),
+            config.model_provider.clone(),
+        );
         if self.state.agent_metadata_for_thread(thread_id).is_none() {
             warn!(%thread_id, "cannot cold-load V2 agent without restored metadata");
             return Err(CodexErr::ThreadNotFound(thread_id));
@@ -416,6 +421,17 @@ impl AgentControl {
                     "cannot resume agent {thread_id}: persisted provider `{stored_provider_id}` is not configured"
                 ))
             })?;
+        // #1074: refused before it starts when its connection has no
+        // credential of its own (#689).
+        if let Some(message) = crate::config::resume_default_key_error(
+            &config,
+            &stored_provider_id,
+            &stored_provider,
+            &caller.0,
+            &caller.1,
+        ) {
+            return Err(CodexErr::InvalidRequest(message));
+        }
         config.model = Some(stored_model);
         config.model_provider_id = stored_provider_id;
         config.model_provider = stored_provider;

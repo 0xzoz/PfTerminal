@@ -194,10 +194,16 @@ async fn handle_spawn_agent(
     let resolved_service_tier = config.service_tier.clone();
 
     ensure_message_encoding_matches_target(
-        &turn.config.model_provider_id,
+        ConfiguredRuntime::new(
+            &turn.config.model_provider_id,
+            account_name(turn.provider.info()),
+        ),
         crate::tools::collaboration_wire::message_source_provider_id(turn.as_ref()),
         &source,
-        &resolved_model_provider,
+        ConfiguredRuntime::new(
+            &resolved_model_provider,
+            account_name(&config.model_provider),
+        ),
         encoding,
         "spawn_agent",
         PLAINTEXT_SPAWN_AGENT_TOOL,

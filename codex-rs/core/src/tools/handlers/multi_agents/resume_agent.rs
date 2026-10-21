@@ -1,5 +1,6 @@
 use super::*;
 use crate::agent::next_thread_spawn_depth;
+use crate::config::resume_default_key_error;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::multi_agents_spec::create_resume_agent_tool;
@@ -194,6 +195,17 @@ async fn try_resume_closed_agent(
     child_depth: i32,
 ) -> Result<(), FunctionCallError> {
     let config = build_agent_resume_config(turn.as_ref())?;
+    // #1074: refused before it starts when its connection has no credential
+    // of its own (#689).
+    if let Some(message) = resume_default_key_error(
+        &config,
+        &config.model_provider_id,
+        &config.model_provider,
+        &turn.config.model_provider_id,
+        turn.provider.info(),
+    ) {
+        return Err(FunctionCallError::RespondToModel(message));
+    }
     Box::pin(session.services.agent_control.resume_agent_from_rollout(
         config,
         receiver_thread_id,

@@ -148,6 +148,29 @@ async fn start_turn_in(
     start_turn_after(home, level, approval, steps, tweak, |_| {}).await
 }
 
+/// [`start_turn_in`], pinning the session's folder as its workspace root, as
+/// in a real session (#1098). That is also `TestCodex`'s default for a local
+/// session (#1120); these tests depend on it, so they pin it.
+#[cfg(target_os = "macos")]
+async fn start_turn_in_project(
+    home: Option<Arc<TempDir>>,
+    level: SecurityLevel,
+    approval: AskForApproval,
+    steps: Vec<Step>,
+    tweak: impl Fn(&mut Config) + Send + Sync + 'static,
+) -> anyhow::Result<(TestCodex, ResponseMock)> {
+    start_turn_with(
+        home,
+        level,
+        approval,
+        steps,
+        tweak,
+        |_| {},
+        /*pin_cwd_as_workspace_root*/ true,
+    )
+    .await
+}
+
 /// [`start_turn_in`], running `before_turn` once the session has started.
 async fn start_turn_after(
     home: Option<Arc<TempDir>>,
@@ -157,11 +180,35 @@ async fn start_turn_after(
     tweak: impl Fn(&mut Config) + Send + Sync + 'static,
     before_turn: impl FnOnce(&TestCodex),
 ) -> anyhow::Result<(TestCodex, ResponseMock)> {
+    start_turn_with(
+        home,
+        level,
+        approval,
+        steps,
+        tweak,
+        before_turn,
+        /*pin_cwd_as_workspace_root*/ false,
+    )
+    .await
+}
+
+async fn start_turn_with(
+    home: Option<Arc<TempDir>>,
+    level: SecurityLevel,
+    approval: AskForApproval,
+    steps: Vec<Step>,
+    tweak: impl Fn(&mut Config) + Send + Sync + 'static,
+    before_turn: impl FnOnce(&TestCodex),
+    pin_cwd_as_workspace_root: bool,
+) -> anyhow::Result<(TestCodex, ResponseMock)> {
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(&server, steps.into_iter().map(sse).collect()).await;
     let mut builder = test_codex();
     if let Some(home) = home {
         builder = builder.with_home(home);
+    }
+    if pin_cwd_as_workspace_root {
+        builder = builder.with_session_cwd_as_workspace_root();
     }
     let test = builder
         .with_model("test-gpt-5.1-codex")
@@ -1228,25 +1275,39 @@ async fn issue_442_env_file_matched_by_name_is_denied_and_explained() -> anyhow:
     Ok(())
 }
 
-/// #442: Permissive is unchanged by the Aggressive decisions: an agent
-/// command still writes the project's `.codex` and `.agents` and reads a
-/// `.env` created mid-session, with no explanation added.
+/// #442: Permissive is unchanged by the Aggressive decisions. In a session's
+/// own folder (#1098) the project's `.codex` and `.agents` are read-only in
+/// the sandbox, as upstream keeps them, with no explanation added; a command
+/// the person approves to run outside the sandbox writes them (Aggressive
+/// refuses that even when approved), and a `.env` created mid-session stays
+/// readable.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_442_permissive_is_unchanged() -> anyhow::Result<()> {
     use codex_protocol::models::PermissionProfile;
+    use codex_protocol::protocol::ReviewDecision;
 
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
-    let (test, captured) = start_turn_in(
+    let write = "mkdir -p .codex .agents; printf x > .codex/p.toml; echo codex=$?; \
+                 printf x > .agents/p.md; echo agents=$?";
+    let (test, captured) = start_turn_in_project(
         /*home*/ None,
         SecurityLevel::Permissive,
-        AskForApproval::Never,
+        AskForApproval::OnRequest,
         vec![
             shell_step(
-                "call-write",
-                "mkdir -p .codex .agents && printf x > .codex/p.toml && printf x > .agents/p.md \
-                 && printf API_KEY=dummy-442-permissive > .env.local; echo wrote=$?",
+                "call-sandboxed",
+                &format!("{write}; printf API_KEY=dummy-442-permissive > .env.local; echo env=$?"),
+            ),
+            call(
+                "call-approved",
+                "shell_command",
+                json!({
+                    "command": write,
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "write the agent settings",
+                }),
             ),
             shell_step("call-read", "cat .env.local"),
             done_step(),
@@ -1259,19 +1320,41 @@ async fn issue_442_permissive_is_unchanged() -> anyhow::Result<()> {
         },
     )
     .await?;
+    let approval = next_exec_approval(&test)
+        .await
+        .expect("running outside the sandbox asks");
+    let reason = approval.reason.clone().unwrap_or_default();
+    assert_eq!(reason, "write the agent settings");
+    test.codex
+        .submit(Op::ExecApproval {
+            id: approval.effective_approval_id(),
+            turn_id: None,
+            decision: ReviewDecision::Approved,
+        })
+        .await?;
     let warned = matches!(
         wait_for_event(&test.codex, |event| {
             matches!(event, EventMsg::TurnComplete(_))
                 || matches!(event, EventMsg::Warning(warning)
-                    if warning.message.starts_with("Security level Aggressive"))
+                    if warning.message.starts_with("Security level"))
         })
         .await,
         EventMsg::Warning(_)
     );
     assert!(!warned);
     let requests = captured.requests();
-    let wrote = output_text(&requests[requests.len() - 2], "call-write");
-    assert!(wrote.contains("wrote=0"), "{wrote}");
+    let sandboxed = output_text(&requests[requests.len() - 3], "call-sandboxed");
+    assert!(sandboxed.contains("codex=1"), "{sandboxed}");
+    assert!(sandboxed.contains("agents=1"), "{sandboxed}");
+    assert!(sandboxed.contains("Operation not permitted"), "{sandboxed}");
+    assert!(sandboxed.contains("env=0"), "{sandboxed}");
+    assert!(!sandboxed.contains("Security level"), "{sandboxed}");
+    let approved = output_text(&requests[requests.len() - 2], "call-approved");
+    assert!(approved.contains("codex=0"), "{approved}");
+    assert!(approved.contains("agents=0"), "{approved}");
+    let cwd = test.cwd_path();
+    assert_eq!(std::fs::read_to_string(cwd.join(".codex/p.toml"))?, "x");
+    assert_eq!(std::fs::read_to_string(cwd.join(".agents/p.md"))?, "x");
     let read = output_text(&requests[requests.len() - 1], "call-read");
     assert!(read.contains("dummy-442-permissive"), "{read}");
     Ok(())
