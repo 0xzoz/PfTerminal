@@ -1299,9 +1299,10 @@ while :; do sleep 1 & wait $!; done"#
     };
 
     // The trap only has to run before the grace period ends. Production's 50 ms
-    // (pinned below) can expire first on a loaded runner, leaving the cleanup
-    // marker empty (#349), so this exec gets 2 s; the 5 s bound still covers
-    // readiness, the grace period and the escalation.
+    // (pinned by `cancellation_termination_grace_period_stays_50_ms_outside_test_overrides`)
+    // can expire first on a loaded runner, leaving the cleanup marker empty
+    // (#349), so this exec gets 2 s; the 5 s bound still covers readiness, the
+    // grace period and the escalation.
     let result = timeout(
         Duration::from_secs(5),
         CANCELLATION_TERMINATION_GRACE_PERIOD_OVERRIDE.scope(
