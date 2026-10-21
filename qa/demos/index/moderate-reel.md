@@ -1,8 +1,8 @@
 # The Moderate security level: demo reel
 
 One narrated video of the Moderate security level, signed off by Travis on 2026-10-20 (D61), and the user-facing
-fixes shipped since: #1171, #1172, #1175, #1135, #1096 and #1185 (#1190, small `/cost` display fixes, merged after the
-recorded build and is not shown). It is an asset on the
+fixes shipped since: #1171, #1172, #1175, #1135, #1096 and #1185 (#1190, small `/cost` display fixes, is not in the
+recorded build `2f9d05c51e` and is not shown). It is an asset on the
 [`demos` prerelease](https://github.com/CorbanuCore/CorbanuTerminal/releases/tag/demos).
 
 - Watch online: <https://corbanu-moderate-reel.cloudflare-share.workers.dev/> (published 2026-10-21; subtitles are burned in, and
@@ -23,7 +23,8 @@ recorded build and is not shown). It is an asset on the
   It is a developer build (Cargo `dev` profile with debug assertions, `developer_marker: true` in its INSTALL.json), so
   `CORBANU_TEST_NO_NATIVE_KEYRING=1`, which `demo_video.py` requires, kept the profiles off the macOS keychain, as with
   the SOP's debug builds.
-  The two "before" clips in chapter 9 use the previous signed build `aa35e3f936`. The clips are indexed in
+  The two "before" clips in chapter 9 use the previous signed build `aa35e3f936`, also a developer build, recorded with
+  the same isolation. The clips are indexed in
   [MOD-REEL.md](MOD-REEL.md); their specs are `qa/demos/specs/modreel-*.toml` plus the existing `issue747`, `issue750`,
   `issue839` and `issue840` specs.
 - Clips are trimmed to the moment that proves the protection; waiting is sped up (an on-screen badge shows the rate)
