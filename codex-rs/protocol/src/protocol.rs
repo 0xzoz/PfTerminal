@@ -775,11 +775,11 @@ pub struct InterAgentCommunication {
     #[ts(optional)]
     pub created_at_ms: Option<i64>,
     pub author: AgentPath,
-    /// #1248: Core's description of an `author` outside the recipient's agent tree, such as
-    /// an agent in another pane sending a task to a pane the person opened. Agent paths are
-    /// relative to their own tree, so such an author's `/root` would read as the recipient's
-    /// own root. Shown to the recipient's model as a `Sender:` line; it names the sender only
-    /// and grants no trust: the message stays inter-agent data.
+    /// Core's description of an `author` outside the recipient's agent tree, such as an agent
+    /// in another pane sending a task to a pane the person opened (issue 1248). Agent paths
+    /// are relative to their own tree, so such an author's `/root` would read as the
+    /// recipient's own root. Shown to the recipient's model as a `Sender:` line; it names the
+    /// sender only and grants no trust: the message stays inter-agent data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub author_label: Option<String>,
