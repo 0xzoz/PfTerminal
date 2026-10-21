@@ -427,3 +427,123 @@ fn issue_1087_file_tool_denials_name_the_level() {
         ))
     );
 }
+
+/// #1139 (D94, MOD-11): under Moderate, a write into the project's `.git`
+/// (a hook, its config) that the sandbox stops names Moderate and the way
+/// forward, both where the command names the path and where only git's
+/// denial line reports it; under secretless launch, no level change is
+/// offered. Nothing outside a writable folder's `.git` is attributed.
+#[test]
+fn issue_1139_moderate_git_folder_write_names_the_level() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.project.join(".git/hooks")).expect(".git/hooks");
+    std::fs::write(fixture.project.join(".git/config"), "").expect(".git/config");
+
+    let hook = "printf 'echo hi\\n' > .git/hooks/pre-commit";
+    let hook_line = "bash: line 1: .git/hooks/pre-commit: Operation not permitted";
+    let explained = fixture.explain(Fixture::profile(), /*contract*/ None, hook, hook_line);
+    assert_eq!(
+        explained,
+        Some(git_write_explanation(".git/hooks/pre-commit"))
+    );
+    insta::assert_snapshot!(
+        "moderate_git_folder_write_explanation",
+        explained.expect("explained")
+    );
+
+    let config = "git config user.name injected";
+    let config_line = "error: could not lock config file .git/config: Operation not permitted";
+    assert_eq!(
+        fixture.explain(
+            Fixture::profile(),
+            /*contract*/ None,
+            config,
+            config_line
+        ),
+        Some(git_write_explanation(".git/config"))
+    );
+
+    let contract = fixture.contract();
+    let explained = fixture.explain(Fixture::profile(), Some(&contract), config, config_line);
+    assert_eq!(explained, Some(kept_git_write_explanation(".git/config")));
+    insta::assert_snapshot!(
+        "moderate_git_folder_write_kept_explanation",
+        explained.expect("explained")
+    );
+
+    // Not a `.git` the sandbox keeps inside a writable folder: one in a
+    // folder the person's own sandbox cannot write. With the person's own
+    // full access, Moderate's own rules keep git config read-only and say so
+    // as before (#748).
+    let other = format!("{}/repo/.git/config", fixture.home.display());
+    assert_eq!(
+        fixture.explain(
+            Fixture::profile(),
+            /*contract*/ None,
+            &format!("printf x > '{other}'"),
+            &format!("bash: {other}: Operation not permitted")
+        ),
+        None
+    );
+    assert_eq!(
+        fixture.explain(
+            PermissionProfile::Disabled,
+            /*contract*/ None,
+            config,
+            config_line
+        ),
+        Some(write_explanation(".git/config", WayForward::Permissive))
+    );
+    // #1139 review: a command that changed folder may have written another
+    // repository's `.git`; a relative path it reports is not attributed.
+    let outside = format!("{}/repo", fixture.home.display());
+    for (script, line) in [
+        (
+            format!("cd '{outside}' && git config user.name x"),
+            config_line,
+        ),
+        (
+            format!("git -C '{outside}' config user.name x"),
+            config_line,
+        ),
+        (
+            format!("GIT_DIR='{outside}/.git' git config user.name x"),
+            config_line,
+        ),
+        (
+            format!("cd '{outside}' && printf x > .git/hooks/pre-commit"),
+            hook_line,
+        ),
+    ] {
+        assert_eq!(
+            fixture.explain(Fixture::profile(), /*contract*/ None, &script, line),
+            None,
+            "{script}"
+        );
+    }
+    // An absolute path in the project still is.
+    let project_config = format!("{}/.git/config", fixture.project.display());
+    assert_eq!(
+        fixture.explain(
+            Fixture::profile(),
+            /*contract*/ None,
+            &format!(
+                "cd /tmp && git -C '{}' config user.name x",
+                fixture.project.display()
+            ),
+            &format!("error: could not lock config file {project_config}: Operation not permitted")
+        ),
+        Some(git_write_explanation(&project_config))
+    );
+
+    // A denied write that involves no `.git` is not attributed either.
+    assert_eq!(
+        fixture.explain(
+            Fixture::profile(),
+            /*contract*/ None,
+            "printf x > notes/a.txt",
+            "bash: notes/a.txt: Operation not permitted"
+        ),
+        None
+    );
+}
