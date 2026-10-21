@@ -38,8 +38,9 @@ Per case, with the screens and files each rests on: [dispositions.md](dispositio
     was the build, not the machine.
   - MOD-21 (#1146): the product session files show the route by which each task reached the child, the same way on
     both machines ([tart-reference/](tart-reference/), `runs/T17-*/task-delivery-excerpt.txt`). A task typed in a pane's
-    own composer is recorded as a user message with origin `human`: UTM T17 (a Troll), and on Tart the T17 resubmission
-    and the replay (an Orc). The one task sent with Spawn status's "Send task to" (Tart T17, to an Orc) is recorded as a
+    own composer is recorded as a user message: UTM T17 (a Troll), and on Tart the T17 resubmission and the replay (an
+    Orc). The first typed task in each pane has origin `human`; the unchanged resubmissions have no origin entry next to
+    them. The one task sent with Spawn status's "Send task to" (Tart T17, to an Orc) is recorded as a
     mailbox assignment. The files do not record the `corbanu_untrusted_data` wrapper itself, not even for that mailbox
     delivery, which the Tart child reported as wrapped. So whether the label follows the route is not shown. The Tart
     child also reported its typed resubmission as "again wrapped" (source=unknown); that report is left open. What the
@@ -149,7 +150,8 @@ Host memory was 72-93% free at every group start; the 25% pause never triggered.
   - Product homes and product logs are not exported; they are listed by size and SHA-256 in `runs/*/withheld-files.txt`.
   - The MOD-21 integrator excerpts (`runs/T17-*/task-delivery-excerpt.txt`, from [tools/excerpt_tasks.py](tools/excerpt_tasks.py))
     give, for each product session file, the user-role inputs with their recorded origin, any mailbox deliveries, and
-    whether any recorded model input carries the untrusted-data wrapper (the files do not record it for mailbox deliveries).
+    whether any recorded model input carries the untrusted-data wrapper (no recorded input does, mailbox deliveries and
+    agent output included: the files do not record it).
   - `pty.raw` and the testers' events are gzipped, and each fixture's `.git` is renamed `dot-git`. The key scan is clean.
 
 ## Named limits
@@ -177,7 +179,7 @@ Host memory was 72-93% free at every group start; the 25% pause never triggered.
   evidence that no wrapper was shown.
 - **`common/effective-policy.txt` changed after the runs were assembled** (review round 1). The isolation records cite
   the version they were assembled with, kept as [common/effective-policy.as-assembled.txt](common/effective-policy.as-assembled.txt)
-  (SHA-256 `51bf826a…`); the current file is the corrected one.
+  (SHA-256 `51bf826a…`); the current file, `common/effective-policy.txt`, is the corrected one (changed after review rounds 1 and 3).
 - **Part 2:**
   - D95's route (a task sent from Spawn status) was not exercised.
   - #1171's message was seen on one path only.
@@ -199,9 +201,10 @@ Host memory was 72-93% free at every group start; the 25% pause never triggered.
    further 3 hours is not worth it.
 2. **D95 (#1175) is not yet confirmed by a code-blind run.** I recommend an amendment (v8) to MOD-21 that names the
    Spawn status route ("send the task from Spawn status, Send task to <pane>"), so the next run exercises it, and
-   re-running MOD-21 on Tart with it. The product session files record the route, not the wrapper, so the check should
-   rest on the session file showing a user message with origin `human` instead of a mailbox assignment, together with
-   the child's own words. The alternative is to accept #1175 on its unit and integration tests (mod-fix1)
+   re-running MOD-21 on Tart with it. The product session files record the route, not the wrapper, so such a run shows
+   the route only (a user message instead of a mailbox assignment). To show that the task reached the child unwrapped,
+   it also needs a product-side record of what the model was sent; the child's own words are not enough (the Tart child
+   reported a typed task as wrapped). The alternative is to accept #1175 on its unit and integration tests (mod-fix1)
    and record MOD-21 as passed by this run.
    The settling check in decision 1 could carry this amended MOD-21 run on Tart.
 3. **MOD-11 after D94.** I recommend a re-run of MOD-11 alone (about 20 minutes) to reach item 8 and close the case. Item 8

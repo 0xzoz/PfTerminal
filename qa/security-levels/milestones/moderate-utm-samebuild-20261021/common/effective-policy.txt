@@ -3,8 +3,9 @@
 
 Both parts use the Tart parity run's guest harness unchanged (../harness/ holds every file of
 ../../moderate-tart-parity-20261020/harness/, byte for byte, except seal-guest.sh and dns-refuse.py; fixture.tar by
-SHA-256; part 2 copied those two at run time from scripts/qa/tart/, outside both freezes, with the same SHA-256 as the
-Tart record's copies: ../harness-tart/seal-assets.sha256) and its network path (guest mediator -> SSH reverse tunnel -> host relay that adds
+SHA-256; part 2's seal step copied its assets at run time, outside both freezes: those two from scripts/qa/tart/, with
+the same SHA-256 as the Tart record's copies, and tmux and libevent_core-2.1.7.dylib from host paths, as the Tart run
+did: ../harness-tart/seal-assets.sha256) and its network path (guest mediator -> SSH reverse tunnel -> host relay that adds
 the Z.AI key on the host). Freezes: design/FROZEN.sha256 (part 1) pushed as 552601666c at 2026-10-21T08:09:37Z, before
 "macOS 3" was started (08:09:54Z); design/FROZEN-d94d95.sha256 (part 2) pushed as 04837d4f1a at 09:46:27Z, before the first
 clone (09:46:35Z). No frozen file changed after its freeze. One post-freeze manual step is disclosed below (env manifest).

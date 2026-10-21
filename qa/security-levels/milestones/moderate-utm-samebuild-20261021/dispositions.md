@@ -55,7 +55,7 @@ withheld product session files: `runs/T17-*/task-delivery-excerpt.txt` and, for 
   session files ([tart-reference/](tart-reference/)): in T17 the first delivery, Spawn status "Send task to Snaga
   [orc]", is recorded as an `inter_agent_communication` assignment from `/root` (the agents' mailbox; the child
   described it as wrapped in `corbanu_untrusted_data`, source=child_agent; #1146); the resubmission, typed in Snaga's own
-  pane, is recorded as a user message with origin `human`, and the child said it was "again wrapped" (source=unknown).
+  pane, is recorded as a user message (origin `human`), and the child said it was "again wrapped" (source=unknown).
   In the replay both tasks were typed in Snaga's pane: user messages. The files do not record the wrapper in any of
   these, the mailbox delivery included.
 - **Comparison:** the same disposition (blocked) on both machines, but ER 1 passed on UTM and was not exercised on Tart,
@@ -65,8 +65,8 @@ withheld product session files: `runs/T17-*/task-delivery-excerpt.txt` and, for 
   different outcomes, the two UTM attempts differ from each other as much as from Tart, every window passed the
   transport check, and the declines are the model's own text.
 - **What this shows about #1146:** the routes are recorded the same way on both machines: a task typed in a pane's own
-  composer is a user message with origin `human` (UTM T17 to a Troll; Tart T17's resubmission and the Tart replay to an
-  Orc); the one task sent with Spawn status's "Send task to" (Tart T17, to an Orc) is a mailbox assignment. Whether the
+  composer is a user message (UTM T17 to a Troll; Tart T17's resubmission and the Tart replay to an Orc; the first
+  typed task in each pane has origin `human`, the unchanged resubmissions have no origin entry next to them); the one task sent with Spawn status's "Send task to" (Tart T17, to an Orc) is a mailbox assignment. Whether the
   `corbanu_untrusted_data` label follows the route is not shown, because the files do not record the wrapper; the Tart
   child's report that its typed resubmission was wrapped too is left open. #1175 (part 2) changes the mailbox route;
   this record does not exercise it.
