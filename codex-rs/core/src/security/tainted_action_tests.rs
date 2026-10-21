@@ -3973,6 +3973,19 @@ fn issue_1240_windows_spellings_are_protected() {
             Persistence,
         ),
         (r"cd/d %USERPROFILE% & echo x>>.bashrc", Persistence),
+        // Review 5: long spaced folders, `=` and `-x` folder names.
+        (
+            r"cd C:\work\1 2 3 4 5 6 7 8 9\..\..\Users\fixture & echo x >> .bashrc",
+            Persistence,
+        ),
+        (
+            r"cd C:\Users\fixture\a=b\.. & echo x >> .bashrc",
+            Persistence,
+        ),
+        (
+            r"cd -x\..\..\Users\fixture & echo x >> .bashrc",
+            Persistence,
+        ),
         // Review 4: spaces in cmd's cd.
         (
             r"cd C:\Program Files\..\Users\fixture & echo x >> .bashrc",
@@ -4051,6 +4064,10 @@ fn issue_1240_windows_spellings_are_protected() {
             Persistence,
         ),
         (r"cd; Add-Content .bashrc x", Persistence),
+        (
+            r"Push-Location -StackName s C:\Users\fixture; Add-Content .bashrc x",
+            Persistence,
+        ),
         // Paths built from parts.
         (r"Add-Content (Join-Path $HOME '.bashrc') 'x'", Persistence),
         (r"Join-Path -Path $HOME -ChildPath .ssh\id_rsa", Credentials),
@@ -4141,6 +4158,20 @@ fn issue_1240_windows_spellings_are_protected() {
         windows_kind(&["pwsh", "-ea", "not base64!", "-c", "dir"]),
         Some(UnseenCode)
     );
+    // Review 5: a value-taking parameter this reading may not know.
+    for parameter in ["-ConfigurationFile", "-SomeFutureParameter"] {
+        assert_eq!(
+            windows_kind(&[
+                "pwsh",
+                parameter,
+                "a.pssc",
+                "-EncodedCommand",
+                &encoded(r"Add-Content ~\.bashrc x"),
+            ]),
+            Some(Persistence),
+            "{parameter}"
+        );
+    }
     // Review 3: a nested PowerShell's parameters; the payload runs from
     // each folder the line may be in.
     let add_bashrc = encoded("Add-Content .bashrc x");

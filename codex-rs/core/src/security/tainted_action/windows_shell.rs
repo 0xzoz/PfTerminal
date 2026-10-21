@@ -432,6 +432,9 @@ fn folder_targets(
 ) -> Vec<(String, Option<usize>, bool)> {
     let mut found = Vec::new();
     let window = |from: usize| from..words.len().min(from + FOLDER_WINDOW);
+    // cmd's `cd` takes the rest of its command, spaces included; read in
+    // full for the command's first folder change (so once per command).
+    let mut rest_read = false;
     for at in 0..words.len() {
         work::step();
         if let Some(target) = attached_folder(&lower[at]) {
@@ -440,25 +443,40 @@ fn folder_targets(
             || matches!(lower[at].as_str(), "cd/d" | "chdir/d")
         {
             // The first operand: `-Path:x` gives its value, other switches
-            // (`/d`, `-Path`, `-PassThru`) are skipped.
-            let operand = window(at + 1).find_map(|next| {
+            // (`/d`, `-Path`, `-PassThru`, `-StackName s`) are skipped; a
+            // `-x\y` word is a folder (cmd has no switches with `\`).
+            let mut operand = None;
+            let mut skip = false;
+            for next in window(at + 1) {
+                work::step();
                 let word = &words[next];
-                if word.starts_with('-') && word.contains(':') {
-                    Some((word.split_once(':').map_or("", |(_, value)| value), next))
-                } else if word.starts_with('-') || lower[next] == "/d" {
-                    None
-                } else {
-                    Some((word.as_str(), next))
+                if std::mem::take(&mut skip) {
+                    continue;
                 }
-            });
+                if word.starts_with('-') && word.contains(':') {
+                    operand = Some((word.split_once(':').map_or("", |(_, value)| value), next));
+                } else if word.starts_with('-') && word.contains(['\\', '/']) {
+                    operand = Some((word.as_str(), next));
+                } else if lower[next].len() >= 3 && "-stackname".starts_with(lower[next].as_str()) {
+                    skip = true;
+                    continue;
+                } else if word.starts_with('-') || lower[next] == "/d" {
+                    continue;
+                } else {
+                    operand = Some((word.as_str(), next));
+                }
+                break;
+            }
             match operand {
                 Some((target, next)) => {
                     found.push((target.to_string(), Some(next), true));
-                    // cmd's `cd` takes the rest of its command, spaces
-                    // included (`cd C:\Program Files`).
-                    let rest = &words[next..words.len().min(next + FOLDER_WINDOW)];
-                    if rest.len() > 1 {
-                        found.push((rest.join(" "), Some(next), true));
+                    let end = if std::mem::replace(&mut rest_read, true) {
+                        words.len().min(next + FOLDER_WINDOW)
+                    } else {
+                        words.len()
+                    };
+                    if end - next > 1 {
+                        found.push((words[next..end].join(" "), Some(next), true));
                     }
                 }
                 None => found.push(("~".to_string(), None, true)),
@@ -541,6 +559,7 @@ fn takes_a_value(word: &str) -> bool {
                 "-workingdirectory",
                 "-settingsfile",
                 "-custompipename",
+                "-configurationfile",
             ]
             .iter()
             .any(|name| name.starts_with(word.as_str())))
@@ -647,6 +666,9 @@ impl Classifier {
     /// folder the line has been in (a `cd` may not have run, `popd` may
     /// return) and its folder flags' values.
     fn windows_command(&mut self, command: &Command, folders: &mut Folders, depth: usize) {
+        if self.windows_budget == 0 {
+            return;
+        }
         let words = &command.words;
         let lower: Vec<String> = words.iter().map(|word| word.to_lowercase()).collect();
         let names: Vec<&str> = lower.iter().map(|word| command_name(word)).collect();
@@ -667,21 +689,27 @@ impl Classifier {
             if let Some(at) = at {
                 folder_values[at] = true;
             }
-            let Some(target) = candidates(&target).pop() else {
-                continue;
-            };
-            if on_another_drive(target, &folders.possible) {
-                self.note(ProtectedActionKind::UnseenCode);
-            }
-            // From each folder the line may be in.
+            // Each spelling of the folder (`-Path:x`, `a=b` kept whole too),
+            // from each folder the line may be in.
             let mut reached = Vec::new();
-            for folder in &folders.possible {
+            for target in candidates(&target) {
                 work::step();
-                let resolved = self.homes.resolve(target, folder);
-                if resolved.len() > MAX_FOLDER_BYTES {
+                if on_another_drive(target, &folders.possible) {
                     self.note(ProtectedActionKind::UnseenCode);
-                } else if !reached.contains(&resolved) {
-                    reached.push(resolved);
+                }
+                let cost = folders.possible.iter().map(String::len).sum::<usize>()
+                    + target.len() * folders.possible.len();
+                if !self.spend(cost) {
+                    return;
+                }
+                for folder in &folders.possible {
+                    work::step();
+                    let resolved = self.homes.resolve(target, folder);
+                    if resolved.len() > MAX_FOLDER_BYTES {
+                        self.note(ProtectedActionKind::UnseenCode);
+                    } else {
+                        reached.push(resolved);
+                    }
                 }
             }
             if !moves {
@@ -694,6 +722,14 @@ impl Classifier {
             self.add_folders(&mut folders.possible, reached, MAX_FOLDERS);
         }
         let mut bases: Vec<String> = Vec::new();
+        let cost = [&before, &folders.possible, &flagged]
+            .iter()
+            .flat_map(|folders| folders.iter())
+            .map(String::len)
+            .sum::<usize>();
+        if !self.spend(cost) {
+            return;
+        }
         for base in [before, folders.possible.clone(), flagged] {
             work::step();
             self.add_folders(&mut bases, base, 3 * MAX_FOLDERS);
@@ -732,6 +768,14 @@ impl Classifier {
         // PowerShell's own parameters: after each `powershell`/`pwsh`,
         // before its code.
         let parameters = powershell_parameters(&names, &lower);
+        // Words after a `powershell`/`pwsh` word.
+        let mut powershell_seen = vec![false; words.len()];
+        let mut seen = false;
+        for (index, name) in names.iter().enumerate() {
+            work::step();
+            powershell_seen[index] = seen;
+            seen |= matches!(*name, "powershell" | "pwsh");
+        }
         let written = |index: usize| {
             command.redirected[index]
                 || writer.is_some_and(|at| index > at)
@@ -780,7 +824,19 @@ impl Classifier {
                     }
                 }
             }
-            if index > 0 && parameters[index - 1] && encoded_parameter(&lower[index - 1]) {
+            // An encoded parameter outside the parameters read (one of
+            // PowerShell's this reading does not know may come before it)
+            // is judged too when it decodes.
+            let encoded_outside = powershell_seen[index]
+                && index > 0
+                && !parameters[index - 1]
+                && encoded_parameter(&lower[index - 1]);
+            if encoded_outside && decoded_command(word).is_none() {
+                // `-Encoding utf8`: a parameter of the command, not encoded.
+            } else if index > 0
+                && (parameters[index - 1] || encoded_outside)
+                && encoded_parameter(&lower[index - 1])
+            {
                 // Run from each folder the line may be in, once each.
                 let decoded = decoded_command(word);
                 for base in bases {
@@ -811,12 +867,25 @@ impl Classifier {
         }
     }
 
+    /// Spend `cost` bytes of the Windows view's work budget; past it the
+    /// action fails closed and the view stops.
+    fn spend(&mut self, cost: usize) -> bool {
+        if self.windows_budget < cost {
+            self.windows_budget = 0;
+            self.note(ProtectedActionKind::UnseenCode);
+            return false;
+        }
+        self.windows_budget -= cost;
+        true
+    }
+
     /// Add `more` to `folders`, without repeats. Past `limit` folders the
     /// line fails closed.
     fn add_folders(&mut self, folders: &mut Vec<String>, more: Vec<String>, limit: usize) {
+        let mut known: std::collections::HashSet<String> = folders.iter().cloned().collect();
         for folder in more {
             work::step();
-            if folders.contains(&folder) {
+            if !known.insert(folder.clone()) {
                 continue;
             }
             if folders.len() >= limit {
@@ -862,12 +931,9 @@ impl Classifier {
         }
         for base in bases {
             work::step();
-            let cost = candidate.len() + base.len();
-            if self.windows_budget < cost {
-                self.note(ProtectedActionKind::UnseenCode);
+            if !self.spend(candidate.len() + base.len()) {
                 return;
             }
-            self.windows_budget -= cost;
             let resolved = self.homes.resolve(candidate, base);
             if path_like {
                 self.path(&resolved);
