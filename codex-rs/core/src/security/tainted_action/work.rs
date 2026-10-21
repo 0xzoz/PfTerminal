@@ -152,6 +152,7 @@ mod tests {
         ("paths.rs", include_str!("paths.rs")),
         ("quoted.rs", include_str!("quoted.rs")),
         ("sed.rs", include_str!("sed.rs")),
+        ("shadow.rs", include_str!("shadow.rs")),
         ("shell.rs", include_str!("shell.rs")),
     ];
 
