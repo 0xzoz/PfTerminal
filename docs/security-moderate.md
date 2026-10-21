@@ -123,14 +123,16 @@ first, with or without command output on the line:
   `touch`, and `git status`, `diff`, `log`, `show`, `add`, `commit`,
   `restore`, `switch`, `checkout`, `branch`, `rm`, `mv` or `stash` (with no
   option before the subcommand, no `--output` and no unquoted `{`, `*`, `?`
-  or `[`). Plain means literal words joined by `;`, `&&`, `||` or `|`: no
-  `$(...)`, variables, redirections, groups, assignments, `if` or loops,
-  comments or backslashes. So `git commit -m "fix(tests): x"` under
-  `/bin/bash` runs without a question. The same line still asks under zsh
-  (for example when your shell is zsh), under a shell named without its
-  system path, with any other program on it, and for every command when
-  the zsh-fork shell is on. zsh lines keep asking until phase 3 of the
-  shell-grammar classifier (#932).
+  or `[`). Plain means literal words joined by `;`, `&&`, `||`, `|` or a
+  newline: no `$(...)`, variables, redirections, groups, assignments, `if`
+  or loops, comments, backslashes or control characters (and no non-ASCII
+  character right before `|`, a brace, a bracket or `~`). So
+  `git commit -m "fix(tests): x"` under `/bin/bash` doesn't ask for this.
+  The same line still asks under zsh (for example when your shell is zsh),
+  under a shell named without one of those system paths (such as `bash` or
+  Homebrew's `/opt/homebrew/bin/bash`), with any other program on it, when
+  typed into a running shell, and for every command when the zsh-fork shell
+  is on. zsh lines still ask (#932 tracks this).
 - bash's prompt expansion `${v@P}`, which runs any `$(...)` in the value, as
   `eval` would (#1012). Other ways a shell runs a variable's value
   (`PS4` with `set -x`, zsh's `${(e)v}` and `print -P`, `trap "$v"`) aren't
