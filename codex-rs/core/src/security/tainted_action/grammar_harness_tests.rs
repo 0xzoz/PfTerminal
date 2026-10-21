@@ -11,7 +11,6 @@
 //! grammar to its contract (no panic, bounded parse work) over the corpus.
 
 use super::Refusal;
-use super::parse_budget;
 use super::read;
 use crate::security::tainted_action::quoted;
 use std::collections::BTreeMap;
@@ -21,6 +20,7 @@ use std::process::Command;
 use std::process::Stdio;
 
 const SOURCES: &[&str] = &[
+    include_str!("../tainted_action.rs"),
     include_str!("../tainted_action_tests.rs"),
     include_str!("../tainted_action_refusal_tests.rs"),
     include_str!("arithmetic_tests.rs"),
@@ -34,6 +34,7 @@ const SOURCES: &[&str] = &[
     include_str!("quoted.rs"),
     include_str!("sed.rs"),
     include_str!("shell.rs"),
+    include_str!("grammar_tests.rs"),
 ];
 
 const CORPUS: &str = include_str!("grammar_corpus.txt");
@@ -126,7 +127,10 @@ fn string_literals(source: &str) -> Vec<String> {
     let mut found = Vec::new();
     let mut at = 0;
     while at < chars.len() {
-        let previous_ident = at > 0 && (chars[at - 1].is_alphanumeric() || chars[at - 1] == '_');
+        let ident = |at: usize| chars[at].is_alphanumeric() || chars[at] == '_';
+        // `r"…"`, `r#"…"#`, and the byte string forms `br"…"`.
+        let previous_ident =
+            at > 0 && ident(at - 1) && !(chars[at - 1] == 'b' && (at < 2 || !ident(at - 2)));
         match chars[at] {
             '/' if chars.get(at + 1) == Some(&'/') => {
                 while at < chars.len() && chars[at] != '\n' {
@@ -410,7 +414,6 @@ fn grammar_and_reader_differential() {
         let reader = reader_names(text);
         let grammar = grammar_names(text);
         if let Ok(reading) = read(text) {
-            assert!(reading.parse_checks <= parse_budget(text.len()));
             max_checks_per_byte =
                 max_checks_per_byte.max(reading.parse_checks as f64 / text.len() as f64);
         }

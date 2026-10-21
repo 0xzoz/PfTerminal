@@ -54,16 +54,23 @@ fn expansions_globs_and_escapes_are_not_data() {
 
 #[test]
 fn parts_with_nothing_between_them_are_one_word() {
+    let reading = read("cat ~/$a$b/c.toml $\"t\" x a#b").expect("readable");
+    let words: Vec<(bool, bool)> = reading.commands[0]
+        .words
+        .iter()
+        .map(|word| (word.data, word.dynamic))
+        .collect();
     assert_eq!(
-        words("cat ~/$a$b/c.toml $\"t\" x a#b"),
-        vec![vec![
-            w("cat", true),
-            w("~/$a$b/c.toml", false),
-            w("$t", false),
-            w("x", true),
-            w("a#b", false),
-        ]]
+        words,
+        [
+            (true, false),
+            (false, true),
+            (false, true),
+            (true, false),
+            (false, false)
+        ]
     );
+    assert_eq!(reading.commands[0].words[4].text, "a#b");
 }
 
 #[test]
@@ -196,6 +203,62 @@ fn here_documents_the_scanner_may_forget_are_refused() {
         read("case x in @(a|b)) ;; esac").err(),
         Some(Refusal::Unsupported)
     );
+}
+
+#[test]
+fn here_documents_end_where_the_shells_end_them() {
+    for text in [
+        // A line that only starts with the delimiter does not end it.
+        "cat <<'EOF'\nEOF; cat <<'Z'\nEOF\necho x\nZ\n",
+        // Quotes inside the delimiter are removed by the shells.
+        "cat <<E\"O\"F\nx\nEOF\necho x\nE\"O\"F\n",
+        "cat <<E\\OF\nx\nEOF\n",
+        // `<<-` strips tabs only.
+        "cat <<-EOF\n  EOF\necho x\nEOF\n",
+        // Backquotes and backslashes in an unquoted body.
+        "cat <<EOF\n`echo x`\nEOF\n",
+        "cat <<EOF\n\\$(echo x)\nEOF\n",
+        // Two on one line, or one without its end.
+        "cat <<A <<B\na\nA\nb\nB\n",
+        "cat <<EOF\nx\n",
+    ] {
+        assert!(read(text).is_err(), "{text:?}");
+    }
+    let reading =
+        read("cat <<EOF | sh\na $(b)\nEOF\ncat <<'Q'\n$(c) `d`\nQ\n\tcat <<-\"R\"\n\tr\n\tR\n")
+            .expect("readable");
+    let names: Vec<&str> = reading
+        .commands
+        .iter()
+        .map(|command| command.words[0].text.as_str())
+        .collect();
+    assert_eq!(names, ["cat", "sh", "b", "cat", "cat"]);
+}
+
+#[test]
+fn expansions_inside_patterns_are_refused() {
+    for text in [
+        "x=a; echo ${x#$(echo x)}",
+        "echo ${x%`id`}",
+        "echo ${x/a$(id)/y}",
+        "echo ${x,,$y}",
+        "echo $(echo == $(id))",
+    ] {
+        assert_eq!(read(text).err(), Some(Refusal::Words), "{text:?}");
+    }
+    assert!(read("echo ${x#a} ${x%.rs}").is_ok());
+}
+
+#[test]
+fn nested_expansions_are_read_in_linear_work() {
+    work::assert_linear("grammar nesting", |scale| {
+        let depth = 10 * scale;
+        let _ = read(&format!(
+            "echo {}x{}",
+            "${x:-$(echo ".repeat(depth),
+            ")}".repeat(depth)
+        ));
+    });
 }
 
 #[test]

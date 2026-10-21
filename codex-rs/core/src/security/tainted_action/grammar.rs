@@ -109,7 +109,15 @@ pub(super) struct Reading {
 }
 
 /// Reserved words and precommand modifiers zsh has and bash does not.
-const ZSH_WORDS: &[&str] = &["repeat", "foreach", "end", "always", "nocorrect"];
+const ZSH_WORDS: &[&str] = &[
+    "repeat",
+    "foreach",
+    "end",
+    "always",
+    "nocorrect",
+    "noglob",
+    "-",
+];
 
 /// Commands after which a shell may parse the rest of the text another way.
 const REPARSING: &[&str] = &[
@@ -177,7 +185,7 @@ pub(super) fn read(text: &str) -> Result<Reading, Refusal> {
             return Err(refusal);
         }
         if node.child_count() == 0 {
-            walk.leaves.push((node.start_byte(), node.end_byte()));
+            walk.leaf(node);
         }
         let inner =
             substituted || matches!(node.kind(), "command_substitution" | "process_substitution");
@@ -276,9 +284,136 @@ impl<'a> Walk<'a> {
         &self.text[node.byte_range()]
     }
 
+    /// A token: its range, and that it hides no expansion unless its text
+    /// is taken literally (quoted, a comment, a here-document's).
+    fn leaf(&mut self, node: Node) {
+        self.leaves.push((node.start_byte(), node.end_byte()));
+        if node.is_named()
+            && !matches!(
+                node.kind(),
+                "raw_string"
+                    | "ansi_c_string"
+                    | "comment"
+                    | "heredoc_body"
+                    | "heredoc_content"
+                    | "heredoc_start"
+                    | "heredoc_end"
+            )
+            && hides_expansion(self.source(node))
+        {
+            self.refuse(Refusal::Words);
+        }
+    }
+
+    /// A here-document must end where the shells end it: the grammar's
+    /// scanner ends it at a line that only starts with the delimiter, keeps
+    /// quotes inside the delimiter, skips any blanks before it after `<<-`
+    /// and does not look for backquotes in the body.
+    fn here_document(&mut self, node: Node) {
+        let mut cursor = node.walk();
+        let mut strip = false;
+        let mut start = None;
+        let mut body = None;
+        let mut end = None;
+        for child in node.children(&mut cursor) {
+            work::step();
+            match child.kind() {
+                "<<-" => strip = true,
+                "heredoc_start" => start = Some(child),
+                "heredoc_body" => body = Some(child),
+                "heredoc_end" => end = Some(child),
+                _ => {}
+            }
+        }
+        let (Some(start), Some(end)) = (start, end) else {
+            self.refuse(Refusal::HereDocuments);
+            return;
+        };
+        let Some((delimiter, quoted)) = delimiter(self.source(start)) else {
+            self.refuse(Refusal::HereDocuments);
+            return;
+        };
+        let text = self.text;
+        // The body starts on the line after the operator's (one
+        // here-document per line) and ends at the first line that is the
+        // delimiter (after leading tabs for `<<-`).
+        let end_line = text[..end.start_byte()].rfind('\n').map_or(0, |at| at + 1);
+        let body_start = body.map_or(end_line, |body| body.start_byte());
+        let (Some(between), Some(body_text)) = (
+            text.get(start.end_byte()..body_start),
+            text.get(body_start..end_line),
+        ) else {
+            // The end is not on a line after the body.
+            self.refuse(Refusal::HereDocuments);
+            return;
+        };
+        // `<<-` strips the tabs at the start of the body's first line too.
+        let between = if strip {
+            between.trim_end_matches('\t')
+        } else {
+            between
+        };
+        let lines: Vec<&str> = body_text.split('\n').collect();
+        let is_end = |line: &str| {
+            let line = if strip {
+                line.trim_start_matches('\t')
+            } else {
+                line
+            };
+            line == delimiter
+        };
+        if self.source(end) != delimiter
+            || !(between.ends_with('\n') && between.matches('\n').count() == 1)
+            || !text.get(end_line..end.end_byte()).is_some_and(is_end)
+            || !text[end.end_byte()..].is_empty() && !text[end.end_byte()..].starts_with('\n')
+            || lines.iter().any(|line| {
+                work::step();
+                is_end(line)
+            })
+        {
+            self.refuse(Refusal::HereDocuments);
+        }
+        // Quoted: no expansions. Unquoted: no backquote or backslash, which
+        // the grammar does not follow in a body.
+        let Some(body) = body else { return };
+        // The body's text is a token even where the grammar made no node
+        // of it (around its expansions).
+        self.leaves.push((body.start_byte(), body.end_byte()));
+        // Its literal text: the gaps between its expansions, and its
+        // content nodes.
+        let mut literal_text = Vec::new();
+        let mut at = body.start_byte();
+        let mut cursor = body.walk();
+        for part in body.named_children(&mut cursor) {
+            work::step();
+            literal_text.push(text.get(at..part.start_byte()).unwrap_or_default());
+            if part.kind() == "heredoc_content" {
+                literal_text.push(self.source(part));
+            } else if quoted {
+                // Quoted: nothing in it expands.
+                self.refuse(Refusal::HereDocuments);
+            }
+            at = at.max(part.end_byte());
+        }
+        literal_text.push(text.get(at..body.end_byte()).unwrap_or_default());
+        // Unquoted: no backquote or backslash, which the grammar does not
+        // follow in a body, and no expansion it left in the text.
+        if !quoted
+            && literal_text.iter().any(|literal| {
+                work::step();
+                literal.contains(['`', '\\']) || hides_expansion(literal)
+            })
+        {
+            self.refuse(Refusal::HereDocuments);
+        }
+    }
+
     /// Checks that hold for every node.
     fn node(&mut self, node: Node, parent: &str) {
         let kind = node.kind();
+        if kind == "heredoc_redirect" {
+            self.here_document(node);
+        }
         if node.is_error() || node.is_missing() {
             self.refuse(Refusal::Syntax);
         }
@@ -339,7 +474,11 @@ impl<'a> Walk<'a> {
             for child in node.children(&mut cursor) {
                 work::step();
                 if let Some(end) = operator_end {
-                    if self.text[end..child.start_byte()].contains('\n') {
+                    if self
+                        .text
+                        .get(end..child.start_byte())
+                        .is_none_or(|gap| gap.contains('\n'))
+                    {
                         self.refuse(Refusal::Syntax);
                     }
                     break;
@@ -487,11 +626,7 @@ impl<'a> Walk<'a> {
                 data: false,
             },
             "simple_expansion" | "expansion" | "arithmetic_expansion" | "translated_string" => {
-                Word {
-                    text: source.to_string(),
-                    dynamic: true,
-                    data: false,
-                }
+                expanded()
             }
             // Assignments, brace expressions, arrays, regular expressions.
             _ => unknown(source),
@@ -527,7 +662,9 @@ impl<'a> Walk<'a> {
             });
         Word {
             text,
-            dynamic: false,
+            // A `$` the grammar left in a word (`$a$b` may come as `$a`,
+            // `$`, `b`) may still expand.
+            dynamic: source.contains('$'),
             data,
         }
     }
@@ -551,7 +688,7 @@ impl<'a> Walk<'a> {
             match part.kind() {
                 "string_content" => approximate.push_str(self.source(part)),
                 "command_substitution" => approximate.push_str(UNSEEN_OUTPUT),
-                _ => approximate.push_str(self.source(part)),
+                _ => approximate.push_str(EXPANDED),
             }
         }
         Word {
@@ -570,13 +707,69 @@ fn literal(text: &str) -> Word {
     }
 }
 
-/// Text that is not data, kept as written.
+/// Text that is not data: kept as written, or [`EXPANDED`] when it holds
+/// an expansion (copying nested expansions whole at every level would take
+/// work quadratic in their depth).
 fn unknown(source: &str) -> Word {
+    if source.contains(['$', '`']) {
+        return expanded();
+    }
     Word {
         text: source.to_string(),
-        dynamic: source.contains(['$', '`']),
+        dynamic: false,
         data: false,
     }
+}
+
+/// The text of a word's expansion, whose value is not known.
+const EXPANDED: &str = "\u{1}expansion\u{1}";
+
+fn expanded() -> Word {
+    Word {
+        text: EXPANDED.to_string(),
+        dynamic: true,
+        data: false,
+    }
+}
+
+/// Whether text the grammar took as a token holds an expansion or a
+/// substitution it did not parse (`${x#$(cmd)}` is one token to it):
+/// a backquote, or `$` before a name, a special parameter, a brace, a
+/// bracket, a parenthesis or a quote.
+fn hides_expansion(text: &str) -> bool {
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        work::step();
+        if ch == '`'
+            || (ch == '$'
+                && chars
+                    .peek()
+                    .is_some_and(|next| next.is_alphanumeric() || "_({['\"@*#?$!-".contains(*next)))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// A here-document's delimiter word as written: plain characters, or the
+/// same quoted whole (`'EOF'`, `"EOF"`), with whether it was quoted.
+fn delimiter(word: &str) -> Option<(&str, bool)> {
+    let plain = |text: &str| {
+        !text.is_empty()
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+    };
+    if plain(word) {
+        return Some((word, false));
+    }
+    ["'", "\""].into_iter().find_map(|quote| {
+        word.strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+            .filter(|inner| plain(inner))
+            .map(|inner| (inner, true))
+    })
 }
 
 #[cfg(test)]
