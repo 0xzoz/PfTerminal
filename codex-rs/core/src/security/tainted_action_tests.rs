@@ -4225,6 +4225,32 @@ fn issue_1161_git_config_safe_writes_reads_and_deletions_stay_quiet() {
     }
 }
 
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1161_git_config_null_flag_preserves_read_and_value_boundaries() {
+    for command in [
+        "git config --null --get pager.log",
+        "git-config -z --get pager.log",
+        "git config -z --comment note --get pager.log",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+    for command in [
+        "git config -z --comment --get pager.log x",
+        "git config -z --comm --get pager.log x",
+        "git-config -z --comment --get pager.log x",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}",
+        );
+    }
+}
+
 /// #1161: local key families and section renames also apply to Git helpers.
 #[test]
 #[cfg_attr(

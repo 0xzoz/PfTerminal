@@ -118,7 +118,7 @@ impl<'a> Writes<'a> {
                 } else if outputs::GIT_CONFIG_FLAGS.contains(&word.as_str())
                     || matches!(
                         word.as_str(),
-                        "-z" | "--add" | "--replace-all" | "--append" | "--bool-or-str"
+                        "--add" | "--replace-all" | "--append" | "--bool-or-str"
                     )
                 {
                     at += 1;

@@ -131,6 +131,7 @@ pub(super) const GIT_CONFIG_FLAGS: &[&str] = &[
     "--worktree",
     "--show-origin",
     "--show-scope",
+    "-z",
     "--null",
     "--name-only",
     "--includes",
@@ -319,6 +320,25 @@ mod tests {
                 .map(|at| git_config_reads(&words[at..]))
                 .collect();
             assert_eq!(each, alone, "{line}");
+        }
+    }
+
+    #[test]
+    fn config_null_flag_keeps_read_options_distinct_from_values() {
+        for (line, expected) in [
+            ("-z --get pager.log", true),
+            ("--null --get pager.log", true),
+            ("-z --list", true),
+            ("-z --comment note --get pager.log", true),
+            ("-z --comment --get pager.log x", false),
+            ("-z --comm --get pager.log x", false),
+            ("-z --file --get pager.log x", false),
+            ("-z -- --get pager.log", false),
+            ("-z pager.log --get", false),
+        ] {
+            let words: Vec<String> = line.split(' ').map(str::to_string).collect();
+            assert_eq!(git_config_reads(&words), expected, "{line}");
+            assert_eq!(git_config_reads_each(&words)[0], expected, "{line}");
         }
     }
 
