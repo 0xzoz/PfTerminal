@@ -1186,11 +1186,12 @@ impl Classifier {
             }
             // #1142: `git -c core.pager=…` runs the value (args as written).
             // A dashed helper takes no git options.
-            if (name == "git" || helper == Some(None))
-                && code_variables::git_runs_code(
-                    &words[index + 1..],
-                    simple.words.get(index + 1..).unwrap_or_default(),
-                )
+            let git_args = (
+                &words[index + 1..],
+                simple.words.get(index + 1..).unwrap_or_default(),
+            );
+            if (name == "git" && code_variables::git_runs_code_after_git(git_args.0, git_args.1))
+                || (helper == Some(None) && code_variables::git_runs_code(git_args.0, git_args.1))
             {
                 self.note(ProtectedActionKind::UnseenCode);
             }

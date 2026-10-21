@@ -3956,3 +3956,112 @@ fn issue_1159_checks_are_linear() {
         });
     }
 }
+
+/// D153: since #1159, a name such as `git.exe` split out of quoted text ended
+/// the git scan, so `git -c 'user.name=a git.exe b' -c core.pager=sh log`
+/// no longer asked. A `-c`/`--config-env` setting whose text holds a git
+/// name asks, and the scan from `git` reads on past other git names, as
+/// before #1159.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d153_git_names_in_quoted_text_do_not_end_the_git_checks() {
+    for command in [
+        // The line from #1230's review, and the same text written other ways.
+        "git -c 'user.name=a git.exe b' -c core.pager=sh log",
+        "git -c \"user.name=a git.exe b\" -c core.pager=sh log",
+        "git -c 'user.name=a GIT.EXE b' -c core.pager=sh log",
+        "git -c 'user.name=a /usr/bin/git.exe b' -c core.pager=sh log",
+        "git -c 'user.name=a C:\\Git\\cmd\\git.exe b' -c core.pager=sh log",
+        "git -c 'user.name=a,git.exe b' -c core.pager=sh log",
+        "git -c 'user.name=a;git.exe b' -c core.pager=sh log",
+        "git -c 'user.name=a g\"i\"t.exe b' -c core.pager=sh log",
+        "git -c'user.name=a git.exe b' -c core.pager=sh log",
+        "git --config-env 'user.name=a git.exe b' -c core.pager=sh log",
+        "git --config-env='user.name=a git.exe b' -c core.pager=sh log",
+        // Other git names in the text, other git commands.
+        "git -c 'user.name=a git b' -c core.pager=sh log",
+        "git -c 'user.name=a git-log b' -c core.pager=sh log",
+        "git.exe -c 'user.name=a git.exe b' -c core.pager=sh log",
+        "env git -c 'user.name=a git.exe b' -c core.pager=sh log",
+        "sh -c \"git -c 'user.name=a git.exe b' -c core.pager=sh log\"",
+        // A git name split out of other quoted text: the scan from `git`
+        // reads on past it, as before #1159.
+        "git -C 'dir git.exe x' -c core.pager=sh log",
+        "git --namespace 'a git.exe b' -c core.pager=sh log",
+        "git -C git.exe b -c core.pager=sh log",
+        "git --namespace=./git.exe b -c core.pager=sh log",
+        // Review round 1: spellings the lexer reads as a git name, other
+        // options from `git.exe`, and a plain `git` (which main missed).
+        "git.exe -c 'user.name=a g{it.exe b' -c core.pager=sh log",
+        "git -c 'user.name=a g{it b' -c core.pager=sh log",
+        "git.exe -c \"user.name=a git$'.exe' b\" -c core.pager=sh log",
+        "git.exe -c 'user.name=a$IFS\"git.exe\" b' -c core.pager=sh log",
+        "git.exe --namespace 'a git.exe b' -c core.pager=sh log",
+        "git.exe --namespace='a git.exe b' -c core.pager=sh log",
+        "git.exe -C git.exe b -c core.pager=sh log",
+        "git.exe -C 'x git.exe y git.exe z' -c core.pager=sh log",
+        "git.exe --namespace=./git.exe b -c core.pager=sh log",
+        "git --namespace 'a git b' -c core.pager=sh log",
+        "git -C 'x git y git z' -c core.pager=sh log",
+        "git --namespace=./git b -c core.pager=sh log",
+        "x=git.exe; git -C \"a $x b\" -c core.pager=sh log",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::UnseenCode),
+            "{command}"
+        );
+    }
+    assert_eq!(
+        kind(&[
+            "git",
+            "-c",
+            "user.name=a git.exe b",
+            "-c",
+            "core.pager=sh",
+            "log"
+        ]),
+        Some(ProtectedActionKind::UnseenCode)
+    );
+    for command in [
+        "git -c user.name=git log",
+        "git -c 'user.name=Ada Lovelace' commit -m x",
+        "git commit -m 'fix the git.exe path'",
+        "git.exe commit -m 'fix the git.exe path'",
+        "git -C git status",
+        "git -C repo log -1 git.exe",
+        "git log --grep 'git.exe crash' --oneline",
+        "git.exe status",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// D153: the git checks stay linear when git names repeat in options and
+/// quoted settings.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d153_checks_are_linear() {
+    for (label, unit) in [
+        ("git.exe values", "-C a git.exe "),
+        ("git.exe options", "--namespace=./git.exe "),
+        ("quoted settings", "-c 'user.name=a b' "),
+        ("quoted names", "'a git.exe b' "),
+        ("git.exe then text", "-C x git.exe a "),
+        ("git then text", "-C x git a "),
+        ("names in values", "-C git.exe -C git "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("git {} status", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!("git.exe {} status", unit.repeat(400 * scale));
+            let _ = script(&line);
+        });
+    }
+}
