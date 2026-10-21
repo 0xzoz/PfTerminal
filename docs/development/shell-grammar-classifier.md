@@ -1,0 +1,133 @@
+# A real shell grammar for the post-taint classifier (#932)
+
+Owner decisions: D32 (option C, hybrid), D85(c) and D92 (start after #1114
+and #1172). This note describes the design and the three phases. Each phase
+is its own pull request.
+
+## Problem
+
+Once a session has taken in untrusted content, the post-taint classifier
+(`codex-rs/core/src/security/tainted_action*`) judges each command the model
+wants to run. It reads shell text with two hand-written readers:
+
+- `shell.rs`, a word lexer that removes quotes on purpose, so quoted text is
+  judged as code too;
+- `quoted.rs` (#885), a quote-aware reader for nested shells' scripts and sed
+  programs.
+
+A cross-check keeps them honest: the shell and sed commands the lexer counts
+must also be found by the quoted reader, and anything the readers cannot
+follow fails closed (asks). Review rounds of #899, #986, #1114, #1158 and
+#1172 found one desync after another (a `case` inside `$(...)`, quotes inside
+`${...}`, zsh keywords, `\`+newline, multibyte locales). Every one was fixed
+by failing closed, so each fix added prompts. D88, D90 and D104 accepted
+those prompts until a real grammar lands.
+
+## Design (option C)
+
+`tainted_action/grammar.rs` reads shell text with tree-sitter-bash, through
+`codex-shell-command`, which already depends on it for safe-command
+detection. Core adds no new crate, and the C code already builds on the
+Windows and Bazel lanes.
+
+The reading gives the simple commands (those in substitutions, process
+substitutions and here-document bodies included) and their words. Each word
+is marked:
+
+- **data**: every part of it is text that bash, zsh and dash all pass on
+  literally. That means single-quoted text, double-quoted text without `$`, a
+  backquote or a backslash, or unquoted letters, digits and `_ . / , : + @ %
+  -` (and `=` after the first character). Expansions, globs, braces, `~`, a
+  leading `=` (zsh), backslashes and `$'...'` are never data. Old dash reads
+  `$'a'` as `$a`.
+- **dynamic**: it holds an expansion or a substitution.
+
+### Fail closed
+
+`read` refuses the text, rather than guess at it, when:
+
+| Refusal | Why |
+| --- | --- |
+| `TooLarge` (> 4 KiB) | Some valid text (`x | x | ...`, nested arrays) takes tree-sitter time quadratic in its length. Neither of its work counters bounds this, so the input is capped. |
+| `Characters` | A control character other than newline or tab, or ASCII punctuation right after a non-ASCII character. In GBK, Big5, Shift-JIS or JOHAB a shell may read that byte as part of the character (same rule as the D85 gate, widened per the JOHAB note). |
+| `LineContinuation` | A backslash-newline. The shells join the lines before splitting words; the grammar ends a word there. |
+| `HereDocuments` | More than 8 here-documents, or a delimiter longer than 64 bytes. The grammar's scanner keeps pending here-documents in at most 1024 bytes of state and silently forgets them all past that. |
+| `ParseBudget` / `Syntax` | The parse stops at the first error that every parse in progress has met (error recovery can be quadratic), or after `bytes/2 + 64` progress checks. Any `ERROR` or `MISSING` node also refuses. So do constructs the grammar accepts and bash rejects: `;;` outside `case`, a redirection whose word is on the next line, `f(x)`, and a function body that is not a compound command. |
+| `Words` | The grammar's words may not be the shells': a reserved word as a command's name (`done x`, `coproc cmd`, `} x`), an "assignment" with an invalid name (`--x=1 cmd`), `[v]` read as a test, blanks or operators inside a word token, a comment starting inside a word, a word glued to a redirection's word, or a non-blank character that is in no token (`\ ` before a word). |
+| `Unsupported` | Extended glob patterns, which bash rejects without `shopt -s extglob`. |
+| `TooDeep` | Syntax nodes nested deeper than 512. |
+
+Parts with nothing between them are one word, as they are to the shells
+(`~/$a$b/x`, `$"t"`).
+
+`zsh_unsure` flags text zsh may read differently from bash. It covers
+zsh-only reserved words (`repeat`, `foreach`, ...), expansion flags
+(`${(e)x}`, `${=x}`), a subscript or modifier after an expansion (`$x[1]`,
+`$x:h`), an argument `}`, a command name that is not data, and commands that
+change how later text parses (`alias`, `setopt`, `emulate`, `set`, ...).
+When the command may run under zsh, a flagged reading has no authority.
+
+The walk is iterative, with every loop stepping the `work.rs` counter. The
+linearity test covers it.
+
+### The cross-check stays
+
+The current lexer and reader keep running. A command the lexer counts that
+the grammar does not find, or the reverse, fails closed (asks). The grammar
+only ever **removes** a prompt where it proves a word is data and both
+readers agree on the commands. A refusal leaves today's behaviour unchanged.
+
+## Phases
+
+1. **Design and differential harness (this PR).** `grammar.rs` is compiled
+   for tests only. `grammar_harness_tests.rs` reads every string literal in
+   the classifier's sources and tests, the cases in `grammar_corpus.txt`
+   (lines from the issue threads), and 3000 generated texts (fixed seed).
+   It reads each one with `quoted.rs` and with the grammar and compares the
+   commands found. `CORBANU_GRAMMAR_SHELLS=1` also checks each text with
+   `bash`, `zsh` and `dash -n`, which reads the text and runs nothing.
+   `CORBANU_GRAMMAR_REPORT=<file>` writes every disagreement. The harness
+   reports and does not judge. CI runs it without real shells, as a
+   no-panic and bounded-work check.
+2. **Grammar behind the cross-check, log only.** Wherever `quoted::commands`
+   reads a line, the grammar reads it too. A disagreement is logged at
+   debug level and decides nothing. The reader stays authoritative. This
+   phase adds work bounded by the 4 KiB cap and a per-classification byte
+   budget.
+3. **Authority where the grammar proves data.** The rules behind the
+   D88/D90/D104 prompts, plus quoted text judged as code, use the grammar's
+   reading where it proves a word is data. That holds only when the grammar
+   read the line, `zsh_unsure` is clear or zsh cannot run it, and the
+   commands agree. Anything else falls back to today's rule. This phase
+   stops at a pull request with the harness results, and the coordinator
+   decides on the merge.
+
+## Phase 1 results (harness, macOS, bash 3.2, zsh 5.9, dash)
+
+These are from 5225 distinct texts (2369 test literals, 66 corpus lines and
+2790 generated), after the fail-closed rules above.
+
+- **Agree:** 1744 of the test literals and 37 of the corpus lines.
+- **Commands differ, reader finds more:** 193 test literals. These are
+  mostly arithmetic and subscript text that `quoted.rs` reads as commands on
+  purpose (#937), and `[[ ... =~ (re) ]]` patterns.
+- **Grammar finds commands the reader misses:** 3 test literals.
+  `[[ $v = (#b)(*) ]]; echo ...` hides the `echo` from the reader, which
+  takes `#b)...` as a comment. zsh runs it. A bare `time` and `$[v]` are the
+  other two.
+- **Grammar reads, a shell rejects:** almost all of these are bash 3.2 gaps
+  (`case` in `$(...)`, `[[ -v ]]`, `|&`) or bash-isms dash rejects. None is a
+  shell that reads different commands.
+- **Grammar refuses, the shells accept:** zsh-only syntax (expansion flags,
+  `$~x`, `${ cmd; }`), `<>` redirections, and `\`+newline continuations.
+  Each costs nothing beyond today's behaviour.
+
+## Decisions for the coordinator
+
+1. **The 4 KiB cap (phase 2/3).** Commands over 4 KiB keep today's prompts.
+   Recommendation: keep it. A wall-clock deadline in the progress callback
+   would allow a larger cap, but the same text would then be judged
+   differently on a loaded machine.
+2. **Backslash-newline.** Multi-line commands with `\` continuations keep
+   today's prompts. Recommendation: keep for phase 3. Joining continuations
+   ourselves means writing quote-aware text handling again.

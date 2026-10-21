@@ -29,6 +29,9 @@ use std::collections::HashSet;
 use std::path::Path;
 
 mod arithmetic;
+// #932 phase 1: read only by its differential harness so far.
+#[cfg(test)]
+mod grammar;
 mod indirect;
 mod invocation;
 mod named_shell;
