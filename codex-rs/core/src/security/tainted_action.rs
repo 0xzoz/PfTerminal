@@ -529,8 +529,8 @@ fn persistence_command(name: &str, args: &[String]) -> bool {
 
 /// #1159: whether `git config` writes global config or a git key that runs
 /// a program, for each git word of a simple command (`git`, `git.exe`, a
-/// dashed helper such as `git-config` that gives its subcommand apart).
-/// What follows each word is worked out once, on the first git word, so
+/// dashed helper such as `git-config` that gives its subcommand apart),
+/// or opens it in an editor (#1255: `git config -e`). What follows each word is worked out once, on the first git word, so
 /// judging every git word of a line (`git config git config …`) stays
 /// linear.
 struct GitConfigWrites<'a> {
@@ -548,6 +548,8 @@ struct FollowingWords {
     persisting: Vec<bool>,
     /// Whether, as the words after `config`, they only read.
     reads: Vec<bool>,
+    /// #1255: whether, as the words after `config`, they open an editor.
+    edits: Vec<bool>,
 }
 
 impl<'a> GitConfigWrites<'a> {
@@ -580,6 +582,7 @@ impl<'a> GitConfigWrites<'a> {
                 // #1141: a reading word given as a value (`git config -f f k
                 // get`) does not make it a read.
                 reads: outputs::git_config_reads_each(words),
+                edits: outputs::git_config_edits_each(words),
             }
         });
         let start = if subcommand == Some("config") {
@@ -590,7 +593,8 @@ impl<'a> GitConfigWrites<'a> {
                 None => return false,
             }
         };
-        start < seen.reads.len() && !seen.reads[start] && seen.persisting[start]
+        start < seen.reads.len()
+            && ((!seen.reads[start] && seen.persisting[start]) || seen.edits[start])
     }
 }
 

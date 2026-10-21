@@ -212,6 +212,48 @@ fn reads_by_subcommand(words: &[String]) -> bool {
         .is_some_and(|word| matches!(word.as_str(), "get" | "list"))
 }
 
+/// #1255: for every `at` (and the empty end), whether `git config` with
+/// `words[at..]` (the words after `config`) opens the config file in an
+/// editor: `-e`, `--edit` or a prefix of it from `--ed`, a short group
+/// holding `e` (`-ze`), the `edit` subcommand, or any of them after `--`
+/// (`git config -- -e` edits too). What the editor writes is config the
+/// classifier never sees. Read loosely, so as to ask: any option before
+/// the first other word counts, past the values of the options that take
+/// one; other options are taken as flags. Worked out in one pass from the
+/// end.
+pub(super) fn git_config_edits_each(words: &[String]) -> Vec<bool> {
+    let opens_editor = |word: &str| {
+        if word.starts_with("--") {
+            word.len() >= "--ed".len() && "--edit".starts_with(word)
+        } else {
+            word.contains('e')
+        }
+    };
+    // Whether the words from the next word on, and from the one after it,
+    // open the editor when the first of them is read as an option.
+    let mut next = false;
+    let mut after_next = false;
+    let mut each = vec![false; words.len() + 1];
+    for (at, word) in words.iter().enumerate().rev() {
+        work::step();
+        let here = if !word.starts_with('-') {
+            false
+        } else if opens_editor(word) {
+            true
+        } else if GIT_CONFIG_VALUES.contains(&word.as_str())
+            || (!word.starts_with("--") && word.ends_with('f'))
+        {
+            after_next
+        } else {
+            next
+        };
+        after_next = next;
+        next = here;
+        each[at] = here || word == "edit";
+    }
+    each
+}
+
 /// What the next `git config` word may be.
 #[derive(Clone, Copy)]
 enum ConfigWord {
@@ -291,6 +333,7 @@ fn option_values(args: &[String], long: &str, short: char, files: &mut Vec<Strin
 
 #[cfg(test)]
 mod tests {
+    use super::git_config_edits_each;
     use super::git_config_reads;
     use super::git_config_reads_each;
     use super::output_files;
@@ -325,6 +368,50 @@ mod tests {
     fn files(name: &str, args: &[&str]) -> Option<Vec<String>> {
         let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
         output_files(name, &args)
+    }
+
+    /// #1255: which `git config` words open the editor, from the start and
+    /// from every later word, against git's reading of them (`-e x` edits,
+    /// `x -e` sets `x` to `-e`, `-f -e` names a file `-e`).
+    #[test]
+    fn config_edits_each_start() {
+        for (line, from_start) in [
+            ("-e", true),
+            ("--edit", true),
+            ("--ed", true),
+            ("--edi", true),
+            ("edit", true),
+            ("edit --local", true),
+            ("-- -e", true),
+            ("-- --local -e", true),
+            ("--global -e", true),
+            ("-ze", true),
+            ("-z -e", true),
+            ("--file=y -e", true),
+            ("-fy -e", true),
+            ("--type=bool -e", true),
+            ("-e x", true),
+            ("user.name -e", false),
+            ("--local user.name -e", false),
+            ("-- edit", false),
+            ("-f -e", false),
+            ("--file -e k v", false),
+            ("-zf -e k v", false),
+            ("--comment -e", false),
+            ("--e", false),
+            ("--expiry-date", false),
+            ("--get user.name", false),
+            ("--list", false),
+            ("", false),
+        ] {
+            let words: Vec<String> = line.split_whitespace().map(str::to_string).collect();
+            let each = git_config_edits_each(&words);
+            assert_eq!(each[0], from_start, "{line}");
+            let alone: Vec<bool> = (0..=words.len())
+                .map(|at| git_config_edits_each(&words[at..])[0])
+                .collect();
+            assert_eq!(each, alone, "{line}");
+        }
     }
 
     #[test]

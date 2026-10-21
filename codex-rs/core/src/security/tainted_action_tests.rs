@@ -4065,3 +4065,160 @@ fn d153_checks_are_linear() {
         });
     }
 }
+
+/// #1255: `git config` opens the config file in an editor (`-e`, `--edit`,
+/// `--ed`, `-ze`, `edit`, `-- -e`), global config too. What the editor
+/// writes is config the classifier never sees, so after untrusted content
+/// the line asks like a config write that may set a key that runs a program.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1255_git_config_editor_is_persistence() {
+    for command in [
+        "git config -e",
+        "git config --edit",
+        "git config --ed",
+        "git config edit",
+        "git config edit --local",
+        "git config -- -e",
+        "git config -- --edit",
+        "git config -- --local -e",
+        "git config --global -e",
+        "git config --system --edit",
+        "git config -ze",
+        "git config -z -e",
+        "git config --file=y -e",
+        "git config -fy -e",
+        "git config --type=bool -e",
+        "git config -e x",
+        "GIT_EDITOR=true git config -e",
+        "git -C repo config -e",
+        "git -C /tmp/git-x config -e",
+        "git --work-tree /src/git-tools config --edit",
+        "git -c user.name=x config -e",
+        "git.exe config -e",
+        "git-config -e",
+        "/usr/lib/git-core/git-config --edit",
+        "env git config edit",
+        "sh -c 'git config -e'",
+        "true && git config --edit",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+    for command in [
+        "git config user.name -e",
+        "git config --local user.name -e",
+        "git config -- edit",
+        "git config --comment -e",
+        "git config --get user.name",
+        "git config --list",
+        "git commit -e -m x",
+        "git grep -e config src",
+        "git log -e",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1255: a word that only looks like git (a last path segment `git-x`, a
+/// folder named `git`) in a value or option does not end the git checks:
+/// the scan from `git` reads past dashed-helper names, and one that stops
+/// at a `git` word is taken up again by the scan from that word.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1255_git_lookalike_words_do_not_end_the_git_checks() {
+    use ProtectedActionKind::*;
+    for (command, want) in [
+        ("git -C /tmp/git-x -c core.pager=sh log", UnseenCode),
+        ("git -C /tmp/git-x/ -c core.pager=sh log", UnseenCode),
+        ("git -C git-x -c core.pager=sh log", UnseenCode),
+        ("git -C a/git-x/ -c core.pager=sh log", UnseenCode),
+        (
+            "git --work-tree /src/git-tools -c core.pager=sh log",
+            UnseenCode,
+        ),
+        ("git --git-dir /tmp/git-x -c core.pager=sh log", UnseenCode),
+        (
+            "git --namespace /tmp/git-x -c core.pager=sh log",
+            UnseenCode,
+        ),
+        ("git -C /src/git -c core.pager=sh log", UnseenCode),
+        ("git -C /tmp/git -c core.pager=sh log", UnseenCode),
+        ("git -C /src/git.exe -c core.pager=sh log", UnseenCode),
+        ("git.exe -C /tmp/git-x -c core.pager=sh log", UnseenCode),
+        ("git.exe -C /src/git -c core.pager=sh log", UnseenCode),
+        ("git -C /tmp/git-x -ccore.pager=sh log", UnseenCode),
+        ("git -C /tmp/git-x --exec-path=/tmp/e log", UnseenCode),
+        (
+            "git -C /tmp/git-x --config-env=core.pager=X log",
+            UnseenCode,
+        ),
+        (
+            "git -c user.name=/tmp/git-x -c core.pager=sh log",
+            UnseenCode,
+        ),
+        (
+            "git -c 'user.name=a /tmp/git-x' -c core.pager=sh log",
+            UnseenCode,
+        ),
+        (
+            "git -c credential.https://h/git-lfs.helper=sh fetch",
+            UnseenCode,
+        ),
+        (
+            "git -c includeIf.gitdir:/x/git-y.path=/tmp/c log",
+            UnseenCode,
+        ),
+        ("sh -c 'git -C /tmp/git-x -c core.pager=sh log'", UnseenCode),
+        ("git -C /tmp/git-x config core.pager sh", Persistence),
+        ("git -C /tmp/git-x config --global user.name x", Persistence),
+        (
+            "git --work-tree /src/git-tools config core.pager sh",
+            Persistence,
+        ),
+        ("git -C /src/git config core.pager sh", Persistence),
+        ("git config core.pager /tmp/git-x", Persistence),
+        ("git config -/git-x core.pager sh", Persistence),
+        ("git -C /tmp/git-x log --output=$HOME/.zshrc", Persistence),
+        (
+            "git --work-tree /src/git-x log --output=$HOME/.zshrc",
+            Persistence,
+        ),
+    ] {
+        assert_eq!(script(command), Some(want), "{command}");
+    }
+}
+
+/// #1255: the editor check stays linear when `config` and editor options
+/// repeat.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1255_checks_are_linear() {
+    for (label, unit) in [
+        ("config words", "config "),
+        ("value options", "-f -e "),
+        ("flags", "--local "),
+        ("separators", "-- "),
+        ("git config words", "git config "),
+        ("lookalike folders", "-C /tmp/git-x "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("git {} status", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!("git config {} -e", unit.repeat(400 * scale));
+            let _ = script(&line);
+        });
+    }
+}
