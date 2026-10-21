@@ -30,7 +30,7 @@ use base64::Engine;
 /// Folders a line may be in at once (and folder flags' values in one
 /// command); twice as many it may have been in. Past them the line fails
 /// closed.
-const MAX_FOLDERS: usize = 8;
+const MAX_FOLDERS: usize = 16;
 /// cmd and PowerShell commands (and aliases) that write, move or remove the
 /// paths after them, besides the POSIX [`WRITERS`].
 const WINDOWS_WRITERS: &[&str] = &[
@@ -128,8 +128,6 @@ pub(super) struct Command {
     /// Whether a command separator (`&`, `|`, `;`, a line end) or the end
     /// of the text ended it, rather than a brace.
     pub(super) separated: bool,
-    /// Whether `&&` ended it: what follows runs only if it succeeded.
-    pub(super) and_then: bool,
 }
 
 /// How a reading takes quotes: grouping a word, or separating words.
@@ -225,10 +223,6 @@ pub(super) fn commands(text: &str, quotes: Quotes) -> Vec<Command> {
             }
             '|' | '&' | ';' | '\n' | '\r' | '{' | '}' => {
                 flush(&mut word, &mut current, &mut redirect);
-                if ch == '&' && chars.get(at + 1) == Some(&'&') {
-                    current.and_then = true;
-                    at += 1;
-                }
                 let separated = !matches!(ch, '{' | '}');
                 end(&mut done, &mut current, &mut redirect, separated);
             }
@@ -411,15 +405,15 @@ fn attached_folder(word: &str) -> Option<&str> {
 /// Bytes of words and folders one action's Windows view may resolve (each
 /// word against each folder); past it the action fails closed. Many times
 /// any line's length, it bounds the view's work whatever the folders.
-pub(super) const RESOLVE_BUDGET: usize = 64 * super::MAX_CLASSIFIED_BYTES;
+pub(super) const RESOLVE_BUDGET: usize = 16 * super::MAX_CLASSIFIED_BYTES;
 
 /// Words after a folder-changing command looked at for its folder.
 const FOLDER_WINDOW: usize = 8;
 
 /// Where a line may be: each folder it may be in now (a `cd` may have
-/// failed, so the folder before it stays possible unless the line goes on
-/// only on success, `cd x && ...`), and every folder it has been in (`popd`
-/// may return to any of them), normalized, the working folder first.
+/// failed or not run, so the folders before it stay possible), and every
+/// folder it has been in (`popd` may return to any of them), normalized,
+/// the working folder first.
 pub(super) struct Folders {
     possible: Vec<String>,
     history: Vec<String>,
@@ -430,18 +424,18 @@ pub(super) struct Folders {
 /// `Set-Location -Path:x`, a bare `D:`, `start /D x` and `pwsh
 /// -WorkingDirectory x` for what follows) or only the command runs there
 /// (`git -C x`). A `cd` without a folder is PowerShell's move to the home.
-fn folder_targets<'a>(
-    words: &'a [String],
-    lower: &'a [String],
+fn folder_targets(
+    words: &[String],
+    lower: &[String],
     names: &[&str],
     separated: bool,
-) -> Vec<(&'a str, Option<usize>, bool)> {
+) -> Vec<(String, Option<usize>, bool)> {
     let mut found = Vec::new();
     let window = |from: usize| from..words.len().min(from + FOLDER_WINDOW);
     for at in 0..words.len() {
         work::step();
         if let Some(target) = attached_folder(&lower[at]) {
-            found.push((target, Some(at), true));
+            found.push((target.to_string(), Some(at), true));
         } else if CHANGE_FOLDER.contains(&names[at])
             || matches!(lower[at].as_str(), "cd/d" | "chdir/d")
         {
@@ -458,36 +452,98 @@ fn folder_targets<'a>(
                 }
             });
             match operand {
-                Some((target, next)) => found.push((target, Some(next), true)),
-                None => found.push(("~", None, true)),
+                Some((target, next)) => {
+                    found.push((target.to_string(), Some(next), true));
+                    // cmd's `cd` takes the rest of its command, spaces
+                    // included (`cd C:\Program Files`).
+                    let rest = &words[next..words.len().min(next + FOLDER_WINDOW)];
+                    if rest.len() > 1 {
+                        found.push((rest.join(" "), Some(next), true));
+                    }
+                }
+                None => found.push(("~".to_string(), None, true)),
             }
         } else if names[at] == "start" {
             if let Some(next) = window(at + 1).find(|next| lower[*next] == "/d")
                 && next + 1 < words.len()
             {
-                found.push((words[next + 1].as_str(), Some(next + 1), true));
+                found.push((words[next + 1].clone(), Some(next + 1), true));
             }
         } else if (lower[at] == "-wd"
             || (lower[at].len() >= 3 && "-workingdirectory".starts_with(lower[at].as_str())))
             && at + 1 < words.len()
         {
-            found.push((words[at + 1].as_str(), Some(at + 1), true));
+            found.push((words[at + 1].clone(), Some(at + 1), true));
         } else if FOLDER_FLAGS.contains(&words[at].as_str()) && at + 1 < words.len() {
-            found.push((words[at + 1].as_str(), Some(at + 1), false));
+            found.push((words[at + 1].clone(), Some(at + 1), false));
         } else if let Some((_, value)) = words[at]
             .split_once('=')
             .filter(|(flag, _)| FOLDER_FLAGS.contains(flag))
         {
-            found.push((value, Some(at), false));
+            found.push((value.to_string(), Some(at), false));
         } else if words.len() == 1
             && separated
             && drive_relative(&words[at]).is_some_and(|(_, rest)| rest.is_empty())
         {
             // A bare drive (`D:`) moves to that drive's current folder.
-            found.push((words[at].as_str(), Some(at), true));
+            found.push((words[at].clone(), Some(at), true));
         }
     }
     found
+}
+
+/// Which words are PowerShell's own parameters (or their values): after
+/// each `powershell`/`pwsh`, up to its code parameter (`-Command`) or the
+/// first word that is neither a parameter nor a parameter's value (the
+/// command itself: `powershell Get-Content a -Encoding utf8`).
+fn powershell_parameters(names: &[&str], lower: &[String]) -> Vec<bool> {
+    let mut parameters = vec![false; lower.len()];
+    let mut in_parameters = false;
+    for (index, name) in names.iter().enumerate() {
+        work::step();
+        let word = lower[index].as_str();
+        if matches!(*name, "powershell" | "pwsh") {
+            in_parameters = true;
+        } else if in_parameters
+            && (starts_the_code(word)
+                || (!word.starts_with(['-', '/'])
+                    && !(index > 0 && takes_a_value(&lower[index - 1]))))
+        {
+            in_parameters = false;
+        } else {
+            parameters[index] = in_parameters;
+        }
+    }
+    parameters
+}
+
+/// Whether `word` (lowercase) is one of PowerShell's own parameters that
+/// takes a value (`-ExecutionPolicy Bypass`, `-WindowStyle Hidden`, the
+/// encoded ones), by the prefixes it accepts, also with `/`.
+fn takes_a_value(word: &str) -> bool {
+    let word = word
+        .strip_prefix('/')
+        .map_or(word.to_string(), |rest| format!("-{rest}"));
+    encoded_parameter(&word)
+        || matches!(
+            word.as_str(),
+            "-ep" | "-w" | "-if" | "-of" | "-o" | "-v" | "-wd"
+        )
+        || (word.len() >= 3
+            && [
+                "-executionpolicy",
+                "-windowstyle",
+                "-inputformat",
+                "-outputformat",
+                "-configurationname",
+                "-version",
+                "-psconsolefile",
+                "-workingdirectory",
+                "-settingsfile",
+                "-custompipename",
+            ]
+            .iter()
+            .any(|name| name.starts_with(word.as_str())))
 }
 
 /// Whether `word` (lowercase) is PowerShell's parameter that ends its own
@@ -611,7 +667,7 @@ impl Classifier {
             if let Some(at) = at {
                 folder_values[at] = true;
             }
-            let Some(target) = candidates(target).pop() else {
+            let Some(target) = candidates(&target).pop() else {
                 continue;
             };
             if on_another_drive(target, &folders.possible) {
@@ -632,10 +688,9 @@ impl Classifier {
                 self.add_folders(&mut flagged, reached, MAX_FOLDERS);
                 continue;
             }
+            // The folders before stay possible: the move may fail, may not
+            // run (`if`, a block, `||`), or may not move (`cd D:\x`).
             self.add_folders(&mut folders.history, reached.clone(), 2 * MAX_FOLDERS);
-            if command.and_then {
-                folders.possible = Vec::new();
-            }
             self.add_folders(&mut folders.possible, reached, MAX_FOLDERS);
         }
         let mut bases: Vec<String> = Vec::new();
@@ -644,7 +699,7 @@ impl Classifier {
             self.add_folders(&mut bases, base, 3 * MAX_FOLDERS);
         }
         let bases = &bases;
-        let current = bases[0].clone();
+        let current = bases.first().cloned().unwrap_or_default();
         let writer = names.iter().position(|name| {
             WINDOWS_WRITERS.contains(name)
                 || WRITERS.contains(name)
@@ -676,18 +731,7 @@ impl Classifier {
         });
         // PowerShell's own parameters: after each `powershell`/`pwsh`,
         // before its code.
-        let mut parameters = vec![false; words.len()];
-        let mut in_parameters = false;
-        for (index, name) in names.iter().enumerate() {
-            work::step();
-            if matches!(*name, "powershell" | "pwsh") {
-                in_parameters = true;
-            } else if in_parameters && starts_the_code(&lower[index]) {
-                in_parameters = false;
-            } else {
-                parameters[index] = in_parameters;
-            }
-        }
+        let parameters = powershell_parameters(&names, &lower);
         let written = |index: usize| {
             command.redirected[index]
                 || writer.is_some_and(|at| index > at)
@@ -932,6 +976,23 @@ mod tests {
         assert!(writing_parameter("-outf"));
         assert!(!writing_parameter("-o"));
         assert!(recursive_flag("-rec"));
+        let parameters = |line: &str| {
+            let lower: Vec<String> = line.split(' ').map(str::to_string).collect();
+            let names: Vec<&str> = lower.iter().map(|word| command_name(word)).collect();
+            powershell_parameters(&names, &lower)
+        };
+        assert_eq!(
+            parameters("powershell get-content a -encoding utf8"),
+            vec![false; 5]
+        );
+        assert_eq!(
+            parameters("pwsh -nop -ep bypass -enc x"),
+            vec![false, true, true, true, true, true]
+        );
+        assert_eq!(
+            parameters("pwsh -c pwsh -e x"),
+            vec![false, false, false, true, true]
+        );
         assert!(encoded_parameter("-enc"));
         assert!(encoded_parameter("/ec"));
         assert!(encoded_parameter("-encodedarguments"));

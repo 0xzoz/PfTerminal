@@ -3973,6 +3973,11 @@ fn issue_1240_windows_spellings_are_protected() {
             Persistence,
         ),
         (r"cd/d %USERPROFILE% & echo x>>.bashrc", Persistence),
+        // Review 4: spaces in cmd's cd.
+        (
+            r"cd C:\Program Files\..\Users\fixture & echo x >> .bashrc",
+            Persistence,
+        ),
     ] {
         assert_eq!(cmd(line), Some(expected), "cmd /c {line}");
     }
@@ -4168,6 +4173,22 @@ fn issue_1240_windows_spellings_are_protected() {
         ]),
         Some(Persistence)
     );
+    // Review 4: a folder past the length limit fails closed (and the next
+    // command still has folders to resolve against).
+    assert_eq!(
+        cmd(&format!(
+            "cd {} && dir && echo x >> %USERPROFILE%\\.bashrc",
+            "a".repeat(1100)
+        )),
+        Some(Persistence)
+    );
+    assert_eq!(
+        cmd(&format!("cd {} && dir", "a".repeat(1100))),
+        Some(UnseenCode)
+    );
+    // Too many folders the line may be in fails closed.
+    let siblings: String = (0..20).map(|n| format!("cd d{n} & cd .. & ")).collect();
+    assert_eq!(cmd(&format!("{siblings}dir")), Some(UnseenCode));
     // Another drive's current folder cannot be known: it fails closed.
     for line in [
         r"echo x >> C:.bashrc",
@@ -4204,6 +4225,33 @@ fn issue_1240_windows_spellings_are_protected() {
     }
     // Relative to a working folder in the home.
     for (cwd, line, expected) in [
+        // Review 4: a move that fails, does not run or does not move keeps
+        // the folders before it.
+        (
+            r"C:\Users\fixture\proj",
+            r"cd nosuch && rem & echo x >> ..\.bashrc",
+            Persistence,
+        ),
+        (
+            r"C:\Users\fixture\proj",
+            r"echo cd sub && echo x >> ..\.bashrc",
+            Persistence,
+        ),
+        (
+            r"C:\Users\fixture\proj",
+            r"cd D:\tmp && echo x >> ..\.bashrc",
+            Persistence,
+        ),
+        (
+            r"C:\Users\fixture\proj",
+            r"cd && echo x >> ..\.bashrc",
+            Persistence,
+        ),
+        (
+            r"C:\Users\fixture\proj",
+            r"if exist x (cd x && echo a) & echo x >> ..\.bashrc",
+            Persistence,
+        ),
         (r"C:\Users\fixture\.corbanu", "type auth.json", Credentials),
         (r"C:\Users\fixture", r"type .corbanu\auth.json", Credentials),
         (r"C:\Users\fixture\proj", r"type ..\.netrc", Credentials),
@@ -4297,7 +4345,8 @@ issue_1240_windows_checks_are_linear! {
     variables: r"%USERPROFILE%\x $env:HOME\y ${env:CODEX_HOME} ",
     redirections: r"echo x >> C:\a\b 2>&1 ",
     writers: r"copy a b; Set-Content -Path c -Value d; ",
-    folders: r"cd /x & cd a & cd .. & ",
+    // Relative moves multiply the folders up to the cap (tested apart).
+    folders: r"cd /x & cd .. & pushd \y & popd & ",
     // `` ` `` is left out: the POSIX reading takes it for a substitution.
     quotes: r#"'a b' "c d" e^f "#,
     operators: "|&;(){},<> ",
