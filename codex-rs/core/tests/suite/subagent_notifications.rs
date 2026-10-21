@@ -388,6 +388,29 @@ async fn wait_for_requests(
     }
 }
 
+/// The child's spawned-task request: it carries the child's prompt but not the
+/// parent's spawn call. A `ResponseMock` records every request that reaches it
+/// before its own matcher runs, so it can also hold parent requests; wait for
+/// this one rather than for any request.
+fn is_child_task_request(request: &ResponsesRequest) -> bool {
+    request.body_contains_text(CHILD_PROMPT) && !request.body_contains_text(SPAWN_CALL_ID)
+}
+
+async fn wait_for_child_task_request(
+    mock: &core_test_support::responses::ResponseMock,
+) -> Result<ResponsesRequest> {
+    let deadline = Instant::now() + POSITIVE_WAIT;
+    loop {
+        if let Some(request) = mock.requests().into_iter().find(is_child_task_request) {
+            return Ok(request);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for the child's spawned-task request");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
 async fn wait_for_request_with_model(
     mock: &core_test_support::responses::ResponseMock,
     model: &str,
@@ -510,7 +533,7 @@ async fn setup_turn_one_with_custom_spawned_child(
     let test = builder.build_with_auto_env(server).await?;
     test.submit_turn(TURN_1_PROMPT).await?;
     if child_response_delay.is_none() && wait_for_parent_notification {
-        let _ = wait_for_requests(&child_request_log).await?;
+        let _ = wait_for_child_task_request(&child_request_log).await?;
         let rollout_path = test
             .codex
             .rollout_path()
@@ -993,7 +1016,7 @@ async fn direct_operator_turn_in_spawned_child_does_not_notify_parent() -> Resul
     // the child only once it has, so the operator's input starts its own turn
     // instead of joining the spawned task's first request (slower remote
     // environments hit that race).
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(POSITIVE_WAIT, async {
         while !matches!(
             child_thread.agent_status().await,
             AgentStatus::Completed(Some(message)) if message == "child done"
@@ -1578,10 +1601,7 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Res
 
     test.submit_turn(TURN_1_PROMPT).await?;
 
-    let child_requests = wait_for_requests(&child_request_log).await?;
-    let child_request = child_requests
-        .last()
-        .expect("child request log should capture at least one request");
+    let child_request = wait_for_child_task_request(&child_request_log).await?;
     assert!(child_request.body_contains_text("Parent developer instructions."));
     assert!(child_request.body_contains_text(CHILD_PROMPT));
 
@@ -1928,7 +1948,7 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
             ev_response_created("resp-turn1-1"),
             ev_function_call_with_namespace(
                 SPAWN_CALL_ID,
-                MULTI_AGENT_V1_NAMESPACE,
+                MULTI_AGENT_V2_NAMESPACE,
                 "spawn_agent",
                 &spawn_args,
             ),
@@ -1982,10 +2002,7 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
     assert!(!parent_request.body_contains_text("<skills_instructions>"));
     assert!(!parent_request.body_contains_text("demo-skill"));
 
-    let child_requests = wait_for_requests(&child_request_log).await?;
-    let child_request = child_requests
-        .last()
-        .expect("child request log should capture at least one request");
+    let child_request = wait_for_child_task_request(&child_request_log).await?;
     assert!(!child_request.body_contains_text("<skills_instructions>"));
     assert!(!child_request.body_contains_text("demo-skill"));
 
