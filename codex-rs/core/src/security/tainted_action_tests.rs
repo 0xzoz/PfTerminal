@@ -3190,6 +3190,8 @@ fn issue_1141_output_files_are_written() {
         "git config -f ~/.zshenv k --list",
         "git config -f ~/.zshenv --add 'x.$(touch pwned).y' -l",
         "git config --global core.fsmonitor 'touch pwned' --get",
+        // Review round 3.
+        "git fast-export --export-marks=~/.zshrc HEAD",
     ] {
         assert_eq!(script(command), Some(Persistence), "{command}");
     }
@@ -3249,6 +3251,16 @@ fn issue_1142_git_code_settings_are_unseen_code() {
         ": ${(P)x::=/tmp/h}; git status",
         ": ${(P)x=/tmp/h}; git status",
         ": ${!x:=1}; git status",
+        // Review round 3: quoted values the lexer splits, a missing value
+        // option, unseen words before the subcommand, attached prefix names.
+        "git --namespace 'a b' -c alias.x='!touch pwned' x",
+        "git --namespace 'a,b' -c alias.x='!touch pwned' x",
+        "git -c 'user.name=a b' $o x",
+        "git --shallow-file x -c alias.y='!touch pwned' y",
+        "git $(cat notes.txt) x",
+        "o=\"-p -c alias.x=!id\"; git $o x",
+        "set -a; printf -vGIT_TEST_FSMONITOR %s 'touch pwned'; git status",
+        "read -rGIT_CONFIG_KEY_0 <<< core.pager",
     ] {
         assert_eq!(script(command), unseen, "{command}");
     }
@@ -3270,9 +3282,18 @@ fn issue_1142_git_code_settings_are_unseen_code() {
         ": ${PORT:=8080} ${HOST:=x}; (( PORT > 1 )) && git status",
         "x=$((i + 1)); a[x]=1; (( x > 2 )) && git status",
         "echo ${(U)name} ${(L)x}; git status",
+        "git commit -m \"$msg\" && git log -c HEAD",
+        "git -C sub commit -c HEAD",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
+}
+
+/// #1142 review round 3: a flag group cut inside a character.
+#[test]
+fn issue_1142_flag_groups_cut_inside_a_character() {
+    let line = format!("echo ${{({}\u{e9})}} a=1", "h".repeat(63));
+    let _ = script(&line);
 }
 
 /// #1102: the #1141/#1142 checks stay linear in the line's length.
@@ -3287,6 +3308,8 @@ fn issue_1141_1142_checks_are_linear() {
         ("naming operands", "$a "),
         ("git option values", "-C git "),
         ("git dir values", "--git-dir git "),
+        ("git upper-case values", "-C GIT "),
+        ("git after the subcommand", "-C d log x "),
         ("arithmetic assignments", "$((a[b[$x]]=$y=1)) "),
         ("named assignments", "${(P)a=1} ${!b:=1} "),
         ("built values", "m=$x=1 ${c:=1}$d=1 "),

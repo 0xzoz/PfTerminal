@@ -1520,12 +1520,16 @@ fn assigns_named_variable(text: &str) -> bool {
         work::step();
         let rest = &text[at + 2..];
         if let Some(flags) = rest.strip_prefix('(') {
-            let window = &flags[..flags.len().min(MAX_FLAGS)];
+            // Bytes, so a window end inside a character cannot panic.
+            let window = &flags.as_bytes()[..flags.len().min(MAX_FLAGS)];
             // Flags are ASCII letters and delimiters; an unclosed or long
             // group counts.
             return window
-                .find(')')
-                .is_none_or(|close| window[..close].contains('P') && last_equals > at + 3 + close);
+                .iter()
+                .position(|&byte| byte == b')')
+                .is_none_or(|close| {
+                    window[..close].contains(&b'P') && last_equals > at + 3 + close
+                });
         }
         rest.strip_prefix('!').is_some_and(|name| {
             let len = name

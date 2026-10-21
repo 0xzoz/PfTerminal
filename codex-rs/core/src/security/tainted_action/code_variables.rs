@@ -112,6 +112,7 @@ const GIT_VALUE_OPTIONS: &[&str] = &[
     "--super-prefix",
     "--list-cmds",
     "--attr-source",
+    "--shallow-file",
 ];
 
 fn is_code_variable(name: &str) -> bool {
@@ -144,7 +145,10 @@ fn names_code_variable(word: &str) -> bool {
     // An attached option value (`printf -vPAGER`, `read -raEDITOR`).
     if let Some(cluster) = word.strip_prefix('-')
         && !cluster.starts_with('-')
-        && CODE_VARIABLES.iter().any(|name| cluster.ends_with(name))
+        && cluster.char_indices().any(|(at, _)| {
+            work::step();
+            is_code_variable(&cluster[at..])
+        })
     {
         return true;
     }
@@ -298,7 +302,15 @@ fn names_in_any_case(operand: &str) -> bool {
 
 /// Whether git's options before its subcommand (`args`, as written) set a
 /// config key that may name a command (`-c core.pager=x`, `--config-env`)
-/// or point git at other programs (`--exec-path=dir`).
+/// or point git at other programs (`--exec-path=dir`), or may do so through
+/// a word the classifier cannot see (`git $o x` with `o='-c alias.x=!sh'`).
+///
+/// Where the subcommand starts is certain only when it is the first word:
+/// the lexer splits quoted text at blanks and commas (`--namespace 'a b'`,
+/// `-c 'user.name=a b'`), so after any option a later word may still be
+/// one of git's. Those lines are read to the end: a setting with a value
+/// (`-c k=v`; not `commit -c HEAD`) or a word holding an unseen value
+/// counts. Stops at the next `git` (#1102: each word is scanned once).
 pub(super) fn git_runs_code(args: &[String]) -> bool {
     let unsafe_key = |setting: &str| {
         let key = setting
@@ -310,39 +322,59 @@ pub(super) fn git_runs_code(args: &[String]) -> bool {
                 .iter()
                 .any(|prefix| key.starts_with(prefix)))
     };
+    let unseen = |word: &str| word.contains('$') || word.contains(shell::UNSEEN_OUTPUT);
+    let is_git = |word: &str| shell::basename(word).eq_ignore_ascii_case("git");
+    // Past the first word that is not an option: only settings with a
+    // value, and unseen words, count.
+    let mut past_subcommand = false;
     let mut index = 0;
     while let Some(word) = args.get(index) {
         work::step();
+        if is_git(word) {
+            return false;
+        }
         let next = args.get(index + 1).map(String::as_str);
+        let setting = |value: &str| {
+            unsafe_key(value) && (!past_subcommand || value.contains('=') || unseen(value))
+        };
         if word == "-c" || word == "--config-env" {
-            if next.is_none_or(unsafe_key) {
-                return true;
+            match next {
+                None => return !past_subcommand,
+                Some(value) if is_git(value) => return false,
+                Some(value) if setting(value) => return true,
+                Some(_) => {}
             }
             index += 2;
             continue;
         }
-        if let Some(setting) = word.strip_prefix("--config-env=") {
-            if unsafe_key(setting) {
+        if let Some(value) = word.strip_prefix("--config-env=") {
+            if unsafe_key(value) {
                 return true;
             }
         } else if word.starts_with("--exec-path=")
-            || (word.starts_with("-c") && !word.starts_with("--") && unsafe_key(&word[2..]))
+            || unseen(word)
+            || (word.starts_with("-c") && !word.starts_with("--") && setting(&word[2..]))
         {
             return true;
-        } else if !word.starts_with('-') || shell::basename(word) == "git" {
-            // The subcommand: its own options follow (`commit -c HEAD`). A
-            // later `git` is checked on its own (#1102: each word is
-            // scanned once).
-            return false;
+        } else if !word.starts_with('-') && !past_subcommand {
+            // The subcommand: its own options follow (`commit -c HEAD`).
+            if index == 0 {
+                return false;
+            }
+            past_subcommand = true;
         }
-        if GIT_VALUE_OPTIONS.contains(&word.as_str())
+        if !past_subcommand
+            && GIT_VALUE_OPTIONS.contains(&word.as_str())
             && let Some(value) = next
         {
-            // A value that is a `git` is checked on its own (#1102). One
-            // that looks like an option is read as one: the lexer drops
-            // empty words, so `-C '' -c k=v` reads as `-C -c k=v`.
-            if shell::basename(value) == "git" {
+            // A value that is a `git` is checked on its own (#1102); one
+            // that looks like an option is read as one (the lexer drops
+            // empty words: `-C '' -c k=v`); an unseen one may be options.
+            if is_git(value) {
                 return false;
+            }
+            if unseen(value) {
+                return true;
             }
             if !value.starts_with('-') {
                 index += 1;
@@ -478,6 +510,15 @@ mod tests {
             &["-c"],
             &["-C", "-c", "core.fsmonitor=x", "status"],
             &["--namespace", "-c", "alias.x=!sh", "x"],
+            // Review round 3: a split value, a missing value option, unseen
+            // words before the subcommand.
+            &["--namespace", "a", "b", "-c", "alias.x=!sh", "x"],
+            &["-c", "user.name=a", "b", "$o", "x"],
+            &["--shallow-file", "x", "-c", "alias.y=!sh", "y"],
+            &["$o", "x"],
+            &["-p", "$o", "x"],
+            &["-C", "$dir", "status"],
+            &["-C", "d", "log", "\u{1}unseen-output\u{1}"],
         ] {
             assert!(git_runs_code(&strings(args)), "{args:?}");
         }
@@ -487,7 +528,13 @@ mod tests {
             &["-c", "user.name=x", "-c", "color.ui=always", "commit"],
             &["commit", "-c", "HEAD"],
             &["--exec-path"],
+            // A `git` value or word is checked on its own.
             &["-C", "git", "-c", "core.pager=x", "log"],
+            &["-C", "GIT", "-c", "core.pager=x", "log"],
+            &["commit", "-m", "$msg"],
+            &["log", "-c", "alias.x=!sh"],
+            &["-C", "d", "commit", "-c", "HEAD"],
+            &["-C", "d", "log", "-c"],
         ] {
             assert!(!git_runs_code(&strings(args)), "{args:?}");
         }

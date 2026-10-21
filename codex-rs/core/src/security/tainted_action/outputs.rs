@@ -15,6 +15,11 @@ const OUTPUT_OPTIONS: &[(&str, &str, char)] = &[
     ("sort", "--output", 'o'),
 ];
 
+/// git options that name a file `fast-export`/`fast-import` writes.
+const GIT_MARK_OPTIONS: &[&str] = &["--export-marks", "--export-pack-edges"];
+/// A short letter no option word holds.
+const NO_SHORT: char = '\0';
+
 /// Shortest long-option prefix taken as the output option (`--o`).
 const MIN_PREFIX: usize = 3;
 
@@ -39,6 +44,13 @@ pub(super) fn output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
         found |= option_values(args, "--file", 'f', &mut files);
     }
     found |= option_values(args, long, *short, &mut files);
+    if name == "git" {
+        // `fast-export`/`fast-import` write their marks and pack edges.
+        for long in GIT_MARK_OPTIONS {
+            work::step();
+            found |= option_values(args, long, NO_SHORT, &mut files);
+        }
+    }
     found.then_some(files)
 }
 
@@ -212,6 +224,11 @@ mod tests {
                 some(&["~/.zshrc"]),
             ),
             ("git", &["bundle", "create", "~/.zshrc", "HEAD"], some(&[])),
+            (
+                "git",
+                &["fast-export", "--export-marks=~/.zshrc", "HEAD"],
+                some(&["~/.zshrc"]),
+            ),
             ("sort", &["-o", "f", "in"], some(&["f"])),
             ("sort", &["-ro~/.zshrc"], some(&["~/.zshrc"])),
             ("sort", &["--output=f"], some(&["f"])),
