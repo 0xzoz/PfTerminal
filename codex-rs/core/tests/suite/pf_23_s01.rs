@@ -148,8 +148,9 @@ async fn start_turn_in(
     start_turn_after(home, level, approval, steps, tweak, |_| {}).await
 }
 
-/// [`start_turn_in`], with the session's folder as its workspace root, as in
-/// a real session (#1098).
+/// [`start_turn_in`], pinning the session's folder as its workspace root, as
+/// in a real session (#1098). That is also `TestCodex`'s default for a local
+/// session (#1120); these tests depend on it, so they pin it.
 #[cfg(target_os = "macos")]
 async fn start_turn_in_project(
     home: Option<Arc<TempDir>>,
@@ -165,7 +166,7 @@ async fn start_turn_in_project(
         steps,
         tweak,
         |_| {},
-        /*cwd_is_workspace_root*/ true,
+        /*pin_cwd_as_workspace_root*/ true,
     )
     .await
 }
@@ -186,7 +187,7 @@ async fn start_turn_after(
         steps,
         tweak,
         before_turn,
-        /*cwd_is_workspace_root*/ false,
+        /*pin_cwd_as_workspace_root*/ false,
     )
     .await
 }
@@ -198,7 +199,7 @@ async fn start_turn_with(
     steps: Vec<Step>,
     tweak: impl Fn(&mut Config) + Send + Sync + 'static,
     before_turn: impl FnOnce(&TestCodex),
-    cwd_is_workspace_root: bool,
+    pin_cwd_as_workspace_root: bool,
 ) -> anyhow::Result<(TestCodex, ResponseMock)> {
     let server = start_mock_server().await;
     let captured = mount_sse_sequence(&server, steps.into_iter().map(sse).collect()).await;
@@ -206,7 +207,7 @@ async fn start_turn_with(
     if let Some(home) = home {
         builder = builder.with_home(home);
     }
-    if cwd_is_workspace_root {
+    if pin_cwd_as_workspace_root {
         builder = builder.with_session_cwd_as_workspace_root();
     }
     let test = builder

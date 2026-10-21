@@ -4398,3 +4398,66 @@ async fn inherited_account_is_replaced_only_by_an_explicit_account_of_its_provid
     );
     Ok(())
 }
+
+/// #1129: an agent's recorded account is restored only while it can be used:
+/// `default` always is; a named account needs the `named_accounts` feature
+/// and must still be configured, otherwise the agent is refused and the
+/// provider is left unchanged.
+#[tokio::test]
+async fn recorded_agent_account_is_restored_or_refused() -> std::io::Result<()> {
+    let codex_home = tempdir().expect("tempdir");
+    let build = |named_accounts: bool| {
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            format!(
+                "model = \"glm-5.3-flash\"\nmodel_provider = \"zai\"\n\n\
+                 [features]\nnamed_accounts = {named_accounts}\n"
+            ),
+        )
+        .expect("write config");
+        ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .build()
+    };
+    codex_vault::Vault::new(codex_home.path().to_path_buf())
+        .write_provider_account(
+            "zai",
+            &codex_vault::ProviderAccountName::parse("work").expect("name"),
+            codex_vault::ProviderAccountKind::ApiKey,
+            "canary-1129-work",
+        )
+        .expect("write account");
+    let restore = |config: &crate::config::Config, recorded: &str| {
+        let mut provider = config.model_providers["zai"].clone();
+        crate::config::restore_recorded_agent_account(config, "zai", &mut provider, recorded)
+            .map(|()| provider.account.map(|account| account.to_string()))
+    };
+    let refusal = |reason: &str| {
+        Err(format!(
+            "Resuming this agent: it ran on account `ghost` of `zai`, and {reason}. It is not \
+             moved to another account: ask the user to restore that account (`/providers`), \
+             or do the work without this agent. Do not retry on another account without the \
+             user's consent."
+        ))
+    };
+
+    let on = build(/*named_accounts*/ true).await?;
+    assert_eq!(restore(&on, "work"), Ok(Some("zai:work".to_string())));
+    assert_eq!(restore(&on, "default"), Ok(None));
+    let ghost = restore(&on, "ghost");
+    assert!(
+        ghost.as_ref().is_err_and(|message| message.starts_with(
+            "Resuming this agent: it ran on account `ghost` of `zai`, and account `ghost` \
+                 of provider `zai` is not configured"
+        )),
+        "{ghost:?}"
+    );
+
+    let off = build(/*named_accounts*/ false).await?;
+    assert_eq!(restore(&off, "default"), Ok(None));
+    assert_eq!(
+        restore(&off, "ghost"),
+        refusal("named accounts need the `named_accounts` feature, which is off now")
+    );
+    Ok(())
+}

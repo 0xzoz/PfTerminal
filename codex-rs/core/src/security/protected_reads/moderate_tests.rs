@@ -2,6 +2,7 @@
 #![cfg(unix)]
 
 use super::*;
+use crate::security::launch_contract::KeptFile;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -302,6 +303,23 @@ fn issue_1077_the_kept_read_note_names_the_file_and_what_it_is() {
             )
         );
     }
+}
+
+/// The Google Cloud CLI's folder on Windows (`%APPDATA%\gcloud`) holds its
+/// credentials and config, so the note calls it that folder, not a CLI
+/// token file; a file inside it is "in" the folder.
+#[test]
+fn the_kept_read_note_names_the_google_cloud_cli_folder() {
+    let notes = [
+        (r"%APPDATA%\gcloud", KeptFile::GoogleCloudCliFolder),
+        (
+            r"%APPDATA%\gcloud\credentials.db",
+            KeptFile::InGoogleCloudCliFolder,
+        ),
+        ("~/.netrc", KeptFile::CliToken),
+    ]
+    .map(|(path, kept)| super::super::moderate_kept_read_note(path, kept));
+    insta::assert_snapshot!(notes.join("\n\n"));
 }
 
 /// #839: what an explained denial was, for the inspector's recent denials:
