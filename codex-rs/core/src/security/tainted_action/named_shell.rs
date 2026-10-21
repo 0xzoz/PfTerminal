@@ -1,6 +1,9 @@
 //! D85: whether a command line provably never reaches zsh, so the zsh-only
 //! checks (glob qualifiers #1028, glob substitution #1084) need not ask for
-//! it (`git commit -m "fix(tests)"` under bash).
+//! it (`git commit -m "fix(tests)"` under bash). #932 phase 3
+//! ([`grammar_proves_data`]) also lifts them under any system shell, zsh
+//! and any `sh` included, for lines whose every word the grammar proves is
+//! data.
 //!
 //! Fail closed: only a line the host runs under the bash, dash or sh its
 //! argv names by system path (an sh that is not zsh), whose script is plain

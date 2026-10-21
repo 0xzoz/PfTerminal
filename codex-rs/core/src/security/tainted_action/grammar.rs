@@ -1152,7 +1152,7 @@ fn option_variable(word: &str) -> bool {
     OPTION_VARIABLES.iter().any(|name| word.contains(name))
 }
 
-/// Whether arithmetic text holds an assignment operator (`=`, `+=`, ...,
+/// Whether arithmetic text holds an assignment operator (`=`, `+=`, `<<=`, ...,
 /// `++`, `--`), not a comparison (`==`, `!=`, `<=`, `>=`).
 fn assigns(text: &str) -> bool {
     let bytes = text.as_bytes();
@@ -1160,7 +1160,11 @@ fn assigns(text: &str) -> bool {
         work::step();
         let before = at.checked_sub(1).map(|before| bytes[before]);
         let after = bytes.get(at + 1).copied();
-        (*byte == b'=' && after != Some(b'=') && !matches!(before, Some(b'=' | b'!' | b'<' | b'>')))
+        // `<<=` and `>>=` assign; `<=` and `>=` compare.
+        let shift = at >= 2 && matches!(&bytes[at - 2..at], b"<<" | b">>");
+        (*byte == b'='
+            && after != Some(b'=')
+            && (shift || !matches!(before, Some(b'=' | b'!' | b'<' | b'>'))))
             || (*byte == b'+' && after == Some(b'+'))
             || (*byte == b'-' && after == Some(b'-'))
     })

@@ -361,6 +361,7 @@ fn quotes_some_shells_do_not_honour_are_refused() {
         "false && echo $(( ')) ; rm -rf ~ ; echo $(( ' ))",
         "echo \"${x:-'}\"; rm -rf ~; echo \"'}\"",
         "x=POSIXLY_CORRE; : $(( ${x}CT = 1 ))",
+        "x=POSIXLY_CORRE; : $(( ${x}CT <<= 1 ))",
         "for (( i=$((1)); i<\"))\"; i++ )) do :; done",
     ] {
         assert!(read(text).is_err(), "{text:?}");
