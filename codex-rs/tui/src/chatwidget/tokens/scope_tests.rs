@@ -679,7 +679,7 @@ async fn cost_unbranded_model_names_on_other_routes_snapshot() {
             "claude-opus-5-5-plan",
         ),
     ];
-    let chat = opened(day(own, None), /*width*/ 100).await;
+    let chat = opened(day(own, /*others*/ None), /*width*/ 100).await;
     insta::assert_snapshot!(
         "cost_unbranded_model_names_on_other_routes",
         render_bottom_popup_with_height(&chat, /*width*/ 100, /*height*/ 24)
