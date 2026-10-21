@@ -18,6 +18,7 @@ use super::indirect;
 use super::invocation;
 use super::invocation::Code;
 use super::outbound;
+use super::outputs;
 use super::quoted;
 use super::quoted::Command;
 use super::quoted::Word;
@@ -315,15 +316,24 @@ impl Classifier {
                 }
                 if sed::NAMES.contains(&resolved_name.as_str()) {
                     sed_command = true;
-                } else if WRITERS.contains(&resolved_name.as_str()) || !command.writes_to.is_empty()
-                {
-                    found.other_writes = true;
-                    found.written.extend(
-                        texts[at + 1..]
-                            .iter()
-                            .filter(|word| !word.starts_with('-'))
-                            .map(|word| target(Some(file_operand(word).to_string()))),
-                    );
+                } else {
+                    // #1141: an output option's file (`git log --output=f`).
+                    let outputs = outputs::output_files(&resolved_name, &texts[at + 1..]);
+                    if WRITERS.contains(&resolved_name.as_str())
+                        || outputs.is_some()
+                        || !command.writes_to.is_empty()
+                    {
+                        found.other_writes = true;
+                        found.written.extend(
+                            texts[at + 1..]
+                                .iter()
+                                .filter(|word| !word.starts_with('-'))
+                                .map(|word| target(Some(file_operand(word).to_string()))),
+                        );
+                        found
+                            .written
+                            .extend(outputs.into_iter().flatten().map(|file| target(Some(file))));
+                    }
                 }
                 if resolved_name == "eval" {
                     continue;

@@ -2317,6 +2317,101 @@ async fn pane_spawn_tree_hides_task_actions() {
     }
 }
 
+/// D95 (#1146): only the person's Spawn status prompt sends a task as the
+/// person's own input; the route agents' tasks take (assignment fires,
+/// model dispatch) still sends them as inter-agent messages.
+#[tokio::test]
+async fn spawn_status_prompt_alone_sends_person_tasks() {
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000001146").expect("valid thread id");
+    let orc_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000001147").expect("valid thread id");
+    app.primary_thread_id = Some(main_thread_id);
+    app.active_thread_id = Some(main_thread_id);
+    app.upsert_agent_picker_thread(
+        orc_thread_id,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread
+        .insert(orc_thread_id, main_thread_id);
+
+    (crate::spawn_orchestration::spawn_agent_task_prompt_submit(
+        app.app_event_tx.clone(),
+        orc_thread_id,
+    ))("typed by the person".to_string());
+    match rx.try_recv().expect("the prompt sends an event") {
+        AppEvent::SubmitSpawnAgentTaskFromPerson { thread_id, task } => {
+            assert_eq!(thread_id, orc_thread_id);
+            assert_eq!(task, "typed by the person");
+        }
+        event => panic!("expected the person's task, got {event:?}"),
+    }
+
+    app.send_native_task_event(orc_thread_id, "sent by an agent".to_string());
+    match rx.try_recv().expect("an agent's task sends an event") {
+        AppEvent::SubmitSpawnAgentTask {
+            thread_id, task, ..
+        } => {
+            assert_eq!(thread_id, orc_thread_id);
+            assert_eq!(task, "sent by an agent");
+        }
+        event => panic!("expected an agent's task, got {event:?}"),
+    }
+}
+
+/// D106 (#1176): an agent's task for a pane the person opened takes the
+/// mailbox route, as for an agent-opened pane; it is never sent as the
+/// person's input. The person's own Spawn status task still is (D95).
+#[tokio::test]
+async fn agent_task_for_a_person_opened_pane_takes_the_mailbox_route() {
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000001176").expect("valid thread id");
+    let pane_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000001177").expect("valid thread id");
+    app.primary_thread_id = Some(main_thread_id);
+    app.active_thread_id = Some(main_thread_id);
+    app.upsert_agent_picker_thread(
+        pane_thread_id,
+        Some("Worker".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    let entry = app
+        .agent_navigation
+        .get(&pane_thread_id)
+        .expect("pane entry")
+        .clone();
+    assert!(app.is_operator_owned_codex_user_pane(pane_thread_id, &entry));
+
+    app.send_native_task_event(pane_thread_id, "sent by an agent".to_string());
+    match rx.try_recv().expect("an agent's task sends an event") {
+        AppEvent::SubmitSpawnAgentTask {
+            thread_id, task, ..
+        } => {
+            assert_eq!(thread_id, pane_thread_id);
+            assert_eq!(task, "sent by an agent");
+        }
+        event => panic!("expected an agent's task for the mailbox, got {event:?}"),
+    }
+    assert!(rx.try_recv().is_err(), "one event only");
+
+    (crate::spawn_orchestration::spawn_agent_task_prompt_submit(
+        app.app_event_tx.clone(),
+        pane_thread_id,
+    ))("typed by the person".to_string());
+    match rx.try_recv().expect("the prompt sends an event") {
+        AppEvent::SubmitSpawnAgentTaskFromPerson { thread_id, task } => {
+            assert_eq!(thread_id, pane_thread_id);
+            assert_eq!(task, "typed by the person");
+        }
+        event => panic!("expected the person's task, got {event:?}"),
+    }
+}
+
 #[tokio::test]
 async fn pane_spawn_tree_disables_restored_unloaded_native_rows() {
     let mut app = make_test_app().await;
@@ -3544,7 +3639,8 @@ async fn pane_picker_marks_exactly_the_active_native_thread_current() {
 }
 
 /// Drains native task events for `thread_id`, whether the target is a managed agent or an
-/// operator-owned user pane. Returns the task texts.
+/// operator-owned user pane (both take agents' tasks from the mailbox, D106). Returns the task
+/// texts.
 fn drain_spawn_agent_tasks_for(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     thread_id: ThreadId,
@@ -3553,9 +3649,6 @@ fn drain_spawn_agent_tasks_for(
     while let Ok(event) = rx.try_recv() {
         match event {
             AppEvent::SubmitSpawnAgentTask {
-                thread_id: t, task, ..
-            }
-            | AppEvent::SubmitCodexUserPaneTask {
                 thread_id: t, task, ..
             } if t == thread_id => matched.push(task),
             _ => {}
@@ -7485,7 +7578,6 @@ async fn issue_507_switch_events_pause_whips_at_once_and_start_nothing() -> Resu
             !matches!(
                 event,
                 AppEvent::CodexOp(_)
-                    | AppEvent::SubmitCodexUserPaneTask { .. }
                     | AppEvent::SubmitSpawnAgentTask { .. }
                     | AppEvent::SubmitSpawnClaudePaneTask { .. }
                     | AppEvent::SendSpawnAgentMailboxMessage { .. }
@@ -7550,52 +7642,6 @@ async fn issue_507_removed_pane_drops_its_waiting_task() {
         .expect("remove the pane");
     app.drop_held_claude_task_of_removed_pane(&orc_pane_id);
     assert!(app.kill_switch_held_claude_tasks.is_empty());
-}
-
-/// #507 review: a task for an operator-owned Codex pane while the switch is
-/// on is not submitted as a user turn (which would be refused and not kept,
-/// yet recorded as sent); it is reported as not sent, before the session
-/// lookup and its retry.
-#[tokio::test]
-async fn issue_507_operator_codex_pane_task_is_reported_not_sent() -> Result<()> {
-    use crate::legacy_core::security_revocation::HumanRevocation;
-    let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
-    let config = app.chat_widget.config_ref().clone();
-    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&config)).await?;
-    let mut tui = crate::tui::test_support::make_test_tui()?;
-    let thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000507")?;
-    app.upsert_agent_picker_thread(
-        thread_id,
-        Some("Gorbag".to_string()),
-        /*agent_role*/ None,
-        /*is_closed*/ false,
-    );
-    while app_event_rx.try_recv().is_ok() {}
-
-    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
-    Box::pin(app.handle_event(
-        &mut tui,
-        &mut app_server,
-        AppEvent::SubmitCodexUserPaneTask {
-            thread_id,
-            task: "pf507 operator task".to_string(),
-            sent_while_kill_switch_on: false,
-        },
-    ))
-    .await?;
-    assert!(op_rx.try_recv().is_err(), "no user turn was submitted");
-    let said = std::iter::from_fn(|| app_event_rx.try_recv().ok())
-        .filter_map(|event| match event {
-            AppEvent::InsertHistoryCell(cell) => {
-                Some(lines_to_single_string(&cell.display_lines(/*width*/ 400)))
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(said.contains("the security kill switch is on"), "{said}");
-    assert!(!said.contains("no live session"), "{said}");
-    Ok(())
 }
 
 /// #507 review: while the switch is on, a child report starts no turn in a

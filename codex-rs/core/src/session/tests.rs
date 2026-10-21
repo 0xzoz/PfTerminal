@@ -4727,6 +4727,16 @@ pub(crate) fn kept_test_cwd() -> PathBuf {
         .keep()
 }
 
+/// #1157: harness overrides that build a unit test's config for a kept
+/// temporary working folder ([`kept_test_cwd`]) instead of the test
+/// process's own folder, the crate's source tree.
+pub(crate) fn kept_test_cwd_overrides() -> ConfigOverrides {
+    ConfigOverrides {
+        cwd: Some(kept_test_cwd()),
+        ..Default::default()
+    }
+}
+
 /// A test config for `codex_home`, built for the working folder `cwd`. Pass
 /// a temporary folder: without one the config would be built for the test
 /// process's own folder, the crate's source tree, and sandboxed commands
@@ -4758,6 +4768,30 @@ async fn build_test_config_is_built_for_the_given_folder() {
         cwd.display()
     );
     assert!(!cwd.starts_with(env!("CARGO_MANIFEST_DIR")));
+}
+
+/// #1157: unit tests that build a config with [`kept_test_cwd_overrides`]
+/// get a temporary working folder that exists, not the crate's source tree.
+#[tokio::test]
+async fn kept_test_cwd_overrides_build_for_a_temporary_folder() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(kept_test_cwd_overrides())
+        .build()
+        .await
+        .expect("load default test config");
+    let cwd = config.cwd.as_path();
+    assert!(cwd.is_dir(), "{}", cwd.display());
+    assert!(
+        cwd.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("codex-test-cwd-")),
+        "{}",
+        cwd.display()
+    );
+    assert!(!cwd.starts_with(env!("CARGO_MANIFEST_DIR")));
+    assert!(!cwd.starts_with(codex_home.path()));
 }
 
 fn session_telemetry(

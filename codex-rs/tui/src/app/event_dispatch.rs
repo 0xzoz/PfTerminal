@@ -5350,10 +5350,18 @@ impl App {
                 task,
                 sent_while_kill_switch_on,
             } => {
-                if self.spawn_legacy_read_only
-                    || self.spawn_crew.as_ref().is_some_and(|crew| {
-                        !matches!(crew.status, crate::crew_state::CrewCreationStatus::Ready)
-                    })
+                // D106 (#1176): a pane the person opened takes agents' tasks
+                // from its mailbox too; the /spawn crew's state does not stop
+                // them, as it did not when they arrived as its input.
+                let is_operator_pane = self
+                    .agent_navigation
+                    .get(&thread_id)
+                    .is_some_and(|entry| self.is_operator_owned_codex_user_pane(thread_id, entry));
+                if !is_operator_pane
+                    && (self.spawn_legacy_read_only
+                        || self.spawn_crew.as_ref().is_some_and(|crew| {
+                            !matches!(crew.status, crate::crew_state::CrewCreationStatus::Ready)
+                        }))
                 {
                     let target_node_id = self.logical_native_node_for_thread(thread_id);
                     let acks = self.take_spawn_dispatch_acks_for_task(&target_node_id, task.trim());
@@ -5376,6 +5384,14 @@ impl App {
                 }
                 let task = task.trim().to_string();
                 if task.is_empty() {
+                    // The sender is told, as before for a pane the person opened.
+                    let target_node_id = self.logical_native_node_for_thread(thread_id);
+                    self.record_spawn_dispatch_failed_for_task_with_turns(
+                        &target_node_id,
+                        &task,
+                        "spawn task cannot be empty",
+                        /*start_turns*/ !sent_while_kill_switch_on,
+                    );
                     self.chat_widget
                         .add_error_message("Spawn task cannot be empty.".to_string());
                     return Ok(AppRunControl::Continue);
@@ -5468,8 +5484,14 @@ impl App {
                         );
                         self.persist_pane_state();
                     }
+                    // D106: a pane the person opened is never re-created as a
+                    // saved agent; if Core has not loaded it, the task fails
+                    // (below) as it did when it had no live session.
                     Err(error)
-                        if AppServerSession::agent_message_target_not_found(&error, thread_id) =>
+                        if !is_operator_pane
+                            && AppServerSession::agent_message_target_not_found(
+                                &error, thread_id,
+                            ) =>
                     {
                         match self
                             .materialize_saved_native_spawn_thread_for_task(app_server, thread_id)
@@ -5586,152 +5608,132 @@ impl App {
                     }
                 }
             }
-            AppEvent::SubmitCodexUserPaneTask {
-                thread_id,
-                task,
-                sent_while_kill_switch_on,
-            } => {
-                let task = task.trim().to_string();
-                // #660: a task sent while the switch was on starts no turn in
-                // its sender, also when it fails after switch-off.
-                let report_turns = !sent_while_kill_switch_on;
-                let target_node_id = self.logical_native_node_for_thread(thread_id);
-                let is_operator_pane = self
-                    .agent_navigation
-                    .get(&thread_id)
-                    .is_some_and(|entry| self.is_operator_owned_codex_user_pane(thread_id, entry));
-                if !is_operator_pane {
-                    let detail =
-                        format!("native thread {thread_id} is not an operator-owned user pane");
-                    self.record_spawn_dispatch_failed_for_task_with_turns(
-                        &target_node_id,
-                        &task,
-                        &detail,
-                        report_turns,
+            AppEvent::SubmitSpawnAgentTaskFromPerson { thread_id, task } => {
+                // D95 (#1146): the person's own task from Spawn status reaches
+                // the pane as user input, as if typed there. No agent's
+                // dispatch acknowledgement is consumed or attributed to it.
+                if self.spawn_legacy_read_only
+                    || self.spawn_crew.as_ref().is_some_and(|crew| {
+                        !matches!(crew.status, crate::crew_state::CrewCreationStatus::Ready)
+                    })
+                {
+                    self.chat_widget.add_error_message(
+                        "This /spawn hierarchy is read-only until its crew identity and creation \
+                         state are reconciled."
+                            .to_string(),
                     );
-                    self.chat_widget.add_error_message(detail);
                     return Ok(AppRunControl::Continue);
                 }
+                let task = task.trim().to_string();
                 if task.is_empty() {
-                    self.record_spawn_dispatch_failed_for_task_with_turns(
-                        &target_node_id,
-                        &task,
-                        "operator pane task cannot be empty",
-                        report_turns,
-                    );
                     self.chat_widget
-                        .add_error_message("Operator pane task cannot be empty.".to_string());
+                        .add_error_message("Spawn task cannot be empty.".to_string());
                     return Ok(AppRunControl::Continue);
                 }
                 if task.len() > crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES {
-                    let detail = format!(
+                    self.chat_widget.add_error_message(format!(
                         "task is {} bytes; maximum is {} bytes",
                         task.len(),
                         crate::dispatch_queue::MAX_DISPATCH_TASK_BYTES
-                    );
-                    self.record_spawn_dispatch_failed_for_task_with_turns(
-                        &target_node_id,
-                        &task,
-                        &detail,
-                        report_turns,
-                    );
-                    self.chat_widget.add_error_message(detail);
+                    ));
                     return Ok(AppRunControl::Continue);
                 }
-                // #507: with the kill switch on, a task for a pane the person
-                // opened is a user turn, which is refused and not kept; say so
-                // to the sender and the person instead of reporting it sent.
-                // Checked before the store-lock retry below, so a retry never
-                // starts it once the switch is off. #660: also when another
-                // agent sent it while the switch was on and it is handled only
-                // after switch-off.
-                let kill_switch_on = self.kill_switch_on_now();
-                if sent_while_kill_switch_on || kill_switch_on {
-                    let label = self.thread_label(thread_id);
-                    let detail = if kill_switch_on {
-                        format!(
-                            "Not sent to {label}: the security kill switch is on, and a task for a pane you opened is not kept (as a typed message is not). Send it again after turning the switch off."
-                        )
-                    } else {
-                        format!(
-                            "Not sent to {label}: it was sent while the security kill switch was on, and a task for a pane you opened is not kept (as a typed message is not). It was not started when the switch was turned off; send it again."
-                        )
-                    };
-                    // #660: the sender is told; no turn starts for it there.
-                    self.record_kill_switch_dispatch_failed_for_task(&target_node_id, &task, &detail);
-                    self.chat_widget.add_error_message(detail);
+                let label = self.thread_label(thread_id);
+                // A pane its parent controls takes no typed input; the task
+                // goes to it as before, as a message, and the person is told.
+                if self.agent_navigation.is_parent_owned(thread_id) {
+                    self.chat_widget.add_info_message(
+                        person_task_to_parent_owned_pane_message(&label),
+                        /*hint*/ None,
+                    );
+                    self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
+                        thread_id,
+                        task,
+                        sent_while_kill_switch_on: false,
+                    });
                     return Ok(AppRunControl::Continue);
                 }
-                let session = match self.thread_event_channels.get(&thread_id) {
-                    Some(channel) => match channel.store.try_lock() {
-                        Ok(store) => store.session.clone(),
-                        Err(_) => {
-                            // Never wait on a thread store from the main dispatcher. A thread-event
-                            // handler may hold this lock while doing asynchronous work, which would
-                            // otherwise freeze all terminal input. Wait off-loop, then replay the
-                            // submission so it observes the latest pane ownership and session.
-                            let store = Arc::clone(&channel.store);
-                            let app_event_tx = self.app_event_tx.clone();
-                            tokio::spawn(async move {
-                                let store_guard = store.lock().await;
-                                drop(store_guard);
-                                app_event_tx.send(AppEvent::SubmitCodexUserPaneTask {
-                                    thread_id,
-                                    task,
-                                    sent_while_kill_switch_on,
-                                });
-                            });
-                            return Ok(AppRunControl::Continue);
+                // #507: a typed message is not kept while the kill switch is
+                // on; neither is this one (checked again before it is sent).
+                if self.kill_switch_on_now() {
+                    self.chat_widget
+                        .add_error_message(person_task_kill_switch_message(&label));
+                    return Ok(AppRunControl::Continue);
+                }
+                let thread_id = match self
+                    .materialize_saved_native_spawn_thread_for_task(app_server, thread_id)
+                    .await
+                {
+                    Ok(thread_id) => thread_id,
+                    Err(error) => {
+                        self.chat_widget
+                            .add_error_message(format!("Not sent to {label}: {error:#}"));
+                        return Ok(AppRunControl::Continue);
+                    }
+                };
+                if self.agent_navigation.is_parent_owned(thread_id) {
+                    self.chat_widget.add_info_message(
+                        person_task_to_parent_owned_pane_message(&label),
+                        /*hint*/ None,
+                    );
+                    self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
+                        thread_id,
+                        task,
+                        sent_while_kill_switch_on: false,
+                    });
+                    return Ok(AppRunControl::Continue);
+                }
+                if self.kill_switch_on_now() {
+                    self.chat_widget
+                        .add_error_message(person_task_kill_switch_message(&label));
+                    return Ok(AppRunControl::Continue);
+                }
+                // User input, as typing sends it: added to a running turn, or
+                // a new turn. It sends no settings, so the pane keeps the
+                // approval, sandbox, model and mode Core holds for it.
+                let items = vec![codex_app_server_protocol::UserInput::Text {
+                    text: task.clone(),
+                    text_elements: Vec::new(),
+                }];
+                let sent = match self.active_turn_id_for_submission(thread_id).await {
+                    Some(turn_id) => app_server
+                        .turn_steer(thread_id, turn_id, items, /*client_user_message_id*/ None)
+                        .await
+                        .map(|_| ())
+                        .map_err(|error| {
+                            format!(
+                                "Not sent to {label}: its running turn did not take it ({error}). \
+                                 Send it again when that turn ends."
+                            )
+                        }),
+                    None => match app_server
+                        .turn_start_keeping_thread_settings(
+                            thread_id,
+                            items,
+                            self.spawn_additional_context_for_thread(thread_id),
+                        )
+                        .await
+                    {
+                        Ok(crate::app_server_session::TurnStartOutcome::Started { .. }) => Ok(()),
+                        Ok(crate::app_server_session::TurnStartOutcome::CapacityUnavailable {
+                            max_threads,
+                        }) => Err(format!(
+                            "Not sent to {label}: all {max_threads} execution slots are in use."
+                        )),
+                        Err(error) => {
+                            Err(format!("Not sent to {label}: the turn could not start: {error:#}"))
                         }
                     },
-                    None => None,
                 };
-                let Some(session) = session else {
-                    let detail = format!(
-                        "operator-owned pane {thread_id} has no live session available for turn submission"
-                    );
-                    self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
-                    self.chat_widget.add_error_message(detail);
-                    return Ok(AppRunControl::Continue);
-                };
-                let mut op = AppCommand::user_turn(
-                    vec![codex_app_server_protocol::UserInput::Text {
-                        text: task.clone(),
-                        text_elements: Vec::new(),
-                    }],
-                    session.cwd.to_path_buf(),
-                    AskForApproval::from(self.config.permissions.approval_policy.value()),
-                    self.config.permissions.active_permission_profile(),
-                    session.model,
-                    session.reasoning_effort,
-                    /*summary*/ None,
-                    /*service_tier*/ None,
-                    /*final_output_json_schema*/ None,
-                    session.collaboration_mode.map(|mode| *mode),
-                    session.personality,
-                );
-                if let AppCommand::UserTurn {
-                    approvals_reviewer, ..
-                } = &mut op
-                {
-                    *approvals_reviewer = Some(self.config.approvals_reviewer);
-                }
-                match self.submit_thread_op(app_server, thread_id, op).await {
+                match sent {
                     Ok(()) => {
-                        self.record_spawn_dispatch_delivered_for_task(&target_node_id, &task);
-                        self.agent_navigation
-                            .set_running(thread_id, /*is_running*/ true);
                         self.agent_navigation.set_last_task_message(
                             thread_id,
                             Some(task.chars().take(240).collect()),
                         );
                         self.persist_pane_state();
                     }
-                    Err(error) => {
-                        let detail = format!("operator pane turn submission failed: {error:#}");
-                        self.record_spawn_dispatch_failed_for_task(&target_node_id, &task, &detail);
-                        self.chat_widget.add_error_message(detail);
-                    }
+                    Err(detail) => self.chat_widget.add_error_message(detail),
                 }
             }
             AppEvent::SendSpawnAgentMailboxMessage { params } => {
@@ -6796,6 +6798,24 @@ pub(super) fn account_switch_message_for(
     } else {
         format!("Connectors, usage and the model list now use {label}; model list refreshed.")
     }
+}
+
+/// D95: why a task the person sent from Spawn status to a pane its parent
+/// controls arrives as a message, not as their own input.
+fn person_task_to_parent_owned_pane_message(label: &str) -> String {
+    format!(
+        "{label} is controlled by its parent and takes no direct input, so the task was sent to \
+         it as a message (it arrives as a message from another agent, not as your own input)."
+    )
+}
+
+/// D95: a task the person sends from Spawn status while the kill switch is on.
+fn person_task_kill_switch_message(label: &str) -> String {
+    format!(
+        "Not sent to {label}: the security kill switch is on. A task you send from Spawn status \
+         is your own input, as if you typed it in that pane, and typed input is not kept while \
+         the switch is on. Send it again after turning the switch off."
+    )
 }
 
 #[cfg(test)]
