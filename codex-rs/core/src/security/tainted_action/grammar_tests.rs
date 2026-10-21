@@ -103,6 +103,9 @@ fn substitutions_are_commands_of_their_own() {
 
 #[test]
 fn unreadable_text_is_refused() {
+    for text in ["print('ok')", "+.,/()[]"] {
+        assert!(read(text).is_err(), "{text:?}");
+    }
     for (text, refusal) in [
         ("echo $(", Refusal::Syntax),
         ("echo 'a", Refusal::Syntax),
@@ -117,8 +120,6 @@ fn unreadable_text_is_refused() {
         ("[v]", Refusal::Words),
         ("--expr=1e x", Refusal::Words),
         ("\\ =git x", Refusal::Words),
-        ("print('ok')", Refusal::Syntax),
-        ("+.,/()[]", Refusal::Syntax),
         ("echo;; id", Refusal::Syntax),
         ("cat <<<\nx", Refusal::Syntax),
     ] {
@@ -134,9 +135,10 @@ fn unreadable_text_is_refused() {
 
 #[test]
 fn deep_nesting_is_refused_not_walked() {
-    let depth = 1000;
-    let text = format!("{}x{}", "$(".repeat(depth), ")".repeat(depth));
-    assert!(matches!(read(&text).err(), Some(Refusal::TooDeep)));
+    let depth = 500;
+    let text = format!("{}x{}", "echo $(".repeat(depth), ")".repeat(depth));
+    assert!(text.len() <= MAX_BYTES);
+    assert_eq!(read(&text).err(), Some(Refusal::TooDeep));
 }
 
 #[test]
@@ -147,9 +149,8 @@ fn zsh_differences_are_flagged() {
         "echo $x[1] $y",
         "echo $x:h",
         "{ echo }",
-        "setopt globsubst",
-        "alias l=ls; l",
-        "$cmd x",
+        "set -o globsubst",
+        "builtin print x",
     ] {
         // Flagged, or not read at all.
         assert!(
@@ -248,6 +249,51 @@ fn expansions_inside_patterns_are_refused() {
         assert_eq!(read(text).err(), Some(Refusal::Words), "{text:?}");
     }
     assert!(read("echo ${x#a} ${x%.rs}").is_ok());
+}
+
+#[test]
+fn words_a_redirection_or_a_quote_would_hide_are_refused() {
+    for text in [
+        // The grammar gives the redirection every word after it.
+        "rm >/dev/null -rf ~/x",
+        "cat >&- foo",
+        "cat <<EOF -n\nx\nEOF\n",
+        // Single quotes are ordinary characters in these places.
+        "echo \"${x:-'$(id)'}\"",
+        "cat <<EOF\n${x:-'$(id)'}\nEOF\n",
+        "echo $(( '$(id)' ))",
+        // A variable to hold a descriptor.
+        "echo {x}>f",
+    ] {
+        assert!(read(text).is_err(), "{text:?}");
+    }
+    assert!(read("echo >/dev/null 2>&1; cat <<'EOF' >f\nx\nEOF\n").is_ok());
+    assert!(read("echo ${x:-'a'} '$(id)'").is_ok());
+}
+
+#[test]
+fn commands_that_change_how_lines_are_read_are_refused() {
+    for text in [
+        "shopt -s expand_aliases",
+        "builtin alias l=ls",
+        "command setopt globsubst",
+        "$c x",
+        "\"$c\" x",
+    ] {
+        assert_eq!(read(text).err(), Some(Refusal::Reparse), "{text:?}");
+    }
+}
+
+#[test]
+fn nested_process_substitutions_are_read_in_linear_work() {
+    work::assert_linear("grammar process substitutions", |scale| {
+        let depth = 10 * scale;
+        let _ = read(&format!(
+            "{}x{}",
+            "export a=<(".repeat(depth),
+            ")".repeat(depth)
+        ));
+    });
 }
 
 #[test]

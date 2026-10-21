@@ -53,7 +53,8 @@ is marked:
 | `LineContinuation` | A backslash-newline. The shells join the lines before splitting words; the grammar ends a word there. |
 | `HereDocuments` | More than 8 here-documents, or a delimiter longer than 64 bytes: the grammar's scanner keeps pending here-documents in at most 1024 bytes of state and silently forgets them all past that. Also any here-document the scanner may end elsewhere than the shells: a delimiter other than plain characters or one whole quoted word, a body not on the line after its operator (one per line), an end that is not exactly the delimiter on its own line (tabs only for `<<-`), a body line equal to the delimiter before that end, expansions in a quoted body, and a backquote, backslash or unparsed expansion in an unquoted body. |
 | `ParseBudget` / `Syntax` | The parse stops at the first error that every parse in progress has met (error recovery can be quadratic), or after `bytes/2 + 64` progress checks. Any `ERROR` or `MISSING` node also refuses. So do constructs the grammar accepts and bash rejects: `;;` outside `case`, a redirection whose word is on the next line, `f(x)`, and a function body that is not a compound command. |
-| `Words` | The grammar's words may not be the shells': a reserved word as a command's name (`done x`, `coproc cmd`, `} x`), an "assignment" with an invalid name (`--x=1 cmd`), `[v]` read as a test, blanks or operators inside a word token, a comment starting inside a word, a word glued to a redirection's word, a non-blank character that is in no token (`\ ` before a word), or a token that holds an expansion the grammar did not parse (`${x#$(cmd)}` makes `$(cmd)` one pattern token). |
+| `Words` | The grammar's words may not be the shells': a reserved word as a command's name (`done x`, `coproc cmd`, `} x`), an "assignment" with an invalid name (`--x=1 cmd`), `[v]` read as a test, blanks or operators inside a word token, a comment starting inside a word, a word glued to a redirection's word, a redirection the grammar gives more than one word (`rm >/dev/null -rf x` runs `rm -rf x`; `>&-` takes none), words after a here-document's delimiter, `{fd}>f`, a non-blank character that is in no token (`\ ` before a word), or a token that holds an expansion the grammar did not parse (`${x#$(cmd)}` makes `$(cmd)` one pattern token), single-quoted text included where the shells treat quotes as ordinary characters (inside double quotes, a here-document body, arithmetic or `${...}`). |
+| `Reparse` | A command that may change how the shells read the lines after it (`alias`, `shopt`, `setopt`, `emulate`, ... named anywhere in a command, so `builtin alias` counts), or a command name spelled through an expansion. |
 | `Unsupported` | Extended glob patterns, which bash rejects without `shopt -s extglob`. |
 | `TooDeep` | Syntax nodes nested deeper than 512. |
 
@@ -104,23 +105,34 @@ readers agree on the commands. A refusal leaves today's behaviour unchanged.
 
 ## Phase 1 results (harness, macOS, bash 3.2, zsh 5.9, dash)
 
-These are from 5416 distinct texts (2564 test literals, 64 corpus lines and
+These are from 5430 distinct texts (2579 test literals, 63 corpus lines and
 2788 generated), after the fail-closed rules above.
 
-- **Agree:** 1884 of the test literals and 37 of the corpus lines.
-- **Commands differ, reader finds more:** 195 test literals. These are
+- **Agree:** 1811 of the test literals and 33 of the corpus lines.
+- **Commands differ, reader finds more:** 190 test literals. These are
   mostly arithmetic and subscript text that `quoted.rs` reads as commands on
   purpose (#937), and `[[ ... =~ (re) ]]` patterns.
-- **Grammar finds commands the reader misses:** 3 test literals.
+- **Grammar finds commands the reader misses:** 2 test literals.
   `[[ $v = (#b)(*) ]]; echo ...` hides the `echo` from the reader, which
-  takes `#b)...` as a comment. zsh runs it. A bare `time` and `$[v]` are the
-  other two.
+  takes `#b)...` as a comment. zsh runs it. A bare `time` is the other.
 - **Grammar reads, a shell rejects:** almost all of these are bash 3.2 gaps
   (`case` in `$(...)`, `[[ -v ]]`, `|&`) or bash-isms dash rejects. None is a
   shell that reads different commands.
 - **Grammar refuses, the shells accept:** zsh-only syntax (expansion flags,
   `$~x`, `${ cmd; }`), `<>` redirections, and `\`+newline continuations.
   Each costs nothing beyond today's behaviour.
+
+## Limits phase 3 must respect
+
+- "Data" means the shell does not expand the text. Builtins may still
+  evaluate it: `declare 'a[$(id)]=1'`, `unset`, `printf -v`, `read` and
+  `test -v` run a substitution in an array subscript, and a test command
+  keeps only its keyword (`[[ -v 'a[$(id)]' ]]`). Data words of such
+  commands keep today's rules.
+- `time cmd` is read as a command named `time` (bash's keyword). Treat it as
+  a wrapper, as the classifier does today.
+- The harness compares command names only; arguments and data marks are
+  covered by `grammar_tests.rs`.
 
 ## Decisions for the coordinator
 

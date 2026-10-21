@@ -66,6 +66,10 @@ pub(super) enum Refusal {
     Words,
     /// A backslash-newline, which the shells remove before reading words.
     LineContinuation,
+    /// A command that may change how the shells read the lines after it:
+    /// `alias`, `shopt`, `setopt`, ... named anywhere in a command, or a
+    /// command name spelled through an expansion.
+    Reparse,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -119,11 +123,17 @@ const ZSH_WORDS: &[&str] = &[
     "-",
 ];
 
-/// Commands after which a shell may parse the rest of the text another way.
+/// Commands after which a shell may read the rest of the text another way
+/// (aliases, parser options, builtins switched): refused wherever their
+/// name is a word, so `builtin alias` and `command shopt` count too.
 const REPARSING: &[&str] = &[
     "alias", "unalias", "setopt", "unsetopt", "emulate", "shopt", "enable", "disable", "zmodload",
-    "autoload", "set",
+    "autoload",
 ];
+
+/// Names zsh reads differently through a wrapper (`builtin setopt`) or
+/// options `set` changes.
+const ZSH_REPARSING: &[&str] = &["set", "builtin", "command"];
 
 /// Reserved words the grammar takes as a command's name where the shells
 /// do not (`done`, `fi`), or whose commands it does not see (`coproc cmd`
@@ -165,11 +175,12 @@ pub(super) fn read(text: &str) -> Result<Reading, Refusal> {
         leaves: Vec::new(),
     };
     let mut commands = Vec::new();
-    // Each node with its depth, whether it is in a substitution, and its
-    // parent's kind.
-    let mut stack = vec![(root, 0usize, false, "")];
+    // Each node with its depth, whether it is in a substitution, its
+    // parent's kind, and whether it is where the shells expand text in single quotes
+    // (double quotes, a here-document body, arithmetic, `${...}`).
+    let mut stack = vec![(root, 0usize, false, "", false)];
     let mut children = Vec::new();
-    while let Some((node, depth, substituted, parent)) = stack.pop() {
+    while let Some((node, depth, substituted, parent, expanding)) = stack.pop() {
         work::step();
         if depth > MAX_DEPTH {
             return Err(Refusal::TooDeep);
@@ -185,16 +196,28 @@ pub(super) fn read(text: &str) -> Result<Reading, Refusal> {
             return Err(refusal);
         }
         if node.child_count() == 0 {
-            walk.leaf(node);
+            walk.leaf(node, expanding);
         }
         let inner =
             substituted || matches!(node.kind(), "command_substitution" | "process_substitution");
+        let expanding = !matches!(node.kind(), "command_substitution" | "process_substitution")
+            && (expanding
+                || matches!(
+                    node.kind(),
+                    "string"
+                        | "heredoc_body"
+                        | "arithmetic_expansion"
+                        | "expansion"
+                        | "subscript"
+                        | "c_style_for_statement"
+                )
+                || (node.kind() == "test_command" && walk.source(node).starts_with("((")));
         let mut cursor = node.walk();
         children.clear();
         children.extend(node.children(&mut cursor));
         for child in children.iter().rev() {
             work::step();
-            stack.push((*child, depth + 1, inner, node.kind()));
+            stack.push((*child, depth + 1, inner, node.kind(), expanding));
         }
     }
     // Every character the grammar did not take into a token must be a
@@ -241,7 +264,9 @@ fn characters_agree(text: &str) -> bool {
 }
 
 /// At most [`MAX_HERE_DOCUMENTS`] `<<` (here-strings counted too), each
-/// followed by a word of at most [`MAX_DELIMITER_BYTES`].
+/// followed by a word of at most [`MAX_DELIMITER_BYTES`]. A quoted
+/// delimiter is measured only to its first blank; `delimiter` refuses
+/// any with a blank.
 fn here_documents_fit(text: &str) -> bool {
     let mut count = 0;
     let mut rest = text;
@@ -286,18 +311,16 @@ impl<'a> Walk<'a> {
 
     /// A token: its range, and that it hides no expansion unless its text
     /// is taken literally (quoted, a comment, a here-document's).
-    fn leaf(&mut self, node: Node) {
+    fn leaf(&mut self, node: Node, expanding: bool) {
         self.leaves.push((node.start_byte(), node.end_byte()));
+        // Quotes inside double quotes, a body, arithmetic or `${...}` are
+        // ordinary characters: `"${x:-'$(cmd)'}"` runs `cmd`.
+        let quoted = matches!(node.kind(), "raw_string" | "ansi_c_string");
         if node.is_named()
+            && !(quoted && !expanding)
             && !matches!(
                 node.kind(),
-                "raw_string"
-                    | "ansi_c_string"
-                    | "comment"
-                    | "heredoc_body"
-                    | "heredoc_content"
-                    | "heredoc_start"
-                    | "heredoc_end"
+                "comment" | "heredoc_body" | "heredoc_content" | "heredoc_start" | "heredoc_end"
             )
             && hides_expansion(self.source(node))
         {
@@ -411,6 +434,45 @@ impl<'a> Walk<'a> {
     /// Checks that hold for every node.
     fn node(&mut self, node: Node, parent: &str) {
         let kind = node.kind();
+        // The grammar lets a redirection take every word after it
+        // (`rm >/dev/null -rf x` runs `rm -rf x`), and words after a
+        // here-document's delimiter: refused.
+        if matches!(kind, "file_redirect" | "herestring_redirect") {
+            let mut cursor = node.walk();
+            let mut targets = 0;
+            let mut closes = false;
+            for child in node.children(&mut cursor) {
+                work::step();
+                if !child.is_named() {
+                    // `>&-` closes the descriptor and takes no word.
+                    closes |= matches!(self.source(child), ">&-" | "<&-");
+                } else if child.kind() != "file_descriptor" {
+                    targets += 1;
+                }
+            }
+            if targets > 1 || (closes && targets > 0) {
+                self.refuse(Refusal::Words);
+            }
+        }
+        if kind == "heredoc_redirect" {
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    work::step();
+                    if cursor.field_name() == Some("argument") {
+                        self.refuse(Refusal::Words);
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+        // `{fd}>f` names a variable to hold the descriptor; the grammar
+        // takes `{fd}` for an argument.
+        if is_redirect(node) && self.text[..node.start_byte()].ends_with('}') {
+            self.refuse(Refusal::Words);
+        }
         if kind == "heredoc_redirect" {
             self.here_document(node);
         }
@@ -554,12 +616,22 @@ impl<'a> Walk<'a> {
         if kind == "command"
             && let Some(name) = words.first()
         {
-            // A name zsh reads as a reserved word, or a command (possibly
-            // spelled through an expansion) that changes how the lines
-            // after it parse.
+            // A name spelled through an expansion may be any command,
+            // one that changes how the lines after it parse included.
+            if name.dynamic {
+                self.refuse(Refusal::Reparse);
+            }
+            // A name zsh reads as a reserved word or a wrapper, or a
+            // command whose options change how zsh reads later lines.
             self.zsh_unsure |= !name.data
                 || ZSH_WORDS.contains(&name.text.as_str())
-                || REPARSING.contains(&name.text.as_str());
+                || ZSH_REPARSING.contains(&name.text.as_str());
+        }
+        if words
+            .iter()
+            .any(|word| REPARSING.contains(&word.text.as_str()))
+        {
+            self.refuse(Refusal::Reparse);
         }
         self.zsh_unsure |= words
             .iter()
@@ -707,11 +779,11 @@ fn literal(text: &str) -> Word {
     }
 }
 
-/// Text that is not data: kept as written, or [`EXPANDED`] when it holds
-/// an expansion (copying nested expansions whole at every level would take
-/// work quadratic in their depth).
+/// Text that is not data: kept as written, or [`EXPANDED`] when it may
+/// hold an expansion or a substitution (copying nested ones whole at every
+/// level would take work quadratic in their depth).
 fn unknown(source: &str) -> Word {
-    if source.contains(['$', '`']) {
+    if source.contains(['$', '`', '(']) {
         return expanded();
     }
     Word {

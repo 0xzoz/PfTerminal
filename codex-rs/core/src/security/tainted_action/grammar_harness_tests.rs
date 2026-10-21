@@ -7,8 +7,10 @@
 //! found on the machine. `CORBANU_GRAMMAR_REPORT=<file>` writes every
 //! disagreement there; the summary is printed either way.
 //!
-//! The harness reports; it does not judge. Its assertions only hold the
-//! grammar to its contract (no panic, bounded parse work) over the corpus.
+//! The harness reports; it does not judge. It compares command names only
+//! (not arguments or data marks; `grammar_tests.rs` covers those), and in
+//! CI it asserts only that the grammar reads the whole corpus without a
+//! panic.
 
 use super::Refusal;
 use super::read;
