@@ -367,8 +367,10 @@ fn recursive_flag(word: &str) -> bool {
 
 /// The text of PowerShell's `-EncodedCommand` (base64 of UTF-16LE).
 fn decoded_command(word: &str) -> Option<String> {
+    // .NET's base64 ignores white space; invalid UTF-16 becomes U+FFFD.
+    let word: String = word.chars().filter(|ch| !ch.is_whitespace()).collect();
     let bytes = base64::engine::general_purpose::STANDARD
-        .decode(word.trim())
+        .decode(word)
         .ok()?;
     if bytes.len() % 2 != 0 {
         return None;
@@ -379,7 +381,7 @@ fn decoded_command(word: &str) -> Option<String> {
         .iter()
         .map(|pair| u16::from_le_bytes(*pair))
         .collect();
-    String::from_utf16(&units).ok()
+    Some(String::from_utf16_lossy(&units))
 }
 
 /// Whether `word` (lowercase) may be one of PowerShell's encoded
@@ -453,13 +455,15 @@ fn folder_targets(
                 if std::mem::take(&mut skip) {
                     continue;
                 }
-                if word.starts_with('-') && word.contains(':') {
+                let name = lower[next].split(':').next().unwrap_or_default();
+                if takes_a_non_folder_value(name) {
+                    // `-StackName s`, `-ErrorAction Stop`: not the folder.
+                    skip = !lower[next].contains(':');
+                    continue;
+                } else if word.starts_with('-') && word.contains(':') {
                     operand = Some((word.split_once(':').map_or("", |(_, value)| value), next));
                 } else if word.starts_with('-') && word.contains(['\\', '/']) {
                     operand = Some((word.as_str(), next));
-                } else if lower[next].len() >= 3 && "-stackname".starts_with(lower[next].as_str()) {
-                    skip = true;
-                    continue;
                 } else if word.starts_with('-') || lower[next] == "/d" {
                     continue;
                 } else {
@@ -475,8 +479,10 @@ fn folder_targets(
                     } else {
                         words.len()
                     };
+                    // Marked `None`: only a spelling, skipped where it
+                    // could not be a folder (longer than any cmd folder).
                     if end - next > 1 {
-                        found.push((words[next..end].join(" "), Some(next), true));
+                        found.push((words[next..end].join(" "), None, true));
                     }
                 }
                 None => found.push(("~".to_string(), None, true)),
@@ -533,6 +539,31 @@ fn powershell_parameters(names: &[&str], lower: &[String]) -> Vec<bool> {
         }
     }
     parameters
+}
+
+/// Whether `word` (lowercase, before any `:`) is a parameter of
+/// `Set-Location`/`Push-Location` whose value is not the folder:
+/// `-StackName` and the common parameters, by the prefixes PowerShell
+/// accepts.
+fn takes_a_non_folder_value(word: &str) -> bool {
+    matches!(
+        word,
+        "-ea" | "-ev" | "-ov" | "-wa" | "-wv" | "-infa" | "-iv" | "-ob" | "-pv"
+    ) || (word.len() >= 4
+        && [
+            "-stackname",
+            "-erroraction",
+            "-errorvariable",
+            "-outvariable",
+            "-warningaction",
+            "-warningvariable",
+            "-informationaction",
+            "-informationvariable",
+            "-outbuffer",
+            "-pipelinevariable",
+        ]
+        .iter()
+        .any(|name| name.starts_with(word)))
 }
 
 /// Whether `word` (lowercase) is one of PowerShell's own parameters that
@@ -667,6 +698,7 @@ impl Classifier {
     /// return) and its folder flags' values.
     fn windows_command(&mut self, command: &Command, folders: &mut Folders, depth: usize) {
         if self.windows_budget == 0 {
+            self.note(ProtectedActionKind::UnseenCode);
             return;
         }
         let words = &command.words;
@@ -688,6 +720,11 @@ impl Classifier {
             work::step();
             if let Some(at) = at {
                 folder_values[at] = true;
+            }
+            // cmd's whole-rest spelling of a `cd`: past any folder's length
+            // it names none (a word `ci/cd` in a long message is no move).
+            if at.is_none() && target.len() > MAX_FOLDER_BYTES {
+                continue;
             }
             // Each spelling of the folder (`-Path:x`, `a=b` kept whole too),
             // from each folder the line may be in.
@@ -870,7 +907,7 @@ impl Classifier {
     /// Spend `cost` bytes of the Windows view's work budget; past it the
     /// action fails closed and the view stops.
     fn spend(&mut self, cost: usize) -> bool {
-        if self.windows_budget < cost {
+        if self.windows_budget <= cost {
             self.windows_budget = 0;
             self.note(ProtectedActionKind::UnseenCode);
             return false;
@@ -881,7 +918,13 @@ impl Classifier {
 
     /// Add `more` to `folders`, without repeats. Past `limit` folders the
     /// line fails closed.
+    /// The bytes compared are charged to the budget; an overflow stops the
+    /// view (the action has already failed closed).
     fn add_folders(&mut self, folders: &mut Vec<String>, more: Vec<String>, limit: usize) {
+        let cost = folders.iter().chain(&more).map(String::len).sum::<usize>();
+        if !self.spend(cost) {
+            return;
+        }
         let mut known: std::collections::HashSet<String> = folders.iter().cloned().collect();
         for folder in more {
             work::step();
@@ -890,6 +933,7 @@ impl Classifier {
             }
             if folders.len() >= limit {
                 self.note(ProtectedActionKind::UnseenCode);
+                self.windows_budget = 0;
                 return;
             }
             folders.push(folder);

@@ -4385,3 +4385,32 @@ issue_1240_windows_checks_are_linear! {
     // One command: each `ni` and join looks only a few words ahead.
     joins: "ni -Name b Join-Path a b c + d [IO.Path]::Combine e f ",
 }
+
+/// #1240 review 6: parameters before a folder, a spent budget, and a word
+/// named like `cd` inside a long command.
+#[test]
+fn issue_1240_review_6_routes() {
+    use ProtectedActionKind::*;
+    for (line, expected) in [
+        (
+            r"Push-Location -StackName:s C:\Users\fixture; Add-Content .bashrc x",
+            Persistence,
+        ),
+        (
+            r"Set-Location -ErrorAction SilentlyContinue $env:USERPROFILE\.corbanu; Get-Content auth.json",
+            Credentials,
+        ),
+    ] {
+        assert_eq!(powershell(line), Some(expected), "{line}");
+    }
+    // `ci/cd` in a long message is not a folder change.
+    let files: String = (0..200).map(|n| format!(r"src\file{n}.rs ")).collect();
+    assert_eq!(cmd(&format!("git add ci/cd {files}")), None);
+    assert_eq!(
+        powershell(&format!(
+            "git commit -m \"Update CI/CD: {}\"",
+            "word ".repeat(300)
+        )),
+        None
+    );
+}
