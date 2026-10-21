@@ -16,7 +16,7 @@ th{background:#f5f5f7}.warn{background:#fff4e5;border-left:4px solid #f0a020;pad
 <body>
 <h1>Corbanu Terminal — management handoff</h1>
 <p><small>Kept by the coordinating agent (Claude, running in Corbanu Terminal as “coordinator”) for its successor; this update written by the coordinator's handoff-doc9 worker.
-State as of <b>2026-10-21 13:45 UTC (06:45 America/Phoenix)</b>, with the workers, rules, CI and <code>todo.md</code> re-checked at about 14:15Z (<code>todo.md</code> read through its 14:13Z line). Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
+State as of <b>2026-10-21 13:45 UTC (06:45 America/Phoenix)</b>, with the workers, rules, CI and <code>todo.md</code> re-checked at about 14:15Z (<code>todo.md</code> read through its 14:13Z line; its 14:18Z launch of win-691 added at 14:45Z). Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
 <code>3b56e6952e</code>, the merge of #1228 at 13:32Z).
 Coordinator since 2026-10-13 04:30Z: a Claude coordinator, resumed from the 2026-10-12 pause handoff when Travis said resume; it runs in Travis's TUI. It stopped with every
 worker during the 429 outage (10-16 13:55Z) and resumed on 2026-10-19 18:30Z (box below).
@@ -48,7 +48,8 @@ head <code>f42907f937</code>; waits on <b>D147</b> (with D148/D149).</li>
 <li><b>New coordinator rules</b> (section 3): the CONTRIBUTOR-FIRST RULE; coordinator-verified attribute-only or rustfmt-only test changes need no new review round; sign-in handoff
 files (<code>*.signin.md</code>) go to Travis at once; and the REVIEWER LAUNCH RULE (14:00Z): run reviewers in the foreground, never as a background job.</li>
 </ul>
-Running now (section 10): <code>sec-1159</code>, <code>ci-1130</code> (D103, since 14:00Z) and this <code>handoff-doc9</code>: 3 sessions, under the 6 cap. flake-5 finished at
+Running now (section 10): <code>sec-1159</code>, <code>ci-1130</code> (D103, since 14:00Z), <code>win-691</code> (since 14:18Z) and this <code>handoff-doc9</code>: 4 sessions,
+under the 6 cap. flake-5 finished at
 14:13Z per <code>todo.md</code> (#1229 merged); its Windows-test question isn't numbered yet (section 11).
 <b>Waiting on Travis: D124–D152</b> (section 11), plus his own action D18 (delete the vault label <code>kimi_api</code>; not confirmed done). D79's action is done.<br>
 <b>Goal / working agreement with Travis (unchanged):</b> keep the workstreams moving with independent workers. Check in every <b>5 minutes</b> with a short
@@ -129,7 +130,7 @@ gh run list --branch main --workflow postmerge-ci --limit 10
 W=/Volumes/CorbanuDrive/Corbanu/.codex-work/workers-20261002
 L=$HOME/.corbanu-workers                          # worker tmux server, logs and results (internal disk, section 3)
 /opt/homebrew/bin/tmux -S $L/tmux.sock ls
-$L/mon.sh sec-1159 ci-1130                       # one line per running worker
+$L/mon.sh sec-1159 ci-1130 win-691               # one line per running worker
 ls $W/*.request*.md                              # requests waiting for a grant (section 3; numbered files too)
 ls $W/*.hold.md                                  # orchestrator.rs merge holds (section 3)
 ls -lt $W/*.signin.md | head                     # sign-in codes to relay to Travis at once (section 3)
@@ -1675,9 +1676,9 @@ follow-ups).</td><td>#38</td></tr>
 <h2>10. Current state</h2>
 <h3>Workers</h3>
 <p>Running at 2026-10-21 13:45 UTC (06:45 America/Phoenix), as tmux sessions on <code>$HOME/.corbanu-workers/tmux.sock</code>. Check with
-<code>$HOME/.corbanu-workers/mon.sh sec-1159 ci-1130</code>. Session <code>watchdog</code> runs <code>watchdog.sh</code> (its last relaunch was sec-891 at 10-16
+<code>$HOME/.corbanu-workers/mon.sh sec-1159 ci-1130 win-691</code>. Session <code>watchdog</code> runs <code>watchdog.sh</code> (its last relaunch was sec-891 at 10-16
 14:01:51Z, during the 429 stop). The stray session <code>f905</code> (an idle bash left from flake-905 on 10-16) can be killed once confirmed idle. Nobody holds
-<code>$W/vm-macos3.lock</code> and no Tart VM is in use. No <code>$W/*.hold.md</code> exists. <b>3 sessions against the 6 cap</b> (2 once this update finishes).
+<code>$W/vm-macos3.lock</code> and no Tart VM is in use. No <code>$W/*.hold.md</code> exists. <b>4 sessions against the 6 cap</b> (3 once this update finishes).
 Launch times are from <code>todo.md</code>. Worker rows re-checked at about 14:15Z.</p>
 <div><b>Request files:</b> none waiting at 13:45Z. The newest were sec-1141c's two (granted 09:48Z and 12:04Z), utm-par2's (08:43Z), sec-932's (08:08Z) and qwen-rerun2's
 (06:44Z); section 3 lists them. <b>Sign-in files:</b> <code>pf84-live1.signin.md</code> is closed (all codes expired or used).</div>
@@ -1688,6 +1689,9 @@ values set on an earlier line, if #1158 doesn't already cover them. Only adds pr
 <td><b>#1230</b> open (13:38Z). Bar: an end-to-end bypass of what it claims, anything looser than main, or a correctness bug (non-linear work counts). It comments on #1159 with what
 remains.</td></tr>
 <tr><td>ci-1130</td><td>10-21 14:00</td><td>D103: publish our own prebuilt argument-comment-lint package from the existing release workflow, so <code>just argument-comment-lint</code> can use a prebuilt that understands current code; CI keeps building from source; D101/D102 still hold (lint nightly 2026-08-08, no toolchain bump).</td><td>No PR yet. One PR touching <code>.github/</code> (pushing-ci-changes care); it will also update <code>docs/rust-toolchain-bump.md</code>.</td></tr>
+<tr><td>win-691</td><td>10-21 14:18</td><td>#691, decision-free: inventory the security tests ignored on Windows (<code>cfg_attr(windows, ignore = …#691)</code>), then convert or add
+Windows-native variants for the most valuable group so they run in the native Windows lane. Never weakens a Unix assertion; a real Windows gap becomes an issue, not a pass.</td>
+<td>No PR yet. Small PRs; a throwaway probe draft is allowed (closed with an explanation). Posts an inventory table on #691.</td></tr>
 <tr><td>handoff-doc9</td><td>10-21 13:36</td><td>This update (docs-only PR).</td><td>—</td></tr>
 </table>
 <div>Finished since the last update (results in <code>$HOME/.corbanu-workers/</code>): handoff-doc8, pf84-d86, qwen-rerun2, flake-3, cost-1, flake-4, contrib-1, contrib-2, sec-932,
@@ -1834,7 +1838,7 @@ command-line delete, and it isn't confirmed done.</p>
 <li>flake-5's question (finished 14:13Z; not yet numbered in <code>todo.md</code>; D152 is a different question): the Windows login-helper test of #1201 failed both attempts on 10-19 and 10-20, before #1229. Under
 the 10-15 rule (one re-run, skip on Windows only if it fails again): (a) keep it on Windows with its one re-run and skip only if it fails again after #1229, or (b) skip it on Windows
 now. flake-5 recommends (a): the fix is test-only, and skipping drops the only Windows coverage of that recovery path. Number it and add it to the list above;</li>
-<li>ci-1130: its #1130 PR (D103).</li>
+<li>ci-1130: its #1130 PR (D103); win-691: its #691 inventory and PRs.</li>
 </ul></div>
 <div>Carried, still unanswered (low priority):
 <ul>
@@ -1852,7 +1856,7 @@ issue yet.</li>
 
 <h2>12. What to do next (recommended order)</h2>
 <ol>
-<li><b>Keep the 5-minute loop</b> on the running workers (<code>$HOME/.corbanu-workers/wait-event.sh 285 sec-1159 ci-1130</code>). In each round:
+<li><b>Keep the 5-minute loop</b> on the running workers (<code>$HOME/.corbanu-workers/wait-event.sh 285 sec-1159 ci-1130 win-691</code>). In each round:
 <ul>
 <li>Check <code>$W/*.request*.md</code> against the <b>newest</b> matching <code>grant*.md</code>, and <code>$W/*.hold.md</code>. Answer with <code>&lt;name&gt;.grant&lt;n&gt;.md</code> under the
 section 3 rules, and record the answer in <code>todo.md</code> and on the PR.</li>
@@ -1869,6 +1873,7 @@ nightly worker for #636.</li>
 <ul>
 <li>sec-1159: #1230 merges on APPROVE and green (it only adds prompts); its comment on #1159 lists what remains and which part #1161 owns.</li>
 <li>ci-1130: its #1130 PR merges on APPROVE and green (it touches <code>.github/</code>).</li>
+<li>win-691: its Windows test PRs and the #691 inventory; close any probe draft it leaves.</li>
 </ul>
 Don't merge a running worker's PR.</li>
 <li><b>As Travis answers:</b>
