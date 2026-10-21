@@ -679,6 +679,68 @@ fn a_mount_point_in_any_of_this_users_namespaces_is_found() {
     assert!(!mounted_anywhere(&[dir.path()]));
 }
 
+// A fake `/proc/<pid>` in mount namespace `namespace`, with a `mountinfo`
+// listing `point`, or none (the process has ended) when `point` is `None`.
+fn fake_process(proc_dir: &Path, pid: &str, namespace: &str, point: Option<&str>) -> PathBuf {
+    let process = proc_dir.join(pid);
+    std::fs::create_dir_all(process.join("ns")).expect("ns folder");
+    std::os::unix::fs::symlink(namespace, process.join("ns/mnt")).expect("ns link");
+    // All fake processes share one root, so their views dedupe by namespace.
+    std::os::unix::fs::symlink(proc_dir, process.join("root")).expect("root link");
+    if let Some(point) = point {
+        std::fs::write(
+            process.join("mountinfo"),
+            format!("1 0 0:1 / {point} rw - tmpfs tmpfs rw\n"),
+        )
+        .expect("mountinfo");
+    }
+    process
+}
+
+#[test]
+fn a_process_that_ends_mid_scan_does_not_hide_its_namespace() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let ended = fake_process(temp.path(), "101", "mnt:[1]", /*point*/ None);
+    let live = fake_process(temp.path(), "102", "mnt:[1]", Some("/live-view"));
+    let other = fake_process(temp.path(), "103", "mnt:[2]", Some("/other-view"));
+
+    assert_eq!(
+        mount_points_for_processes([ended, live, other].into_iter()),
+        Some(HashSet::from([
+            b"/live-view".to_vec(),
+            b"/other-view".to_vec(),
+        ])),
+    );
+}
+
+#[test]
+fn a_namespace_whose_view_was_read_is_read_once() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let first = fake_process(temp.path(), "101", "mnt:[1]", Some("/first-view"));
+    // Reading a folder as `mountinfo` fails the whole scan, so this view
+    // must not be read: its namespace was already read through `first`.
+    let duplicate = fake_process(temp.path(), "102", "mnt:[1]", /*point*/ None);
+    std::fs::create_dir(duplicate.join("mountinfo")).expect("unreadable view");
+
+    assert_eq!(
+        mount_points_for_processes([first, duplicate].into_iter()),
+        Some(HashSet::from([b"/first-view".to_vec()])),
+    );
+}
+
+#[test]
+fn an_unreadable_view_still_fails_the_scan() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let unreadable = fake_process(temp.path(), "101", "mnt:[1]", /*point*/ None);
+    std::fs::create_dir(unreadable.join("mountinfo")).expect("unreadable view");
+    let live = fake_process(temp.path(), "102", "mnt:[1]", Some("/live-view"));
+
+    assert_eq!(
+        mount_points_for_processes([unreadable, live].into_iter()),
+        None
+    );
+}
+
 #[test]
 fn a_held_lock_leaves_the_run_without_the_record() {
     let mut setup = Setup::new();
