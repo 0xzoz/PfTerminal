@@ -466,7 +466,7 @@ fn judged(action: &ApprovalAction, homes: Homes, as_named: bool) -> Classifier {
     let avoids_zsh = as_named
         && match action {
             ApprovalAction::Shell { command, .. } | ApprovalAction::ExecCommand { command, .. } => {
-                named_shell::avoids_zsh(command)
+                named_shell::avoids_zsh(command) || named_shell::grammar_proves_data(command)
             }
             ApprovalAction::ApplyPatch { .. } => false,
         };
@@ -583,10 +583,10 @@ fn persistence_command(name: &str, args: &[String]) -> bool {
 
 /// #1159: whether `git config` writes global config or a git key that runs
 /// a program, for each git word of a simple command (`git`, `git.exe`, a
-/// dashed helper such as `git-config` that gives its subcommand apart).
-/// What follows each word is worked out once, on the first git word, so
-/// judging every git word of a line (`git config git config …`) stays
-/// linear.
+/// dashed helper such as `git-config` that gives its subcommand apart),
+/// or opens it in an editor (#1255: `git config -e`). What follows each
+/// word is worked out once, on the first git word, so judging every git
+/// word of a line (`git config git config …`) stays linear.
 struct GitConfigWrites<'a> {
     /// The command's words, lowercase.
     words: &'a [String],
@@ -602,6 +602,12 @@ struct FollowingWords {
     persisting: Vec<bool>,
     /// Whether, as the words after `config`, they only read.
     reads: Vec<bool>,
+    /// #1255: whether, as the words after `config`, they open an editor.
+    edits: Vec<bool>,
+    /// #1255: whether a `config` among them is followed by words that open
+    /// an editor (any of them: the first may be an option's value, as in
+    /// `git -C config config -e`).
+    config_edits: Vec<bool>,
 }
 
 impl<'a> GitConfigWrites<'a> {
@@ -616,6 +622,8 @@ impl<'a> GitConfigWrites<'a> {
         let seen = self.seen.get_or_insert_with(|| {
             let mut next_config = vec![None; words.len() + 1];
             let mut persisting = vec![false; words.len() + 1];
+            let edits = outputs::git_config_edits_each(words);
+            let mut config_edits = vec![false; words.len() + 1];
             for (at, word) in words.iter().enumerate().rev() {
                 work::step();
                 next_config[at] = if word == "config" {
@@ -623,6 +631,7 @@ impl<'a> GitConfigWrites<'a> {
                 } else {
                     next_config[at + 1]
                 };
+                config_edits[at] = config_edits[at + 1] || (word == "config" && edits[at + 1]);
                 persisting[at] = persisting[at + 1]
                     || matches!(word.as_str(), "--global" | "--system")
                     || GIT_RUN_KEYS.contains(&word.as_str())
@@ -634,17 +643,22 @@ impl<'a> GitConfigWrites<'a> {
                 // #1141: a reading word given as a value (`git config -f f k
                 // get`) does not make it a read.
                 reads: outputs::git_config_reads_each(words),
+                edits,
+                config_edits,
             }
         });
+        let flag = |flags: &[bool], at: usize| flags.get(at).copied().unwrap_or(false);
+        let edits = flag(&seen.config_edits, from)
+            || (subcommand == Some("config") && flag(&seen.edits, from));
         let start = if subcommand == Some("config") {
             from
         } else {
             match seen.next_config.get(from).copied().flatten() {
                 Some(at) => at + 1,
-                None => return false,
+                None => return edits,
             }
         };
-        start < seen.reads.len() && !seen.reads[start] && seen.persisting[start]
+        edits || (start < seen.reads.len() && !seen.reads[start] && seen.persisting[start])
     }
 }
 
@@ -1250,11 +1264,12 @@ impl Classifier {
             }
             // #1142: `git -c core.pager=…` runs the value (args as written).
             // A dashed helper takes no git options.
-            if (name == "git" || helper == Some(None))
-                && code_variables::git_runs_code(
-                    &words[index + 1..],
-                    simple.words.get(index + 1..).unwrap_or_default(),
-                )
+            let git_args = (
+                &words[index + 1..],
+                simple.words.get(index + 1..).unwrap_or_default(),
+            );
+            if (name == "git" && code_variables::git_runs_code_after_git(git_args.0, git_args.1))
+                || (helper == Some(None) && code_variables::git_runs_code(git_args.0, git_args.1))
             {
                 self.note(ProtectedActionKind::UnseenCode);
             }

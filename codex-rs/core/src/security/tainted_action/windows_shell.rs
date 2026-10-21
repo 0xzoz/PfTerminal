@@ -849,7 +849,10 @@ impl Classifier {
                     self.note(ProtectedActionKind::Persistence);
                 }
                 if name == "git"
-                    && code_variables::git_runs_code(&words[index + 1..], &words[index + 1..])
+                    && code_variables::git_runs_code_after_git(
+                        &words[index + 1..],
+                        &words[index + 1..],
+                    )
                 {
                     self.note(ProtectedActionKind::UnseenCode);
                 }

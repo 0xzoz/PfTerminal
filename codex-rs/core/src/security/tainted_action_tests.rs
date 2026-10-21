@@ -3024,6 +3024,48 @@ fn issue_1084_glob_substitution_is_unseen_code() {
     assert_eq!(wrong, Vec::<String>::new());
 }
 
+/// #932 phase 3: under zsh too, the zsh-only checks do not ask for plain
+/// commands of programs that never run their words when the bash grammar
+/// proves every word is data (quoted or plain characters, no expansion).
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_932_zsh_lines_of_proven_data_skip_the_zsh_only_checks() {
+    let named = |command: &[&str]| {
+        classify_as_named_with(
+            &shell_in("/work", command),
+            Path::new(HOME),
+            Some(Path::new(USER_HOME)),
+        )
+    };
+    let mut wrong = Vec::new();
+    for shell in ["/bin/zsh", "/usr/bin/zsh", "/bin/bash"] {
+        for line in [
+            "git commit -m \"fix(tests)\"",
+            "git commit -m 'fix(tests): keep *(N) and /*(e:true:)'",
+            "echo '${~x} ${(e)y} setopt globsubst' && git status",
+            "grep -n 'x$~y' notes.txt | head -n 3",
+            "git add 'src/*(N)'; git status",
+        ] {
+            let found = named(&[shell, "-lc", line]);
+            if found.is_some() {
+                wrong.push(format!("{shell} {line:?}: {found:?}, expected None"));
+            }
+        }
+    }
+    // Run as the argv names only: otherwise the checks ask as before.
+    let found = classify_fixture(&shell_in(
+        "/work",
+        &["/bin/zsh", "-lc", "git commit -m 'fix(tests)'"],
+    ));
+    if found != Some(ProtectedActionKind::UnseenCode) {
+        wrong.push(format!("not as named: {found:?}"));
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
 /// D85: the zsh-only checks (#1028 glob qualifiers, #1084 glob substitution)
 /// ask only where zsh may run: not on a line a system bash, dash or sh runs
 /// as plain commands of programs that never hand their words to a shell,
@@ -3097,8 +3139,16 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
     // argv shape.
     let qualifier = "git commit -m '/*(e:true:)'";
     for command in [
-        vec!["/bin/zsh", "-lc", qualifier],
-        vec!["/usr/bin/zsh", "-c", "git commit -m \"fix(tests)\""],
+        // #932 phase 3: under zsh, only words the grammar does not prove
+        // data keep the checks.
+        vec!["/bin/zsh", "-lc", "git commit -m \"$m\" -m '/*(e:true:)'"],
+        vec!["/usr/bin/zsh", "-c", "git commit -m fix(tests)"],
+        vec!["/bin/zsh", "-lc", "cd '/*(e:true:)'"],
+        vec!["/bin/zsh", "-lc", "echo 'it''s /*(e:true:)'"],
+        vec!["/bin/zsh", "-lc", "git commit -m \\'/*(e:true:)\\'"],
+        vec!["/bin/zsh", "-lc", "set -o globsubst; echo '/*(e:true:)'"],
+        vec!["/bin/fish", "-c", qualifier],
+        vec!["zsh", "-lc", qualifier],
         vec!["/bin/bash", "-lc", "zsh -c 'print -l /*(e:true:)'"],
         vec![
             "/bin/bash",
@@ -4430,4 +4480,276 @@ fn issue_1240_review_6_routes() {
         )),
         None
     );
+}
+
+/// D153: since #1159, a name such as `git.exe` split out of quoted text ended
+/// the git scan, so `git -c 'user.name=a git.exe b' -c core.pager=sh log`
+/// no longer asked. A `-c`/`--config-env` setting whose text holds a git
+/// name asks, and the scan from `git` reads on past other git names, as
+/// before #1159.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d153_git_names_in_quoted_text_do_not_end_the_git_checks() {
+    for command in [
+        // The line from #1230's review, and the same text written other ways.
+        "git -c 'user.name=a git.exe b' -c core.pager=sh log",
+        "git -c \"user.name=a git.exe b\" -c core.pager=sh log",
+        "git -c 'user.name=a GIT.EXE b' -c core.pager=sh log",
+        "git -c 'user.name=a /usr/bin/git.exe b' -c core.pager=sh log",
+        "git -c 'user.name=a C:\\Git\\cmd\\git.exe b' -c core.pager=sh log",
+        "git -c 'user.name=a,git.exe b' -c core.pager=sh log",
+        "git -c 'user.name=a;git.exe b' -c core.pager=sh log",
+        "git -c 'user.name=a g\"i\"t.exe b' -c core.pager=sh log",
+        "git -c'user.name=a git.exe b' -c core.pager=sh log",
+        "git --config-env 'user.name=a git.exe b' -c core.pager=sh log",
+        "git --config-env='user.name=a git.exe b' -c core.pager=sh log",
+        // Other git names in the text, other git commands.
+        "git -c 'user.name=a git b' -c core.pager=sh log",
+        "git -c 'user.name=a git-log b' -c core.pager=sh log",
+        "git.exe -c 'user.name=a git.exe b' -c core.pager=sh log",
+        "env git -c 'user.name=a git.exe b' -c core.pager=sh log",
+        "sh -c \"git -c 'user.name=a git.exe b' -c core.pager=sh log\"",
+        // A git name split out of other quoted text: the scan from `git`
+        // reads on past it, as before #1159.
+        "git -C 'dir git.exe x' -c core.pager=sh log",
+        "git --namespace 'a git.exe b' -c core.pager=sh log",
+        "git -C git.exe b -c core.pager=sh log",
+        "git --namespace=./git.exe b -c core.pager=sh log",
+        // Review round 1: spellings the lexer reads as a git name, other
+        // options from `git.exe`, and a plain `git` (which main missed).
+        "git.exe -c 'user.name=a g{it.exe b' -c core.pager=sh log",
+        "git -c 'user.name=a g{it b' -c core.pager=sh log",
+        "git.exe -c \"user.name=a git$'.exe' b\" -c core.pager=sh log",
+        "git.exe -c 'user.name=a$IFS\"git.exe\" b' -c core.pager=sh log",
+        "git.exe --namespace 'a git.exe b' -c core.pager=sh log",
+        "git.exe --namespace='a git.exe b' -c core.pager=sh log",
+        "git.exe -C git.exe b -c core.pager=sh log",
+        "git.exe -C 'x git.exe y git.exe z' -c core.pager=sh log",
+        "git.exe --namespace=./git.exe b -c core.pager=sh log",
+        "git --namespace 'a git b' -c core.pager=sh log",
+        "git -C 'x git y git z' -c core.pager=sh log",
+        "git --namespace=./git b -c core.pager=sh log",
+        "x=git.exe; git -C \"a $x b\" -c core.pager=sh log",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::UnseenCode),
+            "{command}"
+        );
+    }
+    assert_eq!(
+        kind(&[
+            "git",
+            "-c",
+            "user.name=a git.exe b",
+            "-c",
+            "core.pager=sh",
+            "log"
+        ]),
+        Some(ProtectedActionKind::UnseenCode)
+    );
+    for command in [
+        "git -c user.name=git log",
+        "git -c 'user.name=Ada Lovelace' commit -m x",
+        "git commit -m 'fix the git.exe path'",
+        "git.exe commit -m 'fix the git.exe path'",
+        "git -C git status",
+        "git -C repo log -1 git.exe",
+        "git log --grep 'git.exe crash' --oneline",
+        "git.exe status",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// D153: the git checks stay linear when git names repeat in options and
+/// quoted settings.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d153_checks_are_linear() {
+    for (label, unit) in [
+        ("git.exe values", "-C a git.exe "),
+        ("git.exe options", "--namespace=./git.exe "),
+        ("quoted settings", "-c 'user.name=a b' "),
+        ("quoted names", "'a git.exe b' "),
+        ("git.exe then text", "-C x git.exe a "),
+        ("git then text", "-C x git a "),
+        ("names in values", "-C git.exe -C git "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("git {} status", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!("git.exe {} status", unit.repeat(400 * scale));
+            let _ = script(&line);
+        });
+    }
+}
+
+/// #1255: `git config` opens the config file in an editor (`-e`, `--edit`,
+/// `--ed`, `-ze`, `edit`, `-- -e`), global config too. What the editor
+/// writes is config the classifier never sees, so after untrusted content
+/// the line asks like a config write that may set a key that runs a program.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1255_git_config_editor_is_persistence() {
+    for command in [
+        "git config -e",
+        "git config --edit",
+        "git config --ed",
+        "git config edit",
+        "git config edit --local",
+        "git config -- -e",
+        "git config -- --edit",
+        "git config -- --local -e",
+        "git config --global -e",
+        "git config --system --edit",
+        "git config -ze",
+        "git config -z -e",
+        "git config --file=y -e",
+        "git config -fy -e",
+        "git config --type=bool -e",
+        "git config -e x",
+        "git config --fil /tmp/zz -e",
+        "git config --typ bool -e",
+        "git config --ty bool -e",
+        "git -C config config -e",
+        "git -C config config --global -e",
+        "GIT_EDITOR=true git config -e",
+        "git -C repo config -e",
+        "git -C /tmp/git-x config -e",
+        "git --work-tree /src/git-tools config --edit",
+        "git -c user.name=x config -e",
+        "git.exe config -e",
+        "git-config -e",
+        "/usr/lib/git-core/git-config --edit",
+        "env git config edit",
+        "sh -c 'git config -e'",
+        "true && git config --edit",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+    for command in [
+        "git config user.name -e",
+        "git config --local user.name -e",
+        "git config -- edit",
+        "git config --comment -e",
+        "git config --get user.name",
+        "git config --list",
+        "git commit -e -m x",
+        "git grep -e config src",
+        "git log -e",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1255: a word that only looks like git (a last path segment `git-x`, a
+/// folder named `git`) in a value or option does not end the git checks:
+/// the scan from `git` reads past dashed-helper names, and one that stops
+/// at a `git` word is taken up again by the scan from that word.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1255_git_lookalike_words_do_not_end_the_git_checks() {
+    use ProtectedActionKind::*;
+    for (command, want) in [
+        ("git -C /tmp/git-x -c core.pager=sh log", UnseenCode),
+        ("git -C /tmp/git-x/ -c core.pager=sh log", UnseenCode),
+        ("git -C git-x -c core.pager=sh log", UnseenCode),
+        ("git -C a/git-x/ -c core.pager=sh log", UnseenCode),
+        (
+            "git --work-tree /src/git-tools -c core.pager=sh log",
+            UnseenCode,
+        ),
+        ("git --git-dir /tmp/git-x -c core.pager=sh log", UnseenCode),
+        (
+            "git --namespace /tmp/git-x -c core.pager=sh log",
+            UnseenCode,
+        ),
+        ("git -C /src/git -c core.pager=sh log", UnseenCode),
+        ("git -C /tmp/git -c core.pager=sh log", UnseenCode),
+        ("git -C /src/git.exe -c core.pager=sh log", UnseenCode),
+        ("git.exe -C /tmp/git-x -c core.pager=sh log", UnseenCode),
+        ("git.exe -C /src/git -c core.pager=sh log", UnseenCode),
+        ("git -C /tmp/git-x -ccore.pager=sh log", UnseenCode),
+        ("git -C /tmp/git-x --exec-path=/tmp/e log", UnseenCode),
+        (
+            "git -C /tmp/git-x --config-env=core.pager=X log",
+            UnseenCode,
+        ),
+        (
+            "git -c user.name=/tmp/git-x -c core.pager=sh log",
+            UnseenCode,
+        ),
+        (
+            "git -c 'user.name=a /tmp/git-x' -c core.pager=sh log",
+            UnseenCode,
+        ),
+        (
+            "git -c credential.https://h/git-lfs.helper=sh fetch",
+            UnseenCode,
+        ),
+        (
+            "git -c includeIf.gitdir:/x/git-y.path=/tmp/c log",
+            UnseenCode,
+        ),
+        ("sh -c 'git -C /tmp/git-x -c core.pager=sh log'", UnseenCode),
+        ("git -C /tmp/git-x config core.pager sh", Persistence),
+        ("git -C /tmp/git-x config --global user.name x", Persistence),
+        (
+            "git --work-tree /src/git-tools config core.pager sh",
+            Persistence,
+        ),
+        ("git -C /src/git config core.pager sh", Persistence),
+        ("git config core.pager /tmp/git-x", Persistence),
+        ("git config -/git-x core.pager sh", Persistence),
+        ("git -C /tmp/git-x log --output=$HOME/.zshrc", Persistence),
+        (
+            "git --work-tree /src/git-x log --output=$HOME/.zshrc",
+            Persistence,
+        ),
+    ] {
+        assert_eq!(script(command), Some(want), "{command}");
+    }
+}
+
+/// #1255: the editor check stays linear when `config` and editor options
+/// repeat.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1255_checks_are_linear() {
+    for (label, unit) in [
+        ("config words", "config "),
+        ("value options", "-f -e "),
+        ("flags", "--local "),
+        ("separators", "-- "),
+        ("git config words", "git config "),
+        ("lookalike folders", "-C /tmp/git-x "),
+        ("config as a value", "-C config --fil "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("git {} status", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!("git config {} -e", unit.repeat(400 * scale));
+            let _ = script(&line);
+        });
+    }
 }

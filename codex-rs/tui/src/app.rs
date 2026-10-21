@@ -1329,6 +1329,8 @@ impl App {
             &config,
             &app_event_tx,
         );
+        // D86/#1193: which providers have named accounts, for `/status`.
+        crate::provider_named_accounts::check_named_account_providers(&model_catalog, &config);
         model_catalog.set_session_recovery_only(session_recovery_only);
         let feedback_audience = bootstrap.feedback_audience;
         let auth_mode = bootstrap.auth_mode;
