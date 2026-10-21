@@ -142,6 +142,108 @@ pub(super) fn prompt_expansion(text: &str) -> bool {
     })
 }
 
+/// Whether text may use zsh glob substitution (#1084), under which zsh
+/// reads a value as a pattern, glob qualifiers included, so the value can
+/// run code (`*(e:code:)`): `$~x`, `${~x}`, `$^~x`, `${(f)~x}` (a flag
+/// group counts when any `~` follows it), the `GLOB_SUBST`
+/// option in any spelling (zsh ignores case and underscores: `setopt glob_subst`,
+/// `zsh -o GLOBSUBST`, `options[globsubst]=on`), a write to zsh's
+/// `options` array, or `ARGV0` (a zsh started as `csh` or `sh` turns the
+/// option on). Read as written (backslash-newlines joined) and with quotes
+/// and backslashes removed, so nested shells' scripts count. Linear.
+pub(super) fn glob_substitution(text: &str) -> bool {
+    let joined = text.replace("\\\n", "");
+    let bare: String = joined
+        .chars()
+        .filter(|ch| !matches!(ch, '\'' | '"' | '\\'))
+        .collect();
+    let option: String = bare
+        .chars()
+        .filter(|ch| !matches!(ch, '_' | '-'))
+        .collect::<String>()
+        .to_ascii_lowercase();
+    option.contains("globsubst")
+        || option.contains("argv0")
+        // `ARGV${:-0}`, `${:-ARGV}0`, `ARGV{0,}`: a name the reader cannot
+        // complete (not `argv[1]`, a subscript).
+        || option.match_indices("argv").any(|(at, _)| {
+            option[at + "argv".len()..].starts_with(['$', '{', '}', '*', '?', '(', '`'])
+        })
+        || [joined.as_str(), bare.as_str()]
+            .iter()
+            .any(|text| substitutes_globs(text) || writes_options(text) || assigns_named(text))
+        || reparses(&joined)
+}
+
+/// `${(e)y}`: a flag group with `e` reparses a value, whose expansions may
+/// spell `${~x}` with no `~` on the line (`y='${'${(#):-126}'x}'`). Each
+/// group is read at most 64 bytes; one not closed by then counts. Linear.
+fn reparses(text: &str) -> bool {
+    text.match_indices("${(").any(|(at, _)| {
+        work::step();
+        let flags = &text.as_bytes()[at + "${(".len()..];
+        let group = &flags[..flags.len().min(64)];
+        group
+            .iter()
+            .position(|&byte| byte == b')')
+            .is_none_or(|end| group[..end].contains(&b'e'))
+    })
+}
+
+/// `${(P)n::=on}`: a `${(` flag group with any later `P` and `=` may
+/// assign the variable a value names (`options` included). Linear.
+fn assigns_named(text: &str) -> bool {
+    let (Some(flag), Some(assign)) = (text.rfind('P'), text.rfind('=')) else {
+        return false;
+    };
+    text.find("${(").is_some_and(|at| flag > at && assign > at)
+}
+
+/// `$~x`, `${~x}`, `$^~x`, or a `${(flags)...}` with any `~` after it on
+/// the line: the `~` flag may sit anywhere in the group, after any
+/// delimiter (`${(s:,:~pj:$x:)a}`, `${(@)=~x}`), so a later home folder
+/// (`${(f)x} ~/dir`) counts too. Linear.
+fn substitutes_globs(text: &str) -> bool {
+    let Some(last) = text.rfind('~') else {
+        return false;
+    };
+    text.match_indices('$').any(|(at, _)| {
+        let rest = &text[at + 1..];
+        let braced = rest.starts_with('{');
+        let rest = if braced { &rest[1..] } else { rest };
+        let run = rest
+            .find(|ch: char| !"^=~#+".contains(ch))
+            .unwrap_or(rest.len());
+        rest[..run].contains('~') || (braced && rest[run..].starts_with('(') && last > at)
+    })
+}
+
+/// A write to zsh's `options` array: `options[k]=on`, `options=(...)`,
+/// `options+=(...)`, `${options[k]::=on}`, `${(AA)=options::=...}`,
+/// `set -Aoptions ...`.
+fn writes_options(text: &str) -> bool {
+    text.match_indices("options").any(|(at, _)| {
+        // An array name attached to its option (`set -Aoptions`,
+        // `-xAoptions`), its letters read back at most 64 bytes.
+        let bytes = text.as_bytes();
+        let mut start = at;
+        while start > 0 && at - start < 64 && bytes[start - 1].is_ascii_alphabetic() {
+            work::step();
+            start -= 1;
+        }
+        let attached = start > 0
+            && start < at
+            && bytes[at - 1] == b'A'
+            && matches!(bytes[start - 1], b'-' | b'+');
+        // Not part of a longer name (`--options=x`, `self.options[k]`).
+        attached
+            || (!text[..at].ends_with(|ch: char| ch.is_ascii_alphanumeric() || "_-./".contains(ch))
+                && ["[", "=", "+=", ":=", "::="]
+                    .iter()
+                    .any(|next| text[at + "options".len()..].starts_with(next)))
+    })
+}
+
 /// `$IFS` and `${IFS}` separate words.
 fn replace_ifs(arg: &str) -> String {
     let arg = arg.replace("${IFS}", " ");
