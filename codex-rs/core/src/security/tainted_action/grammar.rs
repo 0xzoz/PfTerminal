@@ -2,10 +2,15 @@
 //! `codex-shell-command` already uses it), beside the hand-written reader in
 //! `quoted.rs`. It finds the simple commands a line runs, those inside
 //! substitutions included, and tells which of their words are data: text
-//! no shell expands. It refuses, rather than guesses at, text it may not read
-//! the way the shells do: a parse error or missing token, text too long or
-//! too slow to parse, characters some locales read differently, or nesting
-//! too deep to walk.
+//! no shell expands. It refuses, rather than guesses at, text it knows it
+//! may not read the way the shells do: a parse error or missing token, text
+//! too long or too slow to parse, characters some locales read differently,
+//! nesting too deep to walk, and the desyncs listed in the design note.
+//!
+//! Best-effort: bash, zsh and dash differ in more ways than these refusals
+//! cover, so an Ok reading is evidence, not proof. It may decide something
+//! only together with an independent check, for narrow forms (see the
+//! design note's "What the reading promises").
 //!
 //! Phase 1 of docs/development/shell-grammar-classifier.md: the differential
 //! harness (`grammar_harness_tests.rs`) compares this reading with

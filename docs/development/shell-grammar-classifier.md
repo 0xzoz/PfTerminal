@@ -77,6 +77,18 @@ authority.
 The walk is iterative, with every loop stepping the `work.rs` counter. The
 linearity test covers it.
 
+### What the reading promises
+
+`read()` is best-effort. Five review rounds on #1183 each found more ways
+bash, zsh and dash read the same text differently from each other or from
+the grammar. Each is now a refusal, but the tail is open, just like the
+hand-written reader's. So when `read()` returns Ok, its commands and data
+marks are evidence, not proof. Grammar authority may only be granted for
+narrow syntactic forms where an independent check also holds: the plain
+words parse D85 uses (no substitutions, tests, arithmetic, compound
+commands or redirections) and agreement with the quote-aware reader. The
+phase 3 slice below is such a form.
+
 ### The cross-check stays
 
 The current lexer and reader keep running. A command the lexer counts that
