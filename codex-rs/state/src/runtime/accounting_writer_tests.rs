@@ -701,3 +701,108 @@ async fn ten_sessions_on_one_home_wait_briefly_and_lose_no_record() -> anyhow::R
     setup.close().await;
     Ok(())
 }
+
+/// The final spool owner releases its lock even if a duplicated descriptor
+/// remains open, so another writer can claim its leftover records immediately.
+#[cfg(unix)]
+#[test]
+fn the_final_spool_owner_releases_its_lock_with_a_retained_descriptor() {
+    let home = home();
+    let spool = Arc::new(Spool::open(&home).expect("open spool"));
+    let dir = spool.dir.clone();
+    let process = spool.process.clone();
+    let retained = spool._lock.try_clone().expect("retain spool descriptor");
+    let other_owner = Arc::clone(&spool);
+
+    assert!(claim(&dir, &process).is_none(), "the live spool is held");
+    drop(spool);
+    assert!(
+        claim(&dir, &process).is_none(),
+        "another spool owner still holds the lock"
+    );
+    drop(other_owner);
+    let claimed = claim(&dir, &process);
+    assert!(
+        claimed.is_some(),
+        "the final owner's lock remains held through a retained descriptor"
+    );
+    assert_eq!(
+        claimed.expect("claim released spool").path,
+        Some(dir.join(format!("{process}.lock")))
+    );
+    drop(retained);
+}
+
+/// Fork a child that keeps a copy of every descriptor of this process open
+/// for 2 s before it starts its program (as any spawn does until exec), and
+/// return once it has forked. #928: a lock released only by closing its file
+/// stays held through that copy.
+#[cfg(unix)]
+fn fork_child_holding_descriptors()
+-> std::thread::JoinHandle<std::io::Result<std::process::ExitStatus>> {
+    use std::io::Read;
+    use std::io::Write;
+    use std::os::unix::process::CommandExt;
+    let (mut forked, mut forked_tx) = std::io::pipe().expect("pipe");
+    let spawner = std::thread::spawn(move || {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        // SAFETY: the hook only writes to a pipe and sleeps, both safe after fork.
+        unsafe {
+            command.pre_exec(move || {
+                forked_tx.write_all(b"f")?;
+                std::thread::sleep(Duration::from_secs(2));
+                Ok(())
+            });
+        }
+        command.status()
+    });
+    let mut byte = [0; 1];
+    forked.read_exact(&mut byte).expect("child forked");
+    spawner
+}
+
+/// #928: a dropped validation lease is free at once, also while a child forked
+/// meanwhile still holds a copy of its descriptor. Otherwise the next process
+/// finds it held and puts its records off for another `VALIDATION_POLL`.
+#[cfg(unix)]
+#[test]
+fn a_dropped_validation_lease_is_free_while_a_forked_child_holds_its_descriptor() {
+    let home = home();
+    std::fs::create_dir_all(&*home).expect("home");
+    let path = home.join(VALIDATION_LEASE);
+    let held = take_lease(&path).expect("open lease").expect("lease free");
+    let spawner = fork_child_holding_descriptors();
+    assert!(
+        take_lease(&path).expect("open lease").is_none(),
+        "the lease is held"
+    );
+    drop(held);
+    assert!(
+        take_lease(&path).expect("open lease").is_some(),
+        "the dropped lease is still held through the forked child's copy"
+    );
+    let status = spawner.join().expect("spawner thread").expect("status");
+    assert!(status.success(), "{status:?}");
+}
+
+/// #928: a dropped claim on a gone process's records is free at once, also
+/// while a child forked meanwhile still holds a copy of its descriptor.
+#[cfg(unix)]
+#[test]
+fn a_dropped_claim_is_free_while_a_forked_child_holds_its_descriptor() {
+    let home = home();
+    std::fs::create_dir_all(&*home).expect("home");
+    let process = Uuid::new_v4().to_string();
+    std::fs::write(home.join(format!("{process}.lock")), b"").expect("lock file");
+    let held = claim(&home, &process).expect("claim free");
+    let spawner = fork_child_holding_descriptors();
+    assert!(claim(&home, &process).is_none(), "the claim is held");
+    drop(held);
+    assert!(
+        claim(&home, &process).is_some(),
+        "the dropped claim is still held through the forked child's copy"
+    );
+    let status = spawner.join().expect("spawner thread").expect("status");
+    assert!(status.success(), "{status:?}");
+}

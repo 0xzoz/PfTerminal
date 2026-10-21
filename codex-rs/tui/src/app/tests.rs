@@ -2317,6 +2317,51 @@ async fn pane_spawn_tree_hides_task_actions() {
     }
 }
 
+/// D95 (#1146): only the person's Spawn status prompt sends a task as the
+/// person's own input; the route agents' tasks take (assignment fires,
+/// model dispatch) still sends them as inter-agent messages.
+#[tokio::test]
+async fn spawn_status_prompt_alone_sends_person_tasks() {
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000001146").expect("valid thread id");
+    let orc_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000001147").expect("valid thread id");
+    app.primary_thread_id = Some(main_thread_id);
+    app.active_thread_id = Some(main_thread_id);
+    app.upsert_agent_picker_thread(
+        orc_thread_id,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread
+        .insert(orc_thread_id, main_thread_id);
+
+    (crate::spawn_orchestration::spawn_agent_task_prompt_submit(
+        app.app_event_tx.clone(),
+        orc_thread_id,
+    ))("typed by the person".to_string());
+    match rx.try_recv().expect("the prompt sends an event") {
+        AppEvent::SubmitSpawnAgentTaskFromPerson { thread_id, task } => {
+            assert_eq!(thread_id, orc_thread_id);
+            assert_eq!(task, "typed by the person");
+        }
+        event => panic!("expected the person's task, got {event:?}"),
+    }
+
+    app.send_native_task_event(orc_thread_id, "sent by an agent".to_string());
+    match rx.try_recv().expect("an agent's task sends an event") {
+        AppEvent::SubmitSpawnAgentTask {
+            thread_id, task, ..
+        } => {
+            assert_eq!(thread_id, orc_thread_id);
+            assert_eq!(task, "sent by an agent");
+        }
+        event => panic!("expected an agent's task, got {event:?}"),
+    }
+}
+
 #[tokio::test]
 async fn pane_spawn_tree_disables_restored_unloaded_native_rows() {
     let mut app = make_test_app().await;
@@ -7060,6 +7105,67 @@ async fn issue_842_moderate_from_another_terminal_is_announced() {
     ] {
         assert!(text.contains(expected), "{expected}: {text}");
     }
+}
+
+/// #919 (Travis, 2026-10-16, D20): Aggressive confirmed in another Corbanu
+/// Terminal on this home (Core already raised this process's sessions and
+/// required approval for every command) is announced here, saying what
+/// applies now and what waits for the restart; the protections claimed
+/// follow `source_envelopes`, and the level shown is this session's own.
+#[tokio::test]
+async fn issue_919_aggressive_from_another_terminal_is_announced() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    app.on_level_raised_elsewhere(
+        crate::legacy_core::security_revocation::SecurityLevel::Aggressive,
+    );
+    let mut text = String::new();
+    while let Ok(event) = app_event_rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            text.push_str(&lines_to_single_string(&cell.display_lines(/*width*/ 1000)));
+        }
+    }
+    for expected in [
+        "Aggressive was confirmed in another Corbanu Terminal on this home",
+        "Core's Aggressive protections apply here now: agent commands cannot run `corbanu vault …`",
+        "From each pane's next turn you approve every command that is not known read-only",
+        "Grants and \"for session\" approvals here ended",
+        "The rest of Aggressive starts when you restart Corbanu Terminal: its sandbox",
+        "this session is shown as Permissive",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    // A lower level is never announced as a raise.
+    app.on_level_raised_elsewhere(
+        crate::legacy_core::security_revocation::SecurityLevel::Permissive,
+    );
+    assert!(app_event_rx.try_recv().is_err());
+}
+
+/// #919: the notice claims the protected-path denials only with the
+/// untrusted-content labels on, and names the level this session is shown
+/// as until the restart.
+#[test]
+fn issue_919_aggressive_notice_follows_labels_and_the_shown_level() {
+    use crate::claude_panes::app_integration::aggressive_confirmed_elsewhere;
+    use crate::security::level::ChosenLevel;
+    let labelled =
+        aggressive_confirmed_elsewhere(/*untrusted_content*/ true, ChosenLevel::Moderate);
+    assert!(labelled.contains("protected paths"), "{labelled}");
+    assert!(labelled.contains("shown as Moderate"), "{labelled}");
+    // Moderate's credential broker already holds the model keys.
+    assert!(!labelled.contains("credential broker"), "{labelled}");
+    let vault_only =
+        aggressive_confirmed_elsewhere(/*untrusted_content*/ false, ChosenLevel::Permissive);
+    assert!(!vault_only.contains("protected paths"), "{vault_only}");
+    assert!(
+        vault_only.contains("model keys held by the credential broker, and the child-agent rules"),
+        "{vault_only}"
+    );
+    assert!(
+        vault_only.contains("in every Corbanu pane and child agent of this Corbanu Terminal"),
+        "{vault_only}"
+    );
 }
 
 fn interrupted_claude_turn(app: &App) -> crate::claude_panes::ClaudePaneTurnOutput {
@@ -13717,7 +13823,7 @@ fn session_start_failure_turns_a_server_refusal_into_a_plain_message() {
         )),
         thread_id,
     };
-    let refusal = "failed to load configuration: the thread's recorded account zai:work: named accounts need the `named_accounts` feature (`--enable named_accounts`); resume with `--account zai:default` to use the default credentials instead";
+    let refusal = "failed to load configuration: the thread's recorded account zai:work: named accounts need the `named_accounts` feature (`--enable named_accounts`); `--account zai:default` (on a resume or fork) uses the default credentials instead";
 
     for action in ["resume", "fork"] {
         for suffix in ["", r#", data: {"reason":"cloudRequirements"}"#] {

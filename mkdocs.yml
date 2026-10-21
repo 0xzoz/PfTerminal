@@ -156,7 +156,7 @@ nav:
               - "PF-60 — Unified agent cost and usage accounting":
                   - Plan: plans/completed/main-2026-10-10-portfolio-agent-cost-accounting.md
               - "PF-60 follow-ups — Accounting follow-ups after PF-60":
-                  - Plan: plans/active/portfolio-agent-cost-accounting-followups.md
+                  - Plan: plans/completed/main-2026-10-20-portfolio-agent-cost-accounting-followups.md
               - "PF-61 — Plan and model-serving backend reconciliation":
                   - Plan: plans/proposed/portfolio-plan-backend-reconciliation.md
                   - "PF-61-S01 — Repository and deployment truth map": sprints/current/portfolio-plan-backend-reconciliation/pf-61-s01-repository-and-deployment-truth-map.md
@@ -272,6 +272,7 @@ nav:
       - Contributing: contributing.md
       - Tmux TUI Harness: tmuxHarness.md
       - CI Coverage: ci.md
+      - Rust Toolchain Bump: rust-toolchain-bump.md
       - License: license.md
 
 plugins:
