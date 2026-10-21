@@ -1969,6 +1969,128 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
     assert_eq!(captured, Some(expected));
 }
 
+/// #1074: reloading a stored V2 agent (to resume it or deliver a message)
+/// goes through the #689 check: on a connection whose default key is nowhere
+/// while a sibling connection with the same key variable runs on a named
+/// account, it is refused before it starts; with a stored default key it
+/// reloads.
+#[tokio::test]
+async fn ensure_v2_agent_loaded_refuses_a_connection_without_its_own_credential() {
+    const KEY: &str = "CORBANU_TEST_1074_V2_ZAI_KEY";
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    let mut zai = codex_model_provider_info::ModelProviderInfo::create_zai_provider();
+    zai.env_key = Some(KEY.to_string());
+    crate::config::stamp_provider_account("zai", &mut zai, "work").expect("stamp");
+    let mut anthropic =
+        codex_model_provider_info::ModelProviderInfo::create_zai_anthropic_provider();
+    anthropic.env_key = Some(KEY.to_string());
+    config.model_providers.insert("zai".to_string(), zai);
+    config
+        .model_providers
+        .insert("zai-anthropic".to_string(), anthropic.clone());
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, _parent_thread) = harness.start_paginated_thread().await;
+    let mut child_config = harness.config.clone();
+    child_config.model_provider = anthropic;
+    child_config.model_provider_id = "zai-anthropic".to_string();
+    child_config.model = Some("glm-5.2".to_string());
+    let spawned_agent = harness
+        .control
+        .spawn_agent_with_metadata(
+            child_config,
+            text_input("hello child"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(AgentPath::try_from("/root/worker").expect("agent path")),
+                agent_nickname: None,
+                agent_role: None,
+                agent_class: None,
+            })),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("spawn_agent should succeed");
+    let child_thread = harness
+        .manager
+        .get_thread(spawned_agent.thread_id)
+        .await
+        .expect("child thread should exist");
+    wait_for_initial_turn_to_finish(&child_thread).await;
+    child_thread
+        .inject_response_items(vec![assistant_message(
+            "child persisted",
+            Some(MessagePhase::FinalAnswer),
+        )])
+        .await
+        .expect("child rollout should persist with v2 metadata");
+    child_thread
+        .shutdown_and_wait()
+        .await
+        .expect("child thread should shut down");
+    assert!(
+        harness
+            .manager
+            .remove_thread(&spawned_agent.thread_id)
+            .await
+            .is_some()
+    );
+
+    let error = harness
+        .control
+        .ensure_v2_agent_loaded(harness.config.clone(), spawned_agent.thread_id)
+        .await
+        .expect_err("the reload should be refused");
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "Resuming this agent: `zai-anthropic` would run on its default account, which has \
+             no credential (`{KEY}` is not set and no default key is stored); accounts are \
+             selected per connection, and account `work` is selected for `zai` only. Ask the \
+             user to add a default `{KEY}` (`/providers`) before resuming it, or do the work \
+             without this agent. Do not retry on another account without the user's consent."
+        )
+    );
+    assert!(
+        harness
+            .manager
+            .get_thread(spawned_agent.thread_id)
+            .await
+            .is_err()
+    );
+
+    // With a stored default key it reloads.
+    codex_login::login_with_provider_api_key(
+        &harness.config.codex_home,
+        KEY,
+        "canary-1074-default",
+        codex_login::AuthCredentialsStoreMode::File,
+        codex_login::AuthKeyringBackendKind::default(),
+    )
+    .expect("store default key");
+    harness
+        .control
+        .ensure_v2_agent_loaded(harness.config.clone(), spawned_agent.thread_id)
+        .await
+        .expect("the agent should reload");
+    assert_eq!(
+        harness
+            .manager
+            .get_thread(spawned_agent.thread_id)
+            .await
+            .expect("reloaded child thread should exist")
+            .config_snapshot()
+            .await
+            .model_provider_id,
+        "zai-anthropic"
+    );
+}
+
 #[tokio::test]
 async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
     let (home, mut config) = test_config().await;

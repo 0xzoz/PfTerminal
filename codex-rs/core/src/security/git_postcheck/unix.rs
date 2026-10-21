@@ -204,6 +204,21 @@ fn times(meta: &std::fs::Metadata) -> (i128, i128) {
     )
 }
 
+/// When it was made, where the file system records it (#943 item 12: a
+/// freed inode number can come back for the next file or folder, on Linux
+/// at once; the creation time tells them apart). Not on macOS, which doesn't
+/// hand out a freed one at once and moves a file's creation time back with
+/// its modification time (`touch -t`, `rsync -t`).
+fn born(meta: &std::fs::Metadata) -> Option<i128> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    meta.created()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|since| since.as_nanos() as i128)
+}
+
 fn now_nanos() -> i128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -329,6 +344,7 @@ enum Role {
 struct Folder {
     dev: u64,
     ino: u64,
+    born: Option<i128>,
     ctime: i128,
     /// Listed long enough after its last change to trust its change time.
     settled: bool,
@@ -352,10 +368,12 @@ enum DotGit {
     Folder {
         dev: u64,
         ino: u64,
+        born: Option<i128>,
     },
     File {
         dev: u64,
         ino: u64,
+        born: Option<i128>,
         text: Option<String>,
     },
     Link {
@@ -373,10 +391,12 @@ impl DotGit {
             Kind::Dir => DotGit::Folder {
                 dev: meta.dev(),
                 ino: meta.ino(),
+                born: born(&meta),
             },
             Kind::File => DotGit::File {
                 dev: meta.dev(),
                 ino: meta.ino(),
+                born: born(&meta),
                 text: read_small(path),
             },
             Kind::Link => DotGit::Link {
@@ -473,7 +493,11 @@ fn walk(repo: &Repo, prev: Option<&Snapshot>) -> Snapshot {
         let old = prev.and_then(|prev| prev.folders.get(&dir));
         let (_, ctime) = times(&meta);
         let mut folder = match old.filter(|old| {
-            old.settled && old.dev == meta.dev() && old.ino == meta.ino() && old.ctime == ctime
+            old.settled
+                && old.dev == meta.dev()
+                && old.ino == meta.ino()
+                && old.born == born(&meta)
+                && old.ctime == ctime
         }) {
             Some(old) => old.clone(),
             None => match list(&dir, &meta, old) {
@@ -619,6 +643,7 @@ fn list(dir: &Path, meta: &std::fs::Metadata, old: Option<&Folder>) -> Option<Fo
     Some(Folder {
         dev: meta.dev(),
         ino: meta.ino(),
+        born: born(meta),
         ctime,
         settled: times(&after).1 == ctime && settled(ctime),
         role: Role::Plain,
@@ -1123,10 +1148,13 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         // Made again or replaced (#943 reviews r4, r6): it may be another
         // kind (a worktree's or submodule's `.git` file replaced by a folder,
         // or the reverse) or name other git folders, so they are worked out
-        // again, also for later looks.
+        // again, also for later looks. #943 item 12: also where it is back
+        // as the same one after a look saw it missing (a `commondir` that
+        // names another folder now, or a file system that doesn't record
+        // when a reused inode was made).
         let remade_repo = snapshot
             .as_ref()
-            .filter(|prev| prev.dot_git != now)
+            .filter(|prev| prev.dot_git != now || prev.went_missing)
             .and_then(|_| repo_at(repo.dot_git.clone()))
             .filter(|fresh| fresh.git_dirs != repo.git_dirs);
         if let Some(fresh) = &remade_repo {
@@ -1140,12 +1168,17 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 }
             });
         }
-        // Replaced in place (no look saw it missing): this look also walks
-        // the git folders it named before, where something may have been
-        // left meanwhile.
+        // Replaced in place (no look saw it missing), or back as the same
+        // one naming other git folders (#943 item 12 review r1): this look
+        // also walks the git folders it named before, where something may
+        // have been left meanwhile.
         let replaced_repo = remade_repo
             .as_ref()
-            .filter(|_| snapshot.as_ref().is_some_and(|prev| !prev.went_missing))
+            .filter(|_| {
+                snapshot
+                    .as_ref()
+                    .is_some_and(|prev| !prev.went_missing || prev.dot_git == now)
+            })
             .map(|fresh| {
                 let mut both = fresh.clone();
                 for dir in &repo.git_dirs {
@@ -1415,7 +1448,7 @@ fn remade_baseline(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Snapshot {
         if let Some(old) = prev
             .folders
             .get(dir)
-            .filter(|old| old.dev == folder.dev && old.ino == folder.ino)
+            .filter(|old| old.dev == folder.dev && old.ino == folder.ino && old.born == folder.born)
         {
             baseline.folders.insert(dir.clone(), old.clone());
         }
@@ -1457,6 +1490,7 @@ fn remade_baseline(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Snapshot {
             Folder {
                 dev: 0,
                 ino: 0,
+                born: None,
                 ctime: 0,
                 settled: false,
                 role: Role::GitDir,
