@@ -116,9 +116,15 @@ async fn a_day_before_the_conversation_started_has_no_requests() -> anyhow::Resu
     let (runtime, owner) = fixture(&path, 300 * DAY, NOW).await?;
     // #352 run Z: past the request detail, inside the daily totals. This read
     // used to say the day's detail had expired.
-    assert_eq!(empty(&runtime, owner, 299, NOW).await?, before(300));
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 299, NOW).await?,
+        before(/*started_day*/ 300)
+    );
     // Even below the daily totals' floor: the proof needs no retained row.
-    assert_eq!(empty(&runtime, owner, 0, NOW).await?, before(300));
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 0, NOW).await?,
+        before(/*started_day*/ 300)
+    );
     // From the day it started, nothing recorded proves nothing.
     for day in [300, 305, 350, 399, 400] {
         assert_eq!(
@@ -135,9 +141,10 @@ async fn a_day_before_the_conversation_started_has_no_requests() -> anyhow::Resu
 async fn a_day_with_requests_is_not_an_empty_day() -> anyhow::Result<()> {
     let path = home();
     let (runtime, owner) = fixture(&path, 300 * DAY, 300 * DAY).await?;
-    record(&runtime, 1, owner, 350 * DAY + 5).await?;
+    record(&runtime, /*id*/ 1, owner, 350 * DAY + 5).await?;
     checkpoint(&runtime, NOW).await?;
-    let view = inspection(AccountingStore::inspect_day(&runtime, owner, 350, NOW).await?);
+    let view =
+        inspection(AccountingStore::inspect_day(&runtime, owner, /*utc_day*/ 350, NOW).await?);
     assert_eq!((view.totals.attempts, view.empty_day), (1, None));
     runtime.close().await;
     Ok(())
@@ -150,17 +157,23 @@ async fn the_start_is_compared_by_utc_day() -> anyhow::Result<()> {
     let path = home();
     let (runtime, owner) = fixture(&path, 300 * DAY - 1, NOW).await?;
     assert_eq!(
-        empty(&runtime, owner, 299, NOW).await?,
+        empty(&runtime, owner, /*day*/ 299, NOW).await?,
         Some(EmptyDay::NotRecorded)
     );
-    assert_eq!(empty(&runtime, owner, 298, NOW).await?, before(299));
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 298, NOW).await?,
+        before(/*started_day*/ 299)
+    );
     runtime.close().await;
     // 00:00:00.000 UTC on day 300: day 299 ends before it.
     let path = home();
     let (runtime, owner) = fixture(&path, 300 * DAY, NOW).await?;
-    assert_eq!(empty(&runtime, owner, 299, NOW).await?, before(300));
     assert_eq!(
-        empty(&runtime, owner, 300, NOW).await?,
+        empty(&runtime, owner, /*day*/ 299, NOW).await?,
+        before(/*started_day*/ 300)
+    );
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 300, NOW).await?,
         Some(EmptyDay::NotRecorded)
     );
     runtime.close().await;
@@ -173,9 +186,12 @@ async fn past_the_daily_totals_only_the_proven_day_is_shown() -> anyhow::Result<
     let now = 800 * DAY;
     let path = home();
     let (runtime, owner) = fixture(&path, 300 * DAY, now).await?;
-    assert_eq!(empty(&runtime, owner, 299, now).await?, before(300));
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 299, now).await?,
+        before(/*started_day*/ 300)
+    );
     assert!(matches!(
-        AccountingStore::inspect_day(&runtime, owner, 350, now).await?,
+        AccountingStore::inspect_day(&runtime, owner, /*utc_day*/ 350, now).await?,
         InspectionDay::DetailUnavailable {
             compact: false,
             coverage: RetentionCoverage {
@@ -186,7 +202,7 @@ async fn past_the_daily_totals_only_the_proven_day_is_shown() -> anyhow::Result<
         }
     ));
     assert_eq!(
-        empty(&runtime, owner, 436, now).await?,
+        empty(&runtime, owner, /*day*/ 436, now).await?,
         Some(EmptyDay::NotRecorded)
     );
     runtime.close().await;
@@ -199,17 +215,20 @@ async fn a_day_before_the_ledger_existed_is_not_recorded() -> anyhow::Result<()>
     let (runtime, owner) = fixture(&path, 300 * DAY, NOW).await?;
     installed(&runtime, /*day*/ 320).await?;
     assert_eq!(
-        empty(&runtime, owner, 310, NOW).await?,
+        empty(&runtime, owner, /*day*/ 310, NOW).await?,
         Some(EmptyDay::BeforeLedger {
             ledger_started_day: 320
         })
     );
     assert_eq!(
-        empty(&runtime, owner, 320, NOW).await?,
+        empty(&runtime, owner, /*day*/ 320, NOW).await?,
         Some(EmptyDay::NotRecorded)
     );
     // The conversation's start still proves the days before it.
-    assert_eq!(empty(&runtime, owner, 299, NOW).await?, before(300));
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 299, NOW).await?,
+        before(/*started_day*/ 300)
+    );
     // An install time this build cannot read states nothing about the ledger.
     set(
         &runtime,
@@ -218,7 +237,7 @@ async fn a_day_before_the_ledger_existed_is_not_recorded() -> anyhow::Result<()>
     )
     .await?;
     assert_eq!(
-        empty(&runtime, owner, 310, NOW).await?,
+        empty(&runtime, owner, /*day*/ 310, NOW).await?,
         Some(EmptyDay::NotRecorded)
     );
     runtime.close().await;
@@ -232,20 +251,23 @@ async fn pending_or_lagging_accounting_is_never_an_empty_day() -> anyhow::Result
     let (runtime, owner) = fixture(&path, 300 * DAY, 250 * DAY).await?;
     // After the checkpoint nothing is verified yet, not even before the start.
     assert_eq!(
-        AccountingStore::inspect_day(&runtime, owner, 260, 301 * DAY).await?,
+        AccountingStore::inspect_day(&runtime, owner, /*utc_day*/ 260, 301 * DAY).await?,
         InspectionDay::CheckpointLag
     );
-    assert_eq!(empty(&runtime, owner, 240, 301 * DAY).await?, before(300));
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 240, 301 * DAY).await?,
+        before(/*started_day*/ 300)
+    );
     runtime.close().await;
 
     // A request older than the request detail that maintenance has not
     // compacted yet is pending, not absent.
     let path = home();
     let (runtime, owner) = fixture(&path, 300 * DAY, 300 * DAY).await?;
-    record(&runtime, 1, owner, 305 * DAY).await?;
+    record(&runtime, /*id*/ 1, owner, 305 * DAY).await?;
     checkpoint(&runtime, NOW).await?;
     assert_eq!(
-        AccountingStore::inspect_day(&runtime, owner, 305, NOW).await?,
+        AccountingStore::inspect_day(&runtime, owner, /*utc_day*/ 305, NOW).await?,
         InspectionDay::CheckpointLag
     );
     runtime.close().await;
@@ -269,11 +291,15 @@ async fn other_threads_on_the_day_can_only_withdraw_the_proof() -> anyhow::Resul
             crate::DirectionalThreadSpawnEdgeStatus::Closed,
         )
         .await?;
-    record(&runtime, 1, child, 295 * DAY).await?;
+    record(&runtime, /*id*/ 1, child, 295 * DAY).await?;
     checkpoint(&runtime, now).await?;
-    let view = inspection(AccountingStore::inspect_day(&runtime, owner, 295, now).await?);
+    let view =
+        inspection(AccountingStore::inspect_day(&runtime, owner, /*utc_day*/ 295, now).await?);
     assert_eq!((view.totals.attempts, view.empty_day), (1, None));
-    assert_eq!(empty(&runtime, owner, 294, now).await?, before(295));
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 294, now).await?,
+        before(/*started_day*/ 295)
+    );
     // A thread of unknown ancestry with a request on day 293 may be an
     // unlinked subagent: that day is not proven.
     let stranger = v7(200 * DAY);
@@ -287,14 +313,18 @@ async fn other_threads_on_the_day_can_only_withdraw_the_proof() -> anyhow::Resul
         293 * DAY,
     )
     .await?;
-    record(&runtime, 2, stranger, 293 * DAY).await?;
+    record(&runtime, /*id*/ 2, stranger, 293 * DAY).await?;
     checkpoint(&runtime, now).await?;
-    let view = inspection(AccountingStore::inspect_day(&runtime, owner, 293, now).await?);
+    let view =
+        inspection(AccountingStore::inspect_day(&runtime, owner, /*utc_day*/ 293, now).await?);
     assert_eq!(
         (view.unknown_parent_totals.attempts, view.empty_day),
         (1, Some(EmptyDay::NotRecorded))
     );
-    assert_eq!(empty(&runtime, owner, 292, now).await?, before(295));
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 292, now).await?,
+        before(/*started_day*/ 295)
+    );
     runtime.close().await;
     Ok(())
 }
@@ -306,14 +336,20 @@ async fn the_start_is_the_earliest_evidence_and_needs_a_time_bearing_id() -> any
     let path = home();
     let (runtime, owner) = fixture(&path, 300 * DAY, NOW).await?;
     thread(&runtime, owner, 390 * DAY).await?;
-    assert_eq!(empty(&runtime, owner, 299, NOW).await?, before(300));
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 299, NOW).await?,
+        before(/*started_day*/ 300)
+    );
     // An earlier stored creation time moves it back.
     thread(&runtime, owner, 280 * DAY).await?;
     assert_eq!(
-        empty(&runtime, owner, 299, NOW).await?,
+        empty(&runtime, owner, /*day*/ 299, NOW).await?,
         Some(EmptyDay::NotRecorded)
     );
-    assert_eq!(empty(&runtime, owner, 279, NOW).await?, before(280));
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 279, NOW).await?,
+        before(/*started_day*/ 280)
+    );
     // A subagent id that carries no time withdraws the proof.
     let legacy = ThreadId::from_string(&Uuid::from_u128(77).to_string())?;
     runtime
@@ -324,7 +360,7 @@ async fn the_start_is_the_earliest_evidence_and_needs_a_time_bearing_id() -> any
         )
         .await?;
     assert_eq!(
-        empty(&runtime, owner, 279, NOW).await?,
+        empty(&runtime, owner, /*day*/ 279, NOW).await?,
         Some(EmptyDay::NotRecorded)
     );
     runtime.close().await;
@@ -336,11 +372,11 @@ async fn the_start_is_the_earliest_evidence_and_needs_a_time_bearing_id() -> any
     installed(&runtime, /*day*/ 0).await?;
     checkpoint(&runtime, NOW).await?;
     assert_eq!(
-        empty(&runtime, legacy, 100, NOW).await?,
+        empty(&runtime, legacy, /*day*/ 100, NOW).await?,
         Some(EmptyDay::NotRecorded)
     );
     assert!(matches!(
-        AccountingStore::inspect_day(&runtime, legacy, 0, NOW).await?,
+        AccountingStore::inspect_day(&runtime, legacy, /*utc_day*/ 0, NOW).await?,
         InspectionDay::DetailUnavailable { compact: false, .. }
     ));
     runtime.close().await;
@@ -363,7 +399,7 @@ async fn range_buckets_never_classify_an_empty_day() -> anyhow::Result<()> {
             NOW,
         )
     };
-    let InspectionDay::Range { buckets, .. } = range(350).await? else {
+    let InspectionDay::Range { buckets, .. } = range(/*start*/ 350).await? else {
         panic!()
     };
     let [InspectionDay::Ready(view)] = buckets[0].days.as_slice() else {
@@ -371,13 +407,139 @@ async fn range_buckets_never_classify_an_empty_day() -> anyhow::Result<()> {
     };
     assert_eq!(view.empty_day, None);
     // Past the request detail a range keeps today's rule: unavailable.
-    let InspectionDay::Range { buckets, .. } = range(299).await? else {
+    let InspectionDay::Range { buckets, .. } = range(/*start*/ 299).await? else {
         panic!()
     };
     assert!(matches!(
         buckets[0].days.as_slice(),
         [InspectionDay::DetailUnavailable { compact: false, .. }]
     ));
+    runtime.close().await;
+    Ok(())
+}
+
+async fn maintain(runtime: &StateRuntime, now: i64) -> anyhow::Result<()> {
+    AccountingStore::open(runtime, now)
+        .await?
+        .maintain(now)
+        .await
+}
+
+#[tokio::test]
+async fn a_subagent_compact_day_is_unavailable_and_moves_the_start() -> anyhow::Result<()> {
+    let path = home();
+    let (runtime, owner) = fixture(&path, 300 * DAY, 290 * DAY).await?;
+    let child = v7(310 * DAY);
+    thread(&runtime, child, 310 * DAY).await?;
+    runtime
+        .upsert_thread_spawn_edge(
+            owner,
+            child,
+            crate::DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await?;
+    record(&runtime, /*id*/ 1, child, 295 * DAY).await?;
+    maintain(&runtime, NOW).await?;
+    // The owner has nothing on day 295, past the request detail; the
+    // subagent's compacted day still keeps the whole day unavailable.
+    assert!(matches!(
+        AccountingStore::inspect_day(&runtime, owner, /*utc_day*/ 295, NOW).await?,
+        InspectionDay::DetailUnavailable { compact: true, .. }
+    ));
+    // Its compacted row is the earliest record: the start moves back to it.
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 294, NOW).await?,
+        before(/*started_day*/ 295)
+    );
+    runtime.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unreadable_unknown_ancestry_day_withdraws_the_proof() -> anyhow::Result<()> {
+    let path = home();
+    let (runtime, owner) = fixture(&path, 300 * DAY, 290 * DAY).await?;
+    let stranger = v7(200 * DAY);
+    let home = runtime.sqlite().home();
+    let mut metadata = test_thread_metadata(home, stranger, home.to_path_buf());
+    metadata.source = "unknown".to_string();
+    runtime.upsert_thread(&metadata).await?;
+    record(&runtime, /*id*/ 1, stranger, 295 * DAY).await?;
+    // Compacted, its day cannot be read in detail.
+    maintain(&runtime, NOW).await?;
+    let view =
+        inspection(AccountingStore::inspect_day(&runtime, owner, /*utc_day*/ 295, NOW).await?);
+    assert_eq!(
+        (view.unknown_parent_unavailable_threads, view.empty_day),
+        (1, Some(EmptyDay::NotRecorded))
+    );
+    runtime.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn spawn_edges_without_native_rows_count_by_their_id() -> anyhow::Result<()> {
+    let path = home();
+    let (runtime, owner) = fixture(&path, 300 * DAY, NOW).await?;
+    // A later subagent with no native row changes nothing.
+    runtime
+        .upsert_thread_spawn_edge(
+            owner,
+            v7(310 * DAY),
+            crate::DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await?;
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 299, NOW).await?,
+        before(/*started_day*/ 300)
+    );
+    // One whose id is earlier moves the start back to it.
+    runtime
+        .upsert_thread_spawn_edge(
+            owner,
+            v7(250 * DAY),
+            crate::DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await?;
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 299, NOW).await?,
+        Some(EmptyDay::NotRecorded)
+    );
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 249, NOW).await?,
+        before(/*started_day*/ 250)
+    );
+    runtime.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_spawn_tree_too_large_to_read_proves_nothing() -> anyhow::Result<()> {
+    let path = home();
+    let (runtime, owner) = fixture(&path, 300 * DAY, NOW).await?;
+    // 10,000 subagents with v7 ids from day 310: still proven.
+    let edges = |from: i64, to: i64| {
+        sqlx::query(
+            "WITH RECURSIVE n(i) AS (VALUES(?2) UNION ALL SELECT i+1 FROM n WHERE i < ?3)
+             INSERT INTO thread_spawn_edges (parent_thread_id, child_thread_id, status)
+             SELECT ?1, printf('00063c73-6800-7000-8000-%012x', i), 'closed' FROM n",
+        )
+        .bind(owner.to_string())
+        .bind(from)
+        .bind(to)
+        .execute(runtime.pool.as_ref())
+    };
+    edges(/*from*/ 1, /*to*/ 9_999).await?;
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 299, NOW).await?,
+        before(/*started_day*/ 300)
+    );
+    // One more and the tree is past the bound.
+    edges(/*from*/ 10_000, /*to*/ 10_000).await?;
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 299, NOW).await?,
+        Some(EmptyDay::NotRecorded)
+    );
     runtime.close().await;
     Ok(())
 }

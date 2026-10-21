@@ -131,3 +131,11 @@ pub(super) fn classify(
 pub(super) fn proven_before(day: i64, started_ms: Option<i64>) -> bool {
     started_ms.is_some_and(|ms| day < ms.div_euclid(DAY_MS))
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_tree_query_reads_one_thread_past_the_bound() {
+        assert!(tree!().contains(&format!("LIMIT {})", super::TREE_LIMIT + 1)));
+    }
+}

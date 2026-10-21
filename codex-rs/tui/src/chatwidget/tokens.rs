@@ -676,7 +676,7 @@ fn resolved_counts<'a>(quotes: impl IntoIterator<Item = &'a ObservationQuote>) -
 /// that records costs, which creates the ledger with the first request it
 /// records, so collection is not "off" there.
 fn absent_state() -> &'static str {
-    "Unavailable — no requests recorded in this home yet; the accounting ledger is created when the first one is."
+    "Unavailable — nothing recorded in this home yet; the accounting ledger is created when the first request is."
 }
 
 /// What `/usage requests` says in a build that records no costs, instead of
@@ -1110,7 +1110,14 @@ fn inspection_pages_for(
         ),
     ]);
     let (noncached, write) = resolved_counts(ready.requests.values().flatten());
-    for (index, (label, m)) in METRICS.iter().zip(&t.measured).enumerate() {
+    // FUP-02: a day with nothing recorded lists no token counts; zeros would
+    // read as no usage, which an empty day does not prove.
+    let measured = if t.attempts == 0 {
+        &[][..]
+    } else {
+        &t.measured[..]
+    };
+    for (index, (label, m)) in METRICS.iter().zip(measured).enumerate() {
         let n = match index {
             1 => noncached,
             3 => write,

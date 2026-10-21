@@ -115,7 +115,7 @@ fn an_unproven_empty_day_never_claims_no_requests() {
                 ledger_started_day: 20_697,
             }),
             vec![format!(
-                "{HEADING} not recorded — accounting in this home started on 2026-09-01 (UTC), after this day."
+                "{HEADING} not recorded — this home's accounting ledger was created on 2026-09-01 (UTC), after this day."
             )],
         ),
     ] {
@@ -133,10 +133,17 @@ fn an_unproven_empty_day_never_claims_no_requests() {
         ] {
             assert!(!text.contains(claim), "{empty:?} claims {claim:?}:\n{text}");
         }
-        // Nothing is stated as a zero amount.
+        // Nothing is stated as a zero amount or a zero token count; only
+        // record counts may be zero.
         for line in text.lines() {
             assert!(
-                !line.contains("$0.00") && !line.contains("usd: 0"),
+                !line.contains("$0") && !line.contains("usd: 0"),
+                "{empty:?}: {line}"
+            );
+            assert!(
+                !(line.ends_with(": 0") || line.contains(": 0 "))
+                    || line.starts_with("recorded attempts")
+                    || line.starts_with("unknown parent population: 0 attempts"),
                 "{empty:?}: {line}"
             );
         }
@@ -167,8 +174,8 @@ fn the_started_date_is_the_utc_date() {
         )[0]
         .clone()
     };
-    assert!(opening(20_745).contains("started on 2026-10-19 (UTC)"));
-    assert!(opening(20_746).contains("started on 2026-10-20 (UTC)"));
+    assert!(opening(/*started_day*/ 20_745).contains("started on 2026-10-19 (UTC)"));
+    assert!(opening(/*started_day*/ 20_746).contains("started on 2026-10-20 (UTC)"));
 }
 
 async fn opened(day: InspectionDay) -> crate::chatwidget::ChatWidget {

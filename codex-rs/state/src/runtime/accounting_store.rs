@@ -836,25 +836,22 @@ async fn inspect_tree_window(
         return Ok(first);
     };
     // FUP-02: a single day with nothing recorded for the owner. Before the
-    // aggregate floor it stays unavailable unless the conversation had not
-    // started yet.
-    let started = if window.is_none() && view.totals.attempts == 0 {
-        // One scan of the accounting rows: the tree's earliest recorded request.
-        if !work.scans(/*count*/ 1) {
+    // aggregate floor it stays unavailable, as before, unless the conversation
+    // had not started yet; that is decided here, ahead of the tree.
+    let mut started = None;
+    if window.is_none() && view.totals.attempts == 0 && day < view.coverage.aggregate_day_floor {
+        let Some(early) = started_ms(conn, owner, work).await? else {
             return Ok(InspectionDay::TooLarge);
-        }
-        let started = empty_day::started_ms(conn, owner).await?;
-        if day < view.coverage.aggregate_day_floor && !empty_day::proven_before(day, started) {
+        };
+        if !empty_day::proven_before(day, early) {
             return Ok(InspectionDay::DetailUnavailable {
                 coverage: view.coverage,
                 read_at_ms,
                 compact: false,
             });
         }
-        Some(started)
-    } else {
-        None
-    };
+        started = Some(early);
+    }
     if !work.scans(/*count*/ 1) {
         return Ok(InspectionDay::TooLarge);
     }
@@ -1017,9 +1014,14 @@ async fn inspect_tree_window(
     )?;
     view.unknown_parent_totals =
         DayTotals::from_quotes(view.unknown_parent_requests.values().flatten())?;
-    if let Some(started) = started
-        && view.totals.attempts == 0
-    {
+    if window.is_none() && view.totals.attempts == 0 {
+        let started = match started {
+            Some(started) => started,
+            None => match started_ms(conn, owner, work).await? {
+                Some(started) => started,
+                None => return Ok(InspectionDay::TooLarge),
+            },
+        };
         let unknown_clear = view.unknown_parent_totals.attempts == 0
             && view.unknown_parent_unavailable_threads == 0;
         let empty = empty_day::classify(
@@ -1044,6 +1046,20 @@ async fn inspect_tree_window(
             Some(scope::other_conversations(conn, unrelated, day, read_at_ms, work).await);
     }
     Ok(InspectionDay::Ready(view))
+}
+
+/// `empty_day::started_ms`, charged to the work budget: one scan of the
+/// accounting rows for the tree's earliest recorded request. The outer `None`
+/// is an exhausted budget.
+async fn started_ms(
+    conn: &mut SqliteConnection,
+    owner: ThreadId,
+    work: &mut InspectionWork,
+) -> anyhow::Result<Option<Option<i64>>> {
+    if !work.scans(/*count*/ 1) {
+        return Ok(None);
+    }
+    Ok(Some(empty_day::started_ms(conn, owner).await?))
 }
 
 // All buckets reuse the already-open deferred snapshot, including ancestry.

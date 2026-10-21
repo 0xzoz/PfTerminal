@@ -18,7 +18,7 @@ pub(super) fn overview(heading: &str, empty: Option<EmptyDay>) -> Vec<String> {
             utc_date(started_day)
         )],
         Some(EmptyDay::BeforeLedger { ledger_started_day }) => vec![format!(
-            "{heading} not recorded — accounting in this home started on {} (UTC), after this day.",
+            "{heading} not recorded — this home's accounting ledger was created on {} (UTC), after this day.",
             utc_date(ledger_started_day)
         )],
         Some(EmptyDay::NotRecorded) | None => {
