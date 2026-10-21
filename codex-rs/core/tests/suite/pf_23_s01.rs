@@ -3759,7 +3759,7 @@ async fn pf_23_s02_typing_into_a_shell_started_before_untrusted_content_is_confi
     // The shell proves it is confined: it cannot read a Corbanu home store
     // (named at run time, so only the sandbox can stop it).
     let steps = |home: &str| {
-        let (head, tail) = split_home_name(&home);
+        let (head, tail) = split_home_name(home);
         let read = format!("echo typed-one; cat \"$(printf '{head}%s/au%s' {tail} th.json)\"\n");
         vec![
             call(
