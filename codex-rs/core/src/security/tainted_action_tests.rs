@@ -2838,6 +2838,250 @@ fn issue_1012_prompt_transformation_is_unseen_code() {
     assert_eq!(wrong, Vec::<String>::new());
 }
 
+/// #1084: under zsh glob substitution a value is read as a pattern whose
+/// qualifiers may run code (`/(e:code:)` in a file read by `$(cat notes)`),
+/// so after untrusted content glob substitution asks, with or without
+/// command output on the line.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1084_glob_substitution_is_unseen_code() {
+    use ProtectedActionKind::*;
+    let mut wrong = Vec::new();
+    for (shell, line) in [
+        // `$~x`, `${~x}` and their combined forms.
+        ("zsh", "x=$(cat notes); print -l $~x"),
+        ("zsh", "x=$(cat notes); print -l ${~x}"),
+        ("zsh", "x=$(cat notes); print -l ${(f)~x}"),
+        ("zsh", "x=$(cat notes); print -l ${^~x}"),
+        ("zsh", "x=$(cat notes); print -l $^~x"),
+        ("zsh", "x=$(cat notes); print -l ${${~x}}"),
+        ("zsh", "x=$(cat notes); print -l ${~x[1,-1]}"),
+        ("zsh", "x=$(cat notes); for f in $~x; do :; done"),
+        ("zsh", "read x < notes; print -l $~x"),
+        ("zsh", "x=$(cat notes); eval 'print -l $~x'"),
+        ("zsh", "x=$(cat notes); eval \"print -l \\$~x\""),
+        ("zsh", "x=$(cat notes); t='~'; eval \"print -l \\$${t}x\""),
+        ("zsh", "x=$(cat notes); eval $'print -l $\\x7ex'"),
+        // A value from the environment or another line.
+        ("zsh", "print -l $~x"),
+        ("bash", "export x=$(cat notes); zsh -c 'print -l $~x'"),
+        // The option in any spelling.
+        ("zsh", "setopt globsubst; print -l $(cat notes)"),
+        ("zsh", "setopt GLOB_SUBST; x=$(cat notes); print -l $x"),
+        ("zsh", "setopt Glob_Subst; x=$(cat notes); print -l $x"),
+        ("zsh", "setopt glob\"_sub\"st; x=$(cat notes); print -l $x"),
+        ("zsh", "unsetopt no_glob_subst; x=$(cat notes); print -l $x"),
+        ("zsh", "set -o globsubst; x=$(cat notes); print -l $x"),
+        ("bash", "zsh -o globsubst -c 'x=$(cat notes); print -l $x'"),
+        ("bash", "zsh --glob-subst -c 'x=$(cat notes); print -l $x'"),
+        ("zsh", "o=subst; setopt glob$o; x=$(cat notes); print -l $x"),
+        // zsh's `options` array.
+        ("zsh", "options[globsubst]=on; x=$(cat notes); print -l $x"),
+        (
+            "zsh",
+            "options+=(globsubst on); x=$(cat notes); print -l $x",
+        ),
+        (
+            "zsh",
+            "k=glob; : ${options[${k}subst]::=on}; print -l $(cat notes)",
+        ),
+        (
+            "zsh",
+            "set -A options ${(kv)options} g on; print -l $(cat notes)",
+        ),
+        ("zsh", "read -A options < opts; print -l $(cat notes)"),
+        // Options the reader cannot name.
+        (
+            "zsh",
+            "k=$(cat name); setopt $k; x=$(cat notes); print -l $x",
+        ),
+        ("zsh", "setopt -m 'g*'; x=$(cat notes); print -l $x"),
+        ("zsh", "set $(cat opts); x=$(cat notes); print -l $x"),
+        ("zsh", "set -o $(cat name); x=$(cat notes); print -l $x"),
+        ("bash", "zsh -o \"$O\" -c 'x=$(cat notes); print -l $x'"),
+        // Emulation modes that turn the option on.
+        (
+            "zsh",
+            "emulate csh; setopt extendedglob; print -l $(cat notes)",
+        ),
+        (
+            "zsh",
+            "emulate -L ksh; unsetopt shglob; print -l $(cat notes)",
+        ),
+        (
+            "zsh",
+            "emulate sh -c 'unsetopt shglob; print -l $(cat notes)'",
+        ),
+        ("zsh", "emulate $m; print -l $(cat notes)"),
+        (
+            "bash",
+            "zsh --emulate sh -c 'unsetopt shglob; print -l $(cat notes)'",
+        ),
+        (
+            "bash",
+            "ARGV0=csh zsh -c 'setopt extendedglob; print -l $(cat notes)'",
+        ),
+        (
+            "bash",
+            "exec -a csh zsh -c 'setopt extendedglob; print -l $(cat notes)'",
+        ),
+        // Review r1: the whole array through flags.
+        (
+            "zsh",
+            "k=$(cat keys); x=$(cat notes); : ${(AA)options::=${=k}}; print -l $x",
+        ),
+        (
+            "zsh",
+            "k=$(cat keys); : ${(A)options::=$=k}; print -l $(cat notes)",
+        ),
+        // Review r2: braces in a flag argument, flags before the name, an
+        // attached `-a` value and GNU `env -a`.
+        ("zsh", "x=$(cat notes); print -l ${(s\"}\")~x}"),
+        ("zsh", "x=$(cat notes); print -l ${(s.\\}.)~x}"),
+        (
+            "zsh",
+            "k=$(cat keys); : ${(AA)=options::=${=k}}; print -l $(cat notes)",
+        ),
+        (
+            "zsh",
+            "k=$(cat keys); : ${(AA)^options::=${=k}}; print -l $(cat notes)",
+        ),
+        ("bash", "exec -acsh zsh ./run.zsh"),
+        ("bash", "env -a csh zsh ./run.zsh"),
+        // Review r3: option names built by brace ranges or globs.
+        ("zsh", "setopt glob{s..s}ubst; x=$(cat notes); print -l $x"),
+        ("zsh", "setopt GLOB_S{U..U}BST; x=$(cat notes); print -l $x"),
+        ("zsh", "set -o glob_{s..s}ubst; x=$(cat notes); print -l $x"),
+        ("bash", "zsh -o glob{s..s}ubst ./run.zsh"),
+        ("zsh", "setopt glob?subst; x=$(cat notes); print -l $x"),
+        ("zsh", "setopt [g]lob_subst; x=$(cat notes); print -l $x"),
+        // Review r4: `~` after flags that end in `=`.
+        ("zsh", "x=$(cat notes); print -l ${(@)=~x}"),
+        ("zsh", "x=$(cat notes); print -l ${(f)^=~x}"),
+        ("zsh", "x=$(cat notes); print -l ${(s: :)=~x}"),
+        ("zsh", "print -l ${(@)=~NOTES}"),
+        // Review r5: the `~` flag inside the group, after any delimiter.
+        ("zsh", "x=$(cat notes); print -r -- ${(s:,:~pj:$x:)a}"),
+        ("zsh", "x=$(cat notes); print -r -- ${(s , ~pj:$x:)a}"),
+        ("zsh", "x=$(cat notes); print -r -- ${(s=,=~pj:$x:)a}"),
+        // Review r6: an array name attached to `set -A`, zmv clusters
+        // ending in a value-taking letter, keeper's `keep`.
+        (
+            "zsh",
+            "k=glob${:-subst}; set -Aoptions extendedglob on $k on; print -l $(cat notes)",
+        ),
+        ("zsh", "p=$(cat notes); zmv -np echo $p x"),
+        ("zsh", "p=$(cat notes); zmv -Qnp echo $p x"),
+        ("zsh", "autoload -U keeper; keeper; keep \"$(cat notes)\""),
+        // zmv globs its pattern as `${~pat}`.
+        ("zsh", "autoload zmv; zmv -n \"$(cat notes)\" x"),
+        ("zsh", "p=$(cat notes); zmv -p echo -- $p x"),
+        // Review r7: `options` through a variable holding its name, `(P)`
+        // assignments, `ARGV0` spelled through an expansion.
+        (
+            "zsh",
+            "n=options; zstyle :c s $(cat opts); zstyle -a :c s $n; x=$(cat notes); print -l $x",
+        ),
+        (
+            "zsh",
+            "n=opt; m=ions; cat opts | read -A $n$m; print -l $(cat notes)",
+        ),
+        (
+            "zsh",
+            "n=options; : ${(PAA)n::=$(cat opts)}; print -l $(cat notes)",
+        ),
+        (
+            "zsh",
+            "n=$(cat name); : ${(P)n::=$(cat opts)}; print -l $(cat notes)",
+        ),
+        (
+            "zsh",
+            "export ARGV${:-0}=sh; zsh -c 'setopt noshglob bareglobqual; IFS=; x=$(cat notes); print -l $x'",
+        ),
+        (
+            "zsh",
+            "typeset -x ARG${:-V0}=sh; zsh -c 'x=$(cat notes); print -l $x'",
+        ),
+        (
+            "zsh",
+            "export A$'RGV'0=sh; zsh -c 'x=$(cat notes); print -l $x'",
+        ),
+        (
+            "zsh",
+            "export ${:-ARGV}0=sh; zsh -c 'x=$(cat notes); print -l $x'",
+        ),
+        (
+            "zsh",
+            "export ARGV{0,}=sh; zsh -c 'x=$(cat notes); print -l $x'",
+        ),
+        // Review r8: a `~` built from a character code and reparsed, the
+        // value from the environment.
+        ("zsh", "y='${'${(#):-126}'x}'; print -l ${(e)y}"),
+        ("zsh", "print -l ${(e):-'${'${(#):-126}'x}'}"),
+        ("zsh", "eval 'print -l ${'${(#):-126}'x}'"),
+        ("zsh", "printf -v t '\\176'; eval \"print -l \\${${t}x}\""),
+    ] {
+        let found = kind(&[shell, "-c", line]);
+        if found != Some(UnseenCode) {
+            wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+        }
+    }
+    // Review r9: the `eval` text is scanned once, not at every level.
+    work::assert_linear("eval chain", |scale| {
+        let chain = format!("{}print -l x", "eval ".repeat(2_000 * scale));
+        assert_eq!(kind(&["zsh", "-c", &chain]), None);
+    });
+    for (shell, line) in [
+        ("zsh", "ls ~/src; echo ${HOME}/x ~"),
+        ("bash", "p=${f/#\\~/$HOME}; echo $p $((~5))"),
+        (
+            "zsh",
+            "setopt extendedglob nullglob; unsetopt nomatch; ls *(.N)",
+        ),
+        ("zsh", "emulate -L zsh; print -r -- $(date)"),
+        ("zsh", "emulate zsh -c 'print -r -- $x'"),
+        ("bash", "set -euo pipefail; set -- $(git ls-files); echo $1"),
+        ("bash", "zsh -fc 'print -r -- $HOME $(date)'"),
+        ("bash", "python3 -c \"opts = {'a': 1}; print(opts)\""),
+        (
+            "bash",
+            "git commit -m \"add options parsing\"; tool --options=x",
+        ),
+        (
+            "zsh",
+            "autoload zmv; zmv -n '(*).txt' '$1.md'; echo $(date)",
+        ),
+        ("bash", "exec -a worker sleep 1"),
+    ] {
+        let found = kind(&[shell, "-c", line]);
+        if found.is_some() {
+            wrong.push(format!("{shell}: {line:?} -> {found:?}"));
+        }
+    }
+    // A flag group counts when any `~` follows it on the line (other checks
+    // may also ask on such a group); a home folder alone does not.
+    assert!(shell::glob_substitution("print ${(j:,:)~arr}"));
+    assert!(shell::glob_substitution("print ${(s\"}\")~arr}"));
+    assert!(shell::glob_substitution("print ${(s:,:~pj:$x:)a}"));
+    assert!(shell::glob_substitution("print ${(j:,:)arr} ~/dir"));
+    assert!(!shell::glob_substitution("print ${(j:,:)arr}"));
+    assert!(!shell::glob_substitution("print $arr --home=~/x a:~/b ~"));
+    // A script file read by a zsh.
+    let root = tempfile::tempdir().expect("tempdir");
+    let cwd = root.path().to_string_lossy().into_owned();
+    std::fs::write(root.path().join("s.zsh"), "print -l $~x\n").expect("script");
+    for line in ["export x=$(cat notes); zsh ./s.zsh", "source ./s.zsh"] {
+        let found = classify_fixture(&shell_in(&cwd, &["zsh", "-c", line]));
+        if found != Some(UnseenCode) {
+            wrong.push(format!("file: {line:?} -> {found:?}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
 /// #1028: zsh `e` and `+` glob qualifiers run code the classifier does not
 /// read as commands, so after untrusted content they ask, with or without
 /// command output on the line.
