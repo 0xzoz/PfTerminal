@@ -381,7 +381,25 @@ fn names_in_any_case(operand: &str) -> bool {
 /// one of git's. Those lines are read to the end: a setting with a value
 /// (`-c k=v`; not `commit -c HEAD`) or a word holding an unseen value
 /// counts. Stops at the next `git` (#1102: each word is scanned once).
+///
+/// This is the scan for a word that names git another way (`git.exe`): it
+/// also stops at such names. The scan for a `git` word is
+/// [`git_runs_code_after_git`].
 pub(super) fn git_runs_code(args: &[String], raw: &[String]) -> bool {
+    git_runs_code_until(args, raw, /*other_git_names_stop*/ true)
+}
+
+/// [`git_runs_code`] for a `git` word: it stops only at the next `git`, as
+/// before #1159 (D153). A name such as `git.exe` may be split out of quoted
+/// text (`git -C 'a git.exe b' -c core.pager=sh log`), and the scan from it
+/// would start at the wrong word; this scan reads on past it. Each word is
+/// still scanned at most twice: by this scan and by the one from the
+/// `git.exe` before it, which stops at the next git name.
+pub(super) fn git_runs_code_after_git(args: &[String], raw: &[String]) -> bool {
+    git_runs_code_until(args, raw, /*other_git_names_stop*/ false)
+}
+
+fn git_runs_code_until(args: &[String], raw: &[String], other_git_names_stop: bool) -> bool {
     let unsafe_key = |setting: &str| {
         let key = setting
             .split_once('=')
@@ -404,7 +422,7 @@ pub(super) fn git_runs_code(args: &[String], raw: &[String]) -> bool {
     // does not end them).
     let is_git = |word: &str| {
         shell::basename(word).eq_ignore_ascii_case("git")
-            || super::git_helpers::git_name(word) == Some(None)
+            || (other_git_names_stop && super::git_helpers::git_name(word) == Some(None))
     };
     // Past the first word that is not an option: only settings with a
     // value, and unseen words, count.

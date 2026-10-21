@@ -3,7 +3,9 @@
 //! config`, `git log`, `git lfs`; `git.exe` (and `git-config.exe`) is git on
 //! Windows. The git checks judge them as the git line they stand for.
 
+use super::quoted::Word;
 use super::shell;
+use super::work;
 
 /// What `word` names, read as git: `Some(None)` for git itself under another
 /// name (`git.exe`, `C:\Git\cmd\git`), `Some(Some(subcommand))` for a dashed
@@ -23,6 +25,56 @@ pub(super) fn git_name(word: &str) -> Option<Option<String>> {
     base.strip_prefix("git-")
         .filter(|subcommand| !subcommand.is_empty())
         .map(|subcommand| Some(subcommand.to_string()))
+}
+
+/// D153: whether a git command (`git`, `git.exe`, after any wrapper) gives a
+/// `-c` or `--config-env` setting as text holding a git name
+/// (`git -c 'user.name=a git.exe b' -c core.pager=sh log`). The word lexer
+/// splits that text, so the git checks would take the name for another git
+/// command and start reading there, past the settings that follow: fail
+/// closed. `words` are read with quotes, each kept whole.
+pub(super) fn setting_holds_git_name(words: &[Word]) -> bool {
+    let mut git = false;
+    let mut value_next = false;
+    for word in words {
+        work::step();
+        let text = word.text.as_str();
+        let value = std::mem::take(&mut value_next)
+            || (git
+                && (text.starts_with("--config-env=")
+                    || (text.starts_with("-c") && !text.starts_with("--"))));
+        if value && holds_git_name(text) {
+            return true;
+        }
+        git |= shell::basename(text).eq_ignore_ascii_case("git") || git_name(text) == Some(None);
+        value_next = git && matches!(text, "-c" | "--config-env");
+    }
+    false
+}
+
+/// Whether a piece of `text`, split at blanks and shell punctuation as the
+/// word lexer splits it, names git or a dashed helper: with quotes and
+/// backslashes dropped (as the lexer drops them) and with backslashes kept
+/// (`C:\Git\cmd\git.exe`).
+fn holds_git_name(text: &str) -> bool {
+    let unquoted: String = text
+        .chars()
+        .filter(|ch| !matches!(ch, '\'' | '"'))
+        .collect();
+    let unescaped: String = unquoted.chars().filter(|ch| *ch != '\\').collect();
+    [unquoted, unescaped].iter().any(|text| {
+        text.split(|ch: char| {
+            ch.is_whitespace()
+                || matches!(
+                    ch,
+                    ',' | ';' | '&' | '|' | '(' | ')' | '<' | '>' | '{' | '}' | '`'
+                )
+        })
+        .any(|piece| {
+            work::step();
+            shell::basename(piece).eq_ignore_ascii_case("git") || git_name(piece).is_some()
+        })
+    })
 }
 
 #[cfg(test)]
