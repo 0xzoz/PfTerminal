@@ -708,10 +708,10 @@ async fn accounting_inspect_whole_store_denominator_thresholds() -> anyhow::Resu
     for (count, day, expected_attempts) in [
         (95_236i64, 91, Some(8)),
         (95_237, 91, None),
-        // An empty day also reads its spawn tree's earliest recorded request
-        // (FUP-02): one more scan, so 4,000,000 / 8 less the day's visits.
-        (499_999, 92, Some(0)),
-        (500_000, 92, None),
+        // FUP-02's start-time scan for an empty day runs only with budget to
+        // spare, so it moves neither threshold.
+        (571_428, 92, Some(0)),
+        (571_429, 92, None),
     ] {
         sqlx::query(
             "WITH RECURSIVE n(i) AS (VALUES(?1) UNION ALL SELECT i+1 FROM n WHERE i<?2)

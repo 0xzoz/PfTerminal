@@ -517,7 +517,8 @@ async fn spawn_edges_without_native_rows_count_by_their_id() -> anyhow::Result<(
 async fn a_spawn_tree_too_large_to_read_proves_nothing() -> anyhow::Result<()> {
     let path = home();
     let (runtime, owner) = fixture(&path, 300 * DAY, NOW).await?;
-    // 10,000 subagents with v7 ids from day 310: still proven.
+    // A tree of 10,000 threads (the owner and 9,999 subagents with v7 ids
+    // from day 310) is still read, and proven.
     let edges = |from: i64, to: i64| {
         sqlx::query(
             "WITH RECURSIVE n(i) AS (VALUES(?2) UNION ALL SELECT i+1 FROM n WHERE i < ?3)
@@ -534,12 +535,38 @@ async fn a_spawn_tree_too_large_to_read_proves_nothing() -> anyhow::Result<()> {
         empty(&runtime, owner, /*day*/ 299, NOW).await?,
         before(/*started_day*/ 300)
     );
-    // One more and the tree is past the bound.
+    // One more subagent and the tree is past the bound.
     edges(/*from*/ 10_000, /*to*/ 10_000).await?;
     assert_eq!(
         empty(&runtime, owner, /*day*/ 299, NOW).await?,
         Some(EmptyDay::NotRecorded)
     );
+    runtime.close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn below_the_floor_an_unknown_ancestry_row_withdraws_the_proof() -> anyhow::Result<()> {
+    let path = home();
+    let (runtime, owner) = fixture(&path, 300 * DAY, 290 * DAY).await?;
+    let stranger = v7(200 * DAY);
+    let home = runtime.sqlite().home();
+    let mut metadata = test_thread_metadata(home, stranger, home.to_path_buf());
+    metadata.source = "unknown".to_string();
+    runtime.upsert_thread(&metadata).await?;
+    record(&runtime, /*id*/ 1, stranger, 299 * DAY).await?;
+    maintain(&runtime, NOW).await?;
+    // The ledger moves to day 800 (floor 436) before expiry removes that row.
+    let now = 800 * DAY;
+    checkpoint(&runtime, now).await?;
+    assert_eq!(
+        empty(&runtime, owner, /*day*/ 298, now).await?,
+        before(/*started_day*/ 300)
+    );
+    assert!(matches!(
+        AccountingStore::inspect_day(&runtime, owner, /*utc_day*/ 299, now).await?,
+        InspectionDay::DetailUnavailable { compact: false, .. }
+    ));
     runtime.close().await;
     Ok(())
 }
