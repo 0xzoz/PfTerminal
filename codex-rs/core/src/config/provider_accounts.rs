@@ -220,6 +220,85 @@ pub fn apply_recorded_provider_account(
     )
 }
 
+/// #1129: an existing agent that is resumed, or reloaded to receive a
+/// message, runs on the account it recorded (`recorded`: a name, `default`,
+/// or `<owner>:<name>` for an account of another provider sharing its API
+/// key) on `provider_id`, not on whichever account `provider` (the provider
+/// as configured now) selects. When that account can no longer be used
+/// (named accounts are off, it is not configured, its owner no longer shares
+/// the API key, or its sign-in is ruled out) the agent is refused; it is
+/// never moved to another account.
+pub(crate) fn restore_recorded_agent_account(
+    config: &super::Config,
+    provider_id: &str,
+    provider: &mut ModelProviderInfo,
+    recorded: &str,
+) -> Result<(), String> {
+    let refuse = |reason: String| {
+        format!(
+            "Resuming this agent: it ran on account `{recorded}` of `{provider_id}`, and \
+             {reason}. It is not moved to another account: ask the user to restore that \
+             account (`/providers`), or do the work without this agent. Do not retry on \
+             another account without the user's consent."
+        )
+    };
+    let is_default = parse_provider_account_selection(recorded).is_ok_and(|name| name.is_none());
+    if !config
+        .features
+        .enabled(codex_features::Feature::NamedAccounts)
+    {
+        // Without named accounts every provider runs on its default account.
+        return if is_default {
+            Ok(())
+        } else {
+            Err(refuse(
+                "named accounts need the `named_accounts` feature, which is off now".to_string(),
+            ))
+        };
+    }
+    let (owner_id, name) = recorded.split_once(':').unwrap_or((provider_id, recorded));
+    let mut restored = provider.clone();
+    let stamp = |owner: &mut ModelProviderInfo| {
+        stamp_provider_account(owner_id, owner, name).map_err(|error| {
+            let message = error.to_string();
+            let prefix = format!("provider_accounts.{owner_id}: ");
+            refuse(
+                message
+                    .strip_prefix(&prefix)
+                    .unwrap_or(&message)
+                    .to_string(),
+            )
+        })
+    };
+    if owner_id == provider_id {
+        stamp(&mut restored)?;
+    } else {
+        // Borrowed as `with_account_from` allows: both use the same API key.
+        let mut owner = config
+            .model_providers
+            .get(owner_id)
+            .cloned()
+            .ok_or_else(|| refuse(format!("provider `{owner_id}` is not configured")))?;
+        if restored.env_key.is_none() || restored.env_key != owner.env_key {
+            return Err(refuse(format!(
+                "`{provider_id}` no longer uses the API key of `{owner_id}`"
+            )));
+        }
+        stamp(&mut owner)?;
+        if owner.account.is_none() {
+            return Err(refuse(format!("`{recorded}` is not an account name")));
+        }
+        restored.account = owner.account;
+    }
+    if let Some(message) = selected_account_error(config.codex_home.as_path(), &restored)
+        .or_else(|| provider_sign_in_restriction_error(config, &restored))
+    {
+        return Err(refuse(message));
+    }
+    *provider = restored;
+    Ok(())
+}
+
 /// Why the session cannot start on the accounts it selects: the session
 /// provider's account (from `--account` or `[provider_accounts]`), then an
 /// explicit account of another provider.
@@ -242,7 +321,14 @@ pub fn subagent_account_error(config: &super::Config) -> Option<String> {
 /// `forced_login_method` counts, not the API-key-only onboarding default a
 /// third-party session provider implies (#571).
 fn sign_in_restriction_error(config: &super::Config) -> Option<String> {
-    let account = codex_model_provider::named_sign_in_account(&config.model_provider)?;
+    provider_sign_in_restriction_error(config, &config.model_provider)
+}
+
+fn provider_sign_in_restriction_error(
+    config: &super::Config,
+    provider: &ModelProviderInfo,
+) -> Option<String> {
+    let account = codex_model_provider::named_sign_in_account(provider)?;
     codex_login::named_account_restriction_error(
         config.codex_home.as_path(),
         &account,

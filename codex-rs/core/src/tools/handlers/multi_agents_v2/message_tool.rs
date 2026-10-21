@@ -139,10 +139,7 @@ pub(super) async fn handle_message_string_tool(
         MessageDeliveryMode::TriggerTurn => ("followup_task", PLAINTEXT_FOLLOWUP_TASK_TOOL),
     };
     ensure_message_encoding_matches_target(
-        ConfiguredRuntime::new(
-            &turn.config.model_provider_id,
-            account_name(turn.provider.info()),
-        ),
+        ConfiguredRuntime::from_provider(&turn.config.model_provider_id, turn.provider.info()),
         crate::tools::collaboration_wire::message_source_provider_id(turn.as_ref()),
         &source,
         ConfiguredRuntime::from_snapshot(
