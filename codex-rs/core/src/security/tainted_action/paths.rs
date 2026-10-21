@@ -503,6 +503,14 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 /// The glob match itself, leading wildcards included. Iterative with one
 /// backtrack point, so it is linear-times-linear whatever the pattern.
 pub(super) fn glob_any(pattern: &str, name: &str) -> bool {
+    // Without glob characters the match below is equality: skip its two
+    // allocations, which every word's path checks pay many times over.
+    if !pattern
+        .bytes()
+        .any(|byte| matches!(byte, b'*' | b'?' | b'['))
+    {
+        return pattern == name;
+    }
     let pattern: Vec<char> = pattern.chars().collect();
     let name: Vec<char> = name.chars().collect();
     // Length of the single-character token at `at` (`?`, `[...]` or literal).
