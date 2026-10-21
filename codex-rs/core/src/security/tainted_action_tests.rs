@@ -3109,7 +3109,7 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
             "git commit -m 'fix(tests): keep *(N) and /*(e:true:)'",
         ),
         ("/bin/bash", "git commit -m \"[WIP] fix(tests)? {x}\""),
-        ("/bin/bash", "git commit -m 'fix(tests) \u{2014} caf\u{e9}'"),
+        ("/bin/bash", "git commit -m 'fix(tests) \u{2014} r\u{e9}sum\u{e9}'"),
         ("/usr/bin/bash", "git add 'src/*(N)' && git status"),
         (
             "/bin/bash",
