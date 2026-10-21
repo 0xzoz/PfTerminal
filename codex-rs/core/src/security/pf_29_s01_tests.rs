@@ -86,7 +86,7 @@ fn find(preflight: &Preflight, kind: FindingKind) -> Vec<&Finding> {
 const WINDOWS_SANDBOX_BLOCKER: &str =
     "OS sandbox: protected launch is not available on this platform yet (PF-27-S06)";
 
-/// [`Preflight::is_clean`] for these fixtures. Off macOS and Linux (Windows)
+/// [`Preflight::is_clean`] on macOS and Linux. Elsewhere (today, Windows)
 /// the OS sandbox row is never ready yet, so it must be exactly
 /// [`WINDOWS_SANDBOX_BLOCKER`] and the fixture is clean when nothing else
 /// blocks.
@@ -372,7 +372,8 @@ fn pf_29_s01_old_memory_content_blocks_until_removed() {
     assert_eq!(
         memory[0].location,
         memories
-            .join("rollout_summaries/old.md")
+            .join("rollout_summaries")
+            .join("old.md")
             .display()
             .to_string()
     );
