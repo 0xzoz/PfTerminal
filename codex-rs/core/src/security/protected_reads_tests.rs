@@ -190,6 +190,18 @@ fn issue_554_recursive_listing_of_a_parent_is_attributed_to_the_home() {
             "ls: ../../users/me/.corbanu: Operation not permitted",
             "../../users/me/.corbanu",
         ),
+        // #1194: the program's name was split off (written separately, with
+        // the command's output merged in between).
+        (
+            "find ~",
+            "/users/me/.corbanu: Operation not permitted",
+            "/users/me/.corbanu",
+        ),
+        (
+            "cd ~ && ls -aR .",
+            "./.corbanu: Operation not permitted",
+            "./.corbanu",
+        ),
     ] {
         assert_eq!(found(script, line), Some(expected.to_string()), "{script}");
     }
@@ -210,6 +222,12 @@ fn issue_554_recursive_listing_of_a_parent_is_attributed_to_the_home() {
         ),
         // Relative to a folder the command does not name.
         ("find .", "find: ./.corbanu: Operation not permitted"),
+        // #1194: with the program's name split off, still only the home.
+        (
+            "find ~",
+            "/users/me/.corbanu/vault: Operation not permitted",
+        ),
+        ("find ~", "/users/me/.corbanu-old: Operation not permitted"),
     ] {
         assert_eq!(found(script, line), None, "{script}: {line}");
     }
@@ -306,6 +324,48 @@ async fn issue_554_find_above_the_home_is_explained_under_aggressive() {
         parent.join("elsewhere").display()
     );
     assert_eq!(explain(&other).await, None);
+}
+
+/// #1194: BSD `find` and `ls` write `find: ` and the rest of the denial line
+/// separately, and unified exec merges stdout and stderr as they arrive, so
+/// the listing they flush at exit can land in between. The denial is still
+/// explained as #554's.
+#[tokio::test]
+async fn issue_1194_a_split_denial_line_is_still_explained() {
+    let (session, turn) = crate::session::tests::make_session_and_context().await;
+    #[allow(deprecated)]
+    let cwd = turn.cwd.clone();
+    let home = turn.config.codex_home.to_path_buf();
+    std::fs::create_dir_all(&home).unwrap();
+    let parent = home.parent().expect("the home has a parent").to_path_buf();
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_level(SecurityLevel::Aggressive)
+        .with_source_envelopes(/*enabled*/ true);
+    session.services.replace_model_client(client);
+    let (parent, home) = (parent.display(), home.display());
+    for (command, program, listing) in [
+        (
+            format!("find '{parent}'"),
+            "find",
+            format!("{parent}\n{home}\n"),
+        ),
+        (
+            format!("ls -aR '{parent}'"),
+            "ls",
+            format!("{parent}:\n.\n..\n{home}\n\n"),
+        ),
+    ] {
+        let command = shell(&command);
+        let output = format!("{program}: {listing}{home}: Operation not permitted\n");
+        let explanation =
+            denial_explanation(&session, &turn, &command, cwd.as_path(), Some(1), &output).await;
+        assert_eq!(
+            explanation,
+            Some(listing_explanation(&home.to_string())),
+            "{output}"
+        );
+    }
 }
 
 /// #621 (milestone AGG-R07): a path inside code an interpreter runs is found
@@ -794,14 +854,31 @@ fn issue_584_only_never_writable_words() {
 }
 
 /// #902: a test harness can only lengthen the lookups' bound; it is 2 s
-/// otherwise.
+/// otherwise. #997: this crate's unit tests always get the test bound.
 #[test]
 fn issue_902_unhurried_lookups_only_lengthen_the_bound() {
-    assert_eq!(lookup_timeout(), LOOKUP_TIMEOUT);
+    let outside_unit_tests = || lookup_timeout_in(/*unit_test*/ false);
+    assert_eq!(LOOKUP_TIMEOUT, Duration::from_secs(/*secs*/ 2));
+    assert_eq!(outside_unit_tests(), LOOKUP_TIMEOUT);
     unhurried_lookups_for_tests(/*enabled*/ true);
-    let unhurried = lookup_timeout();
+    let unhurried = outside_unit_tests();
+    let unit_test = lookup_timeout();
     unhurried_lookups_for_tests(/*enabled*/ false);
     assert_eq!(unhurried, TEST_LOOKUP_TIMEOUT);
+    assert_eq!(unit_test, TEST_LOOKUP_TIMEOUT);
     assert!(TEST_LOOKUP_TIMEOUT > LOOKUP_TIMEOUT);
-    assert_eq!(lookup_timeout(), LOOKUP_TIMEOUT);
+    assert_eq!(outside_unit_tests(), LOOKUP_TIMEOUT);
+    assert_eq!(lookup_timeout(), TEST_LOOKUP_TIMEOUT);
+}
+
+/// #997: a lookup slower than the production bound still finishes in this
+/// crate's unit tests, so a loaded machine does not drop the explanations
+/// and withheld grant offers they check.
+#[tokio::test]
+async fn issue_997_unit_test_lookups_outlast_the_production_bound() {
+    let slow = off_thread(|| {
+        std::thread::sleep(LOOKUP_TIMEOUT + Duration::from_millis(/*millis*/ 500));
+        Some("found")
+    });
+    assert_eq!(slow.await, Some("found"));
 }

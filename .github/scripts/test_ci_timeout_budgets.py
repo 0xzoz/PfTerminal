@@ -161,9 +161,11 @@ class PrArgumentCommentLintTest(unittest.TestCase):
         # run.py adds --all-targets (tests included) when no target is given.
         self.assertRegex(
             job,
-            r'python3 tools/argument-comment-lint/run\.py "\$\{args\[@\]\}" -- '
-            r"--ignore-rust-version --keep-going",
+            r'(?m)python3 tools/argument-comment-lint/run\.py "\$\{args\[@\]\}" -- --keep-going$',
         )
+        # #1030: the lint nightly is newer than the stable toolchain, so any
+        # crate that builds on stable meets its rust-version on the nightly too.
+        self.assertNotIn("--ignore-rust-version", job)
         self.assertNotRegex(job, r"--(lib|bins|tests|all-targets)\b")
 
     def test_lint_is_required(self) -> None:
@@ -359,14 +361,12 @@ class RunScopedCachePruneTest(unittest.TestCase):
         self.assertEqual(re.findall(r"uses: ([\w/-]+)@", prune), ["actions/checkout"])
 
     def test_no_other_workflow_holds_actions_write(self) -> None:
-        # cla.yml is upstream's and runs only in openai's repositories.
         holders = {
             path.name
             for path in self.WORKFLOWS.glob("*.yml")
             if re.search(r"(?m)^\s+actions: write$", path.read_text())
         }
-        self.assertEqual(holders, {"cache-prune.yml", "cla.yml"})
-        self.assertIn("github.repository_owner == 'openai'", (self.WORKFLOWS / "cla.yml").read_text())
+        self.assertEqual(holders, {"cache-prune.yml"})
 
 
 class PrWindowsNativeTestsTest(unittest.TestCase):
