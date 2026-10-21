@@ -30,6 +30,7 @@ use std::path::Path;
 
 mod arithmetic;
 mod code_variables;
+mod git_helpers;
 mod grammar;
 mod indirect;
 mod invocation;
@@ -517,21 +518,7 @@ fn rank(kind: ProtectedActionKind) -> u8 {
 fn persistence_command(name: &str, args: &[String]) -> bool {
     let has = |word: &str| args.iter().any(|arg| arg == word);
     match name {
-        "git" => {
-            let Some(at) = args.iter().position(|arg| arg == "config") else {
-                return false;
-            };
-            let config = &args[at + 1..];
-            // #1141: a reading word given as a value (`git config -f f k
-            // get`) does not make it a read.
-            !outputs::git_config_reads(config)
-                && (config
-                    .iter()
-                    .any(|arg| matches!(arg.as_str(), "--global" | "--system"))
-                    || config.iter().any(|arg| {
-                        GIT_RUN_KEYS.contains(&arg.as_str()) || arg.starts_with("alias.")
-                    }))
-        }
+        "git" => git_config_persists(/*subcommand*/ None, args),
         "crontab" => !has("-l"),
         "launchctl" => ["load", "bootstrap", "submit", "enable"]
             .iter()
@@ -539,6 +526,29 @@ fn persistence_command(name: &str, args: &[String]) -> bool {
         "systemctl" => has("--user") && ["enable", "link", "edit"].iter().any(|verb| has(verb)),
         _ => false,
     }
+}
+
+/// Whether `git <subcommand> args` (or `git args`) writes global config or a
+/// git key that runs a program. #1159: a dashed helper (`git-config`) gives
+/// its subcommand apart from its arguments.
+fn git_config_persists(subcommand: Option<&str>, args: &[String]) -> bool {
+    let config = if subcommand == Some("config") {
+        args
+    } else {
+        let Some(at) = args.iter().position(|arg| arg == "config") else {
+            return false;
+        };
+        &args[at + 1..]
+    };
+    // #1141: a reading word given as a value (`git config -f f k get`) does
+    // not make it a read.
+    !outputs::git_config_reads(config)
+        && (config
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--global" | "--system"))
+            || config
+                .iter()
+                .any(|arg| GIT_RUN_KEYS.contains(&arg.as_str()) || arg.starts_with("alias.")))
 }
 
 /// The folders a command's words resolve against: the last `-C`-style
@@ -1108,11 +1118,32 @@ impl Classifier {
             if CLI_NAMES.contains(&name) && !imported {
                 self.cli(args);
             }
-            if persistence_command(name, args) {
+            // #1159: git under another name (`git.exe`), or a dashed helper
+            // (`/usr/lib/git-core/git-config`) that runs `git <subcommand>`.
+            let helper = git_helpers::git_name(word);
+            let subcommand = helper.as_ref().and_then(Option::as_deref);
+            if persistence_command(name, args)
+                || helper
+                    .as_ref()
+                    .is_some_and(|_| git_config_persists(subcommand, args))
+            {
                 self.note(ProtectedActionKind::Persistence);
             }
+            // A helper named by text the classifier cannot see may be any
+            // subcommand (`git-$x`, `git-conf*`), like `git $x`.
+            if subcommand.is_some_and(|subcommand| {
+                subcommand.contains(['$', '*', '?', '['])
+                    || subcommand.contains(shell::UNSEEN_OUTPUT)
+                    || simple
+                        .words
+                        .get(index)
+                        .is_some_and(|raw| basename(raw).contains('$'))
+            }) {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
             // #1142: `git -c core.pager=…` runs the value (args as written).
-            if name == "git"
+            // A dashed helper takes no git options.
+            if (name == "git" || helper == Some(None))
                 && code_variables::git_runs_code(
                     &words[index + 1..],
                     simple.words.get(index + 1..).unwrap_or_default(),
@@ -1242,7 +1273,11 @@ impl Classifier {
                 work::step();
                 let resolved = self.homes.resolve(file, base);
                 self.word_path(&resolved, file, depth);
-                if self.homes.is_persistence(&resolved) {
+                // #1159: files of any name written in a folder (`--work-tree
+                // ~`, `--output-directory ~/`) may be the home's.
+                if self.homes.is_persistence(&resolved)
+                    || (file.ends_with('/') && self.homes.holds_a_home(&resolved))
+                {
                     self.note(ProtectedActionKind::Persistence);
                 }
             }

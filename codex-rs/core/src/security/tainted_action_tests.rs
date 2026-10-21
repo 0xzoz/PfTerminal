@@ -3780,3 +3780,89 @@ fn issue_1141_1142_checks_are_linear() {
         });
     }
 }
+
+/// #1159: git under another name is judged as git (a dashed helper in git's
+/// exec path runs `git <subcommand>`, `git.exe` is git), and more git
+/// options and variables that name a file or folder git writes are writes.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1159_git_helpers_and_path_writes() {
+    use ProtectedActionKind::*;
+    for command in [
+        "/usr/lib/git-core/git-config --global core.pager 'touch pwned'",
+        "git-config --global core.pager 'touch pwned'",
+        "git-config core.fsmonitor 'touch pwned'",
+        "git-config alias.x '!touch pwned'",
+        "GIT-CONFIG --global core.pager x",
+        "sudo /usr/lib/git-core/git-config --system core.pager x",
+        "find . -maxdepth 0 -exec /usr/libexec/git-core/git-config --global core.pager x \\;",
+        "git.exe config --global core.pager x",
+        "git-config.exe --global core.pager x",
+        "git-log -1 --format=x --output=~/.zshrc",
+        "/usr/lib/git-core/git-archive -o ~/.zshrc HEAD",
+        "git-config --file ~/.zshrc a.b x",
+        "git-bundle create ~/.zshrc HEAD",
+        "git-credential-store --file ~/.zshrc store",
+        "git.exe log -1 --output=~/.zshrc",
+        "git checkout-index -a --prefix=$HOME/",
+        "git checkout-index -a --prefix=~/.z",
+        "git checkout-index -af --prefix=/home/fixture/.config/autostart/",
+        "git -C ~ checkout-index -a --prefix=",
+        "/usr/lib/git-core/git-checkout-index -a --prefix=~/",
+        "git read-tree --index-output=~/.zshrc HEAD",
+        "git --work-tree=~ checkout HEAD -- .zshrc",
+        "git --work-tree ~ checkout HEAD -- .zshrc",
+    ] {
+        assert_eq!(script(command), Some(Persistence), "{command}");
+    }
+    for command in [
+        "git.exe -c core.pager='touch pwned' log",
+        "env git.exe -c alias.x='!touch pwned' x",
+        "git -C git.exe -c core.pager='touch pwned' log",
+        "find . -exec /usr/lib/git-core/git-conf* --global core.pager x \\;",
+        "find . -exec git-$sub --global core.pager x \\;",
+        "GIT_INDEX_FILE=~/.zshrc git add x",
+        "export GIT_WORK_TREE=~; git checkout HEAD -- .zshrc",
+    ] {
+        assert_eq!(script(command), Some(UnseenCode), "{command}");
+    }
+    for command in [
+        "git-lfs pull",
+        "git-log --oneline -5",
+        "git-config get user.name",
+        "git-config user.email a@example.com",
+        "git.exe status",
+        "git checkout-index -a --prefix=build/",
+        "git read-tree --index-output=/tmp/idx HEAD",
+        "git --work-tree=../wt checkout main -- .",
+        "cat docs/git-config.txt",
+        "echo \"$GIT_INDEX_FILE\"",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1159: the git helper checks stay linear in the line's length.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1159_checks_are_linear() {
+    for (label, unit) in [
+        ("git helpers", "git-config "),
+        ("git helper options", "-/git-config "),
+        ("git.exe words", "git.exe -c x "),
+        ("prefixes", "checkout-index --prefix=a/ "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("git {} status", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!("git-config {}", unit.repeat(400 * scale));
+            let _ = script(&line);
+        });
+    }
+}

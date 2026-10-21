@@ -3,6 +3,7 @@
 //! command is a writer like `tee`, and the option's value is a file it
 //! writes.
 
+use super::git_helpers;
 use super::work;
 
 /// Commands with an output-file option: the long option (git and sort
@@ -24,20 +25,28 @@ const NO_SHORT: char = '\0';
 const MIN_PREFIX: usize = 3;
 
 /// For a command that has an output-file option and uses it, the files it
-/// names (empty when the value is missing); `None` otherwise. `name` is the
+/// names (empty when the value is missing; a folder it writes files of any
+/// name in ends with `/`); `None` otherwise. `name` is the
 /// command's lowercase basename, `args` the words after it as written.
+/// #1159: a dashed git helper (`git-log`) is `git log`, `git.exe` is git.
 pub(super) fn output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
+    let helper = git_helpers::git_name(name);
+    let subcommand = helper.as_ref().and_then(Option::as_deref);
+    let name = if helper.is_some() { "git" } else { name };
     let (_, long, short) = OUTPUT_OPTIONS
         .iter()
         .find(|(command, _, _)| *command == name)?;
-    let has = |word: &str| args.iter().any(|arg| arg == word);
+    let has = |word: &str| subcommand == Some(word) || args.iter().any(|arg| arg == word);
     // `git config --file FILE key value` writes FILE; `git bundle create
     // FILE` writes its operand (a writer's operands are written).
     let config_file = name == "git"
-        && args
-            .iter()
-            .position(|arg| arg == "config")
-            .is_some_and(|at| !git_config_reads(&args[at + 1..]));
+        && if subcommand == Some("config") {
+            !git_config_reads(args)
+        } else {
+            args.iter()
+                .position(|arg| arg == "config")
+                .is_some_and(|at| !git_config_reads(&args[at + 1..]))
+        };
     let mut found = name == "git" && has("bundle") && has("create");
     let mut files = Vec::new();
     if config_file {
@@ -54,8 +63,33 @@ pub(super) fn output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
             work::step();
             found |= option_values(args, long, NO_SHORT, &mut files);
         }
+        // #1159: `git --work-tree=DIR checkout` writes its files in DIR
+        // (taken as a folder written, whatever the subcommand).
+        let mut trees = Vec::new();
+        found |= option_values(args, "--work-tree", NO_SHORT, &mut trees);
+        files.extend(trees.iter().map(|tree| format!("{tree}/")));
+        // `git read-tree --index-output=FILE` writes FILE.
+        if has("read-tree") {
+            found |= option_values(args, "--index-output", NO_SHORT, &mut files);
+        }
+        // `git checkout-index --prefix=~/.z` writes `~/.z` + each path
+        // (`~/.zshrc`): the folder the prefix is in is written.
+        if has("checkout-index") {
+            let mut prefixes = Vec::new();
+            found |= option_values(args, "--prefix", NO_SHORT, &mut prefixes);
+            files.extend(prefixes.iter().map(|prefix| prefix_folder(prefix)));
+        }
     }
     found.then_some(files)
+}
+
+/// The folder a path prefix writes in, ending with `/`: itself when it ends
+/// with `/`, else the folder that holds it (`./` when it names none).
+fn prefix_folder(prefix: &str) -> String {
+    match prefix.rfind('/') {
+        Some(at) => prefix[..=at].to_string(),
+        None => "./".to_string(),
+    }
 }
 
 /// git config options that take the next word as their value (`-zf FILE`
@@ -133,7 +167,12 @@ pub(super) fn git_config_reads(words: &[String]) -> bool {
         }
         // A word that is not an option may be the key (after an unknown
         // option too), which ends the options.
-        if word == "--" || !option || super::shell::basename(word) == "git" {
+        // #1159: a git helper (`git-config`) starts another git line too.
+        if word == "--"
+            || !option
+            || super::shell::basename(word) == "git"
+            || git_helpers::git_name(word).is_some()
+        {
             return false;
         }
         if GIT_CONFIG_READS.contains(&word.as_str()) {

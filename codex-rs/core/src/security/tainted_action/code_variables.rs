@@ -41,6 +41,10 @@ const CODE_VARIABLES: &[&str] = &[
     "GIT_CONFIG_SYSTEM",
     "GIT_CONFIG_PARAMETERS",
     "GIT_CONFIG_COUNT",
+    // #1159: a file git writes (the index) and the folder it writes the
+    // working tree to (`GIT_WORK_TREE=~ git checkout -- .zshrc`).
+    "GIT_INDEX_FILE",
+    "GIT_WORK_TREE",
     // Where git finds the user's config (`$HOME/.gitconfig`).
     "HOME",
     "XDG_CONFIG_HOME",
@@ -396,7 +400,12 @@ pub(super) fn git_runs_code(args: &[String], raw: &[String]) -> bool {
             .is_some_and(|word| unseen_text(word) || word.contains(['*', '?', '[']))
             || raw.get(at).is_some_and(|word| unseen_text(word))
     };
-    let is_git = |word: &str| shell::basename(word).eq_ignore_ascii_case("git");
+    // #1159: `git.exe` too (a dashed helper takes no git options, so it
+    // does not end them).
+    let is_git = |word: &str| {
+        shell::basename(word).eq_ignore_ascii_case("git")
+            || super::git_helpers::git_name(word) == Some(None)
+    };
     // Past the first word that is not an option: only settings with a
     // value, and unseen words, count.
     let mut past_subcommand = false;
