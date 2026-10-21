@@ -3887,6 +3887,22 @@ fn issue_1240_windows_spellings_are_protected() {
         ),
         (r"Copy-Item -Recurse C:\Users\fixture D:\x", Credentials),
         (r"& 'C:\Tools\corbanu.exe' vault list", Vault),
+        // Paths built from parts.
+        (r"Add-Content (Join-Path $HOME '.bashrc') 'x'", Persistence),
+        (r"Join-Path -Path $HOME -ChildPath .ssh\id_rsa", Credentials),
+        (
+            r"[IO.File]::AppendAllText([IO.Path]::Combine($HOME, '.zshrc'), 'x')",
+            Persistence,
+        ),
+        (r#"Add-Content ("$HOME" + "\.profile") x"#, Persistence),
+        (
+            r"New-Item -Path $HOME -Name .bash_profile -Value x",
+            Persistence,
+        ),
+        (
+            r"ni $env:USERPROFILE -Name .gitconfig -Value x -Force",
+            Persistence,
+        ),
         (
             r"$p = [Environment]::GetFolderPath('UserProfile')",
             UnseenCode,
@@ -4024,6 +4040,8 @@ fn issue_1240_ordinary_windows_commands_are_not_protected() {
         r"$env:RUST_LOG = 'debug'; cargo test",
         r"Write-Output $HOME",
         r"New-Item -ItemType Directory C:\work\out",
+        r"Join-Path $HOME 'proj\README.md'",
+        r"[Environment]::GetEnvironmentVariable('PATH')",
     ] {
         assert_eq!(powershell(line), None, "powershell {line}");
     }
@@ -4057,4 +4075,6 @@ issue_1240_windows_checks_are_linear! {
     quotes: r#"'a b' "c d" e^f "#,
     operators: "|&;(){},<> ",
     percents: "%a% %% % ",
+    // One command: each `ni` and join looks only a few words ahead.
+    joins: "ni -Name b Join-Path a b c + d [IO.Path]::Combine e f ",
 }

@@ -245,6 +245,64 @@ fn candidates(word: &str) -> Vec<&str> {
         .collect()
 }
 
+/// Words a join may take as operands (`Join-Path a b c`).
+const MAX_JOINED: usize = 3;
+/// Words after `New-Item` its `-Path` and `-Name` are looked for in.
+const MAX_PARAMETER_WORDS: usize = 16;
+
+/// Paths a command builds from several words, each with the position of
+/// its first word: `Join-Path a b`, `[IO.Path]::Combine(a, b)`, `a + b`, and
+/// `New-Item -Path a -Name b`.
+fn joined_paths(words: &[String], lower: &[String], names: &[&str]) -> Vec<(usize, String)> {
+    let operand = |word: &String| !word.starts_with('-');
+    let value_of = |flag: &str, shortest: usize, from: usize| {
+        (from..words.len().saturating_sub(1))
+            .take(MAX_PARAMETER_WORDS)
+            .find(|at| {
+                lower[*at].len() >= shortest
+                    && lower[*at].starts_with('-')
+                    && flag.starts_with(&lower[*at])
+            })
+            .map(|at| at + 1)
+    };
+    let mut found = Vec::new();
+    for at in 0..words.len() {
+        work::step();
+        if names[at] == "join-path" || lower[at].ends_with("::combine") {
+            let operands: Vec<usize> = (at + 1..words.len())
+                .take(2 * MAX_JOINED)
+                .filter(|index| operand(&words[*index]))
+                .take(MAX_JOINED)
+                .collect();
+            if let [first, ..] = operands[..]
+                && operands.len() > 1
+            {
+                let parts: Vec<&str> = operands
+                    .iter()
+                    .map(|index| words[*index].as_str())
+                    .collect();
+                found.push((first, parts.join("\\")));
+            }
+        }
+        if words[at] == "+" && at > 0 && at + 1 < words.len() {
+            found.push((at - 1, format!("{}{}", words[at - 1], words[at + 1])));
+        }
+        if matches!(names[at], "new-item" | "ni")
+            && let Some(name) = value_of("-name", 3, at + 1)
+        {
+            let path = value_of("-path", 2, at + 1).or_else(|| {
+                (at + 1..words.len())
+                    .take(MAX_PARAMETER_WORDS)
+                    .find(|index| operand(&words[*index]) && *index != name)
+            });
+            if let Some(path) = path {
+                found.push((path, format!("{}\\{}", words[path], words[name])));
+            }
+        }
+    }
+    found
+}
+
 /// Whether `word` (lowercase) is a PowerShell parameter naming a file
 /// written.
 fn writing_parameter(word: &str) -> bool {
@@ -382,6 +440,11 @@ impl Classifier {
         let powershell = names
             .iter()
             .any(|name| matches!(*name, "powershell" | "pwsh"));
+        let written = |index: usize| {
+            command.redirected[index]
+                || writer.is_some_and(|at| index > at)
+                || (index > 0 && writing_parameter(&lower[index - 1]))
+        };
         let mut git_config = GitConfigWrites::new(&lower);
         for (index, word) in words.iter().enumerate() {
             work::step();
@@ -394,7 +457,7 @@ impl Classifier {
                 self.cli(args);
             }
             if persistence_command(name, args)
-                || (name == "git" && git_config.persists(index + 1, None))
+                || (name == "git" && git_config.persists(index + 1, /*subcommand*/ None))
             {
                 self.note(ProtectedActionKind::Persistence);
             }
@@ -417,28 +480,39 @@ impl Classifier {
                     None => self.note(ProtectedActionKind::UnseenCode),
                 }
             }
-            let written = command.redirected[index]
-                || writer.is_some_and(|at| index > at)
-                || (index > 0 && writing_parameter(&lower[index - 1]));
             for candidate in candidates(word) {
                 work::step();
-                let path_like =
-                    candidate.contains(['/', '\\']) || candidate.starts_with(['.', '~', '%', '$']);
-                for base in bases.iter() {
-                    work::step();
-                    let resolved = self.homes.resolve(candidate, base);
-                    if path_like {
-                        self.path(&resolved);
-                    } else if let Some(kind) = self.homes.classify_path(&resolved) {
-                        self.note(kind);
-                    }
-                    if written && self.homes.is_persistence(&resolved) {
-                        self.note(ProtectedActionKind::Persistence);
-                    }
-                    if recursive && !folder_values[index] && self.homes.holds_a_home(&resolved) {
-                        self.note(ProtectedActionKind::Credentials);
-                    }
-                }
+                self.windows_path(
+                    candidate,
+                    bases,
+                    written(index),
+                    recursive && !folder_values[index],
+                );
+            }
+        }
+        for (index, path) in joined_paths(words, &lower, &names) {
+            work::step();
+            self.windows_path(&path, bases, written(index), recursive);
+        }
+    }
+
+    /// One word that may be a path, resolved against each folder.
+    fn windows_path(&mut self, candidate: &str, bases: &[String], written: bool, recursive: bool) {
+        let path_like =
+            candidate.contains(['/', '\\']) || candidate.starts_with(['.', '~', '%', '$']);
+        for base in bases {
+            work::step();
+            let resolved = self.homes.resolve(candidate, base);
+            if path_like {
+                self.path(&resolved);
+            } else if let Some(kind) = self.homes.classify_path(&resolved) {
+                self.note(kind);
+            }
+            if written && self.homes.is_persistence(&resolved) {
+                self.note(ProtectedActionKind::Persistence);
+            }
+            if recursive && self.homes.holds_a_home(&resolved) {
+                self.note(ProtectedActionKind::Credentials);
             }
         }
     }
@@ -486,7 +560,10 @@ mod tests {
     #[test]
     fn issue_1240_windows_commands_split_as_cmd_and_powershell_do() {
         assert_eq!(
-            words(r"type C:\Users\me\.corbanu\auth.json", true),
+            words(
+                r"type C:\Users\me\.corbanu\auth.json",
+                /*single_quotes*/ true
+            ),
             vec![(
                 vec!["type", r"C:\Users\me\.corbanu\auth.json"],
                 vec![false, false]
@@ -495,7 +572,7 @@ mod tests {
         assert_eq!(
             words(
                 r#"echo x >> "C:\Users\John Smith\.bashrc" 2>&1 & dir"#,
-                true
+                /*single_quotes*/ true
             ),
             vec![
                 (
@@ -508,7 +585,7 @@ mod tests {
         assert_eq!(
             words(
                 r"Set-Content -Path 'C:\a b\.zshrc' -Value x; [IO.File]::ReadAllText('C:\k')",
-                true
+                /*single_quotes*/ true
             ),
             vec![
                 (
@@ -520,14 +597,17 @@ mod tests {
         );
         // cmd keeps `'` as text: read as a separator it cannot hide `>`.
         assert_eq!(
-            words(r"echo don't > C:\x\.bashrc", false),
+            words(r"echo don't > C:\x\.bashrc", /*single_quotes*/ false),
             vec![(
                 vec!["echo", "don", "t", r"C:\x\.bashrc"],
                 vec![false, false, false, true]
             )]
         );
         assert_eq!(
-            words(r"ty^pe C:\x\.cor`banu\auth.json", true),
+            words(
+                r"ty^pe C:\x\.cor`banu\auth.json",
+                /*single_quotes*/ true
+            ),
             vec![(vec!["type", r"C:\x\.corbanu\auth.json"], vec![false, false])]
         );
         assert_eq!(command_name(r"c:\program files\git\bin\git.exe"), "git");

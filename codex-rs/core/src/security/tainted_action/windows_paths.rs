@@ -179,19 +179,25 @@ pub(super) fn expand(word: &str, values: &Values<'_>) -> String {
 
 /// Whether text uses a home variable in a way these rules do not expand:
 /// cmd's substring and replacement forms (`%USERPROFILE:~0%`,
-/// `%HOMEPATH:a=b%`) and .NET lookups (`[Environment]::GetFolderPath(...)`).
+/// `%HOMEPATH:a=b%`), .NET's user folders
+/// (`[Environment]::GetFolderPath(...)`) and .NET lookups of a home
+/// variable (`[Environment]::GetEnvironmentVariable('USERPROFILE')`).
 pub(super) fn hides_a_home(text: &str) -> bool {
     let lower = text.to_lowercase();
-    HOME_VARIABLES.iter().any(|name| {
-        work::step();
-        lower.contains(&format!("%{}:", name.to_lowercase()))
-    }) || [
-        "getfolderpath",
-        "getenvironmentvariable",
-        "expandenvironmentvariables",
-    ]
-    .iter()
-    .any(|method| lower.contains(method))
+    let names_a_home = |spelling: &dyn Fn(&str) -> String| {
+        HOME_VARIABLES.iter().any(|name| {
+            work::step();
+            lower.contains(&spelling(&name.to_lowercase()))
+        })
+    };
+    names_a_home(&|name| format!("%{name}:"))
+        || lower.contains("getfolderpath")
+        || (["getenvironmentvariable", "expandenvironmentvariables"]
+            .iter()
+            .any(|method| lower.contains(method))
+            && (names_a_home(&|name| format!("'{name}'"))
+                || names_a_home(&|name| format!("\"{name}\""))
+                || names_a_home(&|name| format!("%{name}%"))))
 }
 
 /// The drive letter of a path starting `X:` (after `\` became `/`).
@@ -444,6 +450,15 @@ mod tests {
         }
         assert!(hides_a_home(r"type %USERPROFILE:~0%\.bashrc"));
         assert!(hides_a_home("[Environment]::GetFolderPath('UserProfile')"));
+        assert!(hides_a_home(
+            "[Environment]::GetEnvironmentVariable(\"USERPROFILE\")"
+        ));
+        assert!(hides_a_home(
+            "[Environment]::ExpandEnvironmentVariables('%HOMEPATH%')"
+        ));
+        assert!(!hides_a_home(
+            "[Environment]::GetEnvironmentVariable('PATH')"
+        ));
         assert!(!hides_a_home(r"type %USERPROFILE%\.bashrc"));
     }
 }
