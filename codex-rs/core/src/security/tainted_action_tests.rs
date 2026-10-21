@@ -4026,6 +4026,8 @@ fn issue_1161_git_config_unknown_options_do_not_hide_writes() {
         "git config --rep filter.x.clean 'sh -c x'",
         "git config -zf .git/config pager.log x",
         "git config -zf.git/config pager.log x",
+        // A safe key does not exempt an explicit protected config file.
+        "git config -zf .git/config user.name pager.log",
         "git --shallow-file x config sequence.editor 'sh -c x'",
         "git --list-cmds x config sequence.editor 'sh -c x'",
         "git --unknown-flag config pager.log x",
@@ -4087,7 +4089,7 @@ fn issue_1161_git_config_safe_writes_reads_and_deletions_stay_quiet() {
         "git config advice.statusHints false",
         "git config -z user.name marker",
         "git config --no-type user.name marker",
-        "git config -zf .git/config user.name pager.log",
+        "git config -zf fixture.cfg user.name pager.log",
         "git config --comment pager.log user.name marker",
         "git config -z --get pager.log",
         "git config --loc --get pager.log",
