@@ -71,3 +71,23 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   that server only if it runs on this Corbanu home, and the level picker
   doesn't offer "restart now", since Corbanu Terminal starts against such a
   server only under Permissive (#1047).
+
+## Named accounts (behind `named_accounts`)
+
+- **App servers in homes with only the default login no longer wait for a
+  conversation.** With named accounts on, a standalone app server or daemon
+  held back its own ChatGPT requests (apps, plugins, rate limits, the model
+  catalog) until a conversation started, even in homes without named
+  accounts. It now does that only when the home has a named OpenAI sign-in
+  account or `[provider_accounts]` selects one. A server started without one
+  starts holding them from the first conversation on an account added while it
+  runs, and never goes back to the default login (#1085).
+
+## `corbanu login status`
+
+- **No part of an API key is shown.** With an API-key login it used to print
+  the key's first 8 and last 5 characters. It now prints
+  `Logged in using an API key - API key configured`, plus
+  `(fingerprint <12 hex>)` when the home's vault has its fingerprint salt. That
+  is the same per-home fingerprint a named OpenAI account holding the key
+  shows (REG-02).

@@ -1467,13 +1467,19 @@ fn issue_943_a_worktree_added_again_on_a_reused_inode() {
             .ino();
         reused += usize::from(new == old);
         let found = kinds(&check(thread, &repos));
-        // Where creation times aren't recorded (or on macOS, where they
-        // aren't compared), a reused inode is the documented limit.
-        let born = std::fs::symlink_metadata(worktree.join(".git"))
-            .expect("git file")
-            .created()
-            .is_ok();
-        if new == old && (!born || cfg!(target_os = "macos")) {
+        // Where creation times aren't recorded (or on macOS or an overlay
+        // file system, where they aren't compared), a reused inode is the
+        // documented limit.
+        // Told apart from the code under test, so a creation time it drops
+        // by mistake fails here instead of skipping.
+        let git_file = worktree.join(".git");
+        let compared = !cfg!(target_os = "macos")
+            && std::fs::symlink_metadata(&git_file)
+                .expect("git file")
+                .created()
+                .is_ok()
+            && !on_overlay_fs(&git_file);
+        if new == old && !compared {
             continue;
         }
         assert!(
@@ -1490,4 +1496,178 @@ fn issue_943_a_worktree_added_again_on_a_reused_inode() {
     {
         eprintln!("the .git file got its old inode number back {reused} of 8 times");
     }
+}
+
+/// #943 follow-up 19: creation times are still compared off overlay file
+/// systems, on each look (the device's answer is remembered after the
+/// first).
+#[cfg(target_os = "linux")]
+#[test]
+fn issue_943_creation_times_are_compared_off_overlay() {
+    let project = Project::new();
+    let git = project.git();
+    let meta = std::fs::symlink_metadata(&git).expect("git folder");
+    let created = meta
+        .created()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|since| since.as_nanos() as i128);
+    if on_overlay_fs(&git) || created.is_none() {
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("skipped: no creation times to compare in the temporary folder");
+        }
+        return;
+    }
+    for _ in 0..2 {
+        assert_eq!(super::unix::born(&git, &meta), created);
+    }
+}
+
+/// Whether `path` is on an overlay file system, told apart from the code
+/// under test.
+#[cfg(target_os = "linux")]
+fn on_overlay_fs(path: &Path) -> bool {
+    #[allow(clippy::unnecessary_cast)]
+    let overlay = fs_type_of(path) == libc::OVERLAYFS_SUPER_MAGIC as i64;
+    overlay
+}
+
+#[cfg(not(target_os = "linux"))]
+fn on_overlay_fs(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn fs_type_of(path: &Path) -> i64 {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path");
+    let mut stat = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stat` is written by the call.
+    assert_eq!(unsafe { libc::statfs(path.as_ptr(), stat.as_mut_ptr()) }, 0);
+    // SAFETY: `statfs` succeeded.
+    #[allow(clippy::unnecessary_cast)]
+    let fs_type = unsafe { stat.assume_init() }.f_type as i64;
+    fs_type
+}
+
+/// Mounts made for a test, unmounted in reverse order.
+#[cfg(target_os = "linux")]
+struct Mounts(Vec<PathBuf>);
+
+#[cfg(target_os = "linux")]
+impl Mounts {
+    fn mount(&mut self, source: &str, target: &Path, fs: &str, options: &str) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = |text: &[u8]| std::ffi::CString::new(text).expect("no NUL");
+        let (source, fs, options) = (
+            c(source.as_bytes()),
+            c(fs.as_bytes()),
+            c(options.as_bytes()),
+        );
+        let target_c = c(target.as_os_str().as_bytes());
+        // SAFETY: every argument is a NUL-terminated string that outlives the call.
+        let status = unsafe {
+            libc::mount(
+                source.as_ptr(),
+                target_c.as_ptr(),
+                fs.as_ptr(),
+                0,
+                options.as_ptr().cast(),
+            )
+        };
+        assert_eq!(
+            status,
+            0,
+            "mount {}: {}",
+            target.display(),
+            std::io::Error::last_os_error()
+        );
+        self.0.push(target.to_path_buf());
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Mounts {
+    fn drop(&mut self) {
+        use std::os::unix::ffi::OsStrExt;
+        for target in self.0.iter().rev() {
+            let target = std::ffi::CString::new(target.as_os_str().as_bytes()).expect("no NUL");
+            // SAFETY: `target` is NUL-terminated.
+            unsafe { libc::umount2(target.as_ptr(), libc::MNT_DETACH) };
+        }
+    }
+}
+
+/// #943 follow-up 19: git's first write in a container copies `.git` up
+/// from the image's layer, with a new creation time and the same inode
+/// number. That alone isn't a replaced `.git`. Mounts an overlay, so it runs
+/// only where `CORBANU_TEST_OVERLAY_MOUNTS` is set (as root in a
+/// throwaway container: `docker run --privileged`).
+#[cfg(target_os = "linux")]
+#[test]
+fn issue_943_a_git_folder_copied_up_on_overlay_isnt_replaced() {
+    if std::env::var_os("CORBANU_TEST_OVERLAY_MOUNTS").is_none() {
+        #[allow(clippy::print_stderr)]
+        {
+            eprintln!("skipped: set CORBANU_TEST_OVERLAY_MOUNTS to mount an overlay");
+        }
+        return;
+    }
+    let dir = TempDir::new().expect("temp dir");
+    let base = dir.path().canonicalize().expect("canonical");
+    let layers = base.join("layers");
+    let merged = base.join("merged");
+    std::fs::create_dir_all(&layers).expect("layers");
+    std::fs::create_dir_all(&merged).expect("merged");
+    let mut mounts = Mounts(Vec::new());
+    // The overlay's upper layer can't be on another overlay (the container's).
+    mounts.mount("tmpfs", &layers, "tmpfs", "");
+    let (lower, upper, work) = (
+        layers.join("lower"),
+        layers.join("upper"),
+        layers.join("work"),
+    );
+    let lower_git = lower.join("project/.git");
+    for folder in ["objects/ab", "refs/heads", "hooks"] {
+        std::fs::create_dir_all(lower_git.join(folder)).expect("git folder");
+    }
+    std::fs::write(lower_git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
+    std::fs::write(lower_git.join("config"), "[core]\n").expect("config");
+    std::fs::write(lower_git.join("refs/heads/main"), "0\n").expect("ref");
+    std::fs::create_dir_all(&upper).expect("upper");
+    std::fs::create_dir_all(&work).expect("work");
+    // The image's layer was made earlier.
+    std::thread::sleep(Duration::from_millis(20));
+    mounts.mount(
+        "overlay",
+        &merged,
+        "overlay",
+        &format!(
+            "lowerdir={},upperdir={},workdir={}",
+            lower.display(),
+            upper.display(),
+            work.display()
+        ),
+    );
+    let root = merged.join("project");
+    let git = root.join(".git");
+    let thread = ThreadId::new();
+    let repos = repos(&[root.as_path()]);
+    assert_eq!(begin(thread, &repos, "Moderate"), None, "nothing there yet");
+    let before = std::fs::symlink_metadata(&git).expect("git folder");
+    // Git's first write: the `.git` folder is copied up.
+    std::fs::write(git.join("index"), "").expect("index");
+    let after = std::fs::symlink_metadata(&git).expect("git folder");
+    assert!(upper.join("project/.git/index").exists(), "copied up");
+    assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+    // What made it noise on main: the creation time moved.
+    assert_ne!(
+        before.created().expect("creation time"),
+        after.created().expect("creation time"),
+        "copy-up keeps the creation time"
+    );
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    assert_eq!(held_for(&[git]), Vec::<String>::new());
+    drop(mounts);
 }
