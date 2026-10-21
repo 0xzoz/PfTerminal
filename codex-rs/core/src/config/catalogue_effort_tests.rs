@@ -16,6 +16,7 @@ async fn exact_catalogue_efforts_survive_config_load() {
             let home = tempdir().expect("home");
             let config = ConfigBuilder::default()
                 .codex_home(home.path().to_path_buf())
+                .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
                 .cli_overrides(vec![
                     (
                         "model_provider".to_string(),
