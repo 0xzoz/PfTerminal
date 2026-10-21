@@ -797,10 +797,12 @@ impl InspectionWork {
         true
     }
 
-    /// One scan when the budget has room for it. Unlike [`Self::scans`], a
-    /// refusal leaves the budget for the rest of the inspection.
-    pub(super) fn spare_scan(&mut self) -> bool {
-        self.scan_rows <= self.rows && self.scans(/*count*/ 1)
+    /// One scan when the budget has room for it and `reserve` more. Unlike
+    /// [`Self::scans`], a refusal leaves the budget for the rest of the
+    /// inspection.
+    pub(super) fn spare_scan(&mut self, reserve: usize) -> bool {
+        self.scan_rows.saturating_mul(reserve.saturating_add(1)) <= self.rows
+            && self.scans(/*count*/ 1)
     }
 
     pub(super) fn visit(&mut self) -> bool {
@@ -1074,7 +1076,7 @@ async fn started_ms(
     {
         return Ok(started);
     }
-    if !work.spare_scan() {
+    if !work.spare_scan(/*reserve*/ 0) {
         return Ok(None);
     }
     let started = empty_day::started_ms(conn, owner).await?;

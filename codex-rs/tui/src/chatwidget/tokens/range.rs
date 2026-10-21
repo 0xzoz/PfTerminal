@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use codex_state::accounting::EmptyDay;
 use codex_state::accounting::InspectionDay;
 use codex_state::accounting::InspectionGrouping;
 use codex_state::accounting::InspectionRange;
@@ -332,12 +333,11 @@ pub(super) fn range_pages(
                         }
                         target.unknown_parent_unavailable_threads +=
                             view.unknown_parent_unavailable_threads;
-                        // #1196: the bucket is as proven as its least proven day.
+                        // #1196: days classified differently prove only
+                        // that nothing was recorded.
                         target.empty_day = match (target.empty_day, view.empty_day) {
                             (Some(first), Some(next)) if first == next => Some(first),
-                            (Some(_), Some(_)) => {
-                                Some(codex_state::accounting::EmptyDay::NotRecorded)
-                            }
+                            (Some(_), Some(_)) => Some(EmptyDay::NotRecorded),
                             _ => None,
                         };
                     } else {
@@ -351,6 +351,18 @@ pub(super) fn range_pages(
                     diagnostics.extend(inspection_pages(Ok(other)).remove(0).text);
                 }
             }
+        }
+        // A claim about days holds for the bucket only if the whole bucket,
+        // days skipped above included, ends before what the claim dates.
+        if let Some(view) = &mut merged {
+            let ends_by = |day: i64| bucket.end_ms <= day.saturating_mul(86_400_000);
+            view.empty_day = view.empty_day.map(|empty| match empty {
+                EmptyDay::BeforeConversation { started_day } if ends_by(started_day) => empty,
+                EmptyDay::BeforeLedger { ledger_started_day } if ends_by(ledger_started_day) => {
+                    empty
+                }
+                _ => EmptyDay::NotRecorded,
+            });
         }
         let available = diagnostics.is_empty();
         header.extend(diagnostics);

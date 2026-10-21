@@ -578,6 +578,27 @@ async fn a_subagent_compact_day_is_unavailable_and_moves_the_start() -> anyhow::
         empty(&runtime, owner, /*day*/ 294, NOW).await?,
         before(/*started_day*/ 295)
     );
+    // #1196: a range reads both days the same way, in any part of the day.
+    for (start, end) in [
+        (295 * DAY, 296 * DAY),
+        (295 * DAY + 5 * HOUR, 295 * DAY + 6 * HOUR),
+    ] {
+        let grouping = if end - start == DAY {
+            InspectionGrouping::Day
+        } else {
+            InspectionGrouping::Hour
+        };
+        assert!(matches!(
+            bucket(&runtime, owner, (start, end), grouping, NOW)
+                .await?
+                .as_slice(),
+            [InspectionDay::DetailUnavailable { compact: true, .. }]
+        ));
+        assert_eq!(
+            only_empty(&bucket(&runtime, owner, (start - DAY, end - DAY), grouping, NOW).await?),
+            before(/*started_day*/ 295)
+        );
+    }
     runtime.close().await;
     Ok(())
 }

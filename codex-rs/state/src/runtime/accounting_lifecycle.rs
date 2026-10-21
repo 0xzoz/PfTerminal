@@ -558,15 +558,18 @@ impl Journal<'_> {
         // A whole day with nothing recorded for this owner loses no detail to
         // retention; the tree inspection decides what that emptiness shows.
         // #1196: so does a range bucket's part of such a day, inside the daily
-        // totals. A raw row elsewhere on the day keeps the window unavailable.
+        // totals. A raw row elsewhere on the day keeps the window unavailable,
+        // and so does the floor's edge: expiry can run ahead of the checkpoint,
+        // so the floor is taken at the read instead.
         let recorded = !records.is_empty() || compact;
         let expired = read_at_ms >= 90 * DAY_MS && lower <= read_at_ms - 90 * DAY_MS;
         let unrecorded_day = window.is_some()
             && !recorded
             && expired
-            && day >= coverage.aggregate_day_floor
-            // Without budget for the check the window stays unavailable.
-            && work.spare_scan()
+            && day >= crate::runtime::accounting::aggregate_day_floor(read_at_ms)
+            // Without budget for this check, the tree's scan and the start's,
+            // the window stays unavailable rather than make the range too large.
+            && work.spare_scan(/*reserve*/ 2)
             && !sqlx::query_scalar::<_, bool>(
                 "SELECT EXISTS(SELECT 1 FROM draft_accounting_attempts
                  WHERE json_extract(payload, '$.thread_id') = ?
