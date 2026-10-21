@@ -402,14 +402,91 @@ fn attached_folder(word: &str) -> Option<&str> {
     })
 }
 
-/// Whether `word` (as written; `lower` in lower case) names the folder the
-/// next word is: a `-C`-style flag, `cd`'s and `start`'s `/d`,
-/// PowerShell's `-WorkingDirectory` (`-wd`, or a prefix).
-fn folder_flag(word: &str, lower: &str) -> bool {
-    FOLDER_FLAGS.contains(&word) || {
-        let word = lower;
-        word == "/d" || word == "-wd" || (word.len() >= 3 && "-workingdirectory".starts_with(word))
+/// Words after a folder-changing command looked at for its folder.
+const FOLDER_WINDOW: usize = 8;
+
+/// Where a line has been: its current folder, and every folder it has been
+/// in (the working folder first), normalized.
+pub(super) struct Folders {
+    current: String,
+    visited: Vec<String>,
+}
+
+/// The folders a command names, each with the index of the word naming it
+/// and whether the line moves there (`cd x`, `cd..`, `pushd x`,
+/// `Set-Location -Path:x`, a bare `D:`, `start /D x` and `pwsh
+/// -WorkingDirectory x` for what follows) or only the command runs there
+/// (`git -C x`). A `cd` without a folder is PowerShell's move to the home.
+fn folder_targets<'a>(
+    words: &'a [String],
+    lower: &'a [String],
+    names: &[&str],
+    separated: bool,
+) -> Vec<(&'a str, Option<usize>, bool)> {
+    let mut found = Vec::new();
+    let window = |from: usize| from..words.len().min(from + FOLDER_WINDOW);
+    for at in 0..words.len() {
+        work::step();
+        if let Some(target) = attached_folder(&lower[at]) {
+            found.push((target, Some(at), true));
+        } else if CHANGE_FOLDER.contains(&names[at]) {
+            // The first operand: `-Path:x` gives its value, other switches
+            // (`/d`, `-Path`, `-PassThru`) are skipped.
+            let operand = window(at + 1).find_map(|next| {
+                let word = &words[next];
+                if word.starts_with('-') && word.contains(':') {
+                    Some((word.split_once(':').map_or("", |(_, value)| value), next))
+                } else if word.starts_with('-') || lower[next] == "/d" {
+                    None
+                } else {
+                    Some((word.as_str(), next))
+                }
+            });
+            match operand {
+                Some((target, next)) => found.push((target, Some(next), true)),
+                None => found.push(("~", None, true)),
+            }
+        } else if names[at] == "start" {
+            if let Some(next) = window(at + 1).find(|next| lower[*next] == "/d")
+                && next + 1 < words.len()
+            {
+                found.push((words[next + 1].as_str(), Some(next + 1), true));
+            }
+        } else if (lower[at] == "-wd"
+            || (lower[at].len() >= 3 && "-workingdirectory".starts_with(lower[at].as_str())))
+            && at + 1 < words.len()
+        {
+            found.push((words[at + 1].as_str(), Some(at + 1), true));
+        } else if FOLDER_FLAGS.contains(&words[at].as_str()) && at + 1 < words.len() {
+            found.push((words[at + 1].as_str(), Some(at + 1), false));
+        } else if let Some((_, value)) = words[at]
+            .split_once('=')
+            .filter(|(flag, _)| FOLDER_FLAGS.contains(flag))
+        {
+            found.push((value, Some(at), false));
+        } else if words.len() == 1
+            && separated
+            && drive_relative(&words[at]).is_some_and(|(_, rest)| rest.is_empty())
+        {
+            // A bare drive (`D:`) moves to that drive's current folder.
+            found.push((words[at].as_str(), Some(at), true));
+        }
     }
+    found
+}
+
+/// Whether `word` (lowercase) is PowerShell's parameter that ends its own
+/// parameters and starts the code (`-Command`, `-c`, `-File`, `-f`,
+/// `-CommandWithArgs`, also with `/`).
+fn starts_the_code(word: &str) -> bool {
+    let word = word
+        .strip_prefix('/')
+        .map_or(word.to_string(), |rest| format!("-{rest}"));
+    word.len() >= 2
+        && (["-command", "-file", "-commandwithargs"]
+            .iter()
+            .any(|name| name.starts_with(word.as_str()))
+            || word == "-cwa")
 }
 
 /// Words of one command that name programs judged by name (the Corbanu
@@ -483,82 +560,71 @@ impl Classifier {
             let text = windows_paths::cmd_spellings(text);
             for quotes in READINGS {
                 work::step();
-                let mut folder = cwd_path.clone();
+                let mut folders = Folders {
+                    current: cwd_path.clone(),
+                    visited: vec![cwd_path.clone()],
+                };
                 for found in commands(&text, quotes) {
                     work::step();
-                    self.windows_command(&found, &cwd_path, &mut folder, depth);
+                    self.windows_command(&found, &mut folders, depth);
                 }
             }
         }
     }
 
-    /// One cmd or PowerShell command. `folder`: where the line has moved
-    /// to (`cd`), followed in order; words also resolve against the working
-    /// folder `cwd` (a `cd` may not have run).
-    fn windows_command(&mut self, command: &Command, cwd: &str, folder: &mut String, depth: usize) {
+    /// One cmd or PowerShell command. Its words resolve against every
+    /// folder the line has been in (a `cd` may not have run, `popd` may
+    /// return) and its folder flags' values.
+    fn windows_command(&mut self, command: &Command, folders: &mut Folders, depth: usize) {
         let words = &command.words;
         let lower: Vec<String> = words.iter().map(|word| word.to_lowercase()).collect();
         let names: Vec<&str> = lower.iter().map(|word| command_name(word)).collect();
-        // Folders the line moves to (a `cd` anywhere: after `cmd /c`, `if`,
-        // `@`), and folder flags: their values are where a command runs,
-        // not what it reads.
+        // Folder values are where a command runs, not what it reads.
         let mut folder_values = vec![false; words.len()];
         let mut flagged: Vec<String> = Vec::new();
-        for (index, word) in words.iter().enumerate() {
+        for (target, at, moves) in folder_targets(words, &lower, &names, command.separated) {
             work::step();
-            let changes_folder = |at: usize| at > 0 && CHANGE_FOLDER.contains(&names[at - 1]);
-            let folder_parameter =
-                |at: usize| matches!(lower[at].as_str(), "/d" | "-path" | "-literalpath" | "-lp");
-            // `cd x`, `cd..`: the line moves; a flag: this command runs there.
-            let (target, moves) = if let Some(target) = attached_folder(&lower[index]) {
-                (Some(target), true)
-            } else if (changes_folder(index) && !folder_parameter(index))
-                || (index > 1 && changes_folder(index - 1) && folder_parameter(index - 1))
-            {
-                (Some(word.as_str()), true)
-            } else if index > 0 && folder_flag(&words[index - 1], &lower[index - 1]) {
-                (Some(word.as_str()), false)
-            } else {
-                let value = word
-                    .split_once('=')
-                    .filter(|(flag, _)| FOLDER_FLAGS.contains(flag))
-                    .map(|(_, value)| value);
-                (value, false)
-            };
-            // A bare drive (`D:`) moves to that drive's current folder.
-            let (target, moves) = match target {
-                None if words.len() == 1
-                    && command.separated
-                    && drive_relative(word).is_some_and(|(_, rest)| rest.is_empty()) =>
-                {
-                    (Some(word.as_str()), true)
-                }
-                other => (other, moves),
-            };
-            let Some(target) = target.and_then(|target| candidates(target).pop()) else {
+            if let Some(at) = at {
+                folder_values[at] = true;
+            }
+            let Some(target) = candidates(target).pop() else {
                 continue;
             };
-            folder_values[index] = true;
-            if on_another_drive(target, std::slice::from_ref(folder)) {
+            if on_another_drive(target, std::slice::from_ref(&folders.current)) {
                 self.note(ProtectedActionKind::UnseenCode);
             }
-            let resolved = self.homes.resolve(target, folder);
-            if resolved.len() > MAX_FOLDER_BYTES || (!moves && flagged.len() + 2 >= MAX_FOLDERS) {
+            let resolved = self.homes.resolve(target, &folders.current);
+            if resolved.len() > MAX_FOLDER_BYTES {
                 self.note(ProtectedActionKind::UnseenCode);
             } else if moves {
-                *folder = resolved;
+                if !folders.visited.contains(&resolved) {
+                    if folders.visited.len() >= MAX_FOLDERS {
+                        self.note(ProtectedActionKind::UnseenCode);
+                    } else {
+                        folders.visited.push(resolved.clone());
+                    }
+                }
+                folders.current = resolved;
+            } else if flagged.len() >= MAX_FOLDERS {
+                self.note(ProtectedActionKind::UnseenCode);
             } else {
                 flagged.push(resolved);
             }
         }
-        let mut bases = vec![cwd.to_string()];
-        for base in std::iter::once(folder.clone()).chain(flagged) {
+        let mut bases: Vec<String> = Vec::new();
+        for base in folders
+            .visited
+            .iter()
+            .chain([&folders.current])
+            .chain(&flagged)
+        {
             work::step();
-            if !bases.contains(&base) {
-                bases.push(base);
+            if !bases.contains(base) {
+                bases.push(base.clone());
             }
         }
         let bases = &bases;
+        let current = folders.current.clone();
         let writer = names.iter().position(|name| {
             WINDOWS_WRITERS.contains(name)
                 || WRITERS.contains(name)
@@ -588,9 +654,16 @@ impl Classifier {
                     .zip(&readers_flagged)
                     .any(|((reader, _), flagged)| *flagged && reader == name)
         });
+        // PowerShell's own parameters: after its name, before its command.
         let powershell = names
             .iter()
-            .any(|name| matches!(*name, "powershell" | "pwsh"));
+            .position(|name| matches!(*name, "powershell" | "pwsh"))
+            .map(|at| {
+                let end = (at + 1..words.len())
+                    .find(|next| starts_the_code(&lower[*next]))
+                    .unwrap_or(words.len());
+                at + 1..end
+            });
         let written = |index: usize| {
             command.redirected[index]
                 || writer.is_some_and(|at| index > at)
@@ -639,9 +712,14 @@ impl Classifier {
                     }
                 }
             }
-            if powershell && index > 0 && encoded_parameter(&lower[index - 1]) {
+            if powershell
+                .as_ref()
+                .is_some_and(|parameters| parameters.contains(&(index.wrapping_sub(1))))
+                && encoded_parameter(&lower[index - 1])
+                && self.windows_decoded.insert(word.clone())
+            {
                 match decoded_command(word) {
-                    Some(text) => self.script(&text, folder, depth + 1),
+                    Some(text) => self.script(&text, &current, depth + 1),
                     None => self.note(ProtectedActionKind::UnseenCode),
                 }
             }
@@ -650,6 +728,7 @@ impl Classifier {
                 self.windows_path(
                     candidate,
                     bases,
+                    &current,
                     written(index),
                     recursive && !folder_values[index],
                 );
@@ -657,7 +736,7 @@ impl Classifier {
         }
         for (index, path) in joined_paths(words, &lower, &names) {
             work::step();
-            self.windows_path(&path, bases, written(index), recursive);
+            self.windows_path(&path, bases, &current, written(index), recursive);
         }
     }
 
@@ -665,7 +744,14 @@ impl Classifier {
     /// whose place cannot be known fails closed: one on another drive's
     /// current folder (`D:x` from `C:\work`), or one climbing out of an
     /// unknown variable (`%APPDATA%\..\..\.bashrc`).
-    fn windows_path(&mut self, candidate: &str, bases: &[String], written: bool, recursive: bool) {
+    fn windows_path(
+        &mut self,
+        candidate: &str,
+        bases: &[String],
+        cwd: &str,
+        written: bool,
+        recursive: bool,
+    ) {
         let path_like =
             candidate.contains(['/', '\\']) || candidate.starts_with(['.', '~', '%', '$']);
         let expanded = windows_paths::expand(
@@ -673,7 +759,7 @@ impl Classifier {
             &windows_paths::Values {
                 codex_home: self.homes.codex_home(),
                 user_home: self.homes.user_home(),
-                cwd: "",
+                cwd,
             },
         );
         if climbs_out_of_a_variable(&expanded) {

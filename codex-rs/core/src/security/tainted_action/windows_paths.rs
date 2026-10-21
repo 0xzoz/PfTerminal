@@ -30,6 +30,7 @@ pub(super) const HOME_VARIABLES: &[&str] = &[
     "CD",
     "PWD",
     "USERNAME",
+    "SYSTEMDRIVE",
     "APPDATA",
     "LOCALAPPDATA",
 ];
@@ -47,7 +48,8 @@ impl Values<'_> {
     fn get(&self, name: &str) -> Option<String> {
         match name {
             "USERPROFILE" | "HOME" => self.user_home.map(str::to_string),
-            "HOMEDRIVE" => self.user_home.and_then(|home| {
+            // The system drive: the home's, as usual.
+            "HOMEDRIVE" | "SYSTEMDRIVE" => self.user_home.and_then(|home| {
                 let slashed = home.replace('\\', "/");
                 drive(&slashed).map(|_| home[..2].to_string())
             }),

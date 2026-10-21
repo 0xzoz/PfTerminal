@@ -3868,6 +3868,25 @@ fn issue_1240_windows_spellings_are_protected() {
         (r"echo x >> %LOCALAPPDATA%\..\..\.zshrc", Persistence),
         (r"echo x >> C:\Users\%USERNAME%\.bashrc", Persistence),
         (r"echo x >> %TEMP%\..\..\..\.bashrc", UnseenCode),
+        (
+            r"echo x >> %SystemDrive%\Users\fixture\.bashrc",
+            Persistence,
+        ),
+        // Review 2: every folder the line has been in counts.
+        (r"cd /d %USERPROFILE% & echo x>>.bashrc cd x", Persistence),
+        (
+            r"cd /d %USERPROFILE% & cd.x & echo x>>..\.bashrc",
+            Persistence,
+        ),
+        (
+            r"cd /d %USERPROFILE% & pushd x & popd & echo x>>.bashrc",
+            Persistence,
+        ),
+        (
+            r#"start /D %USERPROFILE% cmd /c "echo a & echo x >> .bashrc""#,
+            Persistence,
+        ),
+        (r"xcopy /d %USERPROFILE% E:\b /e /i", Credentials),
     ] {
         assert_eq!(cmd(line), Some(expected), "cmd /c {line}");
     }
@@ -3935,6 +3954,12 @@ fn issue_1240_windows_spellings_are_protected() {
             Persistence,
         ),
         (r"Add-Content $env:TEMP\..\..\..\.bashrc x", UnseenCode),
+        // Review 2: switches before the folder, PowerShell's bare `cd`.
+        (
+            r"Set-Location -PassThru ~; Add-Content .bashrc x",
+            Persistence,
+        ),
+        (r"cd; Add-Content .bashrc x", Persistence),
         // Paths built from parts.
         (r"Add-Content (Join-Path $HOME '.bashrc') 'x'", Persistence),
         (r"Join-Path -Path $HOME -ChildPath .ssh\id_rsa", Credentials),
@@ -4025,16 +4050,13 @@ fn issue_1240_windows_spellings_are_protected() {
         windows_kind(&["pwsh", "-ea", "not base64!", "-c", "dir"]),
         Some(UnseenCode)
     );
-    assert_eq!(
-        windows_kind(&[
-            "pwsh",
-            "-WorkingDirectory",
-            "~",
-            "-Command",
-            "Add-Content .bashrc x",
-        ]),
-        Some(Persistence)
-    );
+    for script in ["Add-Content .bashrc x", "Get-Date; Add-Content .bashrc x"] {
+        assert_eq!(
+            windows_kind(&["pwsh", "-WorkingDirectory", "~", "-Command", script]),
+            Some(Persistence),
+            "{script}"
+        );
+    }
     assert_eq!(
         windows_kind(&[
             "cmd.exe",
@@ -4147,6 +4169,9 @@ fn issue_1240_ordinary_windows_commands_are_not_protected() {
         r"[Environment]::GetEnvironmentVariable('PATH')",
         r"Set-Location src; Set-Location ..\docs; Get-Content README.md",
         r#"curl.exe -s -d '{"a":{"b":1},"e":{"f":2}}' https://api.example"#,
+        // Review 2: `-e…` words of the command are not PowerShell's own.
+        "Get-Content a.txt -Encoding utf8 -ErrorAction Stop -Exclude *.log",
+        r"echo x > %CD%\..\work\out.txt",
     ] {
         assert_eq!(powershell(line), None, "powershell {line}");
     }

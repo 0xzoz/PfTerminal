@@ -533,6 +533,7 @@ impl Classifier {
             classified_bytes: 0,
             classified_lines: 0,
             compared: shadow::Budget::new(),
+            windows_decoded: HashSet::new(),
         }
     }
 
@@ -756,6 +757,9 @@ struct Classifier {
     avoids_zsh: bool,
     /// #932: comparisons left with the grammar.
     compared: shadow::Budget,
+    /// #1240: PowerShell encoded commands the Windows view decoded, each
+    /// judged once.
+    windows_decoded: HashSet<String>,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
