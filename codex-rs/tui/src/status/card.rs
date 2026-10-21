@@ -32,6 +32,7 @@ use std::path::PathBuf;
 use url::Url;
 
 use super::account::StatusAccountDisplay;
+use super::account_usage::StatusAccountUsage;
 use super::format::FieldFormatter;
 use super::format::push_label;
 use super::format::truncate_line_to_width;
@@ -121,6 +122,9 @@ struct StatusHistoryCell {
     session_id: Option<String>,
     forked_from: Option<String>,
     token_usage: StatusTokenUsageData,
+    /// PF-84: the active provider's per-account token summary, only while
+    /// named accounts are on.
+    account_usage: Option<StatusAccountUsage>,
     rate_limit_state: Arc<RwLock<StatusRateLimitState>>,
 }
 
@@ -196,6 +200,7 @@ pub(crate) fn new_status_output_with_rate_limits(
         reasoning_effort_override,
         "<none>".to_string(),
         refreshing_rate_limits,
+        /*account_usage*/ None,
     )
     .0
 }
@@ -219,6 +224,7 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
     reasoning_effort_override: Option<Option<ReasoningEffort>>,
     agents_summary: String,
     refreshing_rate_limits: bool,
+    account_usage: Option<StatusAccountUsage>,
 ) -> (CompositeHistoryCell, StatusHistoryHandle) {
     let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
     let (card, handle) = StatusHistoryCell::new(
@@ -239,6 +245,7 @@ pub(crate) fn new_status_output_with_rate_limits_handle(
         reasoning_effort_override,
         agents_summary,
         refreshing_rate_limits,
+        account_usage,
     );
 
     (
@@ -267,6 +274,7 @@ impl StatusHistoryCell {
         reasoning_effort_override: Option<Option<ReasoningEffort>>,
         agents_summary: String,
         refreshing_rate_limits: bool,
+        account_usage: Option<StatusAccountUsage>,
     ) -> (Self, StatusHistoryHandle) {
         let approval_policy = AskForApproval::from(config.permissions.approval_policy.value());
         let permission_profile = config.permissions.effective_permission_profile();
@@ -321,10 +329,34 @@ impl StatusHistoryCell {
             &approval,
             workspace_root_suffix.as_deref(),
         );
-        let model_provider = format_model_provider(config, runtime_model_provider_base_url);
+        // PF-84 (#555): name the account the usage rows mark active, which
+        // is the one the app server reported for the thread when it did.
+        let active_account = account_usage
+            .as_ref()
+            .and_then(|usage| usage.rows.first())
+            .map(|(account, _)| account.as_str());
+        // D86: other accounts this session used count as the provider
+        // having named accounts.
+        let used_named_account = account_usage.as_ref().is_some_and(|usage| {
+            usage
+                .rows
+                .iter()
+                .any(|(account, _)| account != codex_vault::DEFAULT_PROVIDER_ACCOUNT)
+        });
+        let model_provider = format_model_provider(
+            config,
+            runtime_model_provider_base_url,
+            active_account,
+            used_named_account,
+        );
         let show_chatgpt_usage_link = config.model_provider.requires_openai_auth;
         let account = compose_account_display(account_display);
         let account_value = status_account_value(config, account_display);
+        let security = crate::security::view::status_summary(
+            config.security_level,
+            crate::legacy_core::security_level_change::configured_level(config),
+            *session_id,
+        );
         let session_id = session_id.as_ref().map(std::string::ToString::to_string);
         let forked_from = forked_from.map(|id| id.to_string());
         let default_usage = TokenUsage::default();
@@ -361,7 +393,7 @@ impl StatusHistoryCell {
                 model_details,
                 directory: config.cwd.to_path_buf(),
                 permissions,
-                security: crate::security::view::status_summary(config.security_level),
+                security,
                 collaboration_mode: collaboration_mode.map(ToString::to_string),
                 model_provider,
                 remote_connection: remote_connection.cloned(),
@@ -372,6 +404,7 @@ impl StatusHistoryCell {
                 session_id,
                 forked_from,
                 token_usage,
+                account_usage,
                 agents_summary,
                 rate_limit_state: rate_limit_state.clone(),
             },
@@ -714,6 +747,21 @@ fn status_account_value(
     account_display: Option<&StatusAccountDisplay>,
 ) -> Option<String> {
     let provider = &config.model_provider;
+    // PF-84-S06: a named sign-in account describes itself, never the default
+    // login (kind, email hint and plan only).
+    if let Some(account) = codex_model_provider::named_sign_in_account(provider) {
+        let summary = codex_login::named_account_summary(&config.codex_home, &account)
+            .ok()
+            .flatten();
+        return Some(match summary {
+            Some(summary) => format!(
+                "{} (account {})",
+                crate::provider_named_accounts::describe_sign_in(&summary),
+                account.name
+            ),
+            None => format!("account {} is not signed in", account.name),
+        });
+    }
     if provider.auth.is_some() {
         return Some(format!("{} account connected", provider.name));
     }
@@ -737,9 +785,17 @@ fn status_account_value(
             (None, Some(plan)) => plan.clone(),
             (None, None) => "ChatGPT".to_string(),
         },
-        StatusAccountDisplay::ApiKey => {
+        // Only providers that use OpenAI sign-in send the environment key.
+        StatusAccountDisplay::ApiKey {
+            env_var: Some(env_var),
+        } if provider.uses_first_party_openai_auth() => {
+            format!("{env_var} from your environment (billed per use)")
+        }
+        StatusAccountDisplay::ApiKey { .. } if provider.uses_first_party_openai_auth() => {
             "OpenAI API key configured (run corbanu login to use ChatGPT)".to_string()
         }
+        // Other providers report their own stored key here (#462).
+        StatusAccountDisplay::ApiKey { .. } => format!("{} API key configured", provider.name),
     })
 }
 
@@ -801,6 +857,15 @@ impl HistoryCell for StatusHistoryCell {
         if self.token_usage.context_window.is_some() {
             push_label(&mut labels, &mut seen, "Context window");
         }
+        let account_usage_lines = self
+            .account_usage
+            .as_ref()
+            .filter(|_| !matches!(self.account, Some(StatusAccountDisplay::ChatGpt { .. })))
+            .map(StatusAccountUsage::lines)
+            .unwrap_or_default();
+        if !account_usage_lines.is_empty() {
+            push_label(&mut labels, &mut seen, "Account usage");
+        }
 
         self.collect_rate_limit_labels(&rate_limit_state, &mut seen, &mut labels);
 
@@ -858,7 +923,16 @@ impl HistoryCell for StatusHistoryCell {
             lines.push(formatter.line("Model provider", vec![Span::from(model_provider.clone())]));
         }
         lines.push(formatter.line("Directory", vec![Span::from(directory_value)]));
-        lines.push(formatter.line("Permissions", vec![Span::from(self.permissions.clone())]));
+        // Config reflects session settings, not the active task's captured authority.
+        let permissions = format!("Next turn: {}", self.permissions);
+        let mut permission_lines = textwrap::wrap(&permissions, value_width.max(1)).into_iter();
+        if let Some(first) = permission_lines.next() {
+            lines.push(formatter.line("Permissions", vec![Span::from(first.into_owned())]));
+            lines.extend(
+                permission_lines
+                    .map(|line| formatter.continuation(vec![Span::from(line.into_owned())])),
+            );
+        }
         let mut security_lines = textwrap::wrap(&self.security, value_width.max(1)).into_iter();
         if let Some(first) = security_lines.next() {
             lines.push(formatter.line("Security", vec![Span::from(first.into_owned())]));
@@ -896,6 +970,20 @@ impl HistoryCell for StatusHistoryCell {
 
         if let Some(spans) = self.context_window_spans() {
             lines.push(formatter.line("Context window", spans));
+        }
+        // One account is one line, wrapped to the card; several are a table.
+        let account_usage_lines: Vec<Line<'static>> = if account_usage_lines.len() == 1 {
+            word_wrap_lines(
+                account_usage_lines.into_iter().map(Line::from),
+                RtOptions::new(value_width.max(1)),
+            )
+        } else {
+            account_usage_lines.into_iter().map(Line::from).collect()
+        };
+        let mut account_usage_lines = account_usage_lines.into_iter();
+        if let Some(first) = account_usage_lines.next() {
+            lines.push(formatter.line("Account usage", first.spans));
+            lines.extend(account_usage_lines.map(|line| formatter.continuation(line.spans)));
         }
 
         lines.extend(self.rate_limit_lines(&rate_limit_state, available_inner_width, &formatter));
@@ -947,7 +1035,12 @@ impl HistoryCell for StatusHistoryCell {
     }
 }
 
-fn format_model_provider(config: &Config, runtime_base_url: Option<&str>) -> Option<String> {
+fn format_model_provider(
+    config: &Config,
+    runtime_base_url: Option<&str>,
+    active_account: Option<&str>,
+    used_named_account: bool,
+) -> Option<String> {
     let provider = &config.model_provider;
     let name = provider.name.trim();
     let provider_name = if name.is_empty() {
@@ -956,15 +1049,61 @@ fn format_model_provider(config: &Config, runtime_base_url: Option<&str>) -> Opt
         name
     };
     let base_url = runtime_base_url.and_then(sanitize_base_url);
+    // PF-84-S04: with named accounts on, name the account this session's
+    // requests use, `default` included. D86: only when this provider has a
+    // named account in the home, so homes without any show what they did.
+    let account = (config
+        .features
+        .enabled(codex_features::Feature::NamedAccounts)
+        && crate::legacy_core::config::supports_named_accounts(provider)
+        && provider_has_named_account(config, active_account, used_named_account))
+    .then(|| {
+        active_account.unwrap_or_else(|| {
+            provider
+                .account
+                .as_ref()
+                .map_or(codex_vault::DEFAULT_PROVIDER_ACCOUNT, |account| {
+                    account.name.as_str()
+                })
+        })
+    });
     let is_default_openai = provider.is_openai() && base_url.is_none();
-    if is_default_openai {
+    if is_default_openai && account.is_none() {
         return None;
     }
 
-    Some(match base_url {
+    let mut value = match base_url {
         Some(base_url) => format!("{provider_name} - {base_url}"),
         None => provider_name.to_string(),
-    })
+    };
+    if let Some(account) = account {
+        value.push_str(&format!(" · account {account}"));
+    }
+    Some(value)
+}
+
+/// D86: whether the session's provider has a named account in this home:
+/// the session is on (or used) one, or the vault holds one. Cheap checks
+/// first; the vault index is read only when they say nothing. A vault that
+/// cannot be read counts as holding one (the line then names the account).
+fn provider_has_named_account(
+    config: &Config,
+    active_account: Option<&str>,
+    used_named_account: bool,
+) -> bool {
+    // A stamped account (`[provider_accounts]`, `--account`, borrowed ones
+    // included) always has a named, non-`default` name.
+    if used_named_account
+        || config.model_provider.account.is_some()
+        || active_account.is_some_and(|name| name != codex_vault::DEFAULT_PROVIDER_ACCOUNT)
+    {
+        return true;
+    }
+    crate::provider_named_accounts::holds_any_named_account(
+        &config.codex_home,
+        &config.model_provider_id,
+    )
+    .unwrap_or(true)
 }
 
 fn sanitize_base_url(raw: &str) -> Option<String> {

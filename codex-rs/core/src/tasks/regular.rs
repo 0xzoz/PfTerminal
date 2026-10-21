@@ -85,7 +85,11 @@ impl SessionTask for RegularTask {
             )
             .instrument(run_turn_span.clone())
             .await?;
-            if !sess.input_queue.has_pending_input(&sess.active_turn).await {
+            // Issue #445: a refused turn takes no pending input; looping on
+            // it would refuse forever. Pending work waits for the switch.
+            if sess.services.model_client().kill_switch_on()
+                || !sess.input_queue.has_pending_input(&sess.active_turn).await
+            {
                 return Ok(last_agent_message);
             }
             next_input = Vec::new();
