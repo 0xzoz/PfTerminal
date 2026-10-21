@@ -90,6 +90,15 @@ fn coordination_lock_is_released_while_a_forked_child_holds_its_descriptor() -> 
     use std::io::Write;
     use std::os::unix::process::CommandExt;
 
+    /// Lets the forked child start its program when dropped, on every path.
+    struct ReleaseChild(std::io::PipeWriter);
+
+    impl Drop for ReleaseChild {
+        fn drop(&mut self) {
+            let _ = self.0.write_all(b"r");
+        }
+    }
+
     let home = TempDir::new()?;
     let coordinator = WriterLockCoordinator::new(home.path());
     let held = coordinator
@@ -97,16 +106,19 @@ fn coordination_lock_is_released_while_a_forked_child_holds_its_descriptor() -> 
         .expect("lock the coordination file");
 
     // A child forked now has a copy of every descriptor, the lock's too, until
-    // it starts its program; this one waits 2 s first and reports the fork.
+    // it starts its program; this one reports the fork, then waits for the
+    // release byte, so its copy stays open until the checks below have run.
     let (mut forked, mut forked_tx) = std::io::pipe()?;
+    let (mut release_rx, release_tx) = std::io::pipe()?;
+    let release = ReleaseChild(release_tx);
     let spawner = std::thread::spawn(move || {
         let mut command = std::process::Command::new("/bin/sh");
         command.args(["-c", "exit 0"]);
-        // SAFETY: the hook only writes to a pipe and sleeps, both safe after fork.
+        // SAFETY: the hook only writes to and reads from pipes, both safe after fork.
         unsafe {
             command.pre_exec(move || {
                 forked_tx.write_all(b"f")?;
-                std::thread::sleep(std::time::Duration::from_secs(2));
+                release_rx.read_exact(&mut [0; 1])?;
                 Ok(())
             });
         }
@@ -126,6 +138,7 @@ fn coordination_lock_is_released_while_a_forked_child_holds_its_descriptor() -> 
         other.try_lock().is_ok(),
         "the dropped coordination lock is still held through the forked child's copy"
     );
+    drop(release);
     let status = spawner.join().expect("spawner thread")?;
     assert!(status.success(), "{status:?}");
     Ok(())
