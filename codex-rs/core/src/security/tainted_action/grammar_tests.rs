@@ -149,7 +149,6 @@ fn zsh_differences_are_flagged() {
         "echo $x[1] $y",
         "echo $x:h",
         "{ echo }",
-        "set -o globsubst",
         "builtin print x",
     ] {
         // Flagged, or not read at all.
@@ -279,6 +278,46 @@ fn commands_that_change_how_lines_are_read_are_refused() {
         "command setopt globsubst",
         "$c x",
         "\"$c\" x",
+    ] {
+        assert_eq!(read(text).err(), Some(Refusal::Reparse), "{text:?}");
+    }
+}
+
+#[test]
+fn tokens_the_shells_split_are_refused() {
+    for text in [
+        "(echo == x; rm -rf ~)",
+        "echo $(echo == x; rm -rf ~)",
+        "cat <(echo =~ x; id)",
+        "[ a > b ]",
+        "[ x == a; rm -rf ~ ]",
+        "[[ x =~ a&&b ]]",
+    ] {
+        assert!(read(text).is_err(), "{text:?}");
+    }
+    // Blanks inside a test's pattern or `${...}` are the shells' too.
+    assert!(read("[[ $x =~ a\\ b ]] && echo ${x/ /_}").is_ok());
+    // Only a C-style `for`'s header is arithmetic.
+    assert!(read("for ((i=0; i<2; i++)); do echo '$x'; done").is_ok());
+}
+
+#[test]
+fn set_is_read_only_with_harmless_options() {
+    for text in [
+        "set -euo pipefail; echo x",
+        "set -e +x",
+        "set -- a b",
+        "set",
+    ] {
+        assert!(read(text).is_ok(), "{text:?}");
+    }
+    for text in [
+        "set -k; git fetch origin X=y",
+        "set -o posix",
+        "builtin set -o keyword",
+        "set -o",
+        "SHELLOPTS=keyword bash -c x",
+        "env BASHOPTS=expand_aliases bash -c x",
     ] {
         assert_eq!(read(text).err(), Some(Refusal::Reparse), "{text:?}");
     }
