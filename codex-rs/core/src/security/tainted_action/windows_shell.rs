@@ -27,8 +27,9 @@ use super::windows_paths;
 use super::work;
 use base64::Engine;
 
-/// Folders a line's words resolve against, the working folder included.
-/// Past it the line fails closed.
+/// Folders one command's words resolve against: the working folder, the
+/// folder the line has moved to, and folder flags' values. Past it the
+/// command fails closed.
 const MAX_FOLDERS: usize = 8;
 /// cmd and PowerShell commands (and aliases) that write, move or remove the
 /// paths after them, besides the POSIX [`WRITERS`].
@@ -124,12 +125,41 @@ const CHANGE_FOLDER: &[&str] = &[
 pub(super) struct Command {
     pub(super) words: Vec<String>,
     pub(super) redirected: Vec<bool>,
+    /// Whether a command separator (`&`, `|`, `;`, a line end) or the end
+    /// of the text ended it, rather than a brace.
+    pub(super) separated: bool,
 }
 
-/// The commands of `text`. `single_quotes`: `'` groups a word (PowerShell)
-/// rather than separating words (cmd keeps it as text; reading it as a
-/// separator keeps `echo don't > f` from hiding the redirection).
-pub(super) fn commands(text: &str, single_quotes: bool) -> Vec<Command> {
+/// How a reading takes quotes: grouping a word, or separating words.
+#[derive(Clone, Copy)]
+pub(super) struct Quotes {
+    /// `'` groups a word (PowerShell); else it separates words (cmd keeps
+    /// it as text; reading it as a separator keeps `echo don't > f` from
+    /// hiding the redirection).
+    pub(super) single: bool,
+    /// `"` groups a word; else it separates words, so a command line
+    /// quoted whole (`cmd /c "echo x > f"`) is read as one.
+    pub(super) double: bool,
+}
+
+/// The readings each text gets.
+const READINGS: [Quotes; 3] = [
+    Quotes {
+        single: true,
+        double: true,
+    },
+    Quotes {
+        single: false,
+        double: true,
+    },
+    Quotes {
+        single: false,
+        double: false,
+    },
+];
+
+/// The commands of `text`, read with `quotes`.
+pub(super) fn commands(text: &str, quotes: Quotes) -> Vec<Command> {
     let chars: Vec<char> = text.chars().collect();
     let mut done = Vec::new();
     let mut current = Command::default();
@@ -142,13 +172,15 @@ pub(super) fn commands(text: &str, single_quotes: bool) -> Vec<Command> {
             current.redirected.push(std::mem::take(redirect));
         }
     };
-    let end = |done: &mut Vec<Command>, current: &mut Command, redirect: &mut bool| {
-        *redirect = false;
-        let command = std::mem::take(current);
-        if !command.words.is_empty() {
-            done.push(command);
-        }
-    };
+    let end =
+        |done: &mut Vec<Command>, current: &mut Command, redirect: &mut bool, separated: bool| {
+            *redirect = false;
+            current.separated = separated;
+            let command = std::mem::take(current);
+            if !command.words.is_empty() {
+                done.push(command);
+            }
+        };
     let mut at = 0;
     while at < chars.len() {
         work::step();
@@ -163,8 +195,8 @@ pub(super) fn commands(text: &str, single_quotes: bool) -> Vec<Command> {
             continue;
         }
         match ch {
-            '"' => quote = Some('"'),
-            '\'' if single_quotes => quote = Some('\''),
+            '"' if quotes.double => quote = Some('"'),
+            '\'' if quotes.single => quote = Some('\''),
             '`' | '^' => {}
             // A POSIX escaped `;` (`find ... -exec cmd {} \;`), not a path.
             '\\' if chars.get(at + 1) == Some(&';') => {
@@ -191,9 +223,10 @@ pub(super) fn commands(text: &str, single_quotes: bool) -> Vec<Command> {
             }
             '|' | '&' | ';' | '\n' | '\r' | '{' | '}' => {
                 flush(&mut word, &mut current, &mut redirect);
-                end(&mut done, &mut current, &mut redirect);
+                let separated = !matches!(ch, '{' | '}');
+                end(&mut done, &mut current, &mut redirect, separated);
             }
-            ch if ch.is_whitespace() || matches!(ch, ',' | '(' | ')' | '<' | '\'') => {
+            ch if ch.is_whitespace() || matches!(ch, ',' | '(' | ')' | '<' | '\'' | '"') => {
                 flush(&mut word, &mut current, &mut redirect);
             }
             ch => word.push(ch),
@@ -201,7 +234,12 @@ pub(super) fn commands(text: &str, single_quotes: bool) -> Vec<Command> {
         at += 1;
     }
     flush(&mut word, &mut current, &mut redirect);
-    end(&mut done, &mut current, &mut redirect);
+    end(
+        &mut done,
+        &mut current,
+        &mut redirect,
+        /*separated*/ true,
+    );
     done
 }
 
@@ -209,6 +247,7 @@ pub(super) fn commands(text: &str, single_quotes: bool) -> Vec<Command> {
 /// program extension (`C:\Git\bin\git.exe` is `git`).
 fn command_name(word: &str) -> &str {
     let base = word
+        .trim_start_matches('@')
         .trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
         .next()
@@ -234,6 +273,11 @@ fn candidates(word: &str) -> Vec<&str> {
         .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
     {
         found.push(word[5..].trim_start_matches('/'));
+    }
+    // A PowerShell provider path (`FileSystem::C:\x`,
+    // `Microsoft.PowerShell.Core\FileSystem::~\x`).
+    if let Some(at) = word.to_ascii_lowercase().find("filesystem::") {
+        found.push(&word[at + "filesystem::".len()..]);
     }
     found
         .into_iter()
@@ -338,17 +382,85 @@ fn decoded_command(word: &str) -> Option<String> {
     String::from_utf16(&units).ok()
 }
 
-/// Whether `word` (lowercase) is PowerShell's `-EncodedCommand` or a prefix
-/// it accepts for it (`-e`, `-ec`, `-enc`).
-fn encoded_command_flag(word: &str) -> bool {
-    word == "-ec" || (word.len() >= 2 && "-encodedcommand".starts_with(word))
+/// Whether `word` (lowercase) may be one of PowerShell's encoded
+/// parameters (`-EncodedCommand`, `-EncodedArguments` and the prefixes and
+/// short names it accepts, also with `/`): any `-e…` parameter but
+/// `-ExecutionPolicy`. Its value is decoded and judged, or fails closed.
+fn encoded_parameter(word: &str) -> bool {
+    let word = word
+        .strip_prefix('/')
+        .map_or(word.to_string(), |rest| format!("-{rest}"));
+    word.starts_with("-e") && !(word.len() >= 3 && "-executionpolicy".starts_with(word.as_str()))
+}
+
+/// Whether `word` (lowercase) is a folder-changing command with its
+/// folder attached (`cd..`, `cd\Users`, `chdir\x`): the folder.
+fn attached_folder(word: &str) -> Option<&str> {
+    ["chdir", "cd"].iter().find_map(|name| {
+        word.strip_prefix(name)
+            .filter(|rest| rest.starts_with(['.', '\\', '/']))
+    })
+}
+
+/// Whether `word` (as written; `lower` in lower case) names the folder the
+/// next word is: a `-C`-style flag, `cd`'s and `start`'s `/d`,
+/// PowerShell's `-WorkingDirectory` (`-wd`, or a prefix).
+fn folder_flag(word: &str, lower: &str) -> bool {
+    FOLDER_FLAGS.contains(&word) || {
+        let word = lower;
+        word == "/d" || word == "-wd" || (word.len() >= 3 && "-workingdirectory".starts_with(word))
+    }
+}
+
+/// Words of one command that name programs judged by name (the Corbanu
+/// CLI, credential tools, schedulers, git); past it the command fails
+/// closed, so judging each with the words after it stays linear.
+const MAX_NAMED_PROGRAMS: usize = 8;
+
+/// Whether `expanded` (a word with the known home variables expanded)
+/// leaves an unknown variable by `..` (`%APPDATA%\..\..\.bashrc`): where it
+/// lands cannot be known.
+fn climbs_out_of_a_variable(expanded: &str) -> bool {
+    let lower = expanded.to_lowercase();
+    let start = [lower.find('%'), lower.find("$env:"), lower.find("${env:")]
+        .into_iter()
+        .flatten()
+        .min();
+    start.is_some_and(|start| {
+        lower[start..].split(['/', '\\']).any(|segment| {
+            segment.trim_end_matches(['.', ' ']).is_empty() && segment.contains("..")
+        })
+    })
+}
+
+/// The drive and the rest of a drive-relative path (`C:x`, `C:`), which is
+/// relative to that drive's own current folder.
+fn drive_relative(word: &str) -> Option<(char, &str)> {
+    let mut chars = word.chars();
+    let letter = chars.next().filter(char::is_ascii_alphabetic)?;
+    let rest = &word[1..];
+    let rest = rest.strip_prefix(':')?;
+    (!rest.starts_with(['/', '\\', ':'])).then_some((letter, rest))
+}
+
+/// Whether `word` is relative to the current folder of a drive other than
+/// one of `bases`' (normalized folders): that folder cannot be known.
+fn on_another_drive(word: &str, bases: &[String]) -> bool {
+    drive_relative(word).is_some_and(|(letter, _)| {
+        bases.iter().any(|base| {
+            !base
+                .get(1..2)
+                .is_some_and(|drive| drive.eq_ignore_ascii_case(&letter.to_string()))
+        })
+    })
 }
 
 impl Classifier {
     /// #1240: judge `command` (an argv, or a script as `sh -c text`) as cmd
     /// and PowerShell text, on its own and as one command line (Windows
     /// passes an argv to a program as one line; `cmd /c` and `powershell
-    /// -Command` run the words after them as one).
+    /// -Command` run the words after them as one). Each reading starts in
+    /// the working folder.
     pub(super) fn windows_text(&mut self, command: &[String], cwd: &str, depth: usize) {
         let line = command
             .iter()
@@ -365,57 +477,88 @@ impl Classifier {
         if windows_paths::hides_a_home(&line) {
             self.note(ProtectedActionKind::UnseenCode);
         }
-        let mut bases = vec![cwd.to_string()];
+        let cwd_path = windows_paths::normalize(cwd);
         for text in std::iter::once(&line).chain(command) {
             work::step();
             let text = windows_paths::cmd_spellings(text);
-            for single_quotes in [true, false] {
+            for quotes in READINGS {
                 work::step();
-                for found in commands(&text, single_quotes) {
+                let mut folder = cwd_path.clone();
+                for found in commands(&text, quotes) {
                     work::step();
-                    self.windows_command(&found, &mut bases, cwd, depth);
+                    self.windows_command(&found, &cwd_path, &mut folder, depth);
                 }
             }
         }
     }
 
-    /// One cmd or PowerShell command.
-    fn windows_command(
-        &mut self,
-        command: &Command,
-        bases: &mut Vec<String>,
-        cwd: &str,
-        depth: usize,
-    ) {
+    /// One cmd or PowerShell command. `folder`: where the line has moved
+    /// to (`cd`), followed in order; words also resolve against the working
+    /// folder `cwd` (a `cd` may not have run).
+    fn windows_command(&mut self, command: &Command, cwd: &str, folder: &mut String, depth: usize) {
         let words = &command.words;
         let lower: Vec<String> = words.iter().map(|word| word.to_lowercase()).collect();
         let names: Vec<&str> = lower.iter().map(|word| command_name(word)).collect();
-        // Folders the line moves to, and `-C`-style folder flags (their
-        // values are where a command runs, not what it reads).
-        let changes_folder = names
-            .first()
-            .is_some_and(|name| CHANGE_FOLDER.contains(name));
+        // Folders the line moves to (a `cd` anywhere: after `cmd /c`, `if`,
+        // `@`), and folder flags: their values are where a command runs,
+        // not what it reads.
         let mut folder_values = vec![false; words.len()];
+        let mut flagged: Vec<String> = Vec::new();
         for (index, word) in words.iter().enumerate() {
             work::step();
-            let folder = if changes_folder && index > 0 {
-                (!matches!(
-                    lower[index].as_str(),
-                    "/d" | "-path" | "-literalpath" | "-lp"
-                ))
-                .then_some(word.as_str())
-            } else if index > 0 && FOLDER_FLAGS.contains(&words[index - 1].as_str()) {
-                Some(word.as_str())
+            let changes_folder = |at: usize| at > 0 && CHANGE_FOLDER.contains(&names[at - 1]);
+            let folder_parameter =
+                |at: usize| matches!(lower[at].as_str(), "/d" | "-path" | "-literalpath" | "-lp");
+            // `cd x`, `cd..`: the line moves; a flag: this command runs there.
+            let (target, moves) = if let Some(target) = attached_folder(&lower[index]) {
+                (Some(target), true)
+            } else if (changes_folder(index) && !folder_parameter(index))
+                || (index > 1 && changes_folder(index - 1) && folder_parameter(index - 1))
+            {
+                (Some(word.as_str()), true)
+            } else if index > 0 && folder_flag(&words[index - 1], &lower[index - 1]) {
+                (Some(word.as_str()), false)
             } else {
-                word.split_once('=')
+                let value = word
+                    .split_once('=')
                     .filter(|(flag, _)| FOLDER_FLAGS.contains(flag))
-                    .map(|(_, value)| value)
+                    .map(|(_, value)| value);
+                (value, false)
             };
-            if let Some(folder) = folder {
-                folder_values[index] = true;
-                self.windows_folder(folder, bases);
+            // A bare drive (`D:`) moves to that drive's current folder.
+            let (target, moves) = match target {
+                None if words.len() == 1
+                    && command.separated
+                    && drive_relative(word).is_some_and(|(_, rest)| rest.is_empty()) =>
+                {
+                    (Some(word.as_str()), true)
+                }
+                other => (other, moves),
+            };
+            let Some(target) = target.and_then(|target| candidates(target).pop()) else {
+                continue;
+            };
+            folder_values[index] = true;
+            if on_another_drive(target, std::slice::from_ref(folder)) {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
+            let resolved = self.homes.resolve(target, folder);
+            if resolved.len() > MAX_FOLDER_BYTES || (!moves && flagged.len() + 2 >= MAX_FOLDERS) {
+                self.note(ProtectedActionKind::UnseenCode);
+            } else if moves {
+                *folder = resolved;
+            } else {
+                flagged.push(resolved);
             }
         }
+        let mut bases = vec![cwd.to_string()];
+        for base in std::iter::once(folder.clone()).chain(flagged) {
+            work::step();
+            if !bases.contains(&base) {
+                bases.push(base);
+            }
+        }
+        let bases = &bases;
         let writer = names.iter().position(|name| {
             WINDOWS_WRITERS.contains(name)
                 || WRITERS.contains(name)
@@ -425,17 +568,25 @@ impl Classifier {
                         .any(|prefix| method.starts_with(prefix))
                 })
         });
+        // Flags looked for once per command, not once per command word.
         let recursive_flags = lower.iter().any(|word| recursive_flag(word));
+        let readers_flagged: Vec<bool> = RECURSIVE_READERS
+            .iter()
+            .map(|(_, flags)| {
+                work::step();
+                flags.is_empty()
+                    || lower
+                        .iter()
+                        .any(|word| flags.iter().any(|flag| has_flag(word, flag)))
+            })
+            .collect();
         let recursive = names.iter().any(|name| {
             WINDOWS_TREE_COPIERS.contains(name)
                 || (recursive_flags && WINDOWS_RECURSIVE.contains(name))
-                || RECURSIVE_READERS.iter().any(|(reader, flags)| {
-                    reader == name
-                        && (flags.is_empty()
-                            || lower
-                                .iter()
-                                .any(|word| flags.iter().any(|flag| has_flag(word, flag))))
-                })
+                || RECURSIVE_READERS
+                    .iter()
+                    .zip(&readers_flagged)
+                    .any(|((reader, _), flagged)| *flagged && reader == name)
         });
         let powershell = names
             .iter()
@@ -446,37 +597,51 @@ impl Classifier {
                 || (index > 0 && writing_parameter(&lower[index - 1]))
         };
         let mut git_config = GitConfigWrites::new(&lower);
+        let mut named_programs = 0;
         for (index, word) in words.iter().enumerate() {
             work::step();
             let name = names[index];
             let args = &lower[index + 1..];
             // The checks the POSIX pass makes by command name, for names
             // only this reading sees (`C:\Tools\corbanu.exe vault list`).
-            let imported = index > 0 && matches!(lower[index - 1].as_str(), "from" | "import");
-            if CLI_NAMES.contains(&name) && !imported {
-                self.cli(args);
+            let named = CLI_NAMES.contains(&name)
+                || name == "git"
+                || matches!(name, "crontab" | "launchctl" | "systemctl")
+                || CREDENTIAL_COMMANDS
+                    .iter()
+                    .any(|(credential_command, _)| *credential_command == name);
+            if named {
+                named_programs += 1;
             }
-            if persistence_command(name, args)
-                || (name == "git" && git_config.persists(index + 1, /*subcommand*/ None))
-            {
-                self.note(ProtectedActionKind::Persistence);
-            }
-            if name == "git"
-                && code_variables::git_runs_code(&words[index + 1..], &words[index + 1..])
-            {
+            if named_programs > MAX_NAMED_PROGRAMS {
                 self.note(ProtectedActionKind::UnseenCode);
-            }
-            for (credential_command, verbs) in CREDENTIAL_COMMANDS {
-                work::step();
-                if name == *credential_command
-                    && args.iter().any(|arg| verbs.contains(&arg.as_str()))
+            } else if named {
+                let imported = index > 0 && matches!(lower[index - 1].as_str(), "from" | "import");
+                if CLI_NAMES.contains(&name) && !imported {
+                    self.cli(args);
+                }
+                if persistence_command(name, args)
+                    || (name == "git" && git_config.persists(index + 1, /*subcommand*/ None))
                 {
-                    self.note(ProtectedActionKind::Credentials);
+                    self.note(ProtectedActionKind::Persistence);
+                }
+                if name == "git"
+                    && code_variables::git_runs_code(&words[index + 1..], &words[index + 1..])
+                {
+                    self.note(ProtectedActionKind::UnseenCode);
+                }
+                for (credential_command, verbs) in CREDENTIAL_COMMANDS {
+                    work::step();
+                    if name == *credential_command
+                        && args.iter().any(|arg| verbs.contains(&arg.as_str()))
+                    {
+                        self.note(ProtectedActionKind::Credentials);
+                    }
                 }
             }
-            if powershell && index > 0 && encoded_command_flag(&lower[index - 1]) {
+            if powershell && index > 0 && encoded_parameter(&lower[index - 1]) {
                 match decoded_command(word) {
-                    Some(text) => self.script(&text, cwd, depth + 1),
+                    Some(text) => self.script(&text, folder, depth + 1),
                     None => self.note(ProtectedActionKind::UnseenCode),
                 }
             }
@@ -496,10 +661,32 @@ impl Classifier {
         }
     }
 
-    /// One word that may be a path, resolved against each folder.
+    /// One word that may be a path, resolved against each folder. A path
+    /// whose place cannot be known fails closed: one on another drive's
+    /// current folder (`D:x` from `C:\work`), or one climbing out of an
+    /// unknown variable (`%APPDATA%\..\..\.bashrc`).
     fn windows_path(&mut self, candidate: &str, bases: &[String], written: bool, recursive: bool) {
         let path_like =
             candidate.contains(['/', '\\']) || candidate.starts_with(['.', '~', '%', '$']);
+        let expanded = windows_paths::expand(
+            candidate,
+            &windows_paths::Values {
+                codex_home: self.homes.codex_home(),
+                user_home: self.homes.user_home(),
+                cwd: "",
+            },
+        );
+        if climbs_out_of_a_variable(&expanded) {
+            self.note(ProtectedActionKind::UnseenCode);
+        }
+        // Written, or spelled as a path (`D:.netrc`, `D:x\y`); not any
+        // `x:y` word (`e:true:`, `a::b`).
+        let spelled_as_path = drive_relative(&expanded).is_some_and(|(_, rest)| {
+            written || rest.starts_with('.') || rest.contains(['/', '\\'])
+        });
+        if spelled_as_path && on_another_drive(&expanded, bases) {
+            self.note(ProtectedActionKind::UnseenCode);
+        }
         for base in bases {
             work::step();
             let resolved = self.homes.resolve(candidate, base);
@@ -516,24 +703,6 @@ impl Classifier {
             }
         }
     }
-
-    /// Add the folder `target` names, from each known folder, to `bases`.
-    /// Past [`MAX_FOLDERS`] folders or [`MAX_FOLDER_BYTES`] the line fails
-    /// closed.
-    fn windows_folder(&mut self, target: &str, bases: &mut Vec<String>) {
-        for base in 0..bases.len() {
-            work::step();
-            let folder = self.homes.resolve(target, &bases[base]);
-            if bases.contains(&folder) {
-                continue;
-            }
-            if folder.len() > MAX_FOLDER_BYTES || bases.len() >= MAX_FOLDERS {
-                self.note(ProtectedActionKind::UnseenCode);
-                return;
-            }
-            bases.push(folder);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -542,19 +711,25 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     fn words(text: &str, single_quotes: bool) -> Vec<(Vec<&'static str>, Vec<bool>)> {
-        commands(text, single_quotes)
-            .into_iter()
-            .map(|command| {
-                (
-                    command
-                        .words
-                        .into_iter()
-                        .map(|word| &*Box::leak(word.into_boxed_str()))
-                        .collect(),
-                    command.redirected,
-                )
-            })
-            .collect()
+        commands(
+            text,
+            Quotes {
+                single: single_quotes,
+                double: true,
+            },
+        )
+        .into_iter()
+        .map(|command| {
+            (
+                command
+                    .words
+                    .into_iter()
+                    .map(|word| &*Box::leak(word.into_boxed_str()))
+                    .collect(),
+                command.redirected,
+            )
+        })
+        .collect()
     }
 
     #[test]
@@ -622,8 +797,23 @@ mod tests {
         assert!(writing_parameter("-outf"));
         assert!(!writing_parameter("-o"));
         assert!(recursive_flag("-rec"));
-        assert!(encoded_command_flag("-enc"));
-        assert!(!encoded_command_flag("-executionpolicy"));
+        assert!(encoded_parameter("-enc"));
+        assert!(encoded_parameter("/ec"));
+        assert!(encoded_parameter("-encodedarguments"));
+        assert!(!encoded_parameter("-executionpolicy"));
+        assert!(!encoded_parameter("-ex"));
+        assert_eq!(attached_folder(r"cd\users"), Some(r"\users"));
+        assert_eq!(attached_folder("cd.."), Some(".."));
+        assert_eq!(attached_folder("cdrom"), None);
+        assert!(climbs_out_of_a_variable(r"%APPDATA%\..\..\.bashrc"));
+        assert!(climbs_out_of_a_variable(r"$env:TEMP\..\.bashrc"));
+        assert!(!climbs_out_of_a_variable(r"%TEMP%\out.txt"));
+        assert!(!climbs_out_of_a_variable(r"..\%TEMP%"));
+        assert_eq!(drive_relative("D:x"), Some(('D', "x")));
+        assert_eq!(drive_relative("D:"), Some(('D', "")));
+        assert_eq!(drive_relative(r"D:\x"), None);
+        assert_eq!(drive_relative("a::b"), None);
+        assert_eq!(drive_relative("ab:x"), None);
         let encoded = base64::engine::general_purpose::STANDARD.encode(
             "type x"
                 .encode_utf16()

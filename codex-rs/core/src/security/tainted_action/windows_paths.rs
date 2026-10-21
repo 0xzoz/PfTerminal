@@ -1,4 +1,6 @@
 //! #1240: Windows path rules for the post-taint classifier's Windows view.
+//! The view never touches the filesystem (a lookup of a Windows path can
+//! follow a link to a network share); it judges paths as written.
 //!
 //! On Windows the classifier judges each action twice: once exactly as on
 //! every other platform, and once with these rules, keeping the stronger
@@ -27,6 +29,9 @@ pub(super) const HOME_VARIABLES: &[&str] = &[
     "PFTERMINAL_HOME",
     "CD",
     "PWD",
+    "USERNAME",
+    "APPDATA",
+    "LOCALAPPDATA",
 ];
 /// Longest variable name read in a spelling; past it the text is left alone.
 const MAX_NAME: usize = 64;
@@ -58,6 +63,17 @@ impl Values<'_> {
                 (!self.codex_home.is_empty()).then(|| self.codex_home.to_string())
             }
             "CD" | "PWD" => (!self.cwd.is_empty()).then(|| self.cwd.to_string()),
+            // Their usual places in a profile (`C:\Users\%USERNAME%`).
+            "USERNAME" => self.user_home.and_then(|home| {
+                normalize(home)
+                    .rsplit_once('/')
+                    .map(|(_, name)| name.to_string())
+                    .filter(|name| !name.is_empty() && !name.ends_with(':'))
+            }),
+            "APPDATA" => self
+                .user_home
+                .map(|home| format!("{home}\\AppData\\Roaming")),
+            "LOCALAPPDATA" => self.user_home.map(|home| format!("{home}\\AppData\\Local")),
             _ => None,
         }
     }
@@ -335,24 +351,6 @@ pub(super) fn parent(path: &str) -> String {
     }
 }
 
-/// The path as Windows APIs take it (`C:\x`), for a normalized path on a
-/// drive. `None` for a share or a path without a root: those are never
-/// looked up (a lookup there can reach the network).
-pub(super) fn native(path: &str) -> Option<String> {
-    let rest = path.strip_prefix('/')?;
-    drive(rest)?;
-    let tail = &rest[2..];
-    if !tail.is_empty() && !tail.starts_with('/') {
-        return None;
-    }
-    let tail = tail.replace('/', "\\");
-    Some(format!(
-        "{}{}",
-        &rest[..2],
-        if tail.is_empty() { "\\" } else { &tail }
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,10 +405,6 @@ mod tests {
         ] {
             assert_eq!(join(cwd, word), expected, "{cwd} + {word}");
         }
-        assert_eq!(native("/c:/users/x"), Some(r"c:\users\x".to_string()));
-        assert_eq!(native("/c:"), Some(r"c:\".to_string()));
-        assert_eq!(native("/unc:/h/s/x"), None);
-        assert_eq!(native("/work"), None);
     }
 
     #[test]
@@ -439,6 +433,12 @@ mod tests {
                 r"C:\Users\fixture\.corbanu\auth.json",
             ),
             (r"%CD%\x", r"C:\work\x"),
+            (r"C:\Users\%USERNAME%\.ssh", r"C:\Users\fixture\.ssh"),
+            (
+                r"%APPDATA%\..\..\.bashrc",
+                r"C:\Users\fixture\AppData\Roaming\..\..\.bashrc",
+            ),
+            (r"$env:LOCALAPPDATA\x", r"C:\Users\fixture\AppData\Local\x"),
             (r"$PWD\x", r"C:\work\x"),
             // Unknown or longer names stay.
             (r"%TEMP%\x", r"%TEMP%\x"),

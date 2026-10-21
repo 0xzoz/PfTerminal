@@ -3850,6 +3850,24 @@ fn issue_1240_windows_spellings_are_protected() {
         ),
         // cmd's substring forms are not expanded: they fail closed.
         (r"type %USERPROFILE:~0%\.bashrc", UnseenCode),
+        // Review 1: folder changes anywhere, attached or after a prefix.
+        (
+            r"cmd /c cd /d %USERPROFILE% & echo x >> .bashrc",
+            Persistence,
+        ),
+        (r"@cd /d %USERPROFILE% & echo x >> .bashrc", Persistence),
+        (r"if 1==1 cd %USERPROFILE% & echo x >> .bashrc", Persistence),
+        (r"cd\Users\fixture & echo x >> .bashrc", Persistence),
+        (r#"cmd /c "echo x >> %USERPROFILE%\.bashrc""#, Persistence),
+        (
+            r"start /D %USERPROFILE% cmd /c echo x >> .bashrc",
+            Persistence,
+        ),
+        // Variables in a profile; climbing out of an unknown one fails closed.
+        (r"echo x >> %APPDATA%\..\..\.bashrc", Persistence),
+        (r"echo x >> %LOCALAPPDATA%\..\..\.zshrc", Persistence),
+        (r"echo x >> C:\Users\%USERNAME%\.bashrc", Persistence),
+        (r"echo x >> %TEMP%\..\..\..\.bashrc", UnseenCode),
     ] {
         assert_eq!(cmd(line), Some(expected), "cmd /c {line}");
     }
@@ -3907,6 +3925,16 @@ fn issue_1240_windows_spellings_are_protected() {
         ),
         (r"Copy-Item -Recurse C:\Users\fixture D:\x", Credentials),
         (r"& 'C:\Tools\corbanu.exe' vault list", Vault),
+        // Review 1: folder parameters, provider paths, unknown variables.
+        (r"Set-Location -Path:~; Add-Content .bashrc x", Persistence),
+        (r"Set-Location -Path ~; Add-Content .bashrc x", Persistence),
+        (r"sl -LiteralPath $HOME; ac .profile x", Persistence),
+        (r"Add-Content FileSystem::$HOME\.bashrc x", Persistence),
+        (
+            r"Add-Content Microsoft.PowerShell.Core\FileSystem::C:\Users\fixture\.bashrc x",
+            Persistence,
+        ),
+        (r"Add-Content $env:TEMP\..\..\..\.bashrc x", UnseenCode),
         // Paths built from parts.
         (r"Add-Content (Join-Path $HOME '.bashrc') 'x'", Persistence),
         (r"Join-Path -Path $HOME -ChildPath .ssh\id_rsa", Credentials),
@@ -3984,6 +4012,56 @@ fn issue_1240_windows_spellings_are_protected() {
         windows_kind(&["powershell", "-e", "not base64!"]),
         Some(UnseenCode)
     );
+    // Review 1: `/` prefixes, other encoded parameters, the working folder.
+    assert_eq!(
+        windows_kind(&[
+            "powershell.exe",
+            "/enc",
+            &encoded(r"Get-Content $env:USERPROFILE\.ssh\id_rsa"),
+        ]),
+        Some(Credentials)
+    );
+    assert_eq!(
+        windows_kind(&["pwsh", "-ea", "not base64!", "-c", "dir"]),
+        Some(UnseenCode)
+    );
+    assert_eq!(
+        windows_kind(&[
+            "pwsh",
+            "-WorkingDirectory",
+            "~",
+            "-Command",
+            "Add-Content .bashrc x",
+        ]),
+        Some(Persistence)
+    );
+    assert_eq!(
+        windows_kind(&[
+            "cmd.exe",
+            "/c",
+            "cd",
+            "/d",
+            "%USERPROFILE%",
+            "&",
+            "echo",
+            "x",
+            ">>",
+            ".bashrc",
+        ]),
+        Some(Persistence)
+    );
+    // Another drive's current folder cannot be known: it fails closed.
+    for line in [
+        r"echo x >> C:.bashrc",
+        r"cd /d C: & echo x >> .bashrc",
+        "C: & echo x >> .bashrc",
+    ] {
+        assert_eq!(
+            windows_kind_with(WINDOWS_HOME, r"D:\work", &["cmd", "/c", line]),
+            Some(UnseenCode),
+            "D:\\work> {line}"
+        );
+    }
     // A Corbanu home elsewhere, named only by its path.
     for (line, expected) in [
         (
@@ -4046,6 +4124,11 @@ fn issue_1240_ordinary_windows_commands_are_not_protected() {
         r"del /q build\*",
         "git.exe status",
         "cargo test -p codex-core",
+        // Review 1: several folder changes are followed, not compounded.
+        r"cd sub & cd sub2 & cd ..\sub3 & cd .. & dir",
+        r"echo x > %TEMP%\out.txt",
+        r"type C:README.md",
+        "cargo test a::tests e:true: -- x:y",
     ] {
         assert_eq!(cmd(line), None, "cmd /c {line}");
     }
@@ -4062,6 +4145,8 @@ fn issue_1240_ordinary_windows_commands_are_not_protected() {
         r"New-Item -ItemType Directory C:\work\out",
         r"Join-Path $HOME 'proj\README.md'",
         r"[Environment]::GetEnvironmentVariable('PATH')",
+        r"Set-Location src; Set-Location ..\docs; Get-Content README.md",
+        r#"curl.exe -s -d '{"a":{"b":1},"e":{"f":2}}' https://api.example"#,
     ] {
         assert_eq!(powershell(line), None, "powershell {line}");
     }

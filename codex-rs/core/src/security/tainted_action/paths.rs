@@ -121,16 +121,12 @@ impl Homes {
         let codex_home_raw = raw(codex_home);
         let user_home_raw = user_home.map(raw);
         let normalize = |path: &str| normalize_with(windows, path);
-        let mut lookup_roots = if windows {
-            Vec::new()
-        } else {
-            vec![
-                "/tmp".to_string(),
-                "/private/tmp".to_string(),
-                "/var/folders".to_string(),
-                "/private/var/folders".to_string(),
-            ]
-        };
+        let mut lookup_roots = vec![
+            "/tmp".to_string(),
+            "/private/tmp".to_string(),
+            "/var/folders".to_string(),
+            "/private/var/folders".to_string(),
+        ];
         lookup_roots.extend(
             std::env::temp_dir()
                 .to_str()
@@ -367,15 +363,15 @@ impl Homes {
 
     /// Whether filesystem lookups may touch `path`.
     pub(super) fn lookups_allowed(&self, path: &str) -> bool {
+        // #1240: Windows rules never look up (a lookup can follow a link or
+        // a mapped drive to a network share).
+        if self.windows {
+            return false;
+        }
         let lower = self.normalize(&path.to_lowercase());
         let under = |root: &str| lower == root || lower.starts_with(&format!("{root}/"));
         if self.lookup_roots.borrow().iter().any(|root| under(root)) {
             return true;
-        }
-        // #1240: elsewhere a Windows path may be a share or a mapped
-        // network drive.
-        if self.windows {
-            return false;
         }
         if NO_LOOKUP_PREFIXES.iter().any(|prefix| under(prefix))
             || (cfg!(target_os = "macos") && under("/home"))
@@ -394,19 +390,10 @@ impl Homes {
     /// existing folder. `None` where lookups are not allowed or the budget
     /// is spent (which marks the classification as incomplete).
     pub(super) fn canonical(&self, path: &str) -> Option<String> {
-        let path = self.normalize(path);
+        let path = normalize_path(path);
         if !self.lookups_allowed(&path) {
             return None;
         }
-        // Windows rules look up Windows paths only on Windows.
-        let path = if self.windows {
-            if !cfg!(windows) {
-                return None;
-            }
-            windows_paths::native(&path)?
-        } else {
-            path
-        };
         let mut existing = PathBuf::from(&path);
         let mut tail: Vec<String> = Vec::new();
         loop {
@@ -433,7 +420,7 @@ impl Homes {
                     work::step();
                     canonical = format!("{}/{segment}", canonical.trim_end_matches('/'));
                 }
-                return Some(self.normalize(&canonical.to_lowercase()));
+                return Some(normalize_path(&canonical.to_lowercase()));
             }
             let segment = existing.file_name()?.to_string_lossy().into_owned();
             tail.push(segment);

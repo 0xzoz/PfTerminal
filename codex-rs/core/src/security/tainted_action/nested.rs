@@ -451,6 +451,11 @@ impl Classifier {
     /// line runs is code the host cannot read; an in-place edit that only
     /// keeps, drops or adds lines has the text it adds judged instead.
     fn judge_sed(&mut self, sed: Sed, line: &Found, depth: usize) {
+        // #1240: judged once, by the first judgment (it reads program
+        // files; the Windows view does not open files).
+        if self.homes.is_windows() {
+            return;
+        }
         let call = &sed.call;
         let dynamic = call
             .programs
