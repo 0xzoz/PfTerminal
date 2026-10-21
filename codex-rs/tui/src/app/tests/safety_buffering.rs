@@ -25,6 +25,7 @@ const RETRY_PROMPT: &str = "Handle the safety-buffered request";
 const COMMITTED_STEER: &str = "Keep the accepted steer";
 const UNSENT_DRAFT: &str = "Keep this unsent draft";
 const RETRY_GOAL: &str = "Preserve this goal across the retry";
+const GOAL_CONTINUATION_REPLY: &str = "goal continued";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SafetyRetryScenario {
@@ -358,7 +359,7 @@ async fn run_safety_retry(
         gate: None,
         body: responses::sse(vec![
             ev_response_created("goal-continuation-response"),
-            ev_assistant_message("goal-continuation-message", "done"),
+            ev_assistant_message("goal-continuation-message", GOAL_CONTINUATION_REPLY),
             ev_completed_with_tokens("goal-continuation-response", /*total_tokens*/ 1_000),
         ]),
     }]);
@@ -661,13 +662,28 @@ goals = true
     }
 
     drive_until_request_count(&mut app, &mut app_server, &server, expected_request_count).await;
+    // The goal continuation's reply may or may not have rendered when its request arrives, so
+    // wait for it: the history is then the same on every run.
     let mut replayed_history = String::new();
-    while let Ok(event) = app_event_rx.try_recv() {
-        if let AppEvent::InsertHistoryCell(cell) = event {
-            replayed_history.push_str(&lines_to_single_string(
-                &cell.transcript_lines(/*width*/ 80),
-            ));
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(/*secs*/ 5);
+    loop {
+        while let Ok(event) = app_event_rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                replayed_history.push_str(&lines_to_single_string(
+                    &cell.transcript_lines(/*width*/ 80),
+                ));
+                replayed_history.push('\n');
+            }
         }
+        if replayed_history.contains(GOAL_CONTINUATION_REPLY) {
+            break;
+        }
+        let event = tokio::time::timeout_at(deadline, app_server.next_event())
+            .await
+            .expect("the goal continuation's reply should render")
+            .expect("app-server event stream should remain open");
+        Box::pin(app.handle_app_server_event(&app_server, event)).await;
+        drain_active_thread_events(&mut app);
     }
     assert_eq!(
         replayed_history.contains("Conversation interrupted"),
