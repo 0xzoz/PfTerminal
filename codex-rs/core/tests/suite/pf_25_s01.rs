@@ -72,7 +72,7 @@ fn canary_home() -> anyhow::Result<(Arc<TempDir>, String)> {
     std::fs::write(&path, CANARY)?;
     let path = path.to_string_lossy().into_owned();
     let folder = path.len() - "/pf25-notes.txt".len();
-    let (head, tail) = (&path[..folder - 2], &path[folder - 2..folder]);
+    let (head, tail) = super::pf_23_s01::split_home_name(&path[..folder]);
     Ok((
         home,
         format!("cat \"$(printf '{head}%s/pf25-notes.txt' {tail})\""),
