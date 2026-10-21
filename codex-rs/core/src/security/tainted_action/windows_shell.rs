@@ -548,22 +548,24 @@ fn powershell_parameters(names: &[&str], lower: &[String]) -> Vec<bool> {
 fn takes_a_non_folder_value(word: &str) -> bool {
     matches!(
         word,
-        "-ea" | "-ev" | "-ov" | "-wa" | "-wv" | "-infa" | "-iv" | "-ob" | "-pv"
-    ) || (word.len() >= 4
-        && [
-            "-stackname",
-            "-erroraction",
-            "-errorvariable",
-            "-outvariable",
-            "-warningaction",
-            "-warningvariable",
-            "-informationaction",
-            "-informationvariable",
-            "-outbuffer",
-            "-pipelinevariable",
-        ]
-        .iter()
-        .any(|name| name.starts_with(word)))
+        "-s" | "-ea" | "-ev" | "-ov" | "-wa" | "-wv" | "-infa" | "-iv" | "-ob" | "-pv" | "-pi"
+    ) || (word.len() >= 3 && "-stackname".starts_with(word))
+        || (word.len() >= 4
+            && [
+                "-stackname",
+                "-erroraction",
+                "-errorvariable",
+                "-outvariable",
+                "-warningaction",
+                "-warningvariable",
+                "-informationaction",
+                "-informationvariable",
+                "-outbuffer",
+                "-pipelinevariable",
+                "-progressaction",
+            ]
+            .iter()
+            .any(|name| name.starts_with(word)))
 }
 
 /// Whether `word` (lowercase) is one of PowerShell's own parameters that
@@ -721,11 +723,10 @@ impl Classifier {
             if let Some(at) = at {
                 folder_values[at] = true;
             }
-            // cmd's whole-rest spelling of a `cd`: past any folder's length
-            // it names none (a word `ci/cd` in a long message is no move).
-            if at.is_none() && target.len() > MAX_FOLDER_BYTES {
-                continue;
-            }
+            // cmd's whole-rest spelling of a `cd` (marked by no index): one
+            // that resolves past any folder's length names none (a word
+            // `ci/cd` in a long message is no move); it does not fail closed.
+            let spelling_only = at.is_none() && target != "~";
             // Each spelling of the folder (`-Path:x`, `a=b` kept whole too),
             // from each folder the line may be in.
             let mut reached = Vec::new();
@@ -742,10 +743,10 @@ impl Classifier {
                 for folder in &folders.possible {
                     work::step();
                     let resolved = self.homes.resolve(target, folder);
-                    if resolved.len() > MAX_FOLDER_BYTES {
-                        self.note(ProtectedActionKind::UnseenCode);
-                    } else {
+                    if resolved.len() <= MAX_FOLDER_BYTES {
                         reached.push(resolved);
+                    } else if !spelling_only {
+                        self.note(ProtectedActionKind::UnseenCode);
                     }
                 }
             }

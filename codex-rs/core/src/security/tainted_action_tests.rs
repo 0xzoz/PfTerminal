@@ -4400,9 +4400,26 @@ fn issue_1240_review_6_routes() {
             r"Set-Location -ErrorAction SilentlyContinue $env:USERPROFILE\.corbanu; Get-Content auth.json",
             Credentials,
         ),
+        // Review 7: the shortest prefixes.
+        (
+            r"Push-Location -st s C:\Users\fixture; Add-Content .bashrc x",
+            Persistence,
+        ),
+        (
+            r"Push-Location -s s C:\Users\fixture; Add-Content .bashrc x",
+            Persistence,
+        ),
     ] {
         assert_eq!(powershell(line), Some(expected), "{line}");
     }
+    // Review 7: a long spelling of cmd's cd that normalizes to a folder.
+    assert_eq!(
+        cmd(&format!(
+            r"cd C:\Users\fixture\x y\..{} & echo x>>.bashrc",
+            r"\.".repeat(600)
+        )),
+        Some(Persistence)
+    );
     // `ci/cd` in a long message is not a folder change.
     let files: String = (0..200).map(|n| format!(r"src\file{n}.rs ")).collect();
     assert_eq!(cmd(&format!("git add ci/cd {files}")), None);
