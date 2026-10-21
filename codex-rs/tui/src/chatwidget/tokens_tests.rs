@@ -1244,13 +1244,13 @@ fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
     Plan consumption: 140 tokens at the plan rate that applied
     Same tokens at API rates: $0.001610
     ");
-    // A plan row the catalogue states no API price for says so, rather than
+    // A plan row with no API rate recorded says so, rather than
     // reporting zero.
     insta::assert_snapshot!(estimate(&plan_day(Decimal::default(), /*burn_milli_tokens*/ 280_000, /*unknown_equivalents*/ 2), EstimateGaps::default()).join("\n"), @"
     No recorded attempt here was billed per token.
     Subscription capacity: 2 of 2 attempts, not billed per token
     Plan consumption: 280 tokens at the plan rate that applied
-    Same tokens at API rates: unavailable — the catalogue states no API price for 2 of 2 plan attempts
+    Same tokens at API rates: unavailable — no API rate was recorded with 2 of 2 plan attempts
     ");
     // A day with no plan work says nothing about plans at all.
     assert_eq!(
@@ -2658,8 +2658,20 @@ fn accounting_inspect_plain_wording_counts_attempts_and_names_every_route() {
         Some("synthetic · synthetic-model")
     );
     // Real routes read by their display names.
-    assert_eq!(model_name("gpt-6-sol"), "GPT-6 Sol");
+    assert_eq!(model_name("openai", "gpt-6-sol"), "GPT-6 Sol");
     assert_eq!(provider_name("deepseek"), "DeepSeek");
+    // #352: the two local providers are told apart.
+    assert_eq!(provider_name("ollama"), "Ollama");
+    assert_eq!(provider_name("lmstudio"), "LM Studio");
+    // #352: another provider's catalogue row is not this route's name.
+    assert_eq!(model_name("ambient", "z-ai/glm-5.2"), "Ambient GLM 5.2");
+    assert_eq!(model_name("openrouter", "z-ai/glm-5.2"), "z-ai/glm-5.2");
+    assert_eq!(
+        model_name("openrouter", "z-ai/glm-5.3-flash"),
+        "OpenRouter GLM 5.3 Flash"
+    );
+    // A provider you configured keeps the catalogue's name.
+    assert_eq!(model_name("my-zai", "glm-5.2"), "Z.AI GLM 5.2");
 }
 
 #[test]

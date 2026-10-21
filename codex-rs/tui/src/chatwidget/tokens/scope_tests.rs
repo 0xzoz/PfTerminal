@@ -1208,12 +1208,18 @@ fn only_pay_per_use_work_can_lack_a_price() {
             .find(|line| line.starts_with("Billing basis:"))
             .unwrap()
     };
-    assert_eq!(basis_line("kimi-code"), "Billing basis: subscription");
+    assert_eq!(
+        basis_line("kimi-code"),
+        "Billing basis: subscription (built-in default)"
+    );
     assert_eq!(
         basis_line("my-gateway"),
         "Billing basis: pay per use (set in your config)"
     );
-    assert_eq!(basis_line("ollama"), "Billing basis: local, no charge");
+    assert_eq!(
+        basis_line("ollama"),
+        "Billing basis: local, no charge (built-in default)"
+    );
     assert_eq!(basis_line("my-llm"), "Billing basis: not declared");
     let undeclared = attempt_text("my-llm");
     assert!(

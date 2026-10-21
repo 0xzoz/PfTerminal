@@ -583,12 +583,12 @@ fn plan(totals: &codex_state::accounting::DayTotals) -> Vec<String> {
         )
     } else if totals.equivalent_usd == Decimal::default() {
         format!(
-            "Same tokens at API rates: unavailable — the catalogue states no API price for {} of {} plan attempts",
+            "Same tokens at API rates: unavailable — no API rate was recorded with {} of {} plan attempts",
             totals.unknown_equivalents, totals.plan_attempts
         )
     } else {
         format!(
-            "Same tokens at API rates: {} known, plus {} of {} plan attempts the catalogue does not price",
+            "Same tokens at API rates: {} known, plus {} of {} plan attempts with no API rate recorded",
             money(totals.equivalent_usd),
             totals.unknown_equivalents,
             totals.plan_attempts
@@ -1464,10 +1464,20 @@ fn inspection_pages_for(
     pages
 }
 
-/// The provider's display name ("Claude Account", "DeepSeek"), else its id.
-fn provider_name(id: &str) -> String {
+/// Built-in providers' names, by id.
+fn built_in_providers() -> &'static std::collections::HashMap<String, String> {
     static NAMES: std::sync::OnceLock<std::collections::HashMap<String, String>> =
         std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)
+            .into_iter()
+            .map(|(id, info)| (id, info.name))
+            .collect()
+    })
+}
+
+/// The provider's display name ("Claude Account", "DeepSeek"), else its id.
+fn provider_name(id: &str) -> String {
     if id.trim().is_empty() {
         return "Unknown provider".to_string();
     }
@@ -1476,40 +1486,59 @@ fn provider_name(id: &str) -> String {
     if id == codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID {
         return "Corbanu API".to_string();
     }
-    NAMES
-        .get_or_init(|| {
-            codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)
-                .into_iter()
-                .map(|(id, info)| (id, info.name))
-                .collect()
-        })
+    // #352: both local providers share the built-in name "gpt-oss"; name them
+    // as /providers does.
+    match id {
+        codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID => return "Ollama".to_string(),
+        codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID => return "LM Studio".to_string(),
+        _ => {}
+    }
+    built_in_providers()
         .get(id)
         .cloned()
         .unwrap_or_else(|| id.to_string())
 }
 
-/// The model's catalogue display name ("GPT-6 Sol"), else its slug.
-fn model_name(slug: &str) -> String {
-    static NAMES: std::sync::OnceLock<std::collections::HashMap<String, String>> =
-        std::sync::OnceLock::new();
+/// The model's catalogue display name ("GPT-6 Sol"), else its slug. #352: a
+/// catalogue row that belongs to another built-in provider ("Ambient GLM 5.2"
+/// for `z-ai/glm-5.2` sent to OpenRouter) is not this route's name. A provider
+/// you configured keeps the catalogue's name: its id says nothing about whose
+/// model it serves.
+fn model_name(provider: &str, slug: &str) -> String {
+    /// Display name and owning provider, by slug.
+    type Names = std::collections::HashMap<String, (String, Option<String>)>;
+    static NAMES: std::sync::OnceLock<Names> = std::sync::OnceLock::new();
     if slug.trim().is_empty() {
         return "unknown model".to_string();
     }
-    NAMES
+    match NAMES
         .get_or_init(|| {
             codex_models_manager::bundled_models_response()
                 .map(|catalog| {
                     catalog
                         .models
                         .into_iter()
-                        .map(|model| (model.slug, model.display_name))
+                        .map(|model| {
+                            let owner = model
+                                .orchestration
+                                .as_ref()
+                                .map(|orchestration| orchestration.provider_id().to_string());
+                            (model.slug, (model.display_name, owner))
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
         })
         .get(slug)
-        .cloned()
-        .unwrap_or_else(|| slug.to_string())
+    {
+        Some((name, owner))
+            if owner.as_deref().is_none_or(|owner| owner == provider)
+                || !built_in_providers().contains_key(provider) =>
+        {
+            name.clone()
+        }
+        _ => slug.to_string(),
+    }
 }
 
 /// "Provider · Model", or "Provider · account NAME · Model" where the view
@@ -1520,13 +1549,13 @@ fn route_name_in(quote: &ObservationQuote, named: bool) -> String {
             "{} · account {} · {}",
             provider_name(&quote.attempt.provider),
             quote.attempt.account_name(),
-            model_name(&quote.attempt.model)
+            model_name(&quote.attempt.provider, &quote.attempt.model)
         )
     } else {
         format!(
             "{} · {}",
             provider_name(&quote.attempt.provider),
-            model_name(&quote.attempt.model)
+            model_name(&quote.attempt.provider, &quote.attempt.model)
         )
     }
 }
@@ -1602,6 +1631,11 @@ fn basis_text(quote: &ObservationQuote) -> String {
     };
     match snapshot.basis_source {
         codex_state::accounting::BasisSource::UserConfig => format!("{basis} (set in your config)"),
+        // #352: the source is recorded on every attempt; say it either way.
+        // An undeclared basis has no default to name.
+        codex_state::accounting::BasisSource::BuiltIn if quote.basis() != Basis::Undeclared => {
+            format!("{basis} (built-in default)")
+        }
         codex_state::accounting::BasisSource::BuiltIn => basis.to_string(),
     }
 }
@@ -1609,7 +1643,9 @@ fn basis_text(quote: &ObservationQuote) -> String {
 /// #396: the basis inside a sentence that already ends in it, without a
 /// second pair of parentheses: "pay per use; set in your config".
 fn basis_clause(quote: &ObservationQuote) -> String {
-    basis_text(quote).replace(" (set in your config)", "; set in your config")
+    basis_text(quote)
+        .replace(" (set in your config)", "; set in your config")
+        .replace(" (built-in default)", "; built-in default")
 }
 /// #403: the turn-label prefix core gives the warm-up a reopened or forked
 /// conversation sends (core `accounting::REOPEN_PREWARM_LABEL`, pinned by
@@ -2258,7 +2294,7 @@ fn plain_header(quotes: &[&ObservationQuote], named: bool) -> Vec<String> {
         let route = (
             provider_name(&quote.attempt.provider),
             quote.attempt.account_name().to_string(),
-            model_name(&quote.attempt.model),
+            model_name(&quote.attempt.provider, &quote.attempt.model),
         );
         if !routes.contains(&route) {
             routes.push(route);
