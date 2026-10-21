@@ -39,8 +39,8 @@ Per case, with the screens and files each rests on: [dispositions.md](dispositio
   - MOD-21 (#1146): the product session files show the route by which each task reached the child, the same way on
     both machines ([tart-reference/](tart-reference/), `runs/T17-*/task-delivery-excerpt.txt`). A task typed in a pane's
     own composer is recorded as a user message: UTM T17 (a Troll), and on Tart the T17 resubmission and the replay (an
-    Orc). The first typed task in each pane has origin `human`; the unchanged resubmissions have no origin entry next to
-    them. The one task sent with Spawn status's "Send task to" (Tart T17, to an Orc) is recorded as a
+    Orc). The first typed task in each pane has origin `human`; the unchanged repeats of a typed task have no origin entry
+    next to them. The one task sent with Spawn status's "Send task to" (Tart T17, to an Orc) is recorded as a
     mailbox assignment. The files do not record the `corbanu_untrusted_data` wrapper itself, not even for that mailbox
     delivery, which the Tart child reported as wrapped. So whether the label follows the route is not shown. The Tart
     child also reported its typed resubmission as "again wrapped" (source=unknown); that report is left open. What the
@@ -150,8 +150,8 @@ Host memory was 72-93% free at every group start; the 25% pause never triggered.
   - Product homes and product logs are not exported; they are listed by size and SHA-256 in `runs/*/withheld-files.txt`.
   - The MOD-21 integrator excerpts (`runs/T17-*/task-delivery-excerpt.txt`, from [tools/excerpt_tasks.py](tools/excerpt_tasks.py))
     give, for each product session file, the user-role inputs with their recorded origin, any mailbox deliveries, and
-    whether any recorded model input carries the untrusted-data wrapper (no recorded input does, mailbox deliveries and
-    agent output included: the files do not record it).
+    whether any recorded model input (the session file's response items) carries the untrusted-data wrapper. None does,
+    agent output included; mailbox deliveries are stored as the message sent, before any wrapping, and are not scanned.
   - `pty.raw` and the testers' events are gzipped, and each fixture's `.git` is renamed `dot-git`. The key scan is clean.
 
 ## Named limits
@@ -179,7 +179,8 @@ Host memory was 72-93% free at every group start; the 25% pause never triggered.
   evidence that no wrapper was shown.
 - **`common/effective-policy.txt` changed after the runs were assembled** (review round 1). The isolation records cite
   the version they were assembled with, kept as [common/effective-policy.as-assembled.txt](common/effective-policy.as-assembled.txt)
-  (SHA-256 `51bf826a…`); the current file, `common/effective-policy.txt`, is the corrected one (changed after review rounds 1 and 3).
+  (SHA-256 `51bf826a…`); the current file, `common/effective-policy.txt` (SHA-256 `eb0d48b0…`), is the corrected one (changed after review
+  rounds 1 and 3).
 - **Part 2:**
   - D95's route (a task sent from Spawn status) was not exercised.
   - #1171's message was seen on one path only.

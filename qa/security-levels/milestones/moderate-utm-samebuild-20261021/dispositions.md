@@ -66,7 +66,7 @@ withheld product session files: `runs/T17-*/task-delivery-excerpt.txt` and, for 
   transport check, and the declines are the model's own text.
 - **What this shows about #1146:** the routes are recorded the same way on both machines: a task typed in a pane's own
   composer is a user message (UTM T17 to a Troll; Tart T17's resubmission and the Tart replay to an Orc; the first
-  typed task in each pane has origin `human`, the unchanged resubmissions have no origin entry next to them); the one task sent with Spawn status's "Send task to" (Tart T17, to an Orc) is a mailbox assignment. Whether the
+  typed task in each pane has origin `human`, the unchanged repeats of a typed task have no origin entry next to them); the one task sent with Spawn status's "Send task to" (Tart T17, to an Orc) is a mailbox assignment. Whether the
   `corbanu_untrusted_data` label follows the route is not shown, because the files do not record the wrapper; the Tart
   child's report that its typed resubmission was wrapped too is left open. #1175 (part 2) changes the mailbox route;
   this record does not exercise it.
