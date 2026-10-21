@@ -959,6 +959,19 @@ async fn direct_operator_turn_in_spawned_child_does_not_notify_parent() -> Resul
         .thread_manager
         .get_thread(ThreadId::from_string(&spawned_id)?)
         .await?;
+    // The setup does not wait for the child's spawned task to finish. Address
+    // the child only once it has, so the operator's input starts its own turn
+    // instead of joining the spawned task's first request (slower remote
+    // environments hit that race).
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !matches!(
+            child_thread.agent_status().await,
+            AgentStatus::Completed(Some(message)) if message == "child done"
+        ) {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
     let direct_child_request = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| body_contains(req, DIRECT_CHILD_PROMPT),
