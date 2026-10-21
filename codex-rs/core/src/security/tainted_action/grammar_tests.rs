@@ -309,8 +309,9 @@ fn tokens_the_shells_split_are_refused() {
 #[test]
 fn set_is_read_only_with_harmless_options() {
     for text in [
+        "export A=$(date) B=\"$x\"; printf '%s' \"$y\"",
         "set -euo pipefail; echo x",
-        "set -e +x",
+        "set -e +u",
         "set -- a b",
         "set",
     ] {
@@ -330,9 +331,52 @@ fn set_is_read_only_with_harmless_options() {
         "command {shopt,-s,expand_aliases}",
         "command {alias,ls=echo\\ x}",
         "c=shopt; command $c -s expand_aliases",
+        "export \"$v=1\"",
+        "read \"$v\"",
+        ": ${POSIXLY_CORRECT:=1}",
+        "declare -n p=BASH_ALIASES",
+        "command -p set -o posix",
+        "command -- set -o posix",
+        "time -p set -o posix",
+        "PS4='$(id)'; set -e; ls",
+        "set -x",
+        "printf -v \"$n\" %s x",
     ] {
         assert_eq!(read(text).err(), Some(Refusal::Reparse), "{text:?}");
     }
+}
+
+#[test]
+fn quotes_some_shells_do_not_honour_are_refused() {
+    for text in [
+        // The first backquote ends the substitution, in quotes or a comment.
+        "echo `: #`;rm -rf ~\n` #`",
+        "echo `echo '`;rm -rf ~;echo '` #`",
+        // zsh and dash end arithmetic and double-quoted `${...}` at a quoted
+        // `))` or `}`.
+        "false && (( ')) ; rm -rf ~ ; (( ' ))",
+        "false && echo $(( ')) ; rm -rf ~ ; echo $(( ' ))",
+        "echo \"${x:-'}\"; rm -rf ~; echo \"'}\"",
+    ] {
+        assert!(read(text).is_err(), "{text:?}");
+    }
+    assert!(read("echo `date` \"${x:-a}\" $((1 + 2))").is_ok());
+}
+
+#[test]
+fn text_dash_reads_differently_is_flagged() {
+    for text in [
+        "[[ -z x || sh -ef p.sh ]]",
+        "(( x ))",
+        "cat <<<x",
+        "diff <(a) <(b)",
+    ] {
+        assert!(
+            read(text).is_ok_and(|reading| reading.bash_only),
+            "{text:?}"
+        );
+    }
+    assert!(read("[ -z x ] || echo y").is_ok_and(|reading| !reading.bash_only));
 }
 
 #[test]

@@ -106,6 +106,10 @@ pub(super) struct Reading {
     /// or modifiers after an expansion, an argument `}`, or a command name
     /// that is not data.
     pub(super) zsh_unsure: bool,
+    /// Text dash (an `sh` on Debian and Ubuntu) reads differently from
+    /// bash: `[[`, `((` (two subshells to dash), process substitution,
+    /// here-strings, `$'...'`, arrays, `&>`, `|&`, `function`, `select`.
+    pub(super) bash_only: bool,
     /// Progress checks the parse used (see [`parse_budget`]).
     pub(super) parse_checks: usize,
 }
@@ -127,6 +131,37 @@ const ZSH_WORDS: &[&str] = &[
 const REPARSING: &[&str] = &[
     "alias", "unalias", "setopt", "unsetopt", "emulate", "shopt", "enable", "disable", "zmodload",
     "autoload",
+];
+
+/// Commands that set a variable they name.
+const DECLARING: &[&str] = &[
+    "export",
+    "declare",
+    "typeset",
+    "local",
+    "readonly",
+    "read",
+    "printf",
+    "mapfile",
+    "readarray",
+    "unset",
+    "let",
+    "getopts",
+    "print",
+];
+
+/// Variables that change how this or a later shell reads text, or which
+/// command a name runs (`PS4` runs under `set -x`). Named anywhere in the
+/// text, the reading is refused (`declare -n p=POSIXLY_CORRECT`, `:
+/// ${POSIXLY_CORRECT:=1}`).
+const OPTION_VARIABLES: &[&str] = &[
+    "SHELLOPTS",
+    "BASHOPTS",
+    "POSIXLY_CORRECT",
+    "BASH_ALIASES",
+    "BASH_CMDS",
+    "BASH_ENV",
+    "PS4",
 ];
 
 /// Names zsh reads differently through a wrapper (`builtin setopt`) or
@@ -157,6 +192,12 @@ pub(super) fn read(text: &str) -> Result<Reading, Refusal> {
     if !here_documents_fit(text) {
         return Err(Refusal::HereDocuments);
     }
+    if OPTION_VARIABLES.iter().any(|name| {
+        work::step();
+        text.contains(name)
+    }) {
+        return Err(Refusal::Reparse);
+    }
     let (tree, parse_checks) = try_parse_shell_bounded(text, parse_budget(text.len()));
     let tree = tree.map_err(|stop| match stop {
         ParseStop::SyntaxError => Refusal::Syntax,
@@ -169,6 +210,7 @@ pub(super) fn read(text: &str) -> Result<Reading, Refusal> {
     let mut walk = Walk {
         text,
         zsh_unsure: false,
+        bash_only: false,
         refusal: None,
         leaves: Vec::new(),
     };
@@ -183,6 +225,7 @@ pub(super) fn read(text: &str) -> Result<Reading, Refusal> {
             parent,
             expanding,
             in_test,
+            literal_quotes,
         } = place;
         if depth > MAX_DEPTH {
             return Err(Refusal::TooDeep);
@@ -198,7 +241,7 @@ pub(super) fn read(text: &str) -> Result<Reading, Refusal> {
             return Err(refusal);
         }
         if node.child_count() == 0 {
-            walk.leaf(node, expanding, in_test);
+            walk.leaf(node, expanding, in_test, literal_quotes);
         }
         let inner =
             substituted || matches!(node.kind(), "command_substitution" | "process_substitution");
@@ -213,6 +256,13 @@ pub(super) fn read(text: &str) -> Result<Reading, Refusal> {
                 // grammar).
                 || (node.kind() == "compound_statement" && walk.source(node).starts_with("((")));
         let in_test = !fresh && (in_test || node.kind() == "test_command");
+        let literal_quotes = !fresh
+            && (literal_quotes
+                || matches!(
+                    node.kind(),
+                    "string" | "heredoc_body" | "arithmetic_expansion"
+                )
+                || (node.kind() == "compound_statement" && walk.source(node).starts_with("((")));
         let mut cursor = node.walk();
         children.clear();
         children.extend(node.children(&mut cursor));
@@ -229,6 +279,7 @@ pub(super) fn read(text: &str) -> Result<Reading, Refusal> {
                     parent: node.kind(),
                     expanding: expanding || header,
                     in_test,
+                    literal_quotes: literal_quotes || header,
                 },
             ));
         }
@@ -258,6 +309,7 @@ pub(super) fn read(text: &str) -> Result<Reading, Refusal> {
     Ok(Reading {
         commands,
         zsh_unsure: walk.zsh_unsure,
+        bash_only: walk.bash_only,
         parse_checks,
     })
 }
@@ -318,11 +370,16 @@ struct Place {
     /// In a test (`[[ ... ]]`, `[ ... ]`, `(( ... ))`), where a pattern or
     /// expression may hold blanks.
     in_test: bool,
+    /// Where zsh or dash take quotes as ordinary characters even for where
+    /// the text ends (double quotes, a here-document body, arithmetic):
+    /// `"${x:-'}"` ends at the quoted `}` to them.
+    literal_quotes: bool,
 }
 
 struct Walk<'a> {
     text: &'a str,
     zsh_unsure: bool,
+    bash_only: bool,
     /// The first reason found not to trust the reading.
     refusal: Option<Refusal>,
     /// The byte ranges of the tokens.
@@ -340,8 +397,11 @@ impl<'a> Walk<'a> {
 
     /// A token: its range, and that it hides no expansion unless its text
     /// is taken literally (quoted, a comment, a here-document's).
-    fn leaf(&mut self, node: Node, expanding: bool, in_test: bool) {
+    fn leaf(&mut self, node: Node, expanding: bool, in_test: bool, literal_quotes: bool) {
         self.leaves.push((node.start_byte(), node.end_byte()));
+        if literal_quotes && matches!(node.kind(), "raw_string" | "ansi_c_string") {
+            self.refuse(Refusal::Words);
+        }
         // One token for text the shells split: blanks or operators outside
         // quotes, a body, a comment or `${...}` (`echo == x; rm y` makes
         // `x; rm y` one pattern token to the grammar). In a test a pattern
@@ -489,6 +549,54 @@ impl<'a> Walk<'a> {
     /// Checks that hold for every node.
     fn node(&mut self, node: Node, parent: &str) {
         let kind = node.kind();
+        let source = self.source(node);
+        // The shells end a backquote substitution at the first backquote,
+        // in quotes or a comment too; the grammar reads quotes and
+        // comments inside it.
+        if kind == "command_substitution"
+            && let Some(inner) = source
+                .strip_prefix('`')
+                .and_then(|rest| rest.strip_suffix('`'))
+            && inner.contains(['\'', '"', '#', '`', '\\'])
+        {
+            self.refuse(Refusal::Words);
+        }
+        // zsh and dash end arithmetic at `))` inside quotes too.
+        let arithmetic = match kind {
+            "arithmetic_expansion" => Some(source),
+            "compound_statement" if source.starts_with("((") => Some(source),
+            "c_style_for_statement" => source.find("))").map(|end| &source[..end]),
+            _ => None,
+        };
+        if arithmetic.is_some_and(|text| text.contains(['\'', '"'])) {
+            self.refuse(Refusal::Words);
+        }
+        self.bash_only |= matches!(
+            kind,
+            "process_substitution"
+                | "herestring_redirect"
+                | "ansi_c_string"
+                | "array"
+                | "c_style_for_statement"
+                | "&>"
+                | "&>>"
+                | "|&"
+                | "function"
+                | "select"
+        ) || ((kind == "test_command" || kind == "compound_statement")
+            && (source.starts_with("[[") || source.starts_with("((")));
+        // zsh's special arrays: `aliases[ls]=...`, `options[x]=on`.
+        self.zsh_unsure |= kind == "variable_assignment"
+            && [
+                "aliases",
+                "galiases",
+                "saliases",
+                "options",
+                "functions",
+                "builtins",
+            ]
+            .iter()
+            .any(|name| source.starts_with(name));
         // The grammar lets a redirection take every word after it
         // (`rm >/dev/null -rf x` runs `rm -rf x`), and words after a
         // here-document's delimiter: refused.
@@ -639,7 +747,6 @@ impl<'a> Walk<'a> {
             self.refuse(Refusal::Words);
         }
         // zsh expansion flags (`${(e)x}`, `${=x}`, `${~x}`, `${^x}`).
-        let source = self.source(node);
         self.zsh_unsure |= kind == "expansion"
             && ["${(", "${=", "${~", "${^"]
                 .iter()
@@ -714,12 +821,34 @@ impl<'a> Walk<'a> {
         }
         // `set -k` makes later `name=value` arguments assignments, `set -o
         // posix` turns on aliases: only harmless options are read.
+        // The first word after wrappers and their options (`command -p`,
+        // `builtin --`, `time -p`).
+        let mut after_wrapper = false;
         let wrapped = words.iter().position(|word| {
-            !matches!(
+            let wrapper = matches!(
                 word.text.as_str(),
                 "builtin" | "command" | "noglob" | "nocorrect" | "-" | "time"
-            )
+            );
+            let option = after_wrapper && word.text.starts_with('-');
+            after_wrapper |= wrapper;
+            !wrapper && !option
         });
+        // A variable named through an expansion (`export "$v=1"`, `read
+        // "$v"`, `declare -n`) may be one that changes how lines are read.
+        if let Some(at) = wrapped
+            && DECLARING.contains(&words[at].text.as_str())
+            && (!matches!(words[at].text.as_str(), "printf" | "print")
+                || words[at + 1..]
+                    .iter()
+                    .any(|word| word.text.starts_with("-v")))
+            && words[at + 1..].iter().any(|word| {
+                // The name: before `=`, or the whole word.
+                let name = word.text.split('=').next().unwrap_or_default();
+                word.dynamic && (!word.text.contains('=') || name.contains(['$', '\u{1}', '`']))
+            })
+        {
+            self.refuse(Refusal::Reparse);
+        }
         // A name spelled through an expansion behind a wrapper
         // (`command $c -s expand_aliases`).
         if kind == "command" && wrapped.is_some_and(|at| at > 0 && words[at].dynamic) {
@@ -805,7 +934,16 @@ impl<'a> Walk<'a> {
             "simple_expansion" | "expansion" | "arithmetic_expansion" | "translated_string" => {
                 expanded()
             }
-            // Assignments, brace expressions, arrays, regular expressions.
+            // An assignment's name stays readable (`export l=$(m)`).
+            "variable_assignment" => match node.child_by_field_name("name") {
+                Some(name) if source.contains(['$', '`', '(', '{']) => Word {
+                    text: format!("{}={EXPANDED}", self.source(name)),
+                    dynamic: true,
+                    data: false,
+                },
+                _ => unknown(source),
+            },
+            // Brace expressions, arrays, regular expressions.
             _ => unknown(source),
         }
     }
@@ -955,10 +1093,7 @@ fn harmless_set(args: &[Word]) -> bool {
             return false;
         }
         if std::mem::take(&mut option_name) {
-            if !matches!(
-                text,
-                "errexit" | "nounset" | "xtrace" | "verbose" | "pipefail"
-            ) {
+            if !matches!(text, "errexit" | "nounset" | "verbose" | "pipefail") {
                 return false;
             }
             continue;
@@ -969,7 +1104,7 @@ fn harmless_set(args: &[Word]) -> bool {
         let Some(flags) = text.strip_prefix(['-', '+']) else {
             return false;
         };
-        if flags.is_empty() || !flags.chars().all(|flag| "euxvo".contains(flag)) {
+        if flags.is_empty() || !flags.chars().all(|flag| "euvo".contains(flag)) {
             return false;
         }
         option_name = flags.ends_with('o');
