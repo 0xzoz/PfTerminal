@@ -3,7 +3,8 @@
 Every milestone, re-run or parity run builds its own tester packet and freezes it with the run. Packets already frozen
 are not changed. This page lists the owner-approved rules that the **next** packet's builder must put into the
 tester's prompt, and into any amendment that sets waiting rules, before that packet is frozen. Each rule gives the
-exact tester text to use.
+exact tester text to use. The generic [executor prompt](../../code-blind-functional/executor-prompt.md) carries the
+D114 rule as well.
 
 ## Check about every 30 seconds while a long turn runs (D114, 2026-10-21)
 
