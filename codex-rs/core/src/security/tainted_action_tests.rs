@@ -5172,6 +5172,15 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         // Review 5: a folder changed through a variable.
         "D=~; cd \"$D\"; git config -f .zshenv --comment x,--get a.b v",
         "D=$HOME; pushd \"$D\"; git config -f .zshenv --comment x,--get a.b v",
+        // Review 6: a nested script run in a folder changed through a
+        // variable, or a wrapper's folder, does not know its folder.
+        "D=~; cd \"$D\"; sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+        "D=~; pushd \"$D\"; bash -c 'git config -f .zshenv --comment x,--get a.b v'",
+        "D=~; cd \"$D\"; eval \"git config -f .zshenv --comment 'x --get' a.b v\"",
+        "D=~; cd \"$D\"; parallel 'git config -f .zshenv --comment x,--get a.b v' ::: 1",
+        "D=~; env -C \"$D\" sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+        "env -C ~ sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+        "D=~; cd \"$D\"; sh -c 'echo x >> .zshenv'",
     ] {
         assert_eq!(
             script(command),
@@ -5215,6 +5224,9 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         "v=me; git config user.name \"$v\"",
         "eval git config --get core.pager",
         "D=/tmp; cd \"$D\"; git config -f x --get core.pager",
+        "D=/tmp; cd \"$D\"; sh -c 'git config --get core.pager'",
+        "cd /tmp; sh -c 'git config -f x a.b v'",
+        "env -C /tmp sh -c 'git config --get core.pager'",
         "eval \"echo hi\"",
         "v=me; git config --get user.name; echo \"$v\"",
         "cp a{,.bak} && git config --get core.pager",

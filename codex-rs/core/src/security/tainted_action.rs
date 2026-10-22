@@ -527,6 +527,7 @@ impl Classifier {
             ran_unknown: false,
             written: Vec::new(),
             nested_scripts: 0,
+            unknown_folder: 0,
             launched: launched_git::Launch::default(),
             substitution_budget: Budget {
                 left: MAX_SUBSTITUTED_BYTES,
@@ -882,6 +883,9 @@ struct Classifier {
     written: Vec<Option<String>>,
     /// #885: nested shell scripts judged so far.
     nested_scripts: usize,
+    /// #1283: inside a nested script whose folder the quote-aware reading
+    /// cannot know (run after `cd "$d"`, or by `env -C`).
+    unknown_folder: usize,
     /// #1268: inside a script a launcher runs with its input added after
     /// it (`xargs env -S'git config'`) or put into its text (`xargs -I% sh
     /// -c 'git config %'`, where any word may be input).
@@ -1184,7 +1188,7 @@ impl Classifier {
             previous: cwd.to_string(),
             stack: std::rc::Rc::default(),
             unfollowed: false,
-            unchecked: false,
+            unchecked: self.unknown_folder > 0,
         };
         let mut variables: HashMap<String, String> = HashMap::new();
         for (name, value) in [
@@ -1549,7 +1553,9 @@ impl Classifier {
                     work::step();
                     let resolved = self.homes.resolve(candidate, base);
                     self.word_path(&resolved, candidate, depth);
-                    if written && self.homes.is_persistence(&resolved) {
+                    if written
+                        && (self.homes.is_persistence(&resolved) || self.unknown_place(candidate))
+                    {
                         self.note(ProtectedActionKind::Persistence);
                     }
                     if recursive && !folder_value && self.homes.holds_a_home(&resolved) {
@@ -1571,6 +1577,7 @@ impl Classifier {
                 // ~`, `--output-directory ~/`) may be the home's.
                 if self.homes.is_persistence(&resolved)
                     || (file.ends_with('/') && self.homes.holds_a_home(&resolved))
+                    || self.unknown_place(file)
                 {
                     self.note(ProtectedActionKind::Persistence);
                 }
@@ -1742,6 +1749,14 @@ impl Classifier {
         if !shell {
             self.not_shell -= 1;
         }
+    }
+
+    /// #1283: in a folder the classifier cannot know, a file named relative
+    /// to it (`.zshenv`, `../x`, `$d/x`) may be any file.
+    fn unknown_place(&self, word: &str) -> bool {
+        self.unknown_folder > 0
+            && (word.contains("..")
+                || self.homes.resolve(word, "/a") != self.homes.resolve(word, "/b"))
     }
 
     /// Follow `cd`, `pushd` and `popd` (also behind `builtin`/`command`).

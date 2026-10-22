@@ -65,7 +65,8 @@ const PURE_FILTERS: &[&str] = &[
 struct Found {
     /// Scripts that nested shells run, with the folder they run in, and
     /// what a launcher does with its input there (#1268).
-    scripts: Vec<(String, String, launched_git::Launch)>,
+    /// #1283: and whether that folder is unknown.
+    scripts: Vec<(String, String, launched_git::Launch, bool)>,
     /// The line as written holds a brace: a launcher's placeholder (`{}`)
     /// may be in it.
     braces: bool,
@@ -233,9 +234,9 @@ impl Classifier {
         }
         self.written.extend(found.written.iter().cloned());
         let mut judged = HashSet::new();
-        for (script, cwd, launched) in std::mem::take(&mut found.scripts) {
+        for (script, cwd, launched, unknown) in std::mem::take(&mut found.scripts) {
             work::step();
-            if !judged.insert((script.clone(), cwd.clone(), launched)) {
+            if !judged.insert((script.clone(), cwd.clone(), launched, unknown)) {
                 continue;
             }
             self.nested_scripts += 1;
@@ -248,7 +249,9 @@ impl Classifier {
                 fed: outer.fed || launched.fed,
                 replaced: outer.replaced || launched.replaced,
             };
+            self.unknown_folder += usize::from(unknown);
             self.script(&script, &cwd, depth + 1);
+            self.unknown_folder -= usize::from(unknown);
             self.launched = outer;
         }
         for sed in std::mem::take(&mut found.seds) {
@@ -285,6 +288,12 @@ impl Classifier {
                 && let Some((index, name)) = indirect::command_word(&texts)
             {
                 self.change_folder(&name, &texts[index + 1..], folders, &mut HashMap::new());
+                // #1283: `cd "$d"` goes where this reading cannot follow.
+                folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
+                    && texts[index + 1..].iter().any(|text| {
+                        work::step();
+                        self.homes.resolve(text, "").contains(['$', '`'])
+                    });
             }
             let first = texts.first().map(|word| name(word));
             let compound = first
@@ -313,11 +322,22 @@ impl Classifier {
             // scripts of shells it puts input into, wherever the command
             // word is read to be (`xargs --replace sh -c '... {}'`).
             let launches = launched_git::launches(&texts, found.braces, self.launched);
+            // #1283: scripts run in a folder this reading does not follow
+            // (after `cd "$d"`, or a wrapper's: `env -C "$d" sh -c`).
+            let unknown = folders.unchecked
+                || texts.iter().any(|text| {
+                    work::step();
+                    let flag = text.split_once('=').map_or(text.as_str(), |(flag, _)| flag);
+                    super::FOLDER_FLAGS.contains(&flag)
+                });
             for (word, script) in replaced_shell_scripts(&texts, &launches, &mut found.unreadable) {
                 work::step();
-                found
-                    .scripts
-                    .push((script, folders.cwd.clone(), replaced(launches[word])));
+                found.scripts.push((
+                    script,
+                    folders.cwd.clone(),
+                    replaced(launches[word]),
+                    unknown,
+                ));
             }
             let (starts, overflow) = sed::command_starts(&texts);
             found.unreadable |= overflow;
@@ -357,9 +377,12 @@ impl Classifier {
                         roles[word] = Role::Script;
                         // Input words a launcher adds go to the wrapper's
                         // line (`xargs env -S'git config'`).
-                        found
-                            .scripts
-                            .push((script, folders.cwd.clone(), launches[wrapper]));
+                        found.scripts.push((
+                            script,
+                            folders.cwd.clone(),
+                            launches[wrapper],
+                            unknown,
+                        ));
                         runners += 1;
                     }
                     // Too many shell strings in one command: fail closed.
@@ -423,7 +446,9 @@ impl Classifier {
                             fed: true,
                             replaced: launches[end].replaced,
                         };
-                        found.scripts.push((line, folders.cwd.clone(), launch));
+                        found
+                            .scripts
+                            .push((line, folders.cwd.clone(), launch, unknown));
                     }
                 }
                 if resolved_name == "eval" {
@@ -445,9 +470,12 @@ impl Classifier {
                             &mut joined_left,
                             &mut found.unreadable,
                         );
-                        found
-                            .scripts
-                            .push((line, folders.cwd.clone(), replaced(launches[at])));
+                        found.scripts.push((
+                            line,
+                            folders.cwd.clone(),
+                            replaced(launches[at]),
+                            unknown,
+                        ));
                     }
                     continue;
                 }
@@ -471,6 +499,7 @@ impl Classifier {
                                 texts[candidate].clone(),
                                 folders.cwd.clone(),
                                 replaced(launches[at]),
+                                unknown,
                             ));
                         }
                     }
@@ -483,6 +512,7 @@ impl Classifier {
                                 input.text.clone(),
                                 folders.cwd.clone(),
                                 replaced(launches[at]),
+                                unknown,
                             ));
                         }
                     }
@@ -536,7 +566,7 @@ impl Classifier {
                     previous: folders.previous.clone(),
                     stack: folders.stack.clone(),
                     unfollowed: false,
-                    unchecked: false,
+                    unchecked: folders.unchecked,
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;
