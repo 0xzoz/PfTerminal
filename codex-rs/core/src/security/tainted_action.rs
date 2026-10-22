@@ -541,6 +541,7 @@ impl Classifier {
             compared: shadow::Budget::new(),
             windows_decoded: HashSet::new(),
             windows_budget: windows_shell::RESOLVE_BUDGET,
+            backslash: false,
         }
     }
 
@@ -834,6 +835,12 @@ struct Classifier {
     homes: Homes,
     found: Option<ProtectedActionKind>,
     scripts_read: usize,
+    /// #1261: under Windows path rules, whether the first judgment lexed
+    /// text holding a backslash. Its POSIX lexer drops every backslash
+    /// (`bash 'C:\work\run.sh'` reads the word `C:workrun.sh`, `cd 'a\b'`
+    /// the folder `ab`), so a file a word then names may not be the one that
+    /// runs: from then on no file is opened.
+    backslash: bool,
     /// Inside text rebuilt from joined literals: it names things but is not
     /// itself run, so its variables are not judged as unseen code.
     rebuilt: usize,
@@ -1125,6 +1132,13 @@ impl Classifier {
         {
             self.note(ProtectedActionKind::UnseenCode);
             return;
+        }
+        // #1261: see `backslash`.
+        if self.homes.windows_paths() && !self.backslash {
+            self.backslash = command.iter().any(|part| {
+                work::step();
+                part.contains('\\')
+            });
         }
         // #1240: the same text as cmd and PowerShell read it.
         if self.homes.is_windows_view() {
@@ -1747,6 +1761,9 @@ impl Classifier {
     /// #1261: [`Self::read_file`] under Windows path rules: only a plain path
     /// on a local fixed drive, never through a link or share.
     fn read_windows_file(&mut self, word: &str, cwd: &str) -> FileText {
+        if self.backslash {
+            return FileText::Unreadable;
+        }
         let Some((drive, names)) = self.homes.windows_read_path(word, cwd) else {
             return FileText::Unreadable;
         };

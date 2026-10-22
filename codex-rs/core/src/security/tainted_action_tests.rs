@@ -1589,8 +1589,15 @@ fn issue_841_sed_edits_are_not_unseen_code() {
     // The command MOD-06's model ran.
     let mod06 = "sed -i '' '/f.write(\" \".join(sys.argv\\[2:\\]) + \"\\\\n\")/a\\\n\\    elif cmd == \"count\":\\\n\\        count = 0\\\n\\        if NOTES.exists():\\\n\\            count = sum(bool(line.strip()) for line in NOTES.read_text().splitlines())\\\n\\        print(count)\n' src/notes.py\npython3 src/notes.py count";
     let mut wrong = Vec::new();
+    // #1261: on Windows a line holding a backslash opens no file (the
+    // lexer drops backslashes), so the script it runs asks.
+    let mod06_kind = if cfg!(windows) {
+        Some(ProtectedActionKind::UnseenCode)
+    } else {
+        None
+    };
     for (script, expected) in [
-        (mod06, None),
+        (mod06, mod06_kind),
         ("sed -i '' 's/a/b/' src/notes.py", None),
         ("sed -i '' '/x/a\\\nfoo' src/notes.py", None),
         // #885: a substitution saved to a script the line then runs wrote
@@ -3066,7 +3073,14 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
     // `/bin/sh` counts where it is bash or dash (stock macOS and Linux).
     let sh = named(&["/bin/sh", "-c", "git commit -m 'fix(tests)'"]);
     let sh_not_zsh = named_shell::avoids_zsh(&["/bin/sh".into(), "-c".into(), "true".into()]);
-    if sh != (!sh_not_zsh).then_some(UnseenCode) {
+    // #1261: where `/bin/sh` may be zsh (Windows), the bash grammar may
+    // still prove the line plain data.
+    let proven = named_shell::grammar_proves_data(&[
+        "/bin/sh".into(),
+        "-c".into(),
+        "git commit -m 'fix(tests)'".into(),
+    ]);
+    if sh != (!sh_not_zsh && !proven).then_some(UnseenCode) {
         wrong.push(format!("/bin/sh (not zsh: {sh_not_zsh}): {sh:?}"));
     }
     // The same text where zsh may run asks as before: under zsh, through a
@@ -5167,9 +5181,13 @@ fn issue_1261_windows_reads_need_a_proven_local_drive() {
         })
         .expect("a free drive letter for subst");
     let unsubst = Unsubst(letter);
-    let line = format!(r"bash '{letter}:\run.sh'");
+    let line = format!("bash {letter}:/run.sh");
     assert_eq!(kind(&line), Some(UnseenCode), "{line}");
     assert_eq!(windows_reads::take_touched(), vec![format!("{letter}:")]);
+    // The backslash spelling is not looked up at all.
+    let backslashed = format!(r"bash '{letter}:\run.sh'");
+    assert_eq!(kind(&backslashed), Some(UnseenCode), "{backslashed}");
+    assert_eq!(windows_reads::take_touched(), Vec::<String>::new());
     drop(unsubst);
     assert_eq!(kind(&line), Some(UnseenCode), "{line}");
     assert_eq!(windows_reads::take_touched(), vec![format!("{letter}:")]);
@@ -5192,4 +5210,37 @@ fn issue_1261_windows_temp_folder_is_plainly_local() {
         matches!(located, windows_reads::Located::File(_)),
         "{located:?} after {touched:?}"
     );
+}
+
+/// #1261: the first judgment's lexer drops backslashes (`'sub\run.sh'` is
+/// the word `subrun.sh`), so on Windows a line holding one opens no file:
+/// a harmless `subrun.sh` never stands in for the `sub\run.sh` that runs.
+#[cfg(windows)]
+#[test]
+fn issue_1261_windows_backslash_lines_open_no_file() {
+    use ProtectedActionKind::*;
+    let root = tempfile::tempdir().expect("tempdir");
+    let work = root.path();
+    std::fs::create_dir(work.join("sub")).expect("folder");
+    std::fs::write(work.join("sub").join("run.sh"), "corbanu vault list\n").expect("script");
+    std::fs::write(work.join("subrun.sh"), "true\n").expect("decoy");
+    let cwd = work.to_string_lossy().into_owned();
+    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-lc", line]));
+    let _ = windows_reads::take_touched();
+    for line in [
+        r"bash 'sub\run.sh'",
+        r"bash sub\\run.sh",
+        r"cd 'sub\' && bash ../subrun.sh",
+        r"printf 'a\n'; bash subrun.sh",
+    ] {
+        assert_eq!(kind(line), Some(UnseenCode), "{line}");
+        assert_eq!(
+            windows_reads::take_touched(),
+            Vec::<String>::new(),
+            "{line}"
+        );
+    }
+    // Without a backslash the same files are read.
+    assert_eq!(kind("bash sub/run.sh"), Some(Vault));
+    assert_eq!(kind("bash subrun.sh"), None);
 }
