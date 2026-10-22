@@ -76,14 +76,20 @@ impl Values<'_> {
                 .user_home
                 .map(|home| format!("{home}\\AppData\\Roaming")),
             "LOCALAPPDATA" => self.user_home.map(|home| format!("{home}\\AppData\\Local")),
+            // #1261 (D168): PowerShell's `$PROFILE` (Windows PowerShell's
+            // spelling; PowerShell 7's is in a folder protected alike).
+            "PROFILE" => self.user_home.map(|home| {
+                format!("{home}\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1")
+            }),
             _ => None,
         }
     }
 }
 
 /// The text with PowerShell spellings of the home variables rewritten as
-/// cmd's (`$env:USERPROFILE`, `${env:HOME}`, `$($env:X)`, `$HOME`, `$PWD`
-/// become `%USERPROFILE%`, `%HOME%`, `%X%`, `%HOME%`, `%PWD%`), in any letter
+/// cmd's (`$env:USERPROFILE`, `${env:HOME}`, `$($env:X)`, `$HOME`, `$PWD`,
+/// `$PROFILE` become `%USERPROFILE%`, `%HOME%`, `%X%`, `%HOME%`, `%PWD%`,
+/// `%PROFILE%`), in any letter
 /// case. Other text is kept. Linear: each `$` reads at most a name's length.
 pub(super) fn cmd_spellings(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
@@ -154,7 +160,7 @@ fn variable_at(chars: &[char], at: usize) -> Option<(String, usize)> {
     let known = if env {
         HOME_VARIABLES.contains(&name.as_str())
     } else {
-        matches!(name.as_str(), "HOME" | "PWD")
+        matches!(name.as_str(), "HOME" | "PWD" | "PROFILE")
     };
     known.then_some((name, index))
 }
