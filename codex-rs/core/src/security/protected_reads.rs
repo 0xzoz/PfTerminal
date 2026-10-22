@@ -1480,6 +1480,7 @@ fn expand(
                 codex_home: &codex_home,
                 user_home: user_home.as_deref(),
                 cwd: &cwd.to_string_lossy(),
+                places: false,
             },
         );
     }
