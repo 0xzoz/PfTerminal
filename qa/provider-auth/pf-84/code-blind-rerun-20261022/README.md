@@ -11,7 +11,7 @@ VMs, GLM 5.3 Flash testers on Z.AI that see only the packet, and integrator chec
 | --- | --- | --- | --- | --- | --- |
 | D136 | owner item: account removed while a session runs on it (D171) | S1 | passed | **passed** | See [D136](#d136). No `odefault` request (no `api.openai.com` request at all). No new ChatGPT connection opened from step 4 to `/quit`; the advisory no-traffic check stays inconclusive (two connections from before the removal stayed open). `auth.json` and `config.toml` unchanged. |
 | NA-05 | AC3/AC4 in-app `/resume` (D172 (a)) | S2 | passed | **passed** | `rone`→`zpersonal` 09:05:37Z, `rtwo`→`zpersonal` 09:06:26Z. Nothing carried `zenv` or `zwork` in the case, and nothing was keyless. The `<gid>` file records `gzero` and `gaone` on `work`, and `rtwo` on `personal`. |
-| NA-06 | AC1 rows, add, rename (D174) | S3R | passed | **passed** | `nren`→`zadded` 09:38:35Z; no Z.AI request at `nold` (only a refused `chatgpt.com` connection attempt at 09:38:44Z, which every product start makes). S3 is not counted (tester error, below). |
+| NA-06 | AC1 rows, add, rename (D174) | S3R | passed | **passed** | `nren`→`zadded` 09:38:35Z; no Z.AI request at `nold` (only a refused `chatgpt.com` connection attempt at 09:38:44Z, when that `exec` started; TUI and `exec` starts make such attempts, the `account list` start at 09:38:17Z did not). S3 is not counted (tester error, below). |
 
 Set-up cases in S2 ran with their amendment-v2 text and also passed, matching the first run's R2:
 - **PR-01:** relay `pzero` `zwork`, `pone` `zpersonal`, the re-anchor `zwork`, `ptwo` `zwork`, `pthree` `zpersonal`, `pfour` `zenv`. The file records `work, personal, work, work`. `[observe]` (v2-Q1), as in the first run: the no-flag `resume <id>` right after the `personal` turn opened on `personal` (pq), the conversation's most recent account, which D173 now documents.
@@ -74,12 +74,12 @@ The same harness as the first run's last version (v4: `--stdin`, `C-c` keeps the
 
 Other facts of the run:
 
-- **One VM at a time:** each group ran in one Tart clone of `corbanu-qa-base`, with `workers-20261002/vm-tart.lock` held. Every clone has the same name, `pf84-rerun-d136` (fixed in `tart-run.sh`), so each `clone-vm-state-end.txt` says "deleted pf84-rerun-d136"; S2, S3 and S3R were still fresh clones (`up` clones the base each time). Times below are from the driver log, [harness/seq.log](harness/seq.log), and the clones' `vm-*` files.
-  - The lock was taken at 08:15Z.
+- **One VM at a time:** each group ran in one Tart clone of `corbanu-qa-base`, with `workers-20261002/vm-tart.lock` held. Every clone has the same name, `pf84-rerun-d136` (fixed in `tart-run.sh`), so each `clone-vm-state-end.txt` says "deleted pf84-rerun-d136"; S2, S3 and S3R were still fresh clones (`up` clones the base each time). Times below are from the driver log [harness/seq.log](harness/seq.log) and the D136 clone's [clone-vm-start.txt](runs/S1/clone-vm-start.txt), [clone-vm-pause.txt](runs/S1/clone-vm-pause.txt) and [clone-vm-resume.txt](runs/S1/clone-vm-resume.txt), except where marked.
+  - The lock was taken at 08:15:58Z (from the lock file's own content, not archived: the file is deleted when it is released) and rewritten by `up` at 08:18:17Z.
   - The D136 clone was kept, stopped, from 08:25 to 08:35Z. The lock stayed held and no other VM ran.
   - S2, S3 and S3R each got a fresh clone.
   - Every clone was deleted at the end, and the lock was released at 09:41Z.
-- **Memory:** the recorded files show 42–44 % free (`runs/*/memory-*.txt`); the lowest host check during the run, while the build ran next to the VM, was 38 %.
+- **Memory:** the recorded files show 42–44 % free (`runs/*/memory-*.txt`); the lowest host check during the run, while the build ran next to the VM, was 38 % (an unarchived `memory_pressure` reading at 08:23Z).
 - **No real key in any guest:** a host relay added the Z.AI key (vault label `zai_key_3`, fetched at relay start, never printed).
 - **ChatGPT traffic:** a blind pass-through carried the ChatGPT traffic (`chatgpt.com:443`, `auth.openai.com:443`), and only for the D136 VM. The test account's tokens existed only inside that guest.
 - **Sign-in (D181):**
@@ -113,7 +113,7 @@ Window A started on `t1` at 08:42:57Z with the case build. That was about 18 min
   - `chatgpt.com` traffic at `beforeone` (08:43:09–12Z).
   - `[advisory]` no-use window, from step 4 (08:43:50Z) to `/quit` (08:48:31Z): **outcome inconclusive.** Every ChatGPT connection, with its open time, duration and byte totals, is in [runs/S1/passthrough-connections.txt](runs/S1/passthrough-connections.txt).
     - No new connection to `chatgpt.com` or `auth.openai.com` opened in the window.
-    - The last ones opened at 08:43:32.86–.92Z: six short `chatgpt.com` connections, closed by 08:43:33Z, while the `account remove` command (08:43:31–33Z) was still running. Their sizes match the short connections every product start opens (as at 08:42:57–59Z). Which process opened them is not visible.
+    - The last ones opened at 08:43:32.86–.92Z, about 1.5 s after the removal began: six short `chatgpt.com` connections, closed by 08:43:33Z, while the `account remove` command (08:43:31–33Z) was still running. The burst looks like both the TUI's start-up burst (08:42:57–59Z) and the running TUI's own later burst (08:43:23–27Z), so it may have come from the remove command or from the running session; which process opened it is not visible. They are not in the no-use window, and their sizes (1.7–7.2 KB up, 3.9–6.5 KB down) are those of the short requests, not of a model request such as the long connections carry.
     - Two connections opened before `beforeone` stayed open through the window. One opened at 08:42:58Z and closed at 08:45:59Z, after 180 s: 15,180 bytes up and 142,658 down in total. The other opened at 08:43:00Z and closed at `/quit`: 44,883 bytes up and 59,784 down in total.
     - The short connections opened during `beforeone` (08:43:09–12Z) carried 1.7–5.5 KB up and 4.5–6.1 KB down each. The two long connections' totals are larger, so they cannot be split into before and after the removal.
     - So the record cannot show that nothing crossed them after the removal. The tester-visible evidence stays the blocker evidence: no reply, and a refusal that says the account has no sign-in. That suggests, but does not prove, that the product refused before sending.
