@@ -38,7 +38,8 @@ hence the new <b>MERGE GUARD RULE</b> (section 3). #1161 still has changes reque
 <b>D139 parity</b> (utm-par3, #1265): MOD-21 and MOD-22 behaved identically on UTM “macOS 3” and Tart in three attempts each, so the frozen rule says <b>switch milestone runs to
 Tart</b>; Travis's confirmation is <b>D161</b> (with D162–D165). #1175 was confirmed in all six MOD-21 attempts (D164). MOD-11 is still blocked by model declines (D165).</li>
 <li><b>PF-84 named accounts:</b> #1250 merged; draft <b>#1080</b> is refreshed and green (head <code>016d47e6de</code>). The <b>code-blind run is in progress</b> (pf84-cb1, D137, with mid-session account
-removal, D136) on Tart clones, using the separately signed <code>corbanu.31b9f3ca</code> (section 7). After it: Travis's Windows gate (#694) and his sign-off, then #1080 merges.</li>
+removal, D136) on Tart clones, using the separately signed <code>corbanu.31b9f3ca</code> (section 7). Interim notes show two failures to watch: D136 (a removed account's
+sign-in kept working in the running session) and NA-05 (an in-app <code>/resume</code> silently switched account; being re-checked) (section 8.2). After it: Travis's Windows gate (#694) and his sign-off, then #1080 merges.</li>
 <li><b>CI:</b> a <b>main red→green episode</b>: from #1262's merge (21:48Z), 7 of the next 11 postmerge runs failed on <code>d153_checks_are_linear</code>'s 60 s timeout in a Linux test shard
 (it passed in the other four). ci-lin2's <b>#1274</b> (00:20Z) fixed it (a glob fast path; the test went from 35 s to 5 s), and main has been green since; #1278's run is in progress. #1257's
 red run was infrastructure (curl exit 35). The 10-21 scheduled nightly failed too, the seventh in a row (#636).</li>
@@ -56,7 +57,6 @@ waiting on him until he answers</b>. He usually answers “all as recommended”
 <b>Overnight rule:</b> 01:30–09:30 Pacific Travis is unavailable. Only launch work that needs no decision from him, and queue the decisions, with recommendations, for
 the morning. In October that is 08:30Z–16:30Z. At this update (01:30Z) the next window starts at 08:30Z; on 10-21 Travis answered at 17:33Z and 22:18Z, so keep queuing
 decisions and take answers whenever they come.</div>
-
 
 <div class="warn"><b>Three-day stop: <code>claude-plan</code> 429 (2026-10-16 13:55Z → 2026-10-19 18:30Z).</b>
 <ul>
@@ -416,8 +416,9 @@ variable, so the head check was silently off. The coordinator verified afterward
 <li><b>REVIEWER LAUNCH RULE</b> (14:00Z; section above): briefs since then name it explicitly (pf84-cb1, sec-1268, sec-1275). Foreground reviewer runs only; a run with no <code>VERDICT</code>
 line doesn't count as a round.</li>
 <li><b>Standing contributor-merge authority (D152, Travis 10-21 17:33Z).</b> The coordinator, or a contributor worker it briefs, may review and merge an outside contributor's PR when an
-independent Opus 5.5 High review approves its exact head, every check is green, nothing under <code>.github/</code> changes, and the PR changes nothing about security (classifier,
-sandbox, approvals, credentials), Permissive behaviour, licensing or CI policy. Limits:
+independent review approves it, every check is green, and the PR changes nothing about security, Permissive behaviour, licensing or CI policy (Travis's terms). In practice
+contrib-3 and contrib-watch2 also required an Opus 5.5 High review of the exact head and no change under <code>.github/</code> (as D119 does for fork CI), and read “security” as the
+classifier, sandbox, approvals and credentials. Limits:
 <ul>
 <li>CI-policy changes still go to Travis (#1222 is D159). Security changes still get a security review, one at a time (D121; #1100 and #951 merged on round-2 security APPROVEs, #1161
 is D158, #1215 and #1246 are D160).</li>
@@ -426,7 +427,8 @@ is D158, #1215 and #1246 are D160).</li>
 </ul>
 Merged under it so far: #1203, #1221, #1224, #1225, #1226, #1227, #991, #1210, #1258 and #1259.</li>
 <li><b>Finish with credit (D146, D151; Travis 17:33Z).</b> When a contributor stays quiet for about a week after a change request, a maintainer PR finishes the work, crediting the author.
-contrib-3 recorded the check date as <b>around 2026-10-28</b> for #1161 (D158 first), #998 (still a draft without main merged) and #1029; #979 is due around 10-27 (D83). #1100 and #951
+contrib-3 (for #1161, #1100, #998 and #951) and contrib-watch2 (for #998 and #1029) recorded the check date as <b>around 2026-10-28</b>. Still due then: #1161 (D158 first), #998 (still a
+draft without main merged) and #1029; #979 is due around 10-27 (D83). #1100 and #951
 were merged on their round-2 security approvals before that date. Record the dates; post nothing early.</li>
 <li><b>Sign-in relay</b> (section above), as used for D136: pf84-cb1 wrote its device code to <code>$W/pf84-cb1.signin.md</code> at about 22:14Z, the coordinator relayed it, and
 Travis approved it with the test account the same minute (<code>todo.md</code> 22:18Z). Keep the 20-minute flag in the round; never copy codes anywhere.</li>
@@ -435,7 +437,8 @@ Travis approved it with the test account the same minute (<code>todo.md</code> 2
 <li>sec-1240 (#1249), grant 21:43Z: round 6 for round 5's three blockers and its listed non-blocking items, plus a spare round 7 only for a regression from those fixes. Bar:
 (a) anything looser than main on any OS; (b) a correctness bug (panic, filesystem access from the Windows view, non-linear work, budget not charged); (c) a regression from the fixes.
 New same-class Windows spellings go to #1240 as follow-ups. grant2 (22:54Z, final): round 8 on <code>f11b88f6d3</code> only. grant3 (23:12Z): round 8 also covers the main merge
-(<code>69b5bf1f3a..bbc31bf4d8</code>); merge only after ci-lin2's fix. Merged 23:53Z on round 8's APPROVE.</li>
+(<code>69b5bf1f3a..bbc31bf4d8</code>); merge only after ci-lin2's fix. #1249 merged 23:53Z on round 8's APPROVE, but before #1274 (00:19Z), against grant3; its postmerge run
+was red on the d153 timeout, and the coordinator judged the early merge harmless (<code>todo.md</code> 00:00Z).</li>
 <li>sec-1268 (#1273), grant 10-22 01:25Z: round 6 on <code>75a621fdbd</code>. Bar: anything looser than main, a correctness bug (non-linear work included), or an end-to-end bypass of the
 round-5 fix. New same-class launcher spellings go to #1276 and don't block. Merge main first if needed.</li>
 </ul>
@@ -618,7 +621,7 @@ for his own use. Ask before any Windows work (#554 Windows home-listing denial n
 holds the 27.6 GB base <code>corbanu-qa-base</code>; Travis asked for nothing on the internal disk. A cycle takes ~31 s, against ~6–10 min on UTM, and SSH is ready ~12 s after
 start. No shared folder is needed, so FASTDRIVE2 doesn't matter for Tart. Runs so far: tart-eval (#930), acc-tart1 (#1046), qwen-1052 (#1078, with throwaway clones for the screens), <code>tart-par1</code> (#1149: the full Moderate
 milestone on Tart, 34 clones, build <code>8c73c8ea80</code>; 25 of 34 matched UTM, and no difference traces back to Tart) , <code>qwen-rerun2</code> (#1191) and utm-par2's D94/D95 re-runs (#1213). Per D93, five cases
-(MOD-11/21/22/26/29) ran once on UTM “macOS 3” with tart-par1's build (#1213): MOD-11 and MOD-26 matched, MOD-29 matched Tart's replay, and MOD-21 and MOD-22 differed with the cause unclear. By the frozen rule milestone runs don't switch yet; D139 (Tart) then ran three attempts each of MOD-21 and MOD-22 on both machines with build <code>9750861c2a</code> (utm-par3, #1265): identical outcomes, so by the frozen rule milestone runs switch to Tart, pending Travis's D161. Since 10-21 ~20:00Z pf84-cb1 runs the PF-84 code-blind run on fresh Tart clones of <code>corbanu-qa-base</code>, one at a time, under <code>$W/vm-tart.lock</code> (taken per group; at 01:14:29Z for group R1).
+(MOD-11/21/22/26/29) ran once on UTM “macOS 3” with tart-par1's build (#1213): MOD-11 and MOD-26 matched, MOD-29 matched Tart's replay, and MOD-21 and MOD-22 differed with the cause unclear. By the frozen rule milestone runs don't switch yet; D139 (Tart) then ran three attempts each of MOD-21 and MOD-22 on both machines with build <code>9750861c2a</code> (utm-par3, #1265): identical outcomes, so by the frozen rule milestone runs switch to Tart, pending Travis's D161. Since 10-21 ~20:00Z pf84-cb1 runs the PF-84 code-blind run on fresh Tart clones of <code>corbanu-qa-base</code>, one at a time, under <code>$W/vm-tart.lock</code> (retaken per group; at 01:46:47Z for group R3).
 Future parity runs use the same build on both machines (D97; <code>qa/security-levels/milestones/vm-parity-method.md</code>).</li>
 <li><b>UTM “macOS 3”</b> was last used by utm-par3 (10-21, the D139 runs; restored, checked at its starting state and stopped; “macOS 2” untouched; every Tart clone deleted). <code>$W/vm-macos3.lock</code> is free. Next step for it depends on D161/D162.</li>
 <li><b>Local model:</b> Travis's mlx-serve on the Mac (<code>127.0.0.1:11235</code>) serves the model for refusal-blocked cases (section 3), the standard harness for those cases
@@ -1237,7 +1240,8 @@ model, but no task went through Spawn status (D140). Travis answered D139 (Tart)
 <li>Testers get <code>tester-packet-rules.md</code> (check the screen about every 30 s while a turn runs, D114), also added to <code>qa/code-blind-functional/executor-prompt.md</code>.</li>
 <li><b>Moderate reel</b> (reel-mod, #1204): 9:02, nine chapters, recorded on the signed build <code>2f9d05c51e</code> in throwaway profiles with fake credentials; on the
 <code>demos</code> release (<code>moderate-reel-2026-10-21.mp4</code> with <code>.srt</code>) and at <code>https://corbanu-moderate-reel.cloudflare-share.workers.dev/</code> (unindexed;
-video in a private bucket). The narrator-voice question (D139 (reel)) fell inside Travis's 17:33Z “D124–D153 all as recommended” (section 9).</li>
+video in a private bucket). The narrator-voice question (D139 (reel)) was covered by Travis's 17:33Z “D124–D153 all as recommended”, whose recommended path is that he listens and decides; no
+listening note is recorded, and <code>todo.md</code> notes he approved the same voice and its terms for the earlier reels on 10-09 (section 9).</li>
 </ul></li>
 <li><b>Since #1231 (10-21/22): D139–D141</b> (utm-par3, #1265; <code>moderate-vm-parity3-20261021/</code>, <code>moderate-amendment-v9-20261021/</code>), on build <code>9750861c2a</code>
 on both machines, by a comparison rule frozen before either VM started:
@@ -1387,7 +1391,18 @@ sign-in summary on the UI thread) is D155 (a), after the flag removal.</li>
 <code>31b9f3cad8</code>, with #1192 and #1250), copied privately into each guest; the installed binary is not used. A frozen code-blind design (designer plus a separate reviewer) covers the
 PF-84 acceptance criteria, the partial #555 legs, #426's two remaining legs, mid-session account removal with the free test account (D136) and the D86/D124/D125 <code>/status</code>
 behaviour; GLM 5.3 Flash testers on Z.AI drive the TUI. Fresh Tart clone per group, one at a time; throwaway credentials only, the test account signed out and its credentials deleted
-before a clone is. At 01:16Z its sequence log showed groups G6R and G8R done and group R1 running. Its record goes to <code>qa/provider-auth/pf-84/</code> in a docs PR with an independent
+before a clone is. Its sequence log shows the main groups G1–G9 done at 00:46Z, the replays G6R and G8R at 01:14Z, and the amendment-v2 groups R1–R4 under way (R3 from
+01:46Z). <b>Interim, from its integrator notes</b> (verdicts are final only in its record):
+<ul>
+<li><b>D136</b> (G9): the tester's check failed: after the account was removed mid-session, the session kept answering on <code>t1</code>'s in-memory sign-in. There was no fallback to the
+default login, and nothing was left in the vault.</li>
+<li><b>NA-05</b> (R2): an in-app <code>/resume</code> of a conversation whose account was removed resumed it on the current account without a message, while the CLI path refuses (GH-02
+passed). pf84-cb1 is re-checking it against the documented rule that an explicit <code>--account</code> wins, since that session was started with one.</li>
+<li>Possible defect (G3): pasting a name and pressing Enter in the same second in the add-account name field left the field open, so the key typed next appeared in it in clear.</li>
+<li>Design premises corrected by amendment v2: the product refuses a typed key (pipe it in), and <code>/providers</code> shows 8 of 18 rows with no scroll hint (an advisory UX defect).
+With v2, NA-01 and NA-04 passed in R1 and PR-01 and GH-02 in R2.</li>
+</ul>
+Its record goes to <code>qa/provider-auth/pf-84/</code> in a docs PR with an independent
 review (budget 5).</li>
 </ul>
 <b>Before #1080 can merge:</b> pf84-cb1's record; Travis's Windows gate (#694); his sign-off. #979 (D83) merges with credit around 10-27 if still a draft.</div>
@@ -1412,6 +1427,9 @@ Linux-sandbox PRs: #1100 (cap placeholder removals per sweep) got a change reque
 (D151); #1116 (distinct process-root mount views) is approved as strictly more conservative than main, with a real-kernel check, and waits for its author to mark it ready (D150).
 Two low-risk #1056 follow-ups (a non-blocking <code>statx</code> in #1116's root check; record a process as seen only after its mount list is read) were posted on #1056 by
 contrib-sec3 (14:00Z). bradsbots' #1225 (pipe handshake in the forked-child lock tests, #928) is open. Still open: #991 and #1005 (authors to merge main, D133), #1056, #732.</p>
+<p><b>Since #1231:</b> merged #1225, #991 and #1005 (bradsbots; #1005 chosen over #1232 by D154), #1227 (citadelculture, Windows lock coverage) and #1260 (small-fix12: lock-test
+children exit with the test process, #1252); Linux sandbox #1238 (sbx-1056), #1116 (D150) and #1100 (security round 2). #918 and #1003 are closed. Open: #1271 and #1277 (duplicate
+#1003 test moves), #1272 (#928 follow-up), draft #1246 (<code>statx</code>, D160), #1056, #928, #732.</p>
 <div><b>Drive-access outages (#616), 10-15/16</b> — timeline and evidence in the box at the top. Travis's decision 8 (21:07Z) gave two parts:
 <ul>
 <li><b>Worker infrastructure</b> on the internal disk with a watchdog (section 3).</li>
@@ -1873,14 +1891,15 @@ Permissive behaviour, licensing or CI policy (section 3).</td><td><code>todo.md<
 <p>Running at 2026-10-22 01:30 UTC (2026-10-21 18:30 America/Phoenix), as tmux sessions on <code>$HOME/.corbanu-workers/tmux.sock</code>. Check with
 <code>$HOME/.corbanu-workers/mon.sh pf84-cb1 sec-1268 sec-1275</code>. Session <code>watchdog</code> runs <code>watchdog.sh</code> (its last relaunch was sec-891 at 10-16
 14:01:51Z, during the 429 stop). The stray session <code>f905</code> (an idle bash left from flake-905 on 10-16) can still be killed once confirmed idle. <code>$W/vm-macos3.lock</code>
-is free; <code>$W/vm-tart.lock</code> is held by pf84-cb1 (taken 01:14:29Z for group R1). No <code>$W/*.hold.md</code> exists. <b>4 sessions against the 6 cap</b> (3 once this update
+is free; <code>$W/vm-tart.lock</code> is held by pf84-cb1 (retaken per group; 01:46:47Z for group R3). No <code>$W/*.hold.md</code> exists. <b>4 sessions against the 6 cap</b> (3 once this update
 finishes). Launch times are from <code>todo.md</code> or, where it has no launch line, the tmux session's creation time.</p>
 <div><b>Request files:</b> none waiting. The newest are sec-1268's (granted 01:25Z) and sec-1240's two (granted 21:43Z, 22:54Z and 23:12Z); section 3 lists them.
 <b>Sign-in files:</b> <code>pf84-cb1.signin.md</code> (attempt 1, written about 22:14Z) was relayed and approved at once; watch it for a new attempt while pf84-cb1 runs.</div>
 <table><tr><th>Worker</th><th>Started (UTC)</th><th>What it is doing</th><th>Open work / watch for</th></tr>
 <tr><td>pf84-cb1</td><td>10-21 20:01</td><td>The PF-84 isolated code-blind acceptance run (D137, with D136's mid-session removal), flag on, on Tart clones with <code>corbanu.31b9f3ca</code> (section 8.2).
 GLM 5.3 Flash testers; fresh clone per group; pauses if free memory drops below 25%.</td>
-<td>At 01:16Z group R1 (re-runs) was running after G6R and G8R. It may write a new <code>pf84-cb1.signin.md</code>: relay it at once. Then a docs PR under
+<td>Main groups G1–G9 finished at 00:46Z and the replays G6R/G8R at 01:14Z; the amendment-v2 groups R1–R4 run now (R3 from 01:46Z). Interim results, including the D136 and NA-05
+failures, are in section 8.2. It may write a new <code>pf84-cb1.signin.md</code>: relay it at once. Then a docs PR under
 <code>qa/provider-auth/pf-84/</code> with an independent review (budget 5).</td></tr>
 <tr><td>sec-1268</td><td>10-21 ~22:45 (tmux)</td><td>#1268, decision-free: git run by launchers with arguments from input (<code>xargs</code>, <code>find -exec</code>, <code>parallel</code>, <code>env -S</code>, wrappers)
 goes through the git checks, failing closed where arguments come from input; and #1269 (<code>git config -f&lt;value&gt;</code> misread as the editor). Only adds prompts.</td>
@@ -1920,8 +1939,8 @@ Worktrees still on disk for merged work (check, then remove): <code>worktrees/se
 <li>Reviewed, waiting on the author: #1161 (round 4 changes requested; pushed 00:30Z; D158), #998 (approved, needs main merged; D118, D146/D151), #1029 (D130), #139 (D132), #161 and
 #252 (D133), #141 and #135 (retarget to main asked).</li>
 <li>Waiting on Travis: #1222 (bradsbots, CI rules, D159); #1215 and draft #1246 (citadelculture, security review, D160).</li>
-<li>New since #1231, not yet assessed: citadelculture's draft <b>#1270</b> (#1266; small-fix14's review APPROVE, green; merge under D152 when its author marks it ready);
-bradsbots' <b>#1271</b> and llmontgo's <b>#1277</b> (a new contributor), which both move the <code>lookup_batch</code> lock-release test into <code>lock_lifetime_tests</code> as #1005's merge comment and
+<li>Reviewed, waiting on the author to mark it ready: citadelculture's draft <b>#1270</b> (#1266; small-fix14's review APPROVE, green; merge under D152 then).</li>
+<li>New since #1231, not yet assessed: bradsbots' <b>#1271</b> and llmontgo's <b>#1277</b> (a new contributor), which both move the <code>lookup_batch</code> lock-release test into <code>lock_lifetime_tests</code> as #1005's merge comment and
 #1232's close comment invited, so they duplicate each other (compare side by side as for D154); bradsbots' <b>#1272</b> (#928 follow-up to #991: the startup-lock child exits with the test process).</li>
 <li>D121 queue: #1055, #1147 and #1152 wait on #932; #1166 waits on the <code>orchestrator.rs</code> hold. #979 is D83 (merge with credit around 10-27 if still a draft). Other citadelculture
 drafts: #1073, #1063, #995, #994, #990 and #983.</li>
@@ -1993,7 +2012,8 @@ with credit to both.</li>
 <li><b>#1270</b> (#1266): merge under D152 once its author marks it ready (small-fix14: correct; its TUI test guards the picker but doesn't prove the fix). An optional follow-up applies the
 general rule to the retired Kimi K2.7 Code model.</li>
 <li><b>#1280</b> (0xzoz, Task Node evidence submission): triage under the CONTRIBUTOR-FIRST RULE.</li>
-<li>pf84-cb1's results, then #1080's last gates (Windows gate #694, sign-off).</li>
+<li>pf84-cb1's results, then #1080's last gates (Windows gate #694, sign-off). Its interim D136 and NA-05 failures (section 8.2) will probably need a fix or an owner decision
+before the flag removal.</li>
 <li>flake-5's old question about #1201 is moot: #1229 closed the issue by keyword, and flake-6's plan is to watch about 120 clean Windows jobs and reopen it on a recurrence.</li>
 </ul></div>
 <div>Carried, still unanswered (low priority):
@@ -2063,6 +2083,7 @@ DeepSeek 2027 dates before 12-01).</li>
 <li><b>PF-13-S07:</b> re-run the Linux canary harness on the current candidate (glitch), then archive the sprint (its Aggressive-sign-off condition is met).</li>
 <li>Carried items (section 11).</li>
 </ol>
+
 <h2>13. Files</h2>
 <ul>
 <li>Wave-2 briefs, logs and result files (not archived in the repo): since 10-15 21:10Z <code>$HOME/.corbanu-workers/&lt;name&gt;.brief.md|.log|.result.md</code>
