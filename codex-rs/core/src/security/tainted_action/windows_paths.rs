@@ -33,7 +33,7 @@ pub(super) const HOME_VARIABLES: &[&str] = &[
     "SYSTEMDRIVE",
     "APPDATA",
     "LOCALAPPDATA",
-    // #1261 (D168): folders that hold machine-wide sign-in places.
+    // #1261 (D168): see `PLACE_VARIABLES`.
     "PROGRAMDATA",
     "ALLUSERSPROFILE",
     "WINDIR",
@@ -42,16 +42,22 @@ pub(super) const HOME_VARIABLES: &[&str] = &[
     "PROGRAMW6432",
     "PROGRAMFILES(X86)",
 ];
-/// #1261 (D168): PowerShell's own variables for places that run code at
-/// start-up, as the home variables spell them (`$PROFILE` is Windows
-/// PowerShell's; PowerShell 7's profile and `$PSHOME` are in places
-/// protected alike). cmd has no such variables: `%PROFILE%` stays unknown.
-const POWERSHELL_PLACES: &[(&str, &str)] = &[
-    (
-        "PROFILE",
-        r"%USERPROFILE%\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1",
-    ),
-    ("PSHOME", r"%SYSTEMROOT%\System32\WindowsPowerShell\v1.0"),
+/// #1261 (D168): variables naming places that run code at start-up, whose
+/// values are only usual ones (PowerShell 7's `$PSHOME`, a OneDrive
+/// `Documents` differ): expanded only when [`Values::places`] is set, as an
+/// extra reading of a word besides the one that keeps them unknown. Their
+/// PowerShell spellings (`$env:ProgramData`, `$PROFILE`, `$PSHOME`) are
+/// rewritten as cmd's like the home variables'.
+pub(super) const PLACE_VARIABLES: &[&str] = &[
+    "PROGRAMDATA",
+    "ALLUSERSPROFILE",
+    "WINDIR",
+    "SYSTEMROOT",
+    "PROGRAMFILES",
+    "PROGRAMW6432",
+    "PROGRAMFILES(X86)",
+    "PROFILE",
+    "PSHOME",
 ];
 /// Longest variable name read in a spelling; past it the text is left alone.
 const MAX_NAME: usize = 64;
@@ -61,6 +67,8 @@ pub(super) struct Values<'a> {
     pub(super) codex_home: &'a str,
     pub(super) user_home: Option<&'a str>,
     pub(super) cwd: &'a str,
+    /// #1261: also expand [`PLACE_VARIABLES`].
+    pub(super) places: bool,
 }
 
 impl Values<'_> {
@@ -101,12 +109,18 @@ impl Values<'_> {
                 .user_home
                 .map(|home| format!("{home}\\AppData\\Roaming")),
             "LOCALAPPDATA" => self.user_home.map(|home| format!("{home}\\AppData\\Local")),
-            // #1261 (D168): machine-wide folders, on the system drive (the
-            // home's, as for `SYSTEMDRIVE`).
-            "PROGRAMDATA" | "ALLUSERSPROFILE" => self.system_folder("ProgramData"),
-            "WINDIR" | "SYSTEMROOT" => self.system_folder("Windows"),
-            "PROGRAMFILES" | "PROGRAMW6432" => self.system_folder("Program Files"),
-            "PROGRAMFILES(X86)" => self.system_folder("Program Files (x86)"),
+            // #1261 (D168): their usual places; machine-wide ones on the
+            // system drive (the home's, as for `SYSTEMDRIVE`).
+            "PROGRAMDATA" | "ALLUSERSPROFILE" if self.places => self.system_folder("ProgramData"),
+            "WINDIR" | "SYSTEMROOT" if self.places => self.system_folder("Windows"),
+            "PROGRAMFILES" | "PROGRAMW6432" if self.places => self.system_folder("Program Files"),
+            "PROGRAMFILES(X86)" if self.places => self.system_folder("Program Files (x86)"),
+            "PSHOME" if self.places => {
+                self.system_folder(r"Windows\System32\WindowsPowerShell\v1.0")
+            }
+            "PROFILE" if self.places => self.user_home.map(|home| {
+                format!(r"{home}\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1")
+            }),
             _ => None,
         }
     }
@@ -114,10 +128,9 @@ impl Values<'_> {
 
 /// The text with PowerShell spellings of the home variables rewritten as
 /// cmd's (`$env:USERPROFILE`, `${env:HOME}`, `$($env:X)`, `$HOME`, `$PWD`
-/// become `%USERPROFILE%`, `%HOME%`, `%X%`, `%HOME%`, `%PWD%`; #1261:
-/// `$PROFILE` and `$PSHOME` become their places, see [`POWERSHELL_PLACES`]),
-/// in any letter case. Other text is kept. Linear: each `$` reads at most a
-/// name's length.
+/// become `%USERPROFILE%`, `%HOME%`, `%X%`, `%HOME%`, `%PWD%`; #1261: also
+/// `$PROFILE` and `$PSHOME`), in any letter case. Other text is kept.
+/// Linear: each `$` reads at most a name's length.
 pub(super) fn cmd_spellings(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -130,12 +143,12 @@ pub(super) fn cmd_spellings(text: &str) -> String {
                 && let Some((name, end)) = variable_at(&chars, at + 2)
                 && chars.get(end) == Some(&')')
             {
-                out.push_str(&spelled(&name));
+                out.push_str(&format!("%{name}%"));
                 at = end + 1;
                 continue;
             }
             if let Some((name, end)) = variable_at(&chars, at) {
-                out.push_str(&spelled(&name));
+                out.push_str(&format!("%{name}%"));
                 at = end;
                 continue;
             }
@@ -146,12 +159,16 @@ pub(super) fn cmd_spellings(text: &str) -> String {
     out
 }
 
-/// How [`cmd_spellings`] spells the PowerShell variable `name`.
-fn spelled(name: &str) -> String {
-    POWERSHELL_PLACES
-        .iter()
-        .find(|(place, _)| *place == name)
-        .map_or_else(|| format!("%{name}%"), |(_, value)| (*value).to_string())
+/// #1261: whether `text` uses one of [`PLACE_VARIABLES`], in any spelling.
+pub(super) fn names_a_place(text: &str) -> bool {
+    if !text.contains(['%', '$']) {
+        return false;
+    }
+    let text = cmd_spellings(text).to_lowercase();
+    PLACE_VARIABLES.iter().any(|name| {
+        work::step();
+        text.contains(&format!("%{}%", name.to_lowercase()))
+    })
 }
 
 /// A PowerShell home variable starting at `chars[at]` (a `$`): its name in
@@ -195,8 +212,7 @@ fn variable_at(chars: &[char], at: usize) -> Option<(String, usize)> {
     let known = if env {
         HOME_VARIABLES.contains(&name.as_str())
     } else {
-        matches!(name.as_str(), "HOME" | "PWD")
-            || POWERSHELL_PLACES.iter().any(|(place, _)| *place == name)
+        matches!(name.as_str(), "HOME" | "PWD" | "PROFILE" | "PSHOME")
     };
     known.then_some((name, index))
 }
@@ -457,6 +473,7 @@ mod tests {
             codex_home: r"C:\Users\fixture\.corbanu",
             user_home: Some(r"C:\Users\fixture"),
             cwd: r"C:\work",
+            places: false,
         };
         for (word, expected) in [
             (r"%USERPROFILE%\.ssh", r"C:\Users\fixture\.ssh"),

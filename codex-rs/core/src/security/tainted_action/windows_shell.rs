@@ -138,6 +138,25 @@ const RUN_KEY_READERS: &[&str] = &[
 const LAUNCHERS: &[&str] = &["cmd", "powershell", "pwsh", "start", "call", "&"];
 /// `reg` operations that only read.
 const REG_READS: &[&str] = &["query", "export", "compare", "/?", "-?"];
+/// PowerShell commands (and aliases) that write registry values or keys,
+/// besides [`WINDOWS_WRITERS`] and the POSIX [`WRITERS`].
+const REGISTRY_WRITERS: &[&str] = &[
+    "new-itemproperty",
+    "set-itemproperty",
+    "sp",
+    "remove-itemproperty",
+    "rp",
+    "rename-itemproperty",
+    "rnp",
+    "copy-itemproperty",
+    "cpp",
+    "move-itemproperty",
+    "mp",
+    "clear-itemproperty",
+    "clp",
+    "clear-item",
+    "cli",
+];
 /// PowerShell commands that register or change a scheduled task or job.
 const TASK_SCHEDULERS: &[&str] = &[
     "register-scheduledtask",
@@ -292,72 +311,103 @@ pub(super) fn commands(text: &str, quotes: Quotes) -> Vec<Command> {
 /// #1261 (D168): whether a cmd or PowerShell command installs something
 /// Windows runs later: a scheduled task (`schtasks /create`,
 /// `Register-ScheduledTask`, the task scheduler's COM object), a value of a
-/// registry Run key (any command naming one but a reader), or a registry
-/// import the classifier cannot read (`reg import`, `regedit`, `regini`).
-/// The command is the first word past launchers and their options (`cmd
-/// /c`, `powershell -Command`, `&`); a word holding blanks (`cmd /c "reg add
-/// ..."`) is read by its own words. `names` and `lower` are the command's
-/// words' names and lowercase words.
-fn windows_persistence(names: &[&str], lower: &[String]) -> bool {
+/// registry Run key (any command naming one, unless it is a reader with no
+/// writer among its words), or a registry import the classifier cannot read
+/// (`reg import`, `regedit`, `regini`), anywhere in the command. Words are
+/// read by their blank-separated parts too (`cmd /c "reg add ..."`).
+/// `lower` is the command's words, lowercase.
+fn windows_persistence(lower: &[String]) -> bool {
+    let tokens: Vec<&str> = lower
+        .iter()
+        .flat_map(|word| {
+            work::step();
+            word.split_whitespace()
+        })
+        .collect();
+    // The command run: the first part past launchers, their options (and
+    // option values) and a variable assignment (`$r = ...`).
+    let mut command: Option<usize> = None;
+    let mut skip_value = false;
+    for (index, token) in tokens.iter().enumerate() {
+        work::step();
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if token.starts_with(['/', '-']) {
+            skip_value = takes_a_value(token);
+            continue;
+        }
+        if LAUNCHERS.contains(&command_name(token)) || token.starts_with('$') || *token == "=" {
+            continue;
+        }
+        command = Some(index);
+        break;
+    }
+    let name_at = |index: usize| {
+        tokens.get(index).map_or("", |token| {
+            command_name(token.trim_start_matches(['(', '$', '@', '{']))
+        })
+    };
+    let command_name_run = command.map_or("", name_at);
+    let helps = matches!(
+        command_name_run,
+        "get-help" | "help" | "get-command" | "gcm"
+    );
     let mut schtasks = false;
     let mut changes_a_task = false;
+    let mut writes = false;
     let mut names_a_run_key = false;
-    for (name, word) in names.iter().zip(lower) {
+    for (index, token) in tokens.iter().enumerate() {
         work::step();
+        let name = name_at(index);
+        let previous = index.checked_sub(1).map_or("", name_at);
+        let following = tokens.get(index + 1).copied().unwrap_or_default();
         changes_a_task |=
-            schtasks && matches!(word.as_str(), "/create" | "-create" | "/change" | "-change");
-        schtasks |= *name == "schtasks";
-        if TASK_SCHEDULERS.contains(name) || word.contains("schedule.service") {
+            schtasks && matches!(*token, "/create" | "-create" | "/change" | "-change");
+        schtasks |= name == "schtasks";
+        let scheduler = TASK_SCHEDULERS.contains(&name) && !helps;
+        let com_scheduler = token.trim_matches(['\'', '"']) == "schedule.service";
+        let import = previous == "reg" && matches!(*token, "import" | "restore" | "load");
+        let editor = matches!(name, "regedit" | "regini")
+            && !following.is_empty()
+            && !matches!(
+                tokens.get(index.wrapping_sub(1)).copied(),
+                Some("/im" | "-im" | "-name" | "-processname")
+            );
+        if scheduler || com_scheduler || import || editor {
             return true;
         }
-        names_a_run_key = names_a_run_key || run_key(word);
+        writes |= REGISTRY_WRITERS.contains(&name)
+            || WINDOWS_WRITERS.contains(&name)
+            || WRITERS.contains(&name)
+            || (previous == "reg" && !REG_READS.contains(token));
+        names_a_run_key = names_a_run_key || run_key(token);
     }
-    // The command run and its first argument.
-    let mut run: Vec<&str> = Vec::new();
-    'words: for word in lower {
-        work::step();
-        for token in word.split_whitespace() {
-            work::step();
-            let launching = run.is_empty()
-                && (LAUNCHERS.contains(&command_name(token)) || token.starts_with(['/', '-']));
-            if !launching {
-                run.push(token);
-            }
-            if run.len() == 2 {
-                break 'words;
-            }
-        }
-    }
-    let name = run.first().map_or("", |token| command_name(token));
-    let operation = run.get(1).copied().unwrap_or_default();
-    let reg = name == "reg";
-    if (reg && matches!(operation, "import" | "restore" | "load"))
-        || (matches!(name, "regedit" | "regini") && !operation.is_empty())
-    {
-        return true;
-    }
-    let reads = RUN_KEY_READERS.contains(&name) || (reg && REG_READS.contains(&operation));
-    changes_a_task || (names_a_run_key && !reads)
+    let reads = RUN_KEY_READERS.contains(&command_name_run) || command_name_run == "reg";
+    changes_a_task || (names_a_run_key && !(reads && !writes))
 }
 
 /// Whether `word` (lowercase) names a registry Run key: `...\CurrentVersion\`
-/// and one of [`RUN_KEYS`] (a wildcard name counts), or
-/// `...\Policies\Explorer\Run`, with `\` or `/`.
+/// and one of [`RUN_KEYS`], or `...\Policies\Explorer\Run`, with `\` or
+/// `/`. In a word that names a hive (`HKCU`, `HKEY_...`, `Registry::`) a
+/// wildcard name counts as any name it matches (`CurrentVer*\R*`).
 fn run_key(word: &str) -> bool {
-    if !word.contains("currentversion") && !word.contains("explorer") {
-        return false;
-    }
-    let segments: Vec<&str> = word
-        .split(['/', '\\'])
-        .map(|segment| segment.trim_matches(['\'', '"']))
-        .filter(|segment| !segment.is_empty())
-        .collect();
+    let hive = ["hkcu", "hklm", "hku", "hkey_", "registry::"]
+        .iter()
+        .any(|hive| word.contains(hive));
+    let same = |segment: &str, name: &str| segment == name || (hive && glob_any(segment, name));
     let mut previous: [&str; 2] = ["", ""];
-    for segment in segments {
+    for segment in word.split(['/', '\\']) {
         work::step();
+        let segment = segment.trim_matches(['\'', '"']);
+        if segment.is_empty() {
+            continue;
+        }
         let after_current_version =
-            previous[1] == "currentversion" && RUN_KEYS.iter().any(|key| glob_any(segment, key));
-        let policy = previous == ["policies", "explorer"] && glob_any(segment, "run");
+            same(previous[1], "currentversion") && RUN_KEYS.iter().any(|key| same(segment, key));
+        let policy =
+            same(previous[0], "policies") && same(previous[1], "explorer") && same(segment, "run");
         if after_current_version || policy {
             return true;
         }
@@ -863,13 +913,25 @@ impl Classifier {
                 if !self.spend(cost) {
                     return;
                 }
+                // #1261 (D168): a start-up place's variable is also read as
+                // its usual value (see `windows_path`).
+                let places = windows_paths::names_a_place(target);
+                if places && !self.spend(cost) {
+                    return;
+                }
                 for folder in &folders.possible {
                     work::step();
-                    let resolved = self.homes.resolve(target, folder);
-                    if resolved.len() <= MAX_FOLDER_BYTES {
-                        reached.push(resolved);
-                    } else if !spelling_only {
-                        self.note(ProtectedActionKind::UnseenCode);
+                    let mut resolved = vec![self.homes.resolve(target, folder)];
+                    if places {
+                        resolved.push(self.homes.resolve_places(target, folder));
+                    }
+                    for resolved in resolved {
+                        work::step();
+                        if resolved.len() <= MAX_FOLDER_BYTES {
+                            reached.push(resolved);
+                        } else if !spelling_only {
+                            self.note(ProtectedActionKind::UnseenCode);
+                        }
                     }
                 }
             }
@@ -943,7 +1005,7 @@ impl Classifier {
                 || (index > 0 && writing_parameter(&lower[index - 1]))
         };
         // #1261 (D168): scheduled tasks, Run keys and registry imports.
-        if windows_persistence(&names, &lower) {
+        if windows_persistence(&lower) {
             self.note(ProtectedActionKind::Persistence);
         }
         let mut git_config = GitConfigWrites::new(&lower);
@@ -1089,6 +1151,7 @@ impl Classifier {
                 codex_home: self.homes.codex_home(),
                 user_home: self.homes.user_home(),
                 cwd,
+                places: false,
             },
         );
         if climbs_out_of_a_variable(&expanded) {
@@ -1102,23 +1165,44 @@ impl Classifier {
         if spelled_as_path && on_another_drive(&expanded, bases) {
             self.note(ProtectedActionKind::UnseenCode);
         }
+        // #1261 (D168): a start-up place's variable is also read as its
+        // usual value, besides as unknown.
+        let places = windows_paths::names_a_place(candidate);
         for base in bases {
             work::step();
             if !self.spend(candidate.len() + base.len()) {
                 return;
             }
             let resolved = self.homes.resolve(candidate, base);
-            if path_like {
-                self.path(&resolved);
-            } else if let Some(kind) = self.homes.classify_path(&resolved) {
-                self.note(kind);
+            self.judge_windows_path(&resolved, path_like, written, recursive);
+            if places {
+                if !self.spend(candidate.len() + base.len()) {
+                    return;
+                }
+                let resolved = self.homes.resolve_places(candidate, base);
+                self.judge_windows_path(&resolved, path_like, written, recursive);
             }
-            if written && self.homes.is_persistence(&resolved) {
-                self.note(ProtectedActionKind::Persistence);
-            }
-            if recursive && self.homes.holds_a_home(&resolved) {
-                self.note(ProtectedActionKind::Credentials);
-            }
+        }
+    }
+
+    /// The findings for a path a word resolved to.
+    fn judge_windows_path(
+        &mut self,
+        resolved: &str,
+        path_like: bool,
+        written: bool,
+        recursive: bool,
+    ) {
+        if path_like {
+            self.path(resolved);
+        } else if let Some(kind) = self.homes.classify_path(resolved) {
+            self.note(kind);
+        }
+        if written && self.homes.is_persistence(resolved) {
+            self.note(ProtectedActionKind::Persistence);
+        }
+        if recursive && self.homes.holds_a_home(resolved) {
+            self.note(ProtectedActionKind::Credentials);
         }
     }
 }

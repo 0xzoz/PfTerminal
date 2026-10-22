@@ -236,7 +236,7 @@ impl Homes {
     /// relative word absolute against `cwd`. Keeps the word's case.
     pub(super) fn resolve(&self, word: &str, cwd: &str) -> String {
         if self.windows {
-            return self.resolve_windows(word, cwd);
+            return self.resolve_windows(word, cwd, /*places*/ false);
         }
         let mut word = word.to_string();
         for (name, value) in [
@@ -270,7 +270,8 @@ impl Homes {
 
     /// [`Self::resolve`] under Windows rules: the same spellings, the Windows
     /// ones too (`%USERPROFILE%`, `$env:CODEX_HOME`, `~\`), and Windows roots.
-    fn resolve_windows(&self, word: &str, cwd: &str) -> String {
+    /// #1261: `places`: also expand `windows_paths::PLACE_VARIABLES`.
+    fn resolve_windows(&self, word: &str, cwd: &str, places: bool) -> String {
         let mut word = word.to_string();
         for (name, value) in [
             ("CODEX_HOME", Some(&self.codex_home_raw)),
@@ -289,6 +290,7 @@ impl Homes {
                 codex_home: &self.codex_home_raw,
                 user_home: self.user_home_raw.as_deref(),
                 cwd,
+                places,
             },
         );
         if let Some(home) = &self.user_home_raw
@@ -303,6 +305,17 @@ impl Homes {
             }
         }
         windows_paths::join(cwd, &word)
+    }
+
+    /// #1261 (D168): [`Self::resolve`], with the Windows rules' variables for
+    /// start-up places (`%ProgramData%`, `$PROFILE`, ...) expanded to their
+    /// usual values: an extra reading, besides the one keeping them unknown.
+    pub(super) fn resolve_places(&self, word: &str, cwd: &str) -> String {
+        if self.windows {
+            self.resolve_windows(word, cwd, /*places*/ true)
+        } else {
+            self.resolve(word, cwd)
+        }
     }
 
     /// Classify a resolved path, also through its canonical form (symlinks,

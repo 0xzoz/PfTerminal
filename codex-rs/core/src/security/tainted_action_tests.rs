@@ -5172,6 +5172,47 @@ fn issue_1261_windows_persistence_is_protected() {
     ] {
         assert_eq!(cmd(line), Some(Persistence), "cmd /c {line}");
     }
+    // Review 2: anywhere in the command, past subexpressions and options.
+    for line in [
+        r"Write-Output (New-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value C:\x.exe)",
+        r"echo $(reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d C:\x.exe /f)",
+        r#"powershell -ExecutionPolicy Bypass -Command "reg import evil.reg""#,
+        "Write-Output (reg import evil.reg)",
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVer*\Run -Name x -Value y",
+    ] {
+        assert_eq!(powershell(line), Some(Persistence), "{line}");
+    }
+    for line in [
+        "if exist evil.reg reg import evil.reg",
+        "for %f in (*.reg) do reg import %f",
+        r#"start "Setup" regedit /s evil.reg"#,
+    ] {
+        assert_eq!(cmd(line), Some(Persistence), "cmd /c {line}");
+    }
+    // Review 2: a start-up place's variable is plain text in the other
+    // shell, so the line is also judged as if it were (as on main).
+    let in_home = |argv: &[&str]| windows_kind_with(WINDOWS_HOME, WINDOWS_USER_HOME, argv);
+    assert_eq!(
+        in_home(&[
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            r"Add-Content %windir%\..\.bashrc x"
+        ]),
+        Some(Persistence)
+    );
+    assert_eq!(
+        in_home(&[
+            "cmd.exe",
+            "/c",
+            r"echo x >> $PROFILE\..\..\..\..\Users\fixture\.bashrc"
+        ]),
+        Some(Persistence)
+    );
+    assert_eq!(
+        in_home(&["cmd.exe", "/c", r"cd %ProgramData%\.. & echo x > .bashrc"]),
+        Some(Persistence)
+    );
     // Review 1: cmd has no `%PROFILE%`: climbing out of it stays unknown.
     assert_eq!(
         cmd(
@@ -5211,6 +5252,12 @@ fn issue_1261_windows_persistence_reads_are_not_protected() {
         "node src/FileExplorer/RunButton.js",
         "cargo test --manifest-path crates/explorer/runtime/Cargo.toml",
         r"Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Runtime",
+        // Review 2.
+        r"$r = Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        r"powershell -ExecutionPolicy Bypass -c Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        "cat deploy/schedule.service",
+        "Get-Help Register-ScheduledTask",
+        r"Get-ChildItem C:\work\build\*\*",
     ] {
         assert_eq!(powershell(line), None, "{line}");
     }
