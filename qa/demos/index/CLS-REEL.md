@@ -2,6 +2,8 @@
 
 Recorded with `scripts/demo_video.py`; see [the demo SOP](../README.md).
 Videos are assets on the [`demos` prerelease](https://github.com/CorbanuCore/CorbanuTerminal/releases/tag/demos).
+These are the source clips of the [classifier demo reel](classifier-reel.md). In `clsreel-git-names`, the #1254 line also
+asked on builds before #1230; #1254 keeps it asking after #1230 (see the reel index).
 
 | Date | Demo | Feature | Commit | Model | Length | Video |
 | --- | --- | --- | --- | --- | --- | --- |
