@@ -294,6 +294,58 @@ pub(crate) fn resume_account_error(
     ))
 }
 
+/// D172 (#1287): a one-line notice when the in-app `/resume` opens a
+/// conversation on another account of its provider than the one it ran on,
+/// as an explicit `--account` the TUI was started with wins over the
+/// recorded account (also when that account is gone). `None` when it resumes
+/// on the recorded account.
+pub(crate) fn resume_account_notice(
+    config: &Config,
+    recorded: &RecordedProviderAccount,
+) -> Option<String> {
+    let provider = if recorded.provider_id == config.model_provider_id {
+        &config.model_provider
+    } else {
+        config.model_providers.get(&recorded.provider_id)?
+    };
+    let current = provider
+        .account
+        .as_ref()
+        .filter(|account| account.provider_id == recorded.provider_id)
+        .map_or(codex_vault::DEFAULT_PROVIDER_ACCOUNT, |account| {
+            account.name.as_str()
+        });
+    if current == recorded.account {
+        return None;
+    }
+    let mut recorded_provider = provider.clone();
+    recorded_provider.account = Some(codex_model_provider_info::NamedProviderAccount {
+        provider_id: recorded.provider_id.clone(),
+        name: recorded.account.clone(),
+    });
+    let gone = codex_model_provider::selected_account_error(
+        config.codex_home.as_path(),
+        &recorded_provider,
+    )
+    .is_some();
+    let selected_by = if config.provider_account_override.is_some() {
+        ", the account `--account` selected for this session"
+    } else {
+        ""
+    };
+    Some(format!(
+        "This conversation ran on {provider_id} account `{recorded_name}`{gone}; it resumes on \
+         `{current}`{selected_by}.",
+        provider_id = recorded.provider_id,
+        recorded_name = recorded.account,
+        gone = if gone {
+            ", which is no longer configured"
+        } else {
+            ""
+        },
+    ))
+}
+
 /// PF-84 (#555): the config loader applies the account a resumed thread
 /// recorded only to the session's own provider. A thread recorded on another
 /// provider resumes there, so that provider's entry carries the account too;
@@ -474,6 +526,45 @@ mod tests {
                 AccountRecovery::CommandLine,
                 ThreadOpening::Resume
             ),
+            None
+        );
+        Ok(())
+    }
+
+    /// D172 (#1287): with `--account personal`, the in-app `/resume` of a
+    /// conversation that ran on `work` resumes on `personal` and says so,
+    /// also naming `work` as gone when it is; on the recorded account it
+    /// says nothing.
+    #[tokio::test]
+    async fn resuming_on_the_launch_account_names_both_accounts() -> std::io::Result<()> {
+        let home = TempDir::new()?;
+        let config = zai_config(&home, Some("personal"), "zai:work").await?;
+        assert_eq!(
+            resume_account_notice(&config, &recorded("zai", "work")).as_deref(),
+            Some(
+                "This conversation ran on zai account `work`, which is no longer configured; it \
+                 resumes on `personal`, the account `--account` selected for this session."
+            )
+        );
+        let name = codex_vault::ProviderAccountName::parse("work").expect("name");
+        codex_vault::Vault::new(home.path().to_path_buf())
+            .write_provider_account(
+                "zai",
+                &name,
+                codex_vault::ProviderAccountKind::ApiKey,
+                "test-key-not-a-secret",
+            )
+            .expect("add work");
+        assert_eq!(
+            resume_account_notice(&config, &recorded("zai", "work")).as_deref(),
+            Some(
+                "This conversation ran on zai account `work`; it resumes on `personal`, the \
+                 account `--account` selected for this session."
+            )
+        );
+        let on_recorded = zai_config(&home, /*explicit*/ None, "zai:work").await?;
+        assert_eq!(
+            resume_account_notice(&on_recorded, &recorded("zai", "work")),
             None
         );
         Ok(())

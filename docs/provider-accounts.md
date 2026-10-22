@@ -33,6 +33,11 @@ one that turn ran on, as a resume does.
 - `--account default` always means today's credentials, also with the feature
   off.
 
+In `/providers`, an account's _Start a new session on this account_ (and a
+provider's _Start a new session on the default account_) starts a new
+session on it; the conversation you were in keeps its account and stays in
+`/resume`. _Make default_ changes only what new sessions use.
+
 ## Fail closed
 
 A missing account is an error, never the default account. The session
@@ -78,7 +83,8 @@ apply.
   above, prefixed with "This conversation ran on zai account `ghost` and
   resumes on it:". Inside a session, `/resume` shows it and stays on the
   current conversation; there the recovery is "add it or pick another account
-  in `/providers`".
+  in `/providers`". A TUI started with `--account` of that provider resumes
+  on the launch account instead (see below).
 - **The recorded provider has no credentials in this home:** the TUI exits
   and says how to set them up (`corbanu -c model_provider="zai"`), instead of
   the configured provider's sign-in. If this home does not define that
@@ -88,7 +94,16 @@ apply.
 refuses it before the fork is chosen, even though the fork would run on the
 source conversation's account; `--account` picks another one.
 
-An explicit `--account` of the same provider still wins. With the feature off,
+A conversation that ran on more than one account (for example its first
+turns on `work`, a later one on `personal` after `--account personal`)
+resumes on the account of its most recent turn.
+
+An explicit `--account` of the same provider still wins, also for `/resume`
+inside a TUI started with it, and also when the recorded account is gone:
+the conversation opens on the launch account with a one-line notice naming
+both, such as "This conversation ran on zai account `work`, which is no
+longer configured; it resumes on `personal`, the account `--account`
+selected for this session." With the feature off,
 the resume is refused and names the recorded account (`--account
 <provider>:default` resumes on the default credentials). A fork of a saved
 conversation follows the same rule, decided by the fork's own configuration
@@ -185,8 +200,8 @@ AWS SDK chain).
 
 While the vault holds a named Bedrock account, `/model` in a session on
 another provider also offers Bedrock's models, so an account chosen with
-_Use for this session_ (or `--account amazon-bedrock:<name>`) can be reached.
-Picking one without choosing an account (there, or with a
+_Start a new session on this account_ (or `--account amazon-bedrock:<name>`)
+can be reached. Picking one without choosing an account (there, or with a
 `[provider_accounts]` default) uses Bedrock's `default` account.
 
 ## OpenAI: ChatGPT and API-key sign-in accounts

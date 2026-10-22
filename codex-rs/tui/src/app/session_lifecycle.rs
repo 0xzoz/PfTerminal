@@ -1090,6 +1090,11 @@ impl App {
             tui.frame_requester().schedule_frame();
             return Ok(AppRunControl::Continue);
         }
+        // D172 (#1287): a launch `--account` wins over the recorded account;
+        // say so once the conversation is open.
+        let account_notice = recorded_account.as_ref().and_then(|recorded| {
+            crate::resume_launch::resume_account_notice(&resume_config, recorded)
+        });
         self.apply_runtime_policy_overrides(&mut resume_config);
 
         let summary = session_summary(
@@ -1151,6 +1156,9 @@ impl App {
                             ));
                         }
                         self.backfill_loaded_subagent_threads(app_server).await;
+                        if let Some(notice) = account_notice {
+                            self.chat_widget.add_info_message(notice, /*hint*/ None);
+                        }
                         if let Some(summary) = summary {
                             let mut lines: Vec<Line<'static>> = Vec::new();
                             if let Some(usage_line) = summary.usage_line {
