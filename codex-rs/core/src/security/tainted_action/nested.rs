@@ -407,7 +407,13 @@ impl Classifier {
                     replaced_shell_scripts(&texts, &anywhere, &mut found.unreadable)
                 {
                     work::step();
-                    push_script(found, folders, script, replaced(launches[word]), true);
+                    push_script(
+                        found,
+                        folders,
+                        script,
+                        replaced(launches[word]),
+                        /*unknown*/ true,
+                    );
                 }
             }
             let (starts, overflow) = sed::command_starts(&texts);
