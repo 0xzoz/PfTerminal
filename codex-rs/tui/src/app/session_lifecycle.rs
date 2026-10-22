@@ -1090,11 +1090,6 @@ impl App {
             tui.frame_requester().schedule_frame();
             return Ok(AppRunControl::Continue);
         }
-        // D172 (#1287): a launch `--account` wins over the recorded account;
-        // say so once the conversation is open.
-        let account_notice = recorded_account.as_ref().and_then(|recorded| {
-            crate::resume_launch::resume_account_notice(&resume_config, recorded)
-        });
         self.apply_runtime_policy_overrides(&mut resume_config);
 
         let summary = session_summary(
@@ -1116,6 +1111,16 @@ impl App {
             Ok(resumed) => {
                 let resumed_thread_id = resumed.session.thread_id;
                 let resumed_session = resumed.session.clone();
+                // D172 (#1287): an account selected for this session wins
+                // over the recorded one; say so, from the account the app
+                // server resumed the thread on.
+                let account_notice = recorded_account.as_ref().and_then(|recorded| {
+                    crate::resume_launch::resume_account_notice(
+                        &resume_config,
+                        recorded,
+                        resumed_session.provider_account.as_deref(),
+                    )
+                });
                 let remember_model = !resumed.blocks_direct_input;
                 self.shutdown_current_thread(app_server).await;
                 apply_persisted_resume_runtime(

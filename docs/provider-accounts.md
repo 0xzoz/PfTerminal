@@ -35,8 +35,11 @@ one that turn ran on, as a resume does.
 
 In `/providers`, an account's _Start a new session on this account_ (and a
 provider's _Start a new session on the default account_) starts a new
-session on it; the conversation you were in keeps its account and stays in
-`/resume`. _Make default_ changes only what new sessions use.
+session on it; the conversation you were in is not moved and stays in
+`/resume`. Like `--account`, that choice holds for the rest of this TUI, so a
+`/resume` there opens a conversation of that provider on it (see below);
+another session resumes it on its own account. _Make default_ changes only
+what new sessions use.
 
 ## Fail closed
 
@@ -99,11 +102,12 @@ turns on `work`, a later one on `personal` after `--account personal`)
 resumes on the account of its most recent turn.
 
 An explicit `--account` of the same provider still wins, also for `/resume`
-inside a TUI started with it, and also when the recorded account is gone:
-the conversation opens on the launch account with a one-line notice naming
+inside a TUI started with it (or after _Start a new session on this
+account_ in `/providers`), and also when the recorded account is gone: the
+conversation opens on the selected account with a one-line notice naming
 both, such as "This conversation ran on zai account `work`, which is no
-longer configured; it resumes on `personal`, the account `--account`
-selected for this session." With the feature off,
+longer configured; it resumes on `personal`, the account selected for this
+session (with `--account` or in `/providers`)." With the feature off,
 the resume is refused and names the recorded account (`--account
 <provider>:default` resumes on the default credentials). A fork of a saved
 conversation follows the same rule, decided by the fork's own configuration

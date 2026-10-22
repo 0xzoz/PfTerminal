@@ -294,49 +294,54 @@ pub(crate) fn resume_account_error(
     ))
 }
 
-/// D172 (#1287): a one-line notice when the in-app `/resume` opens a
-/// conversation on another account of its provider than the one it ran on,
-/// as an explicit `--account` the TUI was started with wins over the
-/// recorded account (also when that account is gone). `None` when it resumes
-/// on the recorded account.
+/// D172 (#1287): a one-line notice when the in-app `/resume` opened a
+/// conversation on another account of its provider than the one it ran on:
+/// an account selected for this session (`--account`, or a new session
+/// started from `/providers`) wins over the recorded one, also when that one
+/// is gone. `resumed_account` is the `<provider>:<name>` the app server
+/// reported for the resumed thread. `None` when it runs on the recorded
+/// account or on another provider.
 pub(crate) fn resume_account_notice(
     config: &Config,
     recorded: &RecordedProviderAccount,
+    resumed_account: Option<&str>,
 ) -> Option<String> {
-    let provider = if recorded.provider_id == config.model_provider_id {
-        &config.model_provider
-    } else {
-        config.model_providers.get(&recorded.provider_id)?
-    };
-    let current = provider
-        .account
-        .as_ref()
-        .filter(|account| account.provider_id == recorded.provider_id)
-        .map_or(codex_vault::DEFAULT_PROVIDER_ACCOUNT, |account| {
-            account.name.as_str()
-        });
-    if current == recorded.account {
+    let (provider_id, current) = resumed_account?.split_once(':')?;
+    if provider_id != recorded.provider_id || current == recorded.account {
         return None;
     }
-    let mut recorded_provider = provider.clone();
-    recorded_provider.account = Some(codex_model_provider_info::NamedProviderAccount {
-        provider_id: recorded.provider_id.clone(),
-        name: recorded.account.clone(),
-    });
-    let gone = codex_model_provider::selected_account_error(
-        config.codex_home.as_path(),
-        &recorded_provider,
-    )
-    .is_some();
+    let provider = if recorded.provider_id == config.model_provider_id {
+        Some(&config.model_provider)
+    } else {
+        config.model_providers.get(&recorded.provider_id)
+    };
+    // `default` always exists; a borrowed account (`<owner>:<name>`) is not
+    // this provider's own.
+    let named = matches!(
+        codex_vault::parse_provider_account_selection(&recorded.account),
+        Ok(Some(_))
+    );
+    let gone = named
+        && provider.is_some_and(|provider| {
+            let mut recorded_provider = provider.clone();
+            recorded_provider.account = Some(codex_model_provider_info::NamedProviderAccount {
+                provider_id: recorded.provider_id.clone(),
+                name: recorded.account.clone(),
+            });
+            codex_model_provider::selected_account_error(
+                config.codex_home.as_path(),
+                &recorded_provider,
+            )
+            .is_some()
+        });
     let selected_by = if config.provider_account_override.is_some() {
-        ", the account `--account` selected for this session"
+        ", the account selected for this session (with `--account` or in `/providers`)"
     } else {
         ""
     };
     Some(format!(
         "This conversation ran on {provider_id} account `{recorded_name}`{gone}; it resumes on \
          `{current}`{selected_by}.",
-        provider_id = recorded.provider_id,
         recorded_name = recorded.account,
         gone = if gone {
             ", which is no longer configured"
@@ -533,18 +538,38 @@ mod tests {
 
     /// D172 (#1287): with `--account personal`, the in-app `/resume` of a
     /// conversation that ran on `work` resumes on `personal` and says so,
-    /// also naming `work` as gone when it is; on the recorded account it
-    /// says nothing.
+    /// also naming `work` as gone when it is; on the recorded account, on
+    /// another provider or without the app server's answer it says nothing,
+    /// and `default` is never called gone.
     #[tokio::test]
     async fn resuming_on_the_launch_account_names_both_accounts() -> std::io::Result<()> {
         let home = TempDir::new()?;
         let config = zai_config(&home, Some("personal"), "zai:work").await?;
+        let notice = |recorded_account: &str, resumed: Option<&str>| {
+            resume_account_notice(&config, &recorded("zai", recorded_account), resumed)
+        };
         assert_eq!(
-            resume_account_notice(&config, &recorded("zai", "work")).as_deref(),
+            notice("work", Some("zai:personal")).as_deref(),
             Some(
                 "This conversation ran on zai account `work`, which is no longer configured; it \
-                 resumes on `personal`, the account `--account` selected for this session."
+                 resumes on `personal`, the account selected for this session (with `--account` \
+                 or in `/providers`)."
             )
+        );
+        assert_eq!(
+            notice("default", Some("zai:personal")).as_deref(),
+            Some(
+                "This conversation ran on zai account `default`; it resumes on `personal`, the \
+                 account selected for this session (with `--account` or in `/providers`)."
+            )
+        );
+        assert_eq!(
+            [
+                notice("work", Some("zai:work")),
+                notice("work", Some("kimi-code:personal")),
+                notice("work", /*resumed*/ None),
+            ],
+            [None, None, None]
         );
         let name = codex_vault::ProviderAccountName::parse("work").expect("name");
         codex_vault::Vault::new(home.path().to_path_buf())
@@ -556,16 +581,11 @@ mod tests {
             )
             .expect("add work");
         assert_eq!(
-            resume_account_notice(&config, &recorded("zai", "work")).as_deref(),
+            notice("work", Some("zai:personal")).as_deref(),
             Some(
                 "This conversation ran on zai account `work`; it resumes on `personal`, the \
-                 account `--account` selected for this session."
+                 account selected for this session (with `--account` or in `/providers`)."
             )
-        );
-        let on_recorded = zai_config(&home, /*explicit*/ None, "zai:work").await?;
-        assert_eq!(
-            resume_account_notice(&on_recorded, &recorded("zai", "work")),
-            None
         );
         Ok(())
     }
