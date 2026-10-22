@@ -248,10 +248,11 @@ async fn legacy_unlabelled_message_matches_a_labelled_retry() {
     assert_eq!(stored.communication, legacy);
 }
 
-/// The symmetric case: a labelled row retried without a label is the same logical message too.
-/// A missing label is an unknown label, not a different sender; `author` is still compared.
+/// The rule is one-directional: a labelled row retried without a label conflicts. The label is
+/// the only field naming the sending thread, and the incoming copy is the one delivered, so an
+/// unlabelled retry would reach the model without its `Sender:` line.
 #[tokio::test]
-async fn labelled_message_matches_an_unlabelled_retry() {
+async fn labelled_message_rejects_an_unlabelled_retry() {
     let runtime = StateRuntime::init_for_testing(
         test_support::unique_temp_dir(),
         "test-provider".to_string(),
@@ -264,11 +265,16 @@ async fn labelled_message_matches_an_unlabelled_retry() {
         .await
         .expect("labelled admission");
 
-    assert_eq!(
-        admit(&runtime, recipient, &labelled(&stored, /*label*/ None))
-            .await
-            .expect("an unlabelled retry of a labelled message is the same message"),
-        AgentMailboxAdmission::Existing(AgentMailboxPhase::Admitted)
+    let error = admit(&runtime, recipient, &labelled(&stored, /*label*/ None))
+        .await
+        .expect_err(
+            "an unlabelled retry of a labelled message would be delivered without its sender",
+        );
+    assert!(
+        error
+            .to_string()
+            .contains("conflicts with a different message"),
+        "{error}"
     );
 }
 
