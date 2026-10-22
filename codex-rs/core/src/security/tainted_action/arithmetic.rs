@@ -453,22 +453,24 @@ impl Arithmetic {
         let mut eval_scanned = false;
         // `eval let v`, zsh `noglob let v`: the rest is a command too. Each
         // level notes only what precedes its command, so this is linear.
+        // #988: so is a `trap` action, which the shell reads again later.
         while start < raw.len().min(words.len()) {
             work::step();
             let raw = &raw[start..];
             let command = indirect::command_word(&words[start..]);
             match command {
                 Some((index, name))
-                    if matches!(name.as_str(), "eval" | "noglob" | "nocorrect")
+                    if matches!(name.as_str(), "eval" | "trap" | "noglob" | "nocorrect")
                         && !self.functions.contains(&name)
                         && !self.aliases.contains_key(&name) =>
                 {
                     // Escapes (`eval \(\(v\)\)`) or `$'...'` decoding hide
                     // the evaluated text from the lexer.
-                    if name == "eval" && (simple.escaped || self.ansi_c) {
+                    let evaluates = matches!(name.as_str(), "eval" | "trap");
+                    if evaluates && (simple.escaped || self.ansi_c) {
                         self.opaque = true;
                     }
-                    if name == "eval" {
+                    if evaluates {
                         self.evaluates_text = true;
                         // `eval 'print ${'$t'x}'`: an expansion in the text
                         // may spell `${~x}` (#1084). Scanned at the first
@@ -483,6 +485,18 @@ impl Arithmetic {
                     }
                     self.note_one(&raw[..index], &redirect[start..], /*command*/ None);
                     start += index + 1;
+                    // `trap -- 'let v' EXIT`: the action follows its options.
+                    while name == "trap"
+                        && let Some(option) = words.get(start)
+                        && option.len() > 1
+                        && option.starts_with('-')
+                    {
+                        work::step();
+                        start += 1;
+                        if option == "--" {
+                            break;
+                        }
+                    }
                 }
                 command => {
                     self.note_one(raw, &redirect[start..], command.as_ref());

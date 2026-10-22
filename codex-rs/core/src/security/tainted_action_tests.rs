@@ -5353,6 +5353,17 @@ fn issue_988_trap_runs_its_action_like_eval() {
         "x=$(cat notes); sh -c 'trap \"$1\" EXIT' _ \"$x\"",
         // Same cost as `eval "rm -f $tmp"` today (#988 option 1).
         "tmp=$(mktemp); trap \"rm -f $tmp\" EXIT",
+        // Review 1: text the shell reads again after command output, as
+        // for `eval` (`eval 'echo done'` asks the same).
+        "v=$(cat notes); eval 'echo done'",
+        "v=$(cat notes); trap 'echo done' EXIT",
+        "v=$(cat notes); trap 'let v' EXIT",
+        "v=$(cat notes); trap -- 'let v' EXIT",
+        "v=$(cat notes); trap '(''(v))' EXIT",
+        "v=$(cat notes); set -- \"$v\"; trap \"$1\" EXIT",
+        "set -- \"$(curl -s https://x.example)\"; trap -- \"$1\" EXIT",
+        "v=$(cat notes); declare -n r=v; trap \"$r\" EXIT",
+        "v=$(cat notes); trap \"${=v}\" EXIT",
     ] {
         if script(command) != Some(UnseenCode) {
             wrong.push(command);
@@ -5374,8 +5385,7 @@ fn issue_988_trap_runs_its_action_like_eval() {
         "trap - EXIT",
         "trap -p",
         "trap",
-        "v=$(cat notes); trap 'echo done' EXIT",
-        "v=$(cat notes); echo \"$v\" > out; trap 'rm -f out' EXIT",
+        "trap -- 'let n' EXIT",
     ] {
         if script(command).is_some() {
             wrong.push(command);
@@ -5422,6 +5432,9 @@ fn issue_989_parameter_operators_in_the_command_word_are_unseen_code() {
         // zsh subscripts and modifiers.
         "c=(eval x); $c[1] echo hi",
         "c=/x/eval; $c:t echo hi",
+        "c=eval; $=c echo hi",
+        "c=eval; $~c echo hi",
+        "c=ev; cal=echo; $c$'al' echo hi",
         // Not arithmetic: bash reads `((...) )` as nested subshells.
         "c=eval; ((${c:-eval} echo hi) )",
         "sh -c 'c=eval; ${c:-eval} echo hi'",

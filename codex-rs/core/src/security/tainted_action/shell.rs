@@ -792,13 +792,15 @@ impl Lexer {
 /// the lexer drops braces, quotes and backslashes: a braced form that is not
 /// a plain name (`${c:-eval}`, `${!c}`, `${c#x}`, `${c[0]}`), a name joined
 /// to the text after it (`${c}al`, `"$c"al` read as `$cal`), or a zsh
-/// subscript or modifier (`$c[1]`, `$c:t`). Reads only the name and the
+/// subscript, modifier or flag (`$c[1]`, `$c:t`, `$=c`). Reads only the name and the
 /// quotes after it, so a line of them stays linear.
 fn misread_parameter(after: &[char]) -> bool {
     let is_name = |ch: &char| ch.is_ascii_alphanumeric() || *ch == '_';
     let braced = after.first() == Some(&'{');
     let after = if braced { &after[1..] } else { after };
     let len = match after.first() {
+        // zsh `$=c`, `$~c`, `$^c` change how the value splits or globs.
+        Some(ch) if !braced && "=~^".contains(*ch) => return true,
         Some(ch) if braced && "@*#?$!-".contains(*ch) => 1,
         Some(ch) if braced && ch.is_ascii_digit() => {
             after.iter().take_while(|ch| ch.is_ascii_digit()).count()
@@ -821,6 +823,8 @@ fn misread_parameter(after: &[char]) -> bool {
         .take_while(|ch| matches!(ch, '\'' | '"' | '\\'))
         .count();
     ((braced || quotes > 0) && rest.get(quotes).is_some_and(is_name))
+        // `$c$'al'`: the decoded text joins the name too.
+        || (rest.get(quotes) == Some(&'$') && rest.get(quotes + 1) == Some(&'\''))
         || (!braced && matches!(rest.first(), Some('[' | ':')))
 }
 
