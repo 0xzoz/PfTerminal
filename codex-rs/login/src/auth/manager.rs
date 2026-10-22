@@ -2985,14 +2985,20 @@ impl AuthManager {
     /// was removed or signed out (by any process); [`AuthManager::auth`]
     /// picks up a later sign-in.
     pub fn auth_cached(&self) -> Option<CodexAuth> {
-        match self.held_named_sign_in() {
-            named_account::HeldSignIn::Current => {}
-            named_account::HeldSignIn::Changed => self.reload_named_sign_in_sync(),
-            named_account::HeldSignIn::Gone { epoch } => {
-                self.clear_named_sign_in_if_unchanged(epoch);
+        loop {
+            match self.held_named_sign_in() {
+                named_account::HeldSignIn::Current => {}
+                named_account::HeldSignIn::Changed => self.reload_named_sign_in_sync(),
+                named_account::HeldSignIn::Gone { epoch } => {
+                    if !self.clear_named_sign_in_if_unchanged(epoch) {
+                        // The replacement may itself have been removed since
+                        // it was installed. Check it before returning it.
+                        continue;
+                    }
+                }
             }
+            return self.auth_cached_unchecked();
         }
-        self.auth_cached_unchecked()
     }
 
     /// The cached auth as it is, for the guarded reloads that compare it with

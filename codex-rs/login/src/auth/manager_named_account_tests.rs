@@ -649,3 +649,64 @@ fn a_current_gone_answer_clears_and_notifies_once() {
         (None, revision + 1)
     );
 }
+
+/// A replacement installed after the Gone check must be checked in this same
+/// call, even when reinstalling identical credentials did not notify subscribers.
+#[test]
+fn auth_cached_rechecks_a_skipped_clear_before_returning() {
+    for remove_replacement in [true, false] {
+        let home = tempfile::tempdir().expect("home");
+        login_named_account_with_api_key(home.path(), &account("work"), "sk-canary-reinstalled")
+            .expect("sign-in");
+        let base = AuthManager::from_auth_for_testing_with_home(
+            CodexAuth::from_api_key("sk-default-canary"),
+            home.path().to_path_buf(),
+        );
+        let work = base.for_named_account(account("work"));
+        assert!(
+            vault(home.path())
+                .remove_provider_account("openai", &work_name())
+                .expect("remove")
+        );
+        let revision = *work.auth_change_receiver().borrow();
+        let store = work.named_store.as_ref().expect("named store");
+        let weak_work = Arc::downgrade(&work);
+        let fixture_home = home.path().to_path_buf();
+        *store.before_clear.lock().expect("before-clear hook") = Some(Box::new(move || {
+            let work = weak_work.upgrade().expect("live manager");
+            login_named_account_with_api_key(
+                &fixture_home,
+                &account("work"),
+                "sk-canary-reinstalled",
+            )
+            .expect("replacement sign-in");
+            work.reload_named_sign_in_sync();
+            assert_eq!(*work.auth_change_receiver().borrow(), revision);
+            if remove_replacement {
+                assert!(
+                    vault(&fixture_home)
+                        .remove_provider_account("openai", &work_name())
+                        .expect("remove replacement")
+                );
+            }
+        }));
+
+        // Retain the first result: a second call would hide the stale return.
+        let auth = work
+            .auth_cached()
+            .and_then(|auth| auth.api_key().map(str::to_string));
+        let expected = if remove_replacement {
+            (None, revision + 1)
+        } else {
+            (Some("sk-canary-reinstalled".to_string()), revision)
+        };
+        assert_eq!((auth, *work.auth_change_receiver().borrow()), expected);
+        assert!(
+            store
+                .before_clear
+                .lock()
+                .expect("before-clear hook")
+                .is_none()
+        );
+    }
+}

@@ -40,6 +40,9 @@ pub(super) struct NamedAccountStore {
     /// Reads of the stored sign-in, and whether `seen` was free during each.
     #[cfg(test)]
     reads: Mutex<Vec<bool>>,
+    /// One-shot interleaving after a Gone observation, before its cache clear.
+    #[cfg(test)]
+    before_clear: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 /// What the store was seen holding, and the cache installation generation
@@ -59,6 +62,8 @@ impl NamedAccountStore {
             }),
             #[cfg(test)]
             reads: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            before_clear: Mutex::new(None),
         }
     }
 
@@ -263,17 +268,27 @@ impl AuthManager {
     /// Check and clear under the cache write lock so a concurrent replacement
     /// cannot be removed between them. This keeps the setter's lock order:
     /// cache first, then `seen`, with no vault read under either lock.
-    pub(super) fn clear_named_sign_in_if_unchanged(&self, epoch: u64) {
+    /// Returns whether the clear applied; otherwise recheck the current sign-in.
+    pub(super) fn clear_named_sign_in_if_unchanged(&self, epoch: u64) -> bool {
         let Some(store) = self.named_store.as_ref() else {
-            return;
+            return false;
         };
+        #[cfg(test)]
+        {
+            let before_clear = store.before_clear.lock().expect("before-clear hook").take();
+            if let Some(before_clear) = before_clear {
+                before_clear();
+            }
+        }
         if let Ok(mut cached) = self.inner.write() {
             // Release `seen` before the replacement invalidates it.
             let unchanged = store.seen().epoch == epoch;
             if unchanged {
                 self.replace_cached_auth(&mut cached, /*new_auth*/ None);
+                return true;
             }
         }
+        false
     }
 
     /// Loads the named account's current sign-in, built without awaiting
