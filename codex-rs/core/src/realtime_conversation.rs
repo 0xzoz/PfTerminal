@@ -1714,7 +1714,9 @@ async fn refuse_named_account_without_sign_in(
         codex_model_provider::named_sign_in_refusal(&info, Some(&auth_manager))
     })
     .await
-    .unwrap_or_else(|_| codex_model_provider::named_sign_in_refusal(provider, /*auth_manager*/ None));
+    .unwrap_or_else(|_| {
+        codex_model_provider::named_sign_in_refusal(provider, /*auth_manager*/ None)
+    });
     refusal.map_or(Ok(()), Err)
 }
 
