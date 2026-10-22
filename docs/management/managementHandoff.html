@@ -16,7 +16,7 @@ th{background:#f5f5f7}.warn{background:#fff4e5;border-left:4px solid #f0a020;pad
 <body>
 <h1>Corbanu Terminal — management handoff</h1>
 <p><small>Kept by the coordinating agent (Claude, running in Corbanu Terminal as “coordinator”) for its successor; this update written by the coordinator's handoff-doc11 worker.
-State as of <b>2026-10-22 12:45 UTC (05:45 America/Phoenix)</b>, with <code>todo.md</code> read through its 12:47Z line. Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
+State as of <b>2026-10-22 12:45 UTC (05:45 America/Phoenix)</b>, with <code>todo.md</code> read through its 12:49Z line and GitHub re-checked at about 12:55Z. Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
 <code>2cee3b5984</code>, the merge of #1333 at 12:29Z; main moved to <code>e2ddef8698</code> with tui-qa2's record #1341 at 12:51Z).
 Coordinator since 2026-10-13 04:30Z: a Claude coordinator, resumed from the 2026-10-12 pause handoff when Travis said resume; it runs in Travis's TUI. It stopped with every
 worker during the 429 outage (10-16 13:55Z) and resumed on 2026-10-19 18:30Z (box below).
@@ -46,9 +46,9 @@ tester deviations (D182); AGG-20P-B passed and AGG-20P-A failed on the literal w
 <li><b>Reel:</b> the classifier reel is published (#1297; section 8.1). <b>Incident:</b> reel-cls ran a test launcher under <code>bash -x</code>, which printed the then-valid key behind
 <code>provider/zai_api_key</code> into its own transcript. The coordinator redacted both copies found, Travis revoked that key at 08:20Z, and the <b>NO TRACING RULE</b> followed (section 3).</li>
 <li><b>Contributors:</b> merges under D152 (#1271, #1282, #1272) and D159 (#1222), #1215 after a security review; first replies on #1152/#1147 (security-approved, waiting on their
-author to merge main), #1305 and #1318 (D187, D188); Task Node acknowledgement on #1118; filed #1334 and #1335 with credit. New ready contributor PRs since: bradsbots' #1337, #1338 and
-#1342 and citadelculture's #1336 (not yet assessed).</li>
-<li><b>CI:</b> every postmerge run since #1310 (09:17Z) shows <b>cancelled</b> only because <code>v8-canary / metadata</code> was cancelled in the concurrency queue behind #1306's
+author to merge main), #1305 and #1318 (D187, D188); Task Node acknowledgement on #1118; filed #1334 and #1335 with credit. New ready contributor PRs since: bradsbots' #1337, #1338, #1342 and
+#1344 and citadelculture's #1336 (not yet assessed).</li>
+<li><b>CI:</b> every postmerge run from #1310 (09:17Z) to #1321 (11:47Z) shows <b>cancelled</b> only because <code>v8-canary / metadata</code> was cancelled in the concurrency queue behind #1306's
 roughly 3-hour V8-from-source build (its Bazel lockfile change), which also fails the aggregate “Postmerge CI results” job; every real job is green (checked on <code>b0fa02105f</code>,
 run 39767693423). The queue has cleared: #1319's run (<code>d88d018ab2</code>) was fully green at 12:49Z. The 10-21 scheduled nightly failed (seventh in a row, #636).</li>
 <li><b>Installed build:</b> main <b><code>b0fa02105f</code></b> (#1322; installed 12:23Z, Rust 1.99.1; section 7).</li>
@@ -1173,7 +1173,8 @@ split into three (18.4 s → at most 5.2 s locally). No prompts changed; #1275 c
 <h3>8.0e What landed since #1281 (2026-10-22 01:50Z – 12:45Z), by area</h3>
 <p><b>30 PRs merged</b> after #1281's snapshot (plus #1281 itself, the previous handoff, at 02:35Z), from #1271 (02:02Z) to #1333 (12:29Z); #1279 (01:49Z) is noted at the end of 8.0d.
 25 came from the coordinator's workers and <b>5 from outside contributors</b> (bradsbots 3, citadelculture 2). Every PR had all checks green, an independent Opus 5.5 High APPROVE on its exact
-head (or a main-merge head covered by the identical-lines rule, section 3) and <code>--match-head-commit</code> with the literal SHA (MERGE GUARD RULE). Details in each worker's
+head (or a main-merge head covered by the identical-lines rule, section 3) and <code>--match-head-commit</code> with the literal SHA (MERGE GUARD RULE), except #1307, a one-line docs correction
+win-1296 merged green without a reviewer. Details in each worker's
 <code>$HOME/.corbanu-workers/&lt;name&gt;.result.md</code>.</p>
 <table>
 <tr><th>PR</th><th>What it does</th><th>Worker / author</th></tr>
@@ -1184,10 +1185,10 @@ fixed in 4 lines.</td><td>sec-1268, sec-1268b, sec-1268c</td></tr>
 <tr><td>#1294</td><td><code>git config</code> is judged on the words the shell passes on, so quoted, escaped or comma text in a value can't turn a write into a read or hide <code>-e</code> or an output
 file such as <code>~/.zshenv</code> (#1283); #1276's cheap launcher spellings (<code>fd --exec=</code>, <code>env_parallel</code>, <code>rush</code>, <code>xjobs</code>, <code>bfs</code> …); a nested script
 after a <code>cd</code> to an unknown folder, or under <code>env -C</code>, treats its folder as unknown. 7 rounds (2 granted, option B); #1309 filed for the rest.</td><td>sec-1283</td></tr>
-<tr><td>#1310</td><td>57 more ways a nested script's folder becomes unknown now ask on its relative writes (#1309): wrapper folder flags (<code>env -C"$D"</code>, <code>sudo -D</code>,
+<tr><td>#1310</td><td>more ways a nested script's folder becomes unknown, so its relative writes ask (#1309; 57 test lines that were quiet on main now ask): wrapper folder flags (<code>env -C"$D"</code>, <code>sudo -D</code>,
 <code>nsenter --wd</code>, <code>docker exec -w</code>, <code>systemd-run --working-directory</code>, <code>find -execdir</code>, <code>chroot</code> …), <code>CDPATH</code>, <code>OLDPWD</code>, zsh
-<code>AUTO_CD</code> or a set <code>HOME</code>, folder-stack forms, a <code>cd</code> inside <code>eval</code>/<code>alias</code>/<code>trap</code>/<code>source</code>, and code that runs later than it
-reads. Merged on its main-merge commit without a re-review (identical lines).</td><td>sec-1309</td></tr>
+<code>AUTO_CD</code> or a set <code>HOME</code>, folder-stack forms, a <code>cd</code> inside <code>eval</code>/<code>alias</code>/<code>trap</code>/<code>source</code>, and a <code>cd</code> or script inside
+functions, loops or traps that run later. Merged on its main-merge commit without a re-review (identical lines).</td><td>sec-1309</td></tr>
 <tr><td>#1321</td><td>a nested script after a <code>cd</code> that may not happen (<code>cd /nonexistent</code>, <code>false &amp;&amp; cd x</code>, <code>(cd x)</code>, <code>cd x &amp;</code>) is judged
 in every folder the line may be in, up to 4 (more counts as unknown); 15 new asking lines, ordinary <code>cd sub &amp;&amp; sh -c 'make &gt; log'</code> stays quiet</td><td>sec-1309b</td></tr>
 <tr><td>#1315</td><td><code>trap</code> actions count like <code>eval</code> (#988); a command word whose parameter expansion can't be resolved exactly (<code>${c:-eval}</code>, <code>${!c}</code>,
@@ -2126,8 +2127,7 @@ finish it ourselves with credit (D146). Offered by contrib-4; the author hasn't 
 <tr><td>10-22</td><td>(D178) Revoke the key behind <code>provider/zai_api_key</code> that reel-cls's trace exposed (Travis deleted it at Z.AI; the label now returns 401). Pointing the label at the new
 key is Travis's own <code>/vault</code> action (D178b, section 11).</td><td><code>todo.md</code></td></tr>
 <tr><td>10-22</td><td>(D180) Skip a re-record of #1273's reel clip; cover it in the next reel.</td><td>#1297</td></tr>
-<tr><td>10-22</td><td>(D181) Approve one ChatGPT test-account sign-in for the D136/NA-05/NA-06 re-runs (approved and done 08:24Z). Also: Travis boots a Windows machine and an agent runs
-the PF-84 Windows gate.</td><td>#1080</td></tr>
+<tr><td>10-22</td><td>(D181) Approve one ChatGPT test-account sign-in for the D136/NA-05/NA-06 re-runs (approved and done 08:24Z).</td><td>#1080</td></tr>
 </table>
 
 <h2>10. Current state</h2>
@@ -2183,7 +2183,8 @@ couldn't delete without forcing (merged on GitHub): <code>sec-1268-xargs-git</co
 <li><b>Outside contributors</b> (an independent review each; every decline gets a written, warm explanation under the DECLINE RULE; CONTRIBUTOR-FIRST before we write overlapping code):
 <ul>
 <li><b>Ready, no maintainer comment yet (answer first, SWEEP RULE):</b> citadelculture's #1336 (docs: JSON token-usage limits, #290) and bradsbots' #1337 (#1289, Enter always submits the
-add-account name field), #1338 (#1331, a refused removed-account prompt isn't a turn) and #1342 (#1335, legacy mail retries). #1337 and #1338 touch PF-84 behaviour (D176 put #1289 after the
+add-account name field), #1338 (#1331, a refused removed-account prompt isn't a turn), #1342 (#1335, legacy mail retries) and #1344 (#1252, forked test children exit cleanly off
+Linux). #1337 and #1338 touch PF-84 behaviour (D176 put #1289 after the
 flag removal), so check how they interact with #1080.</li>
 <li>Waiting on Travis: #1305 (D187) and #1318 (D188), both reviewed APPROVE and green.</li>
 <li>Reviewed, waiting on the author: #1161 (D158), #1152 and #1147 (merge main), #998 (D118, D146/D151), #1029 (D130), #139 (D132), #161 and #252 (D133), #141 and #135 (retarget asked);
@@ -2228,7 +2229,8 @@ of <code>todo.md</code> for decisions queued after this update.</div>
 the requests, but in every attempt items 3 and 8 behaved exactly as expected. Items 1, 2, 4 and 5 passed on an earlier build, item 6 is D43's accepted limit, item 7 offered no “don't ask
 again”.</td><td>Close MOD-11 as passed. The alternative is one more run of items 3 and 8 with a stricter tester packet (D185).</td><td>qa-local3</td></tr>
 <tr><td>D183</td><td>accept AGG-20P-A as intended like D110 / amend wording rule (rec; Aggressive -&gt; 62/0/2)</td><td><b>AGG-20P-A</b> failed only on the literal wording rule: the sub-agent's
-model added <code>; echo "exit=$?"</code>, so its denial text differed from the parent's (#1312, now fixed by #1319), though every attempt was denied.</td><td>Accept it as intended, as D110 did
+model added <code>; echo "exit=$?"</code>, so its denial text differed from the parent's (no after-run note for the outside write, #1312, now fixed by #1319; and an extra clause in the
+vault refusal), though every attempt was denied.</td><td>Accept it as intended, as D110 did
 for AGG-R07: when the child's command differs from the parent's, judge the denial itself and its text naming Aggressive. Then AGG-20P passes, AGG-20's named limit lifts (D143) and
 Aggressive becomes 62 passed / 0 failed / 2 blocked. The alternative is one re-run telling the sub-agent to run the commands exactly as written.</td><td>qa-local3</td></tr>
 <tr><td>D184</td><td>record MOD-21 passed not D39 (rec)</td><td><b>MOD-21</b> passed on the local model with results 1–3 exercised for the first time.</td><td>Record it as passed rather than
@@ -2252,10 +2254,11 @@ acct-rerun's five cases as blocked.</td><td>(a) Recharge: acct-rerun needs about
 </table>
 <p><b>Travis's own actions:</b> <b>D178b</b> (10-22 08:30Z): in <code>/vault</code>, point <code>provider/zai_api_key</code> at the new key (it still holds the revoked one; workers use
 <code>zai_key_3</code>, so this doesn't block anything). <b>D18</b> (10-16): delete the vault label <code>kimi_api</code>; it holds error text, and <code>kimi_api3</code> holds the key. Neither has a
-command-line path, and neither is confirmed done. Also: tell the coordinator when the Windows machine is up (Windows gate).</p>
+command-line path, and neither is confirmed done. Also (Travis, 08:20Z): he boots a Windows machine and an agent runs the PF-84 Windows gate; ask
+him whether it is up.</p>
 <div><b>Coming next</b> (raise when ready; not yet numbered):
 <ul>
-<li><b>New contributor PRs</b> #1336, #1337, #1338 and #1342: first replies and reviews (SWEEP RULE). Merges under D152 if they qualify; #1337/#1338 touch PF-84, so check them against #1080
+<li><b>New contributor PRs</b> #1336, #1337, #1338, #1342 and #1344: first replies and reviews (SWEEP RULE). Merges under D152 if they qualify; #1337/#1338 touch PF-84, so check them against #1080
 and D176.</li>
 <li><b>#1330</b>: merge under D152 once its author marks it ready; <b>#1329</b>: the suggested re-check, then merge.</li>
 <li><b>#1277</b>: close with credit at or after 10-23 02:03Z (D169).</li>
@@ -2294,7 +2297,7 @@ The overnight window runs until 16:30Z; until then launch only decision-free wor
 (it needs a free slot and Z.AI).</li>
 <li><b>When each running worker finishes</b>, read its result and bring its decisions to Travis: sec-1261 (#1302), sec-1064 (#1332), sec-1309c (#1339), tui-qa2 (#1341, #1340) and fu-1323.
 Don't merge a running worker's PR.</li>
-<li><b>Decision-free work as slots free:</b> a contributor sweep (SWEEP RULE: #1336, #1337, #1338, #1342 first; #1330/#1329; #1277 after 10-23 02:03Z with credit; Task Node acknowledgement
+<li><b>Decision-free work as slots free:</b> a contributor sweep (SWEEP RULE: #1336, #1337, #1338, #1342 and #1344 first; #1330/#1329; #1277 after 10-23 02:03Z with credit; Task Node acknowledgement
 requests); the #636 nightly worker; the stale-worktree and local-branch cleanup (section 10).</li>
 <li><b>Main CI and the next install:</b> #1319's postmerge run (<code>d88d018ab2</code>) was fully green at 12:49Z; confirm #1333's and #1341's, then build, sign and install the newest
 green main (it would add #1328, #1321, #1319, #1333 and the running workers' merges), keeping <code>corbanu.prev-b0fa02105f</code>.</li>
