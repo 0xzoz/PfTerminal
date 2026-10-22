@@ -5143,6 +5143,18 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         "$(echo git) config --comment 'x --get' core.pager sh",
         "x=xargs; printf 'core.pager sh' | $x git config --comment 'x --get'",
         "{git,config} -f ~/.zshenv --comment x,--get k v",
+        // Review 2: a value held in a variable, which the quote-aware
+        // reading cannot know.
+        "k=core.pager; git config --comment 'x --get' \"$k\" sh",
+        "g=--global; git config $g --comment 'x --get' user.name x",
+        "d=~; git config -f \"$d/.zshenv\" --comment x,--get k v",
+        "f=~/.bashrc; git config --file \"$f\" --comment 'x --get' k v",
+        "o=-e; git config -f 'a b' $o",
+        "x=core.pager; git config --comment 'a b' $(echo $x) sh",
+        // Review 2: a loop over the positional parameters, with the value
+        // quoted.
+        "set -- core.pager; for k; do git config --comment 'x --get' \"$k\" sh; done",
+        "sh -c 'for k; do git config --comment \"x --get\" \"$k\" sh; done' _ core.pager",
     ] {
         assert_eq!(
             script(command),
@@ -5154,20 +5166,28 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         kind(&["git", "config", "--comment", "x --get", "core.pager", "sh"]),
         Some(ProtectedActionKind::Persistence)
     );
-    // Review 1: git deeper than the quote-aware reading goes (five `eval
-    // "..."` levels) fails closed.
-    let mut line = "git config --comment \"x --get\" core.pager sh".to_string();
-    for _ in 0..5 {
-        let escaped: String = line
-            .chars()
-            .flat_map(|ch| {
-                let escape = matches!(ch, '\\' | '"' | '$' | '`');
-                escape.then_some('\\').into_iter().chain([ch])
-            })
-            .collect();
-        line = format!("eval \"{escaped}\"");
+    // Reviews 1 and 2: git deeper than the quote-aware reading goes (five
+    // `eval "..."` levels) fails closed, however it is spelled.
+    for inner in [
+        "git config --comment \"x --get\" core.pager sh",
+        "g''it config --comment \"x --get\" core.pager sh",
+        "g\\it config --comment \"x --get\" core.pager sh",
+        "\"g\"it config --comment \"x --get\" core.pager sh",
+        "$'\\x67'it config --comment \"x --get\" core.pager sh",
+    ] {
+        let mut line = inner.to_string();
+        for _ in 0..5 {
+            let escaped: String = line
+                .chars()
+                .flat_map(|ch| {
+                    let escape = matches!(ch, '\\' | '"' | '$' | '`');
+                    escape.then_some('\\').into_iter().chain([ch])
+                })
+                .collect();
+            line = format!("eval \"{escaped}\"");
+        }
+        assert!(script(&line).is_some(), "{line}");
     }
-    assert!(script(&line).is_some(), "{line}");
     for command in [
         "git config --get core.pager",
         "git config --file \"$f\" --get core.pager",
@@ -5175,7 +5195,8 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         "git config -f 'a b' -l",
         "git config --get core.pager 2>/dev/null",
         "git -C /tmp config --get core.pager",
-        "f=x; git config --file \"$f\" --get core.pager",
+        "v=me; git config user.name \"$v\"",
+        "v=me; git config --get user.name; echo \"$v\"",
         "cp a{,.bak} && git config --get core.pager",
         "sh -c 'git config --get core.pager'",
         "echo 'git config --get core.pager'",

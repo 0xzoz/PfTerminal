@@ -820,7 +820,7 @@ impl Classifier {
                 || writer.is_some_and(|at| index > at)
                 || (index > 0 && writing_parameter(&lower[index - 1]))
         };
-        let mut git_config = GitConfigWrites::new(&lower, &[]);
+        let mut git_config = GitConfigWrites::new(&lower, &[], &[]);
         let mut later = LaterWords::new(&lower);
         let mut named_programs = 0;
         for (index, word) in words.iter().enumerate() {

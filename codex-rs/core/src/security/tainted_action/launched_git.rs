@@ -61,7 +61,7 @@ pub(super) struct LaunchedGit<'a> {
     any_replacement: bool,
     /// For each word (and the end): whether, as the words after `config`,
     /// they read, and whether one of them is a positional parameter.
-    seen: Option<(Vec<bool>, Vec<bool>)>,
+    seen: Option<(Vec<bool>, Vec<bool>, Vec<bool>)>,
     /// #1283/#1276: what else is known of the words.
     marks: Marks<'a>,
     /// #1283: a launcher met so far was hidden.
@@ -75,6 +75,9 @@ pub(super) struct Marks<'a> {
     /// `{git,config}`), so it cannot check what the word lexer makes of the
     /// words.
     pub(super) hidden: &'a [bool],
+    /// #1283: the quote-aware reading cannot know its text (`"$k"` with
+    /// `k=core.pager`).
+    pub(super) unchecked: &'a [bool],
     /// #1276: it holds a loop variable that iterates the positional
     /// parameters (`for k; do git config "$k"`).
     pub(super) looped: &'a [bool],
@@ -93,8 +96,7 @@ const MAX_LOOP_NAMES: usize = 8;
 
 impl PositionalLoops {
     /// Takes in a simple command's words as written.
-    pub(super) fn read(&mut self, simple: &super::shell::SimpleCommand) {
-        let words = &simple.words;
+    pub(super) fn read(&mut self, words: &[String]) {
         let keyword = words
             .first()
             .is_some_and(|word| matches!(word.to_lowercase().as_str(), "for" | "select"));
@@ -114,12 +116,11 @@ impl PositionalLoops {
 
     /// For each of a simple command's words as written, whether it holds
     /// one of the loop variables (`$k`, `${k}`).
-    pub(super) fn marks(&self, simple: &super::shell::SimpleCommand) -> Vec<bool> {
+    pub(super) fn marks(&self, words: &[String]) -> Vec<bool> {
         if self.names.is_empty() && !self.any {
             return Vec::new();
         }
-        simple
-            .words
+        words
             .iter()
             .map(|word| {
                 word.match_indices('$').any(|(at, _)| {
@@ -408,7 +409,9 @@ impl<'a> LaunchedGit<'a> {
             // quote-aware reading cannot see, which then cannot check what
             // this reading makes of quoted values.
             let unchecked = this.hidden_launcher || this.hidden(index) || this.hidden(from - 1);
-            let (reads, positional) = this.seen();
+            let (reads, positional, unknown) = this.seen();
+            // Or a word it cannot know (`"$k"` with `k=core.pager`).
+            let unchecked = unchecked || unknown[index + 1];
             ((fed || positional[from]) && (unchecked || !reads[from]))
                 .then_some(ProtectedActionKind::Persistence)
         };
@@ -433,19 +436,24 @@ impl<'a> LaunchedGit<'a> {
         }
     }
 
-    fn seen(&mut self) -> &(Vec<bool>, Vec<bool>) {
+    /// For each word (and the end), whether as the words after `config`
+    /// they read, and whether one of them is a positional parameter or
+    /// unchecked (see [`Marks`]).
+    fn seen(&mut self) -> &(Vec<bool>, Vec<bool>, Vec<bool>) {
         let words = self.lower;
-        let looped = self.marks.looped;
+        let marks = self.marks;
         self.seen.get_or_insert_with(|| {
             let reads = outputs::git_config_reads_each(words);
+            let mark = |marks: &[bool], at: usize| marks.get(at).copied().unwrap_or(false);
             let mut positional = vec![false; words.len() + 1];
+            let mut unchecked = vec![false; words.len() + 1];
             for (at, word) in words.iter().enumerate().rev() {
                 work::step();
-                positional[at] = positional[at + 1]
-                    || holds_positional(word)
-                    || looped.get(at).copied().unwrap_or(false);
+                positional[at] =
+                    positional[at + 1] || holds_positional(word) || mark(marks.looped, at);
+                unchecked[at] = unchecked[at + 1] || mark(marks.unchecked, at);
             }
-            (reads, positional)
+            (reads, positional, unchecked)
         })
     }
 }

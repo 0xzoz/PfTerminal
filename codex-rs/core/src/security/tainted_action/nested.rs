@@ -265,6 +265,8 @@ impl Classifier {
     /// Collect nested scripts, sed invocations and written files from
     /// `commands` and the quoted text in them, following `cd`.
     fn walk(&self, commands: &[Command], folders: &mut Folders, level: usize, found: &mut Found) {
+        // #1276: `for k;` loops met so far.
+        let mut loops = launched_git::PositionalLoops::default();
         for command in commands {
             work::step();
             if found.scripts.len()
@@ -304,7 +306,8 @@ impl Classifier {
             found.written.extend(targets);
             // D153: a git setting whose quoted text names git.
             found.unreadable |= git_helpers::setting_holds_git_name(&command.words);
-            self.judge_git(&texts, found);
+            loops.read(&texts);
+            self.judge_git(&texts, &loops, found);
             // #1268: where a launcher's input reaches the words, and the
             // scripts of shells it puts input into, wherever the command
             // word is read to be (`xargs --replace sh -c '... {}'`).
@@ -477,10 +480,10 @@ impl Classifier {
                     .chain(&command.other_text)
                     .any(|word| {
                         work::step();
-                        word.text.to_lowercase().contains("git")
+                        spells_git(&word.text)
                     });
-                if deeper && !found.git.contains(&ProtectedActionKind::UnseenCode) {
-                    found.git.push(ProtectedActionKind::UnseenCode);
+                if deeper {
+                    note_git(found, ProtectedActionKind::UnseenCode);
                 }
                 continue;
             }
@@ -544,18 +547,28 @@ impl Classifier {
     /// core.pager sh` as a read); here each value stays one word. Git
     /// spelled by text this reading cannot see is checked there instead
     /// (`hidden_words`).
-    fn judge_git(&self, texts: &[String], found: &mut Found) {
+    /// `loops`: loop variables over the positional parameters so far.
+    fn judge_git(
+        &self,
+        texts: &[String],
+        loops: &launched_git::PositionalLoops,
+        found: &mut Found,
+    ) {
         if !texts.iter().any(|text| text.to_lowercase().contains("git")) {
             return;
         }
         let lower: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
-        let mut config = GitConfigWrites::new(&lower, &[]);
+        let looped = loops.marks(texts);
+        let mut config = GitConfigWrites::new(&lower, &[], &[]);
         let mut launched = launched_git::LaunchedGit::new(
             texts,
             &lower,
             found.braces,
             self.launched,
-            launched_git::Marks::default(),
+            launched_git::Marks {
+                looped: &looped,
+                ..launched_git::Marks::default()
+            },
         );
         for (index, word) in lower.iter().enumerate() {
             work::step();
@@ -573,9 +586,7 @@ impl Classifier {
             launched.step(index);
             for kind in kinds {
                 work::step();
-                if !found.git.contains(&kind) {
-                    found.git.push(kind);
-                }
+                note_git(found, kind);
             }
         }
     }
@@ -602,7 +613,7 @@ impl Classifier {
             };
             if bases.len() + 2 > MAX_BASES {
                 // Too many folders to follow: fail closed.
-                found.git.push(ProtectedActionKind::Persistence);
+                note_git(found, ProtectedActionKind::Persistence);
                 return;
             }
             // Against the folder before it and the working folder.
@@ -618,8 +629,8 @@ impl Classifier {
                     || (file.ends_with('/') && self.homes.holds_a_home(&resolved))
             })
         });
-        if writes_home && !found.git.contains(&ProtectedActionKind::Persistence) {
-            found.git.push(ProtectedActionKind::Persistence);
+        if writes_home {
+            note_git(found, ProtectedActionKind::Persistence);
         }
     }
 
@@ -1061,6 +1072,25 @@ fn fish_codes(texts: &[String], at: usize, cut: &mut bool) -> Vec<String> {
 
 /// What a launcher puts into a shell's script (`xargs -I% sh -c 'git %'`):
 /// its added words go to the shell's own arguments, not the script.
+/// #1283: note `kind` once (a few kinds at most, so checking is cheap).
+fn note_git(found: &mut Found, kind: ProtectedActionKind) {
+    if !found.git.contains(&kind) {
+        found.git.push(kind);
+    }
+}
+
+/// #1283: whether text may spell `git` once the word lexer reads it: it
+/// removes quotes, backslashes, line continuations and braces, and decodes
+/// `$'...'`.
+fn spells_git(text: &str) -> bool {
+    let bare: String = text
+        .replace("\\\n", "")
+        .chars()
+        .filter(|ch| !matches!(ch, '\'' | '"' | '\\' | '{' | '}'))
+        .collect();
+    bare.to_lowercase().contains("git") || text.contains("$'")
+}
+
 fn replaced(launch: launched_git::Launch) -> launched_git::Launch {
     launched_git::Launch {
         fed: false,

@@ -227,13 +227,6 @@ fn reads_by_subcommand(words: &[String]) -> bool {
 /// their value (`-fpager.log`, `-zfe`), not options. Worked out in one pass
 /// from the end.
 pub(super) fn git_config_edits_each(words: &[String]) -> Vec<bool> {
-    let opens_editor = |word: &str| {
-        if word.starts_with("--") {
-            word.len() >= "--ed".len() && "--edit".starts_with(word)
-        } else {
-            word.split(['f', 't']).next().unwrap_or(word).contains('e')
-        }
-    };
     // Whether the words from the next word on, and from the one after it,
     // open the editor when the first of them is read as an option.
     let mut next = false;
@@ -263,6 +256,21 @@ pub(super) fn git_config_edits_each(words: &[String]) -> Vec<bool> {
         each[at] = here || word == "edit";
     }
     each
+}
+
+/// Whether `word`, read as a `git config` option, opens the editor.
+fn opens_editor(word: &str) -> bool {
+    if word.starts_with("--") {
+        word.len() >= "--ed".len() && "--edit".starts_with(word)
+    } else {
+        word.split(['f', 't']).next().unwrap_or(word).contains('e')
+    }
+}
+
+/// #1283: whether `word` (lowercase) may open the editor as a `git config`
+/// option or subcommand wherever it is.
+pub(super) fn may_open_editor(word: &str) -> bool {
+    (word.starts_with('-') && opens_editor(word)) || word == "edit"
 }
 
 /// What the next `git config` word may be.
