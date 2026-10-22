@@ -578,8 +578,9 @@ fn pf_30_s03_research_workflow_prompt_count_and_latency() {
         .iter()
         .chain(protected.iter())
         .filter(|command| {
+            // #1261: not a login shell on Windows (see `SCRIPT_FLAG`).
             classify_with(
-                &shell_in(&work, &["bash", "-lc", command]),
+                &shell_in(&work, &["bash", SCRIPT_FLAG, command]),
                 &codex_home,
                 Some(&user_home),
             )
@@ -3389,7 +3390,15 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
         "./tool",
     ] {
         let found = classify_fixture(&shell_in(&cwd, &["zsh", "-c", line]));
-        if found != Some(UnseenCode) {
+        // #1261: on Windows the sed line's words come after a writer (`sed
+        // -i`), and its `/*` is `C:\*`, a folder holding the machine's
+        // start-up places (#1308): it asks as Persistence there.
+        let expected = if cfg!(windows) && line.starts_with("sed -i") {
+            Some(Persistence)
+        } else {
+            Some(UnseenCode)
+        };
+        if found != expected {
             wrong.push(format!("file: {line:?} -> {found:?}"));
         }
     }
