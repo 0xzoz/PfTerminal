@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import subprocess
 import tempfile
 import unittest
@@ -63,10 +64,59 @@ class ArgumentCommentLintPackagesTest(unittest.TestCase):
             ["git", *args],
             input=input,
             cwd=root,
+            env={
+                **os.environ,
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+            },
             capture_output=True,
             check=True,
             text=True,
         ).stdout.strip()
+
+    def test_git_fixture_ignores_user_and_system_signing_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as config_dir:
+            config = Path(config_dir) / "gitconfig"
+            missing_signer = Path(config_dir) / "missing-signing-program"
+            # An unsupported format fails before any signer or credential
+            # service can run if the fixture inherits this configuration.
+            config.write_text(
+                "[commit]\n\tgpgsign = true\n"
+                "[gpg]\n\tformat = fixture-invalid-signing-format\n"
+                f'\tprogram = "{missing_signer.as_posix()}"\n'
+            )
+            for scope in ("GLOBAL", "SYSTEM"):
+                with (
+                    self.subTest(scope=scope),
+                    tempfile.TemporaryDirectory() as temp_dir,
+                ):
+                    root = Path(temp_dir)
+                    environment = {
+                        "GIT_CONFIG_GLOBAL": os.devnull,
+                        "GIT_CONFIG_SYSTEM": os.devnull,
+                        "GIT_CONFIG_NOSYSTEM": "0",
+                        f"GIT_CONFIG_{scope}": str(config),
+                    }
+                    with mock.patch.dict(os.environ, environment):
+                        try:
+                            self.run_git(root, "init")
+                            self.run_git(root, "config", "user.name", "Test User")
+                            self.run_git(
+                                root, "config", "user.email", "test@example.com"
+                            )
+                            tree = self.run_git(root, "write-tree")
+                            commit = self.run_git(
+                                root, "commit-tree", tree, "-m", "unsigned fixture"
+                            )
+                            subject = self.run_git(
+                                root, "show", "-s", "--format=%s", commit
+                            )
+                        except subprocess.CalledProcessError as error:
+                            self.fail(
+                                f"Git fixture inherited {scope} signing configuration: "
+                                f"{error.stderr.strip()}"
+                            )
+                    self.assertEqual(subject, "unsigned fixture")
 
     def test_changed_rust_sources_select_their_crates(self) -> None:
         self.assertEqual(
