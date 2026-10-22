@@ -95,7 +95,7 @@ const CODE_VARIABLE_PREFIXES: &[&str] = &[
 /// #1159: code variables whose names are common words (`grep PROMPT`,
 /// `GetEnvironmentVariable('PROMPT')`, `docker run -e PROMPT=x`), counted
 /// only where they are set: assigned before a command or by `env`
-/// (`PROMPT=x zsh -i`, `fpath+=(x)`), by PowerShell (`$env:PROMPT = 'x'`)
+/// (`PROMPT=x zsh -i`, `FPATH=x:$FPATH`), by PowerShell (`$env:PROMPT = 'x'`)
 /// or an expansion (`${PROMPT:=x}`), or named to a builtin that sets them
 /// (`export PROMPT`, `read PROMPT`, `set prompt=x`). zsh's `FPATH` is where
 /// `autoload` finds the functions it runs.

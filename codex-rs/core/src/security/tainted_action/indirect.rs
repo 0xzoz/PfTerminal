@@ -230,9 +230,15 @@ pub(super) fn command_word(words: &[String]) -> Option<(usize, String)> {
     let mut index = 0;
     while let Some(word) = words.get(index) {
         work::step();
-        let name = basename(word).to_lowercase();
-        // #1159: zsh `=git` is a command (`$(which git)`), not an assignment.
-        let assignment = word.contains('=') && !word.starts_with(['-', '=']);
+        // #1159: zsh `=git` runs git (`$(which git)`); any other `=word`
+        // is read as before.
+        let equals_git = equals_git(word);
+        let name = if equals_git {
+            "git".to_string()
+        } else {
+            basename(word).to_lowercase()
+        };
+        let assignment = word.contains('=') && !word.starts_with('-') && !equals_git;
         if assignment || KEYWORDS.contains(&name.as_str()) {
             index += 1;
             continue;
@@ -266,6 +272,13 @@ pub(super) fn command_word(words: &[String]) -> Option<(usize, String)> {
         index += operands;
     }
     None
+}
+
+/// #1159: whether `word` is zsh's `=git` (EQUALS expansion: the `git` on the
+/// path).
+pub(super) fn equals_git(word: &str) -> bool {
+    word.strip_prefix('=')
+        .is_some_and(|rest| basename(rest).eq_ignore_ascii_case("git"))
 }
 
 /// #989: whether the command word holds a parameter expansion the lexer

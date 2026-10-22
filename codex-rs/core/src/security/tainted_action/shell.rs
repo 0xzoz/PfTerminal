@@ -92,9 +92,7 @@ pub(super) struct Lexed {
 /// depth squared (#1020).
 pub(super) const MAX_SUBSTITUTION_DEPTH: usize = 32;
 
-/// #1159: zsh `=git` runs the `git` found on the path, like `$(which git)`.
 pub(super) fn basename(word: &str) -> &str {
-    let word = word.strip_prefix('=').unwrap_or(word);
     word.trim_end_matches('/')
         .rsplit('/')
         .next()
@@ -182,22 +180,31 @@ fn computed_transformation(text: &str) -> bool {
             name => name,
         };
         rest = &rest[name..];
-        // A subscript may hold `]` (`${a[b[0]]@$p}`, `${a["]"]@$p}`): any
-        // `]@` in it counts.
+        // A subscript ends at its matching `]` (`${a[b[0]]@$p}`); one
+        // holding a quote or backslash (`${a["]"]@$p}`), or not closed
+        // within 64 bytes, counts.
         if rest.starts_with('[') {
-            let bytes = rest.as_bytes();
-            let window = &bytes[..bytes.len().min(64)];
-            if !window.contains(&b']') {
-                return true;
-            }
-            return window.iter().enumerate().any(|(at, byte)| {
+            let mut depth = 0usize;
+            let mut close = None;
+            for (at, byte) in rest.as_bytes().iter().take(64).enumerate() {
                 work::step();
-                *byte == b']'
-                    && bytes.get(at + 1) == Some(&b'@')
-                    && bytes
-                        .get(at + 2)
-                        .is_none_or(|op| !b"QEAKakUuL".contains(op))
-            });
+                match byte {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(at);
+                            break;
+                        }
+                    }
+                    b'\'' | b'"' | b'\\' => return true,
+                    _ => {}
+                }
+            }
+            let Some(close) = close else {
+                return true;
+            };
+            rest = &rest[close + 1..];
         }
         rest.strip_prefix('@').is_some_and(|op| {
             !(op.starts_with(|ch: char| "QEAKakUuL".contains(ch)) || (bang && op.starts_with('}')))

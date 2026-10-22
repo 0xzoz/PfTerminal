@@ -1426,7 +1426,7 @@ impl Classifier {
             // #1276: or a finder's exec option with git attached
             // (`fd --exec=git`).
             let git_word = launched_git.attached(index).unwrap_or(word);
-            let is_git = basename(git_word) == "git";
+            let is_git = basename(git_word) == "git" || indirect::equals_git(git_word);
             let helper = git_helpers::git_name(git_word);
             let subcommand = helper.as_ref().and_then(Option::as_deref);
             if persistence_command(name, &mut later, index + 1)
