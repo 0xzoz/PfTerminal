@@ -3724,16 +3724,18 @@ impl ModelClientSession {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
+        // A connection opened as another sign-in is replaced at the turn's
+        // first request (#1311).
+        if self.websocket_session.connection.is_some() {
+            return Ok(());
+        }
+
         let client_setup = self.client.current_client_setup().await.map_err(|err| {
             ApiError::Stream(format!(
                 "failed to build websocket prewarm client setup: {err}"
             ))
         })?;
         let identity = ConnectionIdentity::of(client_setup.auth.as_ref());
-        self.drop_websocket_of_another_sign_in(&identity);
-        if self.websocket_session.connection.is_some() {
-            return Ok(());
-        }
         let auth_context = AuthRequestTelemetryContext::new(
             client_setup.auth.as_ref().map(CodexAuth::auth_mode),
             client_setup.api_auth.as_ref(),
