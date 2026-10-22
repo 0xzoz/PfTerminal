@@ -5854,6 +5854,10 @@ fn issue_1064_other_ways_a_value_runs_are_unseen_code() {
         "echo \"${v@\"$p\"}\"",
         "echo \"${a[b[0]]@$p}\"",
         "echo \"${a[\"]\"]@$p}\"",
+        // Review 3: a substitution in the subscript may hide a `]`.
+        "p=$(cat f); echo \"${a[$(echo ])]@$p}\"",
+        "p=$(cat f); echo \"${a[`echo ]`]@$p}\"",
+        "p=$(cat f); echo \"${a[${x:-]}]@$p}\"",
         // Review 2: a nested `]` early, closed past 64 bytes.
         "p=$(cat f); echo \"${a[b[0]                                                            ]@$p}\"",
         "p=$(cat f); echo \"${a[\"]xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]@$p}\"",
@@ -5914,6 +5918,7 @@ fn issue_1064_other_ways_a_value_runs_are_unseen_code() {
         "git rebase -i HEAD~3",
         "git rebase -X theirs --onto main x",
         "echo \"${a[b[0]]@Q}\"",
+        "for i in 0 1; do echo \"${a[$i]@Q}\"; done",
         "git submodule update --init",
         "parallel gzip ::: a b",
         "tmux ls",

@@ -181,8 +181,9 @@ fn computed_transformation(text: &str) -> bool {
         };
         rest = &rest[name..];
         // A subscript ends at its matching `]` (`${a[b[0]]@$p}`); one
-        // holding a quote or backslash (`${a["]"]@$p}`), or not closed
-        // within 64 bytes, counts.
+        // holding a quote, backslash or substitution, which may hide a `]`
+        // (`${a["]"]@$p}`, `${a[$(echo ])]@$p}`, `${a[${x:-]}]@$p}`), or not
+        // closed within 64 bytes, counts.
         if rest.starts_with('[') {
             let mut depth = 0usize;
             let mut close = None;
@@ -197,7 +198,7 @@ fn computed_transformation(text: &str) -> bool {
                             break;
                         }
                     }
-                    b'\'' | b'"' | b'\\' => return true,
+                    b'\'' | b'"' | b'\\' | b'`' | b'(' | b'{' => return true,
                     _ => {}
                 }
             }
