@@ -34,6 +34,21 @@ impl VT100Backend {
     pub fn vt100(&self) -> &vt100::Parser {
         self.crossterm_backend.writer()
     }
+
+    /// Like [`Self::new`], keeping up to `scrollback` rows that scroll off the top.
+    // Used by the crate's unit tests, not by `tests/all`, which shares this file.
+    #[allow(dead_code)]
+    pub fn with_scrollback(width: u16, height: u16, scrollback: usize) -> Self {
+        crossterm::style::force_color_output(true);
+        Self {
+            crossterm_backend: CrosstermBackend::new(vt100::Parser::new(height, width, scrollback)),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn vt100_mut(&mut self) -> &mut vt100::Parser {
+        self.crossterm_backend.writer_mut()
+    }
 }
 
 impl Write for VT100Backend {
