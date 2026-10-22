@@ -551,6 +551,9 @@ async fn pf_889_webrtc_session_inactive_when_sideband_connects_ends_once() -> an
     assert!(!input_task_done, "the sideband is still connecting");
     let ended_after = chrono::Utc::now().timestamp_millis();
     sideband.release.send(()).await?;
+    // The handshake completed: the task returned from the post-connect check,
+    // not from a failed connection.
+    connected(&sideband).await?;
     let (attempts, observations) = realtime_ledger_settled(&db, /*count*/ 1).await?;
     assert_end(&attempts, &observations, ended_after);
     // The input task returns instead of running the session.

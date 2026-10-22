@@ -159,18 +159,20 @@ async fn issue_912_other_warmups_are_counted_by_request() {
             (second.attempt.request_id, vec![second]),
             (normal.attempt.request_id, vec![normal]),
         ]),
+        unavailable: 1,
         ..OtherConversations::default()
     });
     let pages = inspection_pages(Ok(InspectionDay::Ready(view)));
+    let text = &pages[0].text;
+    let position = |wanted: &str| text.iter().position(|line| line.starts_with(wanted));
+    let count = position("Of these, 2 requests are reopen warm-ups.");
+    // The count sits with the requests it counts, not after the line about
+    // conversations that could not be read.
     assert!(
-        pages[0]
-            .text
-            .iter()
-            .any(|line| line == "Of these, 2 requests are reopen warm-ups."),
-        "{:#?}",
-        pages[0].text
+        count.is_some() && count < position("1 conversation could not be read in full"),
+        "{text:#?}"
     );
-    assert_explained(&pages[0].text);
+    assert_explained(text);
 }
 
 #[tokio::test]
