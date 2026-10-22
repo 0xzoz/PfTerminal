@@ -246,7 +246,11 @@ pub(super) fn git_config_edits_each(words: &[String]) -> Vec<bool> {
         } else if GIT_CONFIG_VALUES.contains(&word.as_str())
             || (!word.starts_with("--") && word.ends_with('f'))
         {
-            after_next
+            // #1269: an `f` or `t` before the last letter takes the rest
+            // of the group (`-ff` is the file `f`), so the next word may
+            // be an option too.
+            let attached = !word.starts_with("--") && word[1..word.len() - 1].contains(['f', 't']);
+            after_next || (attached && next)
         } else if word.contains('=') || GIT_CONFIG_FLAGS.contains(&word.as_str()) {
             next
         } else {

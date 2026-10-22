@@ -4377,6 +4377,12 @@ fn issue_1268_git_given_input_words_asks() {
         "xargs -I% fish --comm='true; git config %' _ < keys",
         "xargs -I% fish -lC'git config %' < keys",
         "xargs --replace sh -c -e -x",
+        // Review round 5: fish's code after other options' values.
+        "printf 'core.pager sh\\n' | xargs -I% fish -c true -C 'cd .; git config %'",
+        "printf 'core.pager sh\\n' | xargs -I% fish -c true -C'cd .; git config %'",
+        "printf 'core.pager sh\\n' | xargs -I% fish -c true -c 'cd .; git config %'",
+        "xargs -I% fish --init-command 'cd .; git config %' < keys",
+        "xargs -I% fish -d 1 --comm 'cd .; git config %' < keys",
     ] {
         assert!(script(command).is_some(), "{command}");
     }
@@ -4466,6 +4472,9 @@ fn issue_1269_git_config_attached_values_are_not_editor_options() {
         "git config -ztbool -e",
         "git config -fx --edit",
         "git config -fpager.log -e",
+        "git config -ff -e",
+        "git config -zfoof -e",
+        "git config -tf -e",
         "git config -ze",
     ] {
         assert_eq!(

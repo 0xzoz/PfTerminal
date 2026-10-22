@@ -815,7 +815,11 @@ fn replaced_shell_scripts(
             break;
         }
         if shell == "fish" {
-            scripts.extend(fish_attached_code(texts, at).map(|code| (at, code.to_string())));
+            scripts.extend(
+                fish_codes(texts, at, cut)
+                    .into_iter()
+                    .map(|code| (at, code)),
+            );
         }
         match invocation::parse(&shell, &texts[at + 1..]).map(|invocation| invocation.code) {
             Some(Code::Inline(Some(inline))) => match script_candidates(texts, at, inline) {
@@ -833,28 +837,97 @@ fn replaced_shell_scripts(
     scripts
 }
 
-/// Code fish runs from its options after `at` with the code attached:
-/// `-c'CODE'`, `-C'CODE'` (also in a group: `-lc'CODE'`), `--command=CODE`,
-/// `--init-command=CODE`, or an unambiguous prefix (`--comm=CODE`).
-fn fish_attached_code(texts: &[String], at: usize) -> impl Iterator<Item = &str> {
-    texts[at + 1..]
-        .iter()
-        .take_while(|word| word.starts_with('-'))
-        .filter_map(|word| {
-            work::step();
-            if let Some(long) = word.strip_prefix("--") {
-                let (option, code) = long.split_once('=')?;
-                let names = |full: &str, shortest: usize| {
-                    option.len() >= shortest && full.starts_with(option)
-                };
-                (names("command", 1) || names("init-command", 3)).then_some(code)
-            } else {
-                let group = word.strip_prefix('-')?;
-                let letter = group.find(['c', 'C'])?;
-                let code = &group[letter + 1..];
-                (!code.is_empty()).then_some(code)
+/// Code fish runs from its options after `at`, read as fish's getopt
+/// reads them (`+hPilNnvc:C:p:d:f:D:o:`): every `-c`/`--command` and
+/// `-C`/`--init-command` value, attached or the next word, in a group or
+/// after other options' values (`-c true -C 'CODE'`), long ones by any
+/// unambiguous prefix. An option it does not know sets `cut`.
+fn fish_codes(texts: &[String], at: usize, cut: &mut bool) -> Vec<String> {
+    /// Long options, whether each takes a value, and whether that is code.
+    const LONG: &[(&str, bool, bool)] = &[
+        ("command", true, true),
+        ("init-command", true, true),
+        ("features", true, false),
+        ("debug", true, false),
+        ("debug-output", true, false),
+        ("debug-stack-frames", true, false),
+        ("profile", true, false),
+        ("profile-startup", true, false),
+        ("interactive", false, false),
+        ("login", false, false),
+        ("no-execute", false, false),
+        ("no-config", false, false),
+        ("private", false, false),
+        ("print-rusage-self", false, false),
+        ("print-debug-categories", false, false),
+        ("help", false, false),
+        ("version", false, false),
+    ];
+    let mut codes = Vec::new();
+    let mut index = at + 1;
+    while let Some(word) = texts.get(index) {
+        work::step();
+        index += 1;
+        if word == "--" || word == "-" || !word.starts_with('-') {
+            break;
+        }
+        // An option's value: attached, or else the next word.
+        let value = |attached: Option<&str>, index: &mut usize| match attached {
+            Some(attached) => Some(attached.to_string()),
+            None => {
+                let next = texts.get(*index).cloned();
+                *index += 1;
+                next
             }
-        })
+        };
+        if let Some(long) = word.strip_prefix("--") {
+            let (option, attached) = match long.split_once('=') {
+                Some((option, attached)) => (option, Some(attached)),
+                None => (long, None),
+            };
+            let exact = LONG.iter().find(|(name, _, _)| *name == option);
+            let mut prefixed = LONG.iter().filter(|(name, _, _)| name.starts_with(option));
+            let found = exact.or_else(|| match (prefixed.next(), prefixed.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            });
+            match found {
+                Some((_, true, is_code)) => {
+                    let taken = value(attached, &mut index);
+                    if *is_code {
+                        match taken {
+                            Some(code) => codes.push(code),
+                            None => *cut = true,
+                        }
+                    }
+                }
+                Some((_, false, _)) if attached.is_none() => {}
+                _ => *cut = true,
+            }
+            continue;
+        }
+        for (at_letter, letter) in word.char_indices().skip(1) {
+            work::step();
+            let rest = &word[at_letter + letter.len_utf8()..];
+            let attached = (!rest.is_empty()).then_some(rest);
+            if "cC".contains(letter) {
+                match value(attached, &mut index) {
+                    Some(code) => codes.push(code),
+                    None => *cut = true,
+                }
+                break;
+            }
+            if "pdfDo".contains(letter) {
+                value(attached, &mut index);
+                break;
+            }
+            if !"hPilNnv".contains(letter) {
+                *cut = true;
+                break;
+            }
+        }
+    }
+    codes
 }
 
 /// What a launcher puts into a shell's script (`xargs -I% sh -c 'git %'`):

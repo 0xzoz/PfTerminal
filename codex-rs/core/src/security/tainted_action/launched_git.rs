@@ -153,7 +153,6 @@ impl<'a> LaunchedGit<'a> {
             "--memfree",
             "--load",
             "--block",
-            "--shebang-wrap",
         ];
         /// Options that take no value.
         const FLAGS: &[&str] = &[
@@ -194,7 +193,7 @@ impl<'a> LaunchedGit<'a> {
             self.parallel_options = false;
             return;
         }
-        let (option, value) = word.split_once('=').unwrap_or((word, ""));
+        let option = word.split_once('=').map_or(word, |(option, _)| option);
         let counted = ["-j", "-P", "-N", "-n"].iter().any(|short| {
             option.strip_prefix(short).is_some_and(|count| {
                 !count.is_empty()
@@ -204,7 +203,7 @@ impl<'a> LaunchedGit<'a> {
             })
         });
         if VALUED.contains(&option) {
-            self.parallel_value_next = value.is_empty() && !word.contains('=');
+            self.parallel_value_next = !word.contains('=');
         } else if !(counted || FLAGS.contains(&option)) {
             self.any_replacement = true;
         }
