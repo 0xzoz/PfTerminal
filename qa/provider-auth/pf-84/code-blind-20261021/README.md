@@ -8,9 +8,10 @@ and the D86/D124/D125 `/status` behaviour. Out of scope by owner decision: live 
 (D135), #1205/#1208 (D138).
 
 **Result: 28 cases: 23 passed (one, ESC-01, after the integrator reclassified a harness artifact), 2 passed in part
-(NA-10, ST-02: one check each could not be set up, because "Use … for this session" starts a new session), 1 not
-complete (NA-06: rename not exercised), 2 failed.** The failures: **D136** blocks (after the account is removed the
-running session shows no recovery text and keeps answering on it); **NA-05** (in-app `/resume` silently re-accounts a
+(NA-10: one check could not be set up because "Use … for this session" starts a new session; ST-02: d5-2 not reached
+for the same reason, and its NO-SECRET checks untested because of a tester error), 1 not complete (NA-06: rename not
+exercised), 2 failed.** The failures: **D136** blocks (after the account is removed the running session shows no
+recovery text; it also kept answering on the removed sign-in, recorded as `[observe]` pending decision 1); **NA-05** (in-app `/resume` silently re-accounts a
 conversation whose account is gone when the TUI was started with `--account`; the docs contradict each other, owner
 decision). Per case: [Results](#results). Open owner questions: [below](#open-owner-decisions).
 
@@ -72,8 +73,9 @@ decision). Per case: [Results](#results). Open owner questions: [below](#open-ow
   reverse tunnel to a host relay that adds the real Z.AI key (fetched with `corbanu vault auth-helper` at relay start,
   never printed). It answers `api.openai.com` itself with 401, and Z.AI requests with no key or a `bad…` label with 401.
 - **Live ChatGPT test account (D136), G9 only.** The coordinator ran `corbanu login --account t1 --device-auth` in the
-  guest lane; only the device URL and code left the guest, in `workers-20261002/pf84-cb1.signin.md`. Travis approved
-  attempt 1 (posted 22:02:44Z, signed in 22:14:54Z: "ChatGPT sign-in · <email-hint> · Free"). ChatGPT traffic went
+  guest lane; only the device URL and code left the guest, in `workers-20261002/pf84-cb1.signin.md`, which the
+  coordinator relays to Travis (D136). Attempt 1 was approved (per the coordinator; the record cannot show who
+  approved): posted 22:02:44Z, signed in 22:14:54Z, "ChatGPT sign-in · <email-hint> · Free". ChatGPT traffic went
   through a blind pass-through (host `chatgpt.com:443`/`auth.openai.com:443` only, TLS not opened), so the test
   account's tokens existed only inside the guest. D136 itself removed `t1` ("Signed out and removed openai account
   `t1`"); the coordinator's sign-out step then found it already gone, and the clone's lane homes were deleted
@@ -81,7 +83,7 @@ decision). Per case: [Results](#results). Open owner questions: [below](#open-ow
 - **Testers:** one fresh GLM 5.3 Flash (`zai`) `corbanu exec` session per group, in the lane, with the frozen cases and
   `agms-tui` only; each first re-ran the isolation probe and checked both digests.
 - **Integrator checks** (not visible to testers): the relay table per group (`relay-product-requests.txt`), conversation
-  files (`sessions-accounts.txt`), home file lists, and one integrator probe in two attempts
+  files (`sessions-accounts.txt`), home file lists, and one integrator probe in three attempts (plus two discarded clones)
   ([integrator-probe-na05/](integrator-probe-na05/)), which is not a case and not code-blind tester evidence.
 - **Background `chatgpt.com` attempts.** In every Z.AI home the product also opened `chatgpt.com:443` (and
   `github.com`/`api.github.com`, refused) around session start, even with no OpenAI sign-in; outside G9 the
@@ -92,7 +94,7 @@ decision). Per case: [Results](#results). Open owner questions: [below](#open-ow
   0; mediator leaf key and placeholder key file absent (`runs/*/clone-*`, `harness/shakedown/clone-*`,
   `integrator-probe-na05/clone-*`). Per-clone binary and harness digests and the host-side signature check:
   [candidate-identity.md](candidate-identity.md). Travis's approval: [runs/G9/signin-handoff.md](runs/G9/signin-handoff.md)
-  (code redacted). The real login keychain and the owner's home were not touched.
+  (code redacted; approval per the coordinator). The real login keychain and the owner's home were not touched.
 
 ### Harness changes in this run
 
@@ -103,7 +105,8 @@ decision). Per case: [Results](#results). Open owner questions: [below](#open-ow
 | v3 | `agms-tui start --stdin TEXT` (pipe a key) | G3–G8 (unused until amendment v2) |
 | v4 | a `C-c` no longer ends the terminal wrapper before the exit line (lost REG-01d's window in G8) | G6R, G8R, R1–R4, probe |
 
-Shakedown (one clone, no tester): every home built, each account kind attributed correctly by the relay, OpenAI 401,
+Shakedown (no tester; a first clone stopped at once on a harness argument bug, `shakedown1-prep-bug-…` in
+[candidate-identity.md](candidate-identity.md), and was deleted; the second ran): every home built, each account kind attributed correctly by the relay, OpenAI 401,
 device-code screen reached through the pass-through and cancelled unapproved ([harness/shakedown/](harness/shakedown/)).
 
 ## Results
@@ -119,13 +122,13 @@ Relay/files lines were checked by the integrator; detail in [harness/host/integr
 | NA-04 | AC3/AC6 rejected key | R1 | passed | **passed** | Two 401s carrying only `badkey`; no fallback. |
 | PR-01 | #555 leg, precedence | R2 | passed | **passed** | Amended run: `/status` and relay at every step: `work`, `personal`, `work`, `personal`, `default`; files: `<id>` records `work, personal, work, work`. The frozen "no-flag resume after a turn on `personal` → `work`" check **failed in G2** and is now `[observe]` (v2-Q1, see Method). |
 | GH-02 | #555 leg | R2 | passed | **passed** | After removing `work`, `resume <gid>` exits 1 naming `work` with `corbanu account add zai work`. `[advisory]` `ghost` not mentioned (as in 10-13). G2's version never set up its situation (premise). |
-| NA-05 | AC3/AC4 in-app resume | R2 | failed | **failed (owner decision)** | In a TUI started with `--account personal`, in-app `/resume` of a conversation recorded only on removed `work` resumed it on `personal` with no message (relay `rtwo`→`zpersonal`; session file: turns 1–2 `work`, turn 3 `personal`). Integrator probe (attempt 2): started **without** `--account`, the same resume is refused with REF-10's message and the session stays put (`qone`→`zpersonal` in the current session; the `qzero` conversation still records only `work`). `docs/provider-accounts.md` contradicts itself: "Choosing an account" lets an explicit `--account` win, "Fail closed" says in-session `/resume` shows the error and stays on the current conversation. |
+| NA-05 | AC3/AC4 in-app resume | R2 | failed | **failed (owner decision)** | In a TUI started with `--account personal`, in-app `/resume` of a conversation recorded only on removed `work` resumed it on `personal` with no message (relay `rtwo`→`zpersonal`; session file: turns 1–2 `work`, turn 3 `personal`). Integrator probe: started **without** `--account`, the same resume is refused with REF-10's message and the session stays put; started **with** `--account personal` (arm B, `[provider_accounts]` = `personal`), it resumes silently on `personal` — so the launch `--account` is the cause. `docs/provider-accounts.md` contradicts itself: "Choosing an account" lets an explicit `--account` win, "Fail closed" says in-session `/resume` shows the error and stays on the current conversation. |
 | NA-06 | AC1 rows, add, rename | R3 | failed | **not complete** | Rows, kinds, fingerprints and markers passed; add with masked key passed. Rename not exercised: the tester chose "Use for this session" by mistake; the product then rightly refused renaming the in-use account. |
 | ESC-03 | #555 leg | G3 | passed | **passed** | Same session, account and transcript after Esc. Draft clause: no route found (`/resume <text>` searches); open question Q2. |
 | NA-07 | AC1/AC2/AC3 use/make-default/remove in use | R3 | passed | **passed** | G3 blocked (row 10 hidden, below). |
 | NA-08 | AC4 forks | G4 | passed | **passed** | `/fork`, edit, `/side` all `zwork`; files: the fork conversations record `work`. |
 | NA-09 | AC4 `corbanu fork`, spawned agent | G4 | passed | **passed** | Fork and spawned agent all `zwork`; `fork --account personal`→`zpersonal`; files: the sub-agent conversation records `work`. |
-| NA-10 | AC5/D86 `/status` format | R1 | failed | **passed in part** | All checks passed except s2's "table with `work (active)` and `personal`" after "Use for this session": that action starts a **new** session ("New session: requests to zai use account `work`"), so the in-session table could not be set up (not reached). Multi-account tables were seen in resumed conversations (PR-01, NA-05). G4 blocked (row hidden). |
+| NA-10 | AC5/D86 `/status` format | R1 | failed | **passed in part** | `[advisory]` s1 omitted the cached-input count. All other checks passed except s2's "table with `work (active)` and `personal`" after "Use for this session": that action starts a **new** session ("New session: requests to zai use account `work`"), so the in-session table could not be set up (not reached). Multi-account tables were seen in resumed conversations (PR-01, NA-05). G4 blocked (row hidden). |
 | ST-01 | D86/D125 no named accounts | G5 | passed | **passed** | Plain `/status` in `zaione`. |
 | ST-02 | D124/D86/D125 | R4 | failed | **passed in part** | Passed: an account added by another process shows on the 2nd `/status` (D124); after removal `/status` is plain; no `/status` late or stalled. Not reached: d5-2, the D86 "session has used a named account" clause (each "Use … for this session" starts a new session, which then never used one). Not tested: NO-SECRET — the tester piped the literal `k` as both keys; `dtwo` carried a key the relay labels `other:8254c329` = `sha256("k")`, i.e. `extrb`'s stored key (inferred). The tester also opened an unplanned Deactivate dialog (cancelled). |
 | ESC-04 | #555 leg onboarding | R4 | passed | **passed** | Onboarding list and masked Z.AI key screen as REF-12/14; finishing needs scrolling to row 17 "Done". `[observe]` the fresh home then used `glm-5.2`. G5 blocked (Done never reached). |
@@ -147,8 +150,9 @@ Totals (final): passed 23 (ESC-01 reclassified: harness artifact), passed in par
 failed.
 
 Other observations: in G3 a "Choose replacement" dialog appeared on `/quit` after the tester had opened
-"Deactivate"; in R3 (NA-07) window B, whose account `work` was removed from window A, was refused on its next request
-("account `work` of provider `zai` has no stored API key; add it with `corbanu account add zai work` …") but its
+"Deactivate"; in R3 (NA-07) window B, whose account `work` was removed from window A, got a fatal error on its next
+request ("■ Fatal error: account `work` of provider `zai` has no stored API key; add it with `corbanu account add zai
+work` or choose another account") but its
 `/status` still showed `· account work` — the same `/status` pattern as D136, with the refusal that D136 lacks.
 
 ### D136 in detail
@@ -171,7 +175,7 @@ showed no named accounts.
 
 | Issue | Severity | What |
 | --- | --- | --- |
-| [#1286](https://github.com/CorbanuCore/CorbanuTerminal/issues/1286) | blocks D136 | After a named account is removed elsewhere, the running session keeps using it and shows no recovery; `/status` still names it. |
+| [#1286](https://github.com/CorbanuCore/CorbanuTerminal/issues/1286) | blocks D136 | After a named account is removed elsewhere, the running session shows no recovery and `/status` still names it; it also kept using the removed sign-in (`[observe]`, decision 1). |
 | [#1287](https://github.com/CorbanuCore/CorbanuTerminal/issues/1287) | needs decision | In-app `/resume` of a conversation whose recorded account is gone silently re-accounts it to the launch `--account`. |
 | [#1288](https://github.com/CorbanuCore/CorbanuTerminal/issues/1288) | advisory | `/providers` (8-row window) and onboarding lists hide rows with no hint; a third account or "Done" is invisible until scrolled. |
 | [#1289](https://github.com/CorbanuCore/CorbanuTerminal/issues/1289) | low | Add-account name field: Enter right after fast typing adds a newline; a key pasted next shows in clear in the name field. |
@@ -204,8 +208,9 @@ showed no named accounts.
 - PR-01's frozen "no-flag resume after a turn on another account" situation as the owner described it (failed in G2,
   `[observe]` since).
 - `auth.json` unchanged from prep time in G9 (the tester's own start-of-group hash equals the end hash).
-- Files checks were made for NA-08, NA-09 (`runs/G4/sessions-accounts.txt`), PR-01, GH-02, NA-05
-  (`runs/G2/`, `runs/R2/sessions-accounts.txt`); the other cases rely on the relay and the screens.
+- Files checks: the integrator checked NA-08, NA-09 (`runs/G4/sessions-accounts.txt`), PR-01, GH-02, NA-05
+  (`runs/G2/`, `runs/R2/sessions-accounts.txt`) and D136 (integrator notes, G9 `auth.json` hash); the tester checked
+  NA-04's config itself; REG-01b's Files line ("CFG(zai3off) ends with `named_accounts = false`") was not checked.
 - The tester model (GLM 5.3 Flash) slipped several times (wrong menu item, a literal placeholder key, a report in the
   wrong folder); every slip is recorded and none is counted as a product result.
 
