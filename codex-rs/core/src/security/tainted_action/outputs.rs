@@ -29,7 +29,9 @@ const MIN_PREFIX: usize = 3;
 /// name in ends with `/`); `None` otherwise. `name` is the
 /// command's lowercase basename, `args` the words after it as written.
 /// #1159: a dashed git helper (`git-log`) is `git log`, `git.exe` is git.
-pub(super) fn output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
+/// #1283: `unchecked`: git or its `config` is spelled by text the
+/// quote-aware reading cannot see, so a `git config` read is not trusted.
+pub(super) fn output_files(name: &str, args: &[String], unchecked: bool) -> Option<Vec<String>> {
     let helper = git_helpers::git_name(name);
     let subcommand = helper.as_ref().and_then(Option::as_deref);
     let name = if helper.is_some() { "git" } else { name };
@@ -41,11 +43,11 @@ pub(super) fn output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
     // FILE` writes its operand (a writer's operands are written).
     let config_file = name == "git"
         && if subcommand == Some("config") {
-            !git_config_reads(args)
+            unchecked || !git_config_reads(args)
         } else {
             args.iter()
                 .position(|arg| arg == "config")
-                .is_some_and(|at| !git_config_reads(&args[at + 1..]))
+                .is_some_and(|at| unchecked || !git_config_reads(&args[at + 1..]))
         };
     let mut found = name == "git" && has("bundle") && has("create");
     let mut files = Vec::new();
@@ -225,13 +227,6 @@ fn reads_by_subcommand(words: &[String]) -> bool {
 /// their value (`-fpager.log`, `-zfe`), not options. Worked out in one pass
 /// from the end.
 pub(super) fn git_config_edits_each(words: &[String]) -> Vec<bool> {
-    let opens_editor = |word: &str| {
-        if word.starts_with("--") {
-            word.len() >= "--ed".len() && "--edit".starts_with(word)
-        } else {
-            word.split(['f', 't']).next().unwrap_or(word).contains('e')
-        }
-    };
     // Whether the words from the next word on, and from the one after it,
     // open the editor when the first of them is read as an option.
     let mut next = false;
@@ -261,6 +256,21 @@ pub(super) fn git_config_edits_each(words: &[String]) -> Vec<bool> {
         each[at] = here || word == "edit";
     }
     each
+}
+
+/// Whether `word`, read as a `git config` option, opens the editor.
+fn opens_editor(word: &str) -> bool {
+    if word.starts_with("--") {
+        word.len() >= "--ed".len() && "--edit".starts_with(word)
+    } else {
+        word.split(['f', 't']).next().unwrap_or(word).contains('e')
+    }
+}
+
+/// #1283: whether `word` (lowercase) may open the editor as a `git config`
+/// option or subcommand wherever it is.
+pub(super) fn may_open_editor(word: &str) -> bool {
+    (word.starts_with('-') && opens_editor(word)) || word == "edit"
 }
 
 /// What the next `git config` word may be.
@@ -376,7 +386,7 @@ mod tests {
 
     fn files(name: &str, args: &[&str]) -> Option<Vec<String>> {
         let args: Vec<String> = args.iter().map(|arg| (*arg).to_string()).collect();
-        output_files(name, &args)
+        output_files(name, &args, /*unchecked*/ false)
     }
 
     /// #1255: which `git config` words open the editor, from the start and
