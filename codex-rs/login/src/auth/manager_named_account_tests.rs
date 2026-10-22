@@ -570,3 +570,79 @@ fn a_read_from_before_the_held_sign_in_changed_is_not_recorded() {
     store.record(epoch, StoreSeen::Holds(marker));
     assert!(matches!(store.seen().state, StoreSeen::Holds(_)));
 }
+
+/// #1326: pause at the real check/clear boundary, install a later sign-in,
+/// then apply the old answer. Both a different sign-in and an A -> B -> A
+/// replacement keep their cache and do not emit a spurious auth-change event.
+#[test]
+fn a_stale_gone_answer_never_clears_a_replacement_sign_in() {
+    for replacements in [
+        &["sk-canary-replacement"][..],
+        &["sk-canary-intermediate", "sk-canary-original"][..],
+    ] {
+        let home = tempfile::tempdir().expect("home");
+        login_named_account_with_api_key(home.path(), &account("work"), "sk-canary-original")
+            .expect("sign-in");
+        let base = AuthManager::from_auth_for_testing_with_home(
+            CodexAuth::from_api_key("sk-default-canary"),
+            home.path().to_path_buf(),
+        );
+        let work = base.for_named_account(account("work"));
+        assert!(
+            vault(home.path())
+                .remove_provider_account("openai", &work_name())
+                .expect("remove")
+        );
+        let HeldSignIn::Gone { epoch } = work.held_named_sign_in() else {
+            panic!("the removed sign-in must be gone");
+        };
+
+        // These are the updates another thread can complete after the
+        // check in auth_cached and before its conditional cache clear.
+        for replacement in replacements {
+            login_named_account_with_api_key(home.path(), &account("work"), replacement)
+                .expect("replacement sign-in");
+            work.reload_named_sign_in_sync();
+        }
+        let expected = Some(CodexAuth::from_api_key(
+            replacements.last().expect("replacement"),
+        ));
+        let revision = *work.auth_change_receiver().borrow();
+
+        work.clear_named_sign_in_if_unchanged(epoch);
+
+        assert_eq!(
+            (work.auth_cached(), *work.auth_change_receiver().borrow()),
+            (expected, revision)
+        );
+    }
+}
+
+/// The current Gone answer still clears the removed sign-in and notifies
+/// subscribers; the generation guard must not suppress real removals.
+#[test]
+fn a_current_gone_answer_clears_and_notifies_once() {
+    let home = tempfile::tempdir().expect("home");
+    login_named_account_with_api_key(home.path(), &account("work"), "sk-canary-removed")
+        .expect("sign-in");
+    let base = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("sk-default-canary"),
+        home.path().to_path_buf(),
+    );
+    let work = base.for_named_account(account("work"));
+    assert!(
+        vault(home.path())
+            .remove_provider_account("openai", &work_name())
+            .expect("remove")
+    );
+    let revision = *work.auth_change_receiver().borrow();
+
+    assert_eq!(
+        (work.auth_cached(), *work.auth_change_receiver().borrow()),
+        (None, revision + 1)
+    );
+    assert_eq!(
+        (work.auth_cached(), *work.auth_change_receiver().borrow()),
+        (None, revision + 1)
+    );
+}
