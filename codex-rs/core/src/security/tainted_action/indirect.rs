@@ -257,7 +257,7 @@ pub(super) fn command_word(words: &[String]) -> Option<(usize, String)> {
                     operands = 0;
                 }
                 index += 1 + usize::from(value_options.contains(&option.as_str()));
-            } else if option.contains('=') && !option.starts_with('=') {
+            } else if option.contains('=') {
                 index += 1;
             } else {
                 break;

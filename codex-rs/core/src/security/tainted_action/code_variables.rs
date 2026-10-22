@@ -56,8 +56,9 @@ const CODE_VARIABLES: &[&str] = &[
     "BROWSER",
     // #1064/#1159: the shell runs a prompt variable's value (`PS4` under
     // `set -x`, `PROMPT_COMMAND`, zsh prompts under `promptsubst`), sources
-    // the file `BASH_ENV`/`ENV` names or reads start-up files from
-    // `ZDOTDIR`. (`PATH` and library search paths are an owner decision.)
+    // the file `BASH_ENV` names or reads start-up files from `ZDOTDIR`.
+    // (Names also set for other reasons, `PATH`, `ENV`, library paths and
+    // interpreter options, are an owner decision.)
     "PS0",
     "PS1",
     "PS2",
@@ -71,19 +72,14 @@ const CODE_VARIABLES: &[&str] = &[
     "RPROMPT2",
     "RPS1",
     "RPS2",
+    "SPROMPT",
+    "PROMPT_EOL_MARK",
     "BASH_ENV",
     "ZDOTDIR",
     // Libraries the loader runs in every program it starts.
     "LD_PRELOAD",
     "LD_AUDIT",
     "DYLD_INSERT_LIBRARIES",
-    // Options an interpreter reads from its environment (`--require`,
-    // `-M`, `-r`, `-javaagent:`).
-    "NODE_OPTIONS",
-    "PERL5OPT",
-    "RUBYOPT",
-    "JAVA_TOOL_OPTIONS",
-    "_JAVA_OPTIONS",
 ];
 /// `GIT_CONFIG_KEY_<n>`/`GIT_CONFIG_VALUE_<n>` set config keys,
 /// `GIT_TRACE*` names a file git writes, `GIT_TEST_*` are test hooks (some
@@ -96,14 +92,14 @@ const CODE_VARIABLE_PREFIXES: &[&str] = &[
     "GIT_TEST_",
     "LESSKEY",
 ];
-/// #1159: code variables whose names are common words (`grep ENV`,
-/// `GetEnvironmentVariable('PROMPT')`, `docker run -e ENV=prod`), counted
+/// #1159: code variables whose names are common words (`grep PROMPT`,
+/// `GetEnvironmentVariable('PROMPT')`, `docker run -e PROMPT=x`), counted
 /// only where they are set: assigned before a command or by `env`
-/// (`ENV=x sh -i`, `fpath+=(x)`), by PowerShell (`$env:ENV = 'x'`) or an
-/// expansion (`${ENV:=x}`), or named to a builtin that sets them (`export
-/// ENV`, `read PROMPT`, `set env=x`). zsh's `FPATH` (tied to the array `fpath`) is where `autoload`
-/// finds the functions it runs.
-const SET_ONLY_VARIABLES: &[&str] = &["ENV", "PROMPT", "FPATH", "fpath"];
+/// (`PROMPT=x zsh -i`, `fpath+=(x)`), by PowerShell (`$env:PROMPT = 'x'`)
+/// or an expansion (`${PROMPT:=x}`), or named to a builtin that sets them
+/// (`export PROMPT`, `read PROMPT`, `set prompt=x`). zsh's `FPATH` is where
+/// `autoload` finds the functions it runs.
+const SET_ONLY_VARIABLES: &[&str] = &["PROMPT", "FPATH"];
 
 fn is_set_only(name: &str) -> bool {
     SET_ONLY_VARIABLES.contains(&name)
@@ -299,7 +295,7 @@ pub(super) fn sets_code_variable(
             }
         }
     }
-    // PowerShell sets a set-only variable (`$env:ENV = 'x'`, `$env:Prompt+=x`).
+    // PowerShell sets a set-only variable (`$env:PROMPT = 'x'`, `$env:Fpath+=x`).
     for (at, word) in raw.iter().enumerate() {
         work::step();
         let lower = word.to_ascii_lowercase();

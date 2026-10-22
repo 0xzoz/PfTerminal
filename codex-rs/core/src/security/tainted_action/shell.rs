@@ -182,12 +182,22 @@ fn computed_transformation(text: &str) -> bool {
             name => name,
         };
         rest = &rest[name..];
+        // A subscript may hold `]` (`${a[b[0]]@$p}`, `${a["]"]@$p}`): any
+        // `]@` in it counts.
         if rest.starts_with('[') {
-            let window = &rest.as_bytes()[..rest.len().min(64)];
-            match window.iter().position(|byte| *byte == b']') {
-                Some(close) => rest = &rest[close + 1..],
-                None => return true,
+            let bytes = rest.as_bytes();
+            let window = &bytes[..bytes.len().min(64)];
+            if !window.contains(&b']') {
+                return true;
             }
+            return window.iter().enumerate().any(|(at, byte)| {
+                work::step();
+                *byte == b']'
+                    && bytes.get(at + 1) == Some(&b'@')
+                    && bytes
+                        .get(at + 2)
+                        .is_none_or(|op| !b"QEAKakUuL".contains(op))
+            });
         }
         rest.strip_prefix('@').is_some_and(|op| {
             !(op.starts_with(|ch: char| "QEAKakUuL".contains(ch)) || (bang && op.starts_with('}')))
@@ -656,8 +666,9 @@ impl Lexer {
             self.looked_up = open.outer_looked_up;
             self.hidden = open.outer_hidden;
             self.operated = open.outer_operated;
-            self.redirect = open.outer_redirect;
+            // `> >(cmd)` adds no outer word: its redirection is done.
             if !open.output {
+                self.redirect = open.outer_redirect;
                 self.word.push_str(UNSEEN_OUTPUT);
             }
             return;
@@ -698,8 +709,8 @@ impl Lexer {
         self.looked_up = open.outer_looked_up;
         self.hidden = open.outer_hidden || spliced.is_some();
         self.operated = open.outer_operated;
-        self.redirect = open.outer_redirect;
         if !open.output {
+            self.redirect = open.outer_redirect;
             // Not literal text: the output of a lookup or of `cd X && pwd`.
             self.looked_up |= spliced.is_some()
                 && !matches!(top.as_slice(), [only] if fact_output(&self.done[*only]));

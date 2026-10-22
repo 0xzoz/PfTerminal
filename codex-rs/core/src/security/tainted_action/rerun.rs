@@ -10,8 +10,8 @@
 //! cannot see is code it cannot read.
 //!
 //! #1159: git options that make git run a program the classifier does not
-//! read whatever their value: `--upload-pack`/`--receive-pack`/`--exec` (and
-//! `clone -u`), hooks copied by `clone`/`init --template`, and config set on
+//! read whatever their value: `--upload-pack`/`--receive-pack`, `--exec` (of
+//! `push`, `archive`, `send-pack`, `fetch-pack`), `clone -u`, hooks copied by `clone`/`init --template`, and config set on
 //! the new repository by `clone -c`/`--config`.
 
 use super::git_helpers;
@@ -27,8 +27,10 @@ const RUNS_OPERANDS: &[&str] = &[
 
 /// Commands whose words after one of these words are a command it runs:
 /// (command, word that must also be on the line or "", words starting the
-/// command). A long option also starts it with its value attached
-/// (`--exec=x`).
+/// command). For git, as its option parser reads them, a short option also
+/// starts it in a group or with its value attached (`-ix`, `-x"$v"`), and a
+/// long one by any prefix from four characters, its value attached or not
+/// (`--exe="$v"`).
 const COMMAND_OPTIONS: &[(&str, &str, &[&str])] = &[
     ("find", "", &["-exec", "-execdir", "-ok", "-okdir"]),
     ("git", "rebase", &["-x", "--exec"]),
@@ -85,13 +87,19 @@ pub(super) fn runs_unseen(name: &str, words: &[String], unseen: &[bool], index: 
         {
             continue;
         }
+        let git = name == "git";
         let start = words[index + 1..].iter().position(|word| {
             starts.iter().any(|start| {
+                let long = word.split_once('=').map_or(word.as_str(), |(name, _)| name);
                 word == start
                     || (start.starts_with("--")
-                        && word
-                            .strip_prefix(start)
-                            .is_some_and(|rest| rest.starts_with('=')))
+                        && (long == *start || (git && long.len() >= 4 && start.starts_with(long))))
+                    || (git
+                        && start.len() == 2
+                        && start.starts_with('-')
+                        && word.starts_with('-')
+                        && !word.starts_with("--")
+                        && word[1..].contains(&start[1..]))
             })
         });
         if let Some(start) = start
@@ -137,7 +145,7 @@ pub(super) fn git_runs_program(args: &[String], subcommand: Option<&str>) -> boo
     };
     let clone = has("clone");
     let creates = clone || has("init");
-    let exec = has("push") || has("archive");
+    let exec = has("push") || has("archive") || has("send-pack") || has("fetch-pack");
     let long = |word: &str, option: &str, shortest: usize| {
         let name = word.split_once('=').map_or(word, |(name, _)| name);
         name.len() >= shortest && option.starts_with(name)

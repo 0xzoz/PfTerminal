@@ -285,6 +285,9 @@ const WORKING_TREE_WRITERS: &[&str] = &[
     "rm",
     "mv",
     "sparse-checkout",
+    "bisect",
+    "submodule",
+    "read-tree",
 ];
 /// `git clone`'s options that take the next word as their value.
 const CLONE_VALUE_OPTIONS: &[&str] = &[
