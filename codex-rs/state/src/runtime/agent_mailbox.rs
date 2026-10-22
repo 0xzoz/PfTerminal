@@ -288,6 +288,10 @@ WHERE message_id = ?
 /// Clients retry with the stable message ID and semantic payload; they are not required to
 /// persist a timestamp that the server generated on their behalf. Every field that can alter
 /// routing, model-visible content, delivery behavior, or attribution remains collision-checked.
+///
+/// A missing `author_label` is an unknown label, not a different sender (#1335): a row persisted
+/// before Core labelled cross-tree mail has none, and the same message retried afterwards has
+/// one. Two different known labels still conflict, and `author` is always compared.
 fn same_logical_message(
     stored: &InterAgentCommunication,
     incoming: &InterAgentCommunication,
@@ -296,6 +300,10 @@ fn same_logical_message(
     let mut incoming = incoming.clone();
     stored.created_at_ms = None;
     incoming.created_at_ms = None;
+    if stored.author_label.is_none() || incoming.author_label.is_none() {
+        stored.author_label = None;
+        incoming.author_label = None;
+    }
     stored == incoming
 }
 
