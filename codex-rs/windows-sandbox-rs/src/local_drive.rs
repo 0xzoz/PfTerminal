@@ -16,10 +16,17 @@ pub const REMOTE_OR_LINK_ATTRIBUTES: u32 = {
         | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
 };
 
-/// `CreateFileW` flag: open a link itself, never what it points to.
+/// `CreateFileW` flags: open a link itself, never what it points to, and
+/// open a folder as well as a file.
 #[cfg(target_os = "windows")]
-pub const OPEN_LINK_ITSELF: u32 =
-    windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+pub const OPEN_ITSELF: u32 = windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT
+    | windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+
+/// `CreateFileW` sharing that lets others read and write but not delete or
+/// rename what is open (so a folder held open cannot be swapped).
+#[cfg(target_os = "windows")]
+pub const SHARE_NOT_DELETE: u32 = windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE;
 
 /// Whether drive `letter` is a fixed disk volume on this machine: its DOS
 /// device names a hard disk volume (not a network redirector, a `subst`

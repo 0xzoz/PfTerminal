@@ -40,6 +40,18 @@ fn classify_fixture(action: &ApprovalAction) -> Option<ProtectedActionKind> {
     classify_with(action, &fixture(HOME), Some(&fixture(USER_HOME)))
 }
 
+/// #1261: `expected`, or on Windows `UnseenCode` for a line whose scripts
+/// the first judgment does not follow exactly there
+/// (`named_shell::windows_reads_follow`): it opens no file for it, so a
+/// script it runs asks, as on main.
+fn unfollowed(expected: Option<ProtectedActionKind>) -> Option<ProtectedActionKind> {
+    if cfg!(windows) {
+        Some(ProtectedActionKind::UnseenCode)
+    } else {
+        expected
+    }
+}
+
 fn kind(command: &[&str]) -> Option<ProtectedActionKind> {
     classify_fixture(&shell_in("/work", command))
 }
@@ -1591,11 +1603,7 @@ fn issue_841_sed_edits_are_not_unseen_code() {
     let mut wrong = Vec::new();
     // #1261: on Windows a line holding a backslash opens no file (the
     // lexer drops backslashes), so the script it runs asks.
-    let mod06_kind = if cfg!(windows) {
-        Some(ProtectedActionKind::UnseenCode)
-    } else {
-        None
-    };
+    let mod06_kind = unfollowed(None);
     for (script, expected) in [
         (mod06, mod06_kind),
         ("sed -i '' 's/a/b/' src/notes.py", None),
@@ -1881,8 +1889,12 @@ fn issue_885_nested_shell_scripts_are_judged() {
         ("bash -c 'echo hi; ./present.sh'", None),
         ("cd src && bash -c 'cat notes.py'", None),
         // The script runs where the line is, not in a substitution's folder.
-        ("d=$(cd src && pwd); bash -c './present.sh'", None),
-        ("d=$(cd / && pwd); bash -c './present.sh'", None),
+        // #1261: not followed exactly on Windows (see `unfollowed`).
+        (
+            "d=$(cd src && pwd); bash -c './present.sh'",
+            unfollowed(None),
+        ),
+        ("d=$(cd / && pwd); bash -c './present.sh'", unfollowed(None)),
         ("docker run img sh -c './entrypoint.sh'", None),
         // Quoted text is judged like code wherever it is (as the word
         // lexer does), so printed text naming a missing script asks.
@@ -1916,7 +1928,7 @@ fn issue_885_sed_writing_a_file_the_line_runs_is_unseen_code() {
         ("sed -n '/x/w r.sh' f; bash r.sh", unseen),
         ("sed -i '1r f' r.sh; source r.sh", unseen),
         // In place, adding text the line shows, or not run in the line.
-        ("sed -i '1a echo hi' r.sh && bash r.sh", None),
+        ("sed -i '1a echo hi' r.sh && bash r.sh", unfollowed(None)),
         ("sed -i '/x/d' r.sh && bash r.sh", None),
         ("sed -i 's/a/b/' f && bash present.sh", None),
         ("sed -n '1a ./p.sh' r.sh", None),
@@ -1985,7 +1997,7 @@ fn issue_885_review_1_routes_and_limits() {
         let nested = format!("uv {envs}bash -c \"uv {envs}bash -c './present.sh'\"");
         assert_eq!(
             classify_fixture(&shell_in(&cwd, &["/bin/bash", "-c", &nested])),
-            None
+            unfollowed(None)
         );
     });
     work::assert_linear("wide wrappers", |scale| {
@@ -2143,7 +2155,7 @@ fn issue_885_review_3_routes() {
         ("sed -n 1,5p f # show the first lines", None),
         ("echo 'sed p'; git log -n 1 # sed -n p", None),
         ("echo a; git log -n 1 # sed -n p", None),
-        ("echo \"bash -c ./present.sh\"", None),
+        ("echo \"bash -c ./present.sh\"", unfollowed(None)),
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
 }
@@ -5299,8 +5311,9 @@ fn issue_1261_spellings_the_shell_may_read_otherwise_are_not_read() {
     // not read either.)
     let plain = homes.resolve("plain/y", cwd);
     assert!(homes.windows_read_path("run.sh", &plain).is_some());
+    // `..` may climb past a drive's root, which Git Bash and WSL have above.
     let up = homes.resolve("..", &plain);
-    assert!(homes.windows_read_path("run.sh", &up).is_some());
+    assert_eq!(homes.windows_read_path("run.sh", &up), None);
 }
 
 /// #1261 review 1: a script file the first judgment reads on Windows is
@@ -5389,5 +5402,61 @@ fn issue_1261_home_and_drive_spellings_are_not_read() {
             Vec::<String>::new(),
             "{line}"
         );
+    }
+}
+
+/// #1261 review 3: on Windows the first judgment opens files only for a
+/// POSIX shell's script it follows exactly: plain commands of literal words,
+/// no wrapper, no inline code, no cmd or PowerShell. Runs on every platform.
+#[test]
+fn issue_1261_windows_reads_follow_only_plain_posix_scripts() {
+    let follows = |argv: &[&str]| {
+        let argv: Vec<String> = argv.iter().map(|word| (*word).to_string()).collect();
+        named_shell::windows_reads_follow(&argv)
+    };
+    for line in [
+        "bash run.sh",
+        "./run.sh && ./other.sh",
+        "sh -x run.sh",
+        "source run.sh",
+        "python3 tool.py count",
+        "cd sub && bash run.sh",
+        "git status | head -n 5; ./run.sh",
+        "bash -c \"sh -c './present.sh'\"",
+        "sed -n 1p f && bash present.sh",
+    ] {
+        assert!(follows(&["bash", "-lc", line]), "{line}");
+    }
+    for argv in [
+        vec![
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "Set-Location sub; bash run2.sh",
+        ],
+        vec!["cmd.exe", "/c", "bash run.sh"],
+        vec!["bash", "run.sh"],
+        vec!["bash", "-lc", "cmd /c \"cd sub & bash run2.sh\""],
+        vec![
+            "bash",
+            "-lc",
+            "powershell -Command \"Set-Location sub; bash run2.sh\"",
+        ],
+        vec![
+            "bash",
+            "-lc",
+            "python3 -c \"import os; os.system('chdir sub && bash run2.sh')\"",
+        ],
+        vec!["bash", "-lc", "env -C sub bash run2.sh"],
+        vec!["bash", "-lc", "sudo -D sub bash run2.sh"],
+        vec!["bash", "-lc", "timeout 5 bash run.sh"],
+        vec!["bash", "-lc", "echo 'x; cd sub'; bash run2.sh"],
+        vec!["bash", "-lc", "d=$(cd sub); bash run2.sh"],
+        vec!["bash", "-lc", "node -r ./p.js app.js"],
+        vec!["bash", "-lc", "bash 'sub\\run.sh'"],
+        vec!["bash", "-lc", "CDPATH=x cd sub && bash run.sh"],
+        vec!["bash", "-lc", "bash r[u]n.sh"],
+    ] {
+        assert!(!follows(&argv), "{argv:?}");
     }
 }

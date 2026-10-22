@@ -117,6 +117,120 @@ pub(super) fn grammar_proves_data(command: &[String]) -> bool {
         )
 }
 
+/// #1261: how deep `-c` scripts of POSIX shells are followed for
+/// [`windows_reads_follow`].
+const MAX_FOLLOWED_DEPTH: usize = 3;
+/// Interpreters whose first word, a file, is a script they run.
+const SCRIPT_INTERPRETERS: &[&str] = &["python", "python3", "node", "ruby", "perl"];
+
+/// #1261: whether, on Windows, the first judgment may open the script and
+/// sed program files `command` (the action's argv) runs. Its word lexer
+/// splits inside quoted words and follows only POSIX `cd`, so a file named
+/// in text that cmd, PowerShell or an interpreter's inline code runs may
+/// not be the one that runs (`cmd /c "cd sub & bash run.sh"`). So only: a
+/// POSIX shell (`bash`, `sh`, `dash`, `zsh`, by name) given `-c` or `-lc`
+/// and a script the bash grammar reads as plain commands of literal words
+/// with no shell syntax in them, each a script run by file (`bash x.sh`,
+/// `sh -x x.sh`, `./x`, `source x`, `python3 x.py`), `cd`/`pushd`/`popd`,
+/// `sed`, a program that never runs its words, or such a shell's `-c`
+/// script that is one too.
+pub(super) fn windows_reads_follow(command: &[String]) -> bool {
+    follows(command, /*depth*/ 0)
+}
+
+fn follows(command: &[String], depth: usize) -> bool {
+    let [shell, flag, script, ..] = command else {
+        return false;
+    };
+    if depth > MAX_FOLLOWED_DEPTH
+        || !posix_shell(shell)
+        || !matches!(flag.as_str(), "-c" | "-lc")
+        || script.len() > MAX_SCRIPT_BYTES
+        || splits_differently(script)
+    {
+        return false;
+    }
+    codex_shell_command::bash::parse_shell_script_into_plain_words(script).is_some_and(|commands| {
+        !commands.is_empty() && commands.iter().all(|words| followed(words, depth))
+    })
+}
+
+/// A shell named by `word` (any folder, `.exe` or not) that reads POSIX
+/// shell text.
+fn posix_shell(word: &str) -> bool {
+    let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    let name = name.strip_suffix(".exe").unwrap_or(name);
+    matches!(name, "bash" | "sh" | "dash" | "zsh")
+}
+
+/// One plain command [`windows_reads_follow`] accepts: its words hold no
+/// text a lexer that ignores quotes would split or expand, and it runs no
+/// script in a way the first judgment may follow wrongly: no wrapper before
+/// it (`env -C dir`, `sudo -D dir`, `timeout`, ...), and a shell or
+/// interpreter only with a script file (no inline code, preloads or modules),
+/// or a POSIX shell's `-c` script that is one too.
+fn followed(words: &[PlainWord], depth: usize) -> bool {
+    let texts: Vec<String> = words.iter().map(|word| word.text.clone()).collect();
+    let Some(name) = texts.first() else {
+        return false;
+    };
+    if posix_shell(name)
+        && texts[1..]
+            .iter()
+            .any(|word| word.starts_with('-') && !word.starts_with("--") && word.contains('c'))
+    {
+        return follows(&texts, depth + 1);
+    }
+    let plain = texts.iter().all(|word| {
+        !word.is_empty()
+            && !word.chars().any(|ch| {
+                ch.is_whitespace()
+                    || matches!(
+                        ch,
+                        ';' | '&'
+                            | '|'
+                            | '('
+                            | ')'
+                            | '<'
+                            | '>'
+                            | '`'
+                            | '$'
+                            | '\\'
+                            | '\''
+                            | '"'
+                            | '{'
+                            | '}'
+                            | '*'
+                            | '?'
+                            | '['
+                            | ']'
+                            | '#'
+                            | '~'
+                            | '='
+                    )
+            })
+    });
+    if !plain {
+        return false;
+    }
+    let Some((index, command)) = super::indirect::command_word(&texts) else {
+        return false;
+    };
+    if index > 0 {
+        return false;
+    }
+    match super::invocation::parse(&command, &texts[1..]) {
+        None => true,
+        Some(invocation) => {
+            matches!(invocation.code, super::invocation::Code::File(_))
+                && invocation.preloads.is_empty()
+                && (posix_shell(&command)
+                    || matches!(command.as_str(), "source" | ".")
+                    || SCRIPT_INTERPRETERS.contains(&command.as_str()))
+        }
+    }
+}
+
 /// Text the parse may split into words other than bash's: a backslash
 /// (`diff\<newline>tool` is one bash word, two parsed words), a control
 /// character other than newline or tab, or a non-ASCII character before

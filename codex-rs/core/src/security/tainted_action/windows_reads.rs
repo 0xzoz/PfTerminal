@@ -18,6 +18,7 @@
 use super::work;
 #[cfg(test)]
 use std::cell::RefCell;
+#[cfg(windows)]
 use std::path::PathBuf;
 
 #[cfg(test)]
@@ -36,8 +37,8 @@ pub(super) fn take_touched() -> Vec<String> {
 #[derive(Debug)]
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(super) enum Located {
-    /// A regular local file (not opened yet).
-    File(PathBuf),
+    /// A regular local file, opened for reading.
+    File(std::fs::File),
     /// The file, or a folder on the way, is not there.
     Missing,
     /// Not looked up, or something on the way is not plainly local.
@@ -76,14 +77,15 @@ fn folder(cwd: &str) -> Option<(char, &str)> {
 /// Whether `word` (home spellings expanded) is a plain spelling of a place
 /// relative to the working folder: no share or device path, no drive
 /// (`C:\x`, `C:x`) or drive root (`\x`, `/x`), which Git Bash or WSL may
-/// read otherwise, and only plain names, `.` and `..`.
+/// read otherwise, and only plain names and `.` (not `..`: Git Bash and WSL
+/// have a root above a drive's).
 pub(super) fn plain_spelling(word: &str) -> bool {
     if word.starts_with(separator) || drive(word).is_some() {
         return false;
     }
     word.split(separator).all(|name| {
         work::step();
-        matches!(name, "" | "." | "..") || plain_name(name)
+        matches!(name, "" | ".") || plain_name(name)
     })
 }
 
@@ -165,14 +167,19 @@ fn touch(path: &str) {
     let _ = path;
 }
 
-/// Look up `drive:\names...` without following a link: the drive must be a
-/// local fixed disk and every folder on the way, and the file, must be no
-/// link, junction, mount point or remote file. `lookup` is asked before
-/// each filesystem call and is false once the lookup budget is spent.
+/// Open `drive:\names...` without following a link: the drive must be a
+/// local fixed disk, and every folder on the way and the file must be no
+/// link, junction, mount point or remote file. Each is opened in turn, by
+/// itself (`FILE_FLAG_OPEN_REPARSE_POINT`), checked through its handle and
+/// held open without delete sharing until the file is open, so no folder
+/// checked can be swapped for a link before the next is opened. `lookup` is
+/// asked before each filesystem call and is false once the lookup budget is
+/// spent.
 #[cfg(windows)]
 pub(super) fn locate(drive: char, names: &[String], lookup: &dyn Fn() -> bool) -> Located {
     use codex_windows_sandbox::local_drive;
     use std::os::windows::fs::MetadataExt;
+    use std::os::windows::fs::OpenOptionsExt;
     if names.is_empty() || !lookup() {
         return Located::Refused;
     }
@@ -181,6 +188,7 @@ pub(super) fn locate(drive: char, names: &[String], lookup: &dyn Fn() -> bool) -
         return Located::Refused;
     }
     let mut path = PathBuf::from(format!("{drive}:\\"));
+    let mut held: Vec<std::fs::File> = Vec::with_capacity(names.len());
     for (at, name) in names.iter().enumerate() {
         work::step();
         path.push(name);
@@ -188,55 +196,43 @@ pub(super) fn locate(drive: char, names: &[String], lookup: &dyn Fn() -> bool) -
             return Located::Refused;
         }
         touch(&path.to_string_lossy());
-        let metadata = match std::fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
+        let handle = match std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(local_drive::SHARE_NOT_DELETE)
+            .custom_flags(local_drive::OPEN_ITSELF)
+            .open(&path)
+        {
+            Ok(handle) => handle,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Located::Missing;
             }
             Err(_) => return Located::Refused,
         };
+        let Ok(metadata) = handle.metadata() else {
+            return Located::Refused;
+        };
         if metadata.file_attributes() & local_drive::REMOTE_OR_LINK_ATTRIBUTES != 0 {
             return Located::Refused;
         }
-        let last = at + 1 == names.len();
-        if !(if last {
-            metadata.is_file()
-        } else {
-            metadata.is_dir()
-        }) {
+        if at + 1 == names.len() {
+            return if metadata.is_file() {
+                Located::File(handle)
+            } else {
+                Located::Refused
+            };
+        }
+        if !metadata.is_dir() {
             return Located::Refused;
         }
+        held.push(handle);
     }
-    Located::File(path)
+    Located::Refused
 }
 
 /// Elsewhere no drive is proven local: nothing is looked up.
 #[cfg(not(windows))]
 pub(super) fn locate(_drive: char, _names: &[String], _lookup: &dyn Fn() -> bool) -> Located {
     Located::Refused
-}
-
-/// Open a file [`locate`] found, without following a link, if it is still a
-/// regular local file.
-#[cfg(windows)]
-pub(super) fn open(path: &std::path::Path) -> Option<std::fs::File> {
-    use codex_windows_sandbox::local_drive;
-    use std::os::windows::fs::MetadataExt;
-    use std::os::windows::fs::OpenOptionsExt;
-    touch(&path.to_string_lossy());
-    let handle = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(local_drive::OPEN_LINK_ITSELF)
-        .open(path)
-        .ok()?;
-    let metadata = handle.metadata().ok()?;
-    (metadata.is_file() && metadata.file_attributes() & local_drive::REMOTE_OR_LINK_ATTRIBUTES == 0)
-        .then_some(handle)
-}
-
-#[cfg(not(windows))]
-pub(super) fn open(_path: &std::path::Path) -> Option<std::fs::File> {
-    None
 }
 
 #[cfg(test)]

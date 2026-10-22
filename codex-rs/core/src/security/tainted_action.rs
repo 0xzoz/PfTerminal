@@ -480,6 +480,10 @@ fn judged(action: &ApprovalAction, homes: Homes, as_named: bool) -> Classifier {
     match action {
         ApprovalAction::Shell { command, cwd, .. }
         | ApprovalAction::ExecCommand { command, cwd, .. } => {
+            // #1261: see `reads_follow`.
+            classifier.reads_follow = classifier.homes.windows_paths()
+                && !classifier.homes.is_windows_view()
+                && named_shell::windows_reads_follow(command);
             classifier.judge_command(command, &path_text(cwd));
         }
         ApprovalAction::ApplyPatch {
@@ -544,6 +548,7 @@ impl Classifier {
             windows_budget: windows_shell::RESOLVE_BUDGET,
             backslash: false,
             in_file: 0,
+            reads_follow: false,
         }
     }
 
@@ -848,6 +853,10 @@ struct Classifier {
     /// flow the POSIX reading does not follow, so no file it names is
     /// opened, and it is also read as cmd and PowerShell read it.
     in_file: usize,
+    /// #1261: under Windows path rules, whether the action is one whose
+    /// script runs the first judgment follows exactly
+    /// (`named_shell::windows_reads_follow`); only then does it open files.
+    reads_follow: bool,
     /// Inside text rebuilt from joined literals: it names things but is not
     /// itself run, so its variables are not judged as unseen code.
     rebuilt: usize,
@@ -1784,15 +1793,18 @@ impl Classifier {
     /// #1261: [`Self::read_file`] under Windows path rules: only a plain path
     /// on a local fixed drive, never through a link or share.
     fn read_windows_file(&mut self, word: &str, cwd: &str) -> FileText {
-        if self.backslash || self.in_file > 0 {
-            return FileText::Unreadable;
+        // A file the first judgment may not name as the shell does is not
+        // opened; as on main (where no Windows file could be opened) a
+        // required one then asks and an optional one is not looked for.
+        if !self.reads_follow || self.backslash || self.in_file > 0 {
+            return FileText::Missing;
         }
         let Some((drive, names)) = self.homes.windows_read_path(word, cwd) else {
             return FileText::Unreadable;
         };
         let homes = &self.homes;
-        let file = match windows_reads::locate(drive, &names, &|| homes.take_lookup()) {
-            windows_reads::Located::File(file) => file,
+        let handle = match windows_reads::locate(drive, &names, &|| homes.take_lookup()) {
+            windows_reads::Located::File(handle) => handle,
             windows_reads::Located::Missing => return FileText::Missing,
             windows_reads::Located::Refused => return FileText::Unreadable,
         };
@@ -1800,10 +1812,7 @@ impl Classifier {
         if self.scripts_read > MAX_SCRIPT_FILES {
             return FileText::Unreadable;
         }
-        match windows_reads::open(&file) {
-            Some(handle) => Self::read_text(handle),
-            None => FileText::Unreadable,
-        }
+        Self::read_text(handle)
     }
 
     /// The text of an opened file, within the file limits.
