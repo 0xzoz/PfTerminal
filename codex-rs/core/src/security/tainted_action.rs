@@ -44,6 +44,8 @@ mod quoted;
 mod sed;
 mod shadow;
 mod shell;
+mod windows_paths;
+mod windows_shell;
 mod work;
 
 pub(crate) use paths::USER_PERSISTENCE;
@@ -416,12 +418,52 @@ pub(super) fn classify_as_named_with(
 
 /// The classifier after judging the action, with its counters. `as_named`:
 /// the host runs the action as its argv names (see [`classify_as_named`]).
+/// #1240: on Windows the action is also judged under Windows path rules
+/// (`windows_paths`, `windows_shell`), and the stronger finding is kept:
+/// the first judgment is the same as on every other platform, so the
+/// Windows view only adds findings.
 fn classified(
     action: &ApprovalAction,
     codex_home: &Path,
     user_home: Option<&Path>,
     as_named: bool,
 ) -> Classifier {
+    let mut classifier = judged(action, Homes::new(codex_home, user_home), as_named);
+    if cfg!(windows) {
+        let windows = judged(action, Homes::windows(codex_home, user_home), as_named);
+        if let Some(kind) = windows.found {
+            classifier.note(kind);
+        }
+    }
+    classifier
+}
+
+/// #1240: [`classify_with`] of a command run in `cwd` as on Windows, on any
+/// platform (an action cannot hold a Windows folder elsewhere). Filesystem
+/// lookups under Windows rules happen only on Windows.
+#[cfg(test)]
+pub(super) fn classify_as_windows(
+    command: &[String],
+    cwd: &str,
+    codex_home: &Path,
+    user_home: Option<&Path>,
+) -> Option<ProtectedActionKind> {
+    let mut classifier =
+        Classifier::new(Homes::new(codex_home, user_home), /*avoids_zsh*/ false);
+    classifier.judge_command(command, cwd);
+    let mut windows = Classifier::new(
+        Homes::windows(codex_home, user_home),
+        /*avoids_zsh*/ false,
+    );
+    windows.judge_command(command, cwd);
+    if let Some(kind) = windows.found {
+        classifier.note(kind);
+    }
+    classifier.found
+}
+
+/// One judgment of the action, under the path rules of `homes`.
+fn judged(action: &ApprovalAction, homes: Homes, as_named: bool) -> Classifier {
     let avoids_zsh = as_named
         && match action {
             ApprovalAction::Shell { command, .. } | ApprovalAction::ExecCommand { command, .. } => {
@@ -429,34 +471,11 @@ fn classified(
             }
             ApprovalAction::ApplyPatch { .. } => false,
         };
-    let mut classifier = Classifier {
-        avoids_zsh,
-        homes: Homes::new(codex_home, user_home),
-        found: None,
-        scripts_read: 0,
-        rebuilt: 0,
-        not_shell: 0,
-        sed_scope: None,
-        ran: Vec::new(),
-        ran_unknown: false,
-        written: Vec::new(),
-        nested_scripts: 0,
-        launched: launched_git::Launch::default(),
-        substitution_budget: Budget {
-            left: MAX_SUBSTITUTED_BYTES,
-            small_left: MAX_SUBSTITUTED_BYTES,
-        },
-        classified_bytes: 0,
-        classified_lines: 0,
-        compared: shadow::Budget::new(),
-    };
+    let mut classifier = Classifier::new(homes, avoids_zsh);
     match action {
         ApprovalAction::Shell { command, cwd, .. }
         | ApprovalAction::ExecCommand { command, cwd, .. } => {
-            let cwd = path_text(cwd);
-            classifier.homes.allow_lookups_under(&cwd);
-            classifier.path(&cwd);
-            classifier.command(command, &cwd, /*depth*/ 0);
+            classifier.judge_command(command, &path_text(cwd));
         }
         ApprovalAction::ApplyPatch {
             files, patch, cwd, ..
@@ -492,6 +511,41 @@ fn classified(
         classifier.note(ProtectedActionKind::UnseenCode);
     }
     classifier
+}
+
+impl Classifier {
+    fn new(homes: Homes, avoids_zsh: bool) -> Self {
+        Self {
+            avoids_zsh,
+            homes,
+            found: None,
+            scripts_read: 0,
+            rebuilt: 0,
+            not_shell: 0,
+            sed_scope: None,
+            ran: Vec::new(),
+            ran_unknown: false,
+            written: Vec::new(),
+            nested_scripts: 0,
+            launched: launched_git::Launch::default(),
+            substitution_budget: Budget {
+                left: MAX_SUBSTITUTED_BYTES,
+                small_left: MAX_SUBSTITUTED_BYTES,
+            },
+            classified_bytes: 0,
+            classified_lines: 0,
+            compared: shadow::Budget::new(),
+            windows_decoded: HashSet::new(),
+            windows_budget: windows_shell::RESOLVE_BUDGET,
+        }
+    }
+
+    /// Judge a command line run in `cwd`.
+    fn judge_command(&mut self, command: &[String], cwd: &str) {
+        self.homes.allow_lookups_under(cwd);
+        self.path(cwd);
+        self.command(command, cwd, /*depth*/ 0);
+    }
 }
 
 fn path_text(path: &PathUri) -> String {
@@ -724,6 +778,12 @@ struct Classifier {
     avoids_zsh: bool,
     /// #932: comparisons left with the grammar.
     compared: shadow::Budget,
+    /// #1240: PowerShell encoded commands the Windows view judged, with
+    /// the folder each was judged in: once each.
+    windows_decoded: HashSet<(String, String)>,
+    /// #1240: bytes of words and folders the Windows view may still
+    /// resolve; past it the action fails closed.
+    windows_budget: usize,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
@@ -977,6 +1037,10 @@ impl Classifier {
         {
             self.note(ProtectedActionKind::UnseenCode);
             return;
+        }
+        // #1240: the same text as cmd and PowerShell read it.
+        if self.homes.is_windows() {
+            self.windows_text(command, cwd, depth);
         }
         // #841: this line's own sed programs (nested lines have theirs).
         let outer_scope = std::mem::replace(&mut self.sed_scope, SedScope::of(command));
@@ -1542,6 +1606,12 @@ impl Classifier {
     /// large, past the file limit, or where lookups are not allowed) fails
     /// closed; an optional one is skipped when it is not there.
     fn script_file(&mut self, file: &str, cwd: &str, depth: usize, need: Script) {
+        // #1240: the first judgment reads script files; the Windows view's
+        // paths are not ones to open (and where it may not look a missing
+        // optional script would read as unreadable).
+        if self.homes.is_windows() {
+            return;
+        }
         self.ran.push(file.to_string());
         let unreadable = |classifier: &mut Self, missing: bool| {
             if need == Script::Required || !missing {
