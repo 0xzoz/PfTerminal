@@ -855,6 +855,9 @@ struct Folders {
     stack: std::rc::Rc<Vec<String>>,
     /// A `cd`/`pushd` past the folder limits was not followed (#1065).
     unfollowed: bool,
+    /// #1283: a `cd`/`pushd` took a word the quote-aware reading cannot
+    /// know (`D=~; cd "$D"`), so that reading's folder may be wrong.
+    unchecked: bool,
 }
 
 struct Classifier {
@@ -1181,6 +1184,7 @@ impl Classifier {
             previous: cwd.to_string(),
             stack: std::rc::Rc::default(),
             unfollowed: false,
+            unchecked: false,
         };
         let mut variables: HashMap<String, String> = HashMap::new();
         for (name, value) in [
@@ -1365,6 +1369,8 @@ impl Classifier {
             if self.rebuilt == 0 && (unseen[*index] || inline_unseen || eval_unseen) {
                 self.note(ProtectedActionKind::UnseenCode);
             }
+            folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
+                && unchecked[index + 1..].iter().any(|word| *word);
             self.change_folder(name, args, folders, variables);
         }
         let mut git_config = GitConfigWrites::new(&lower, &hidden, &unchecked);
@@ -1469,8 +1475,10 @@ impl Classifier {
         // value is a file written (`git log --output=~/.zshrc`, `-o.zshrc`).
         let outputs = command.as_ref().and_then(|(index, name)| {
             // #1283: a `config` the quote-aware reading cannot spell.
-            // A wrapper's words count too (`env -C "$d" git`).
-            let unchecked = hidden[*index] || unchecked.iter().any(|word| *word);
+            // A wrapper's words count too (`env -C "$d" git`), and so does a
+            // folder changed through one (`cd "$d"`).
+            let unchecked =
+                hidden[*index] || folders.unchecked || unchecked.iter().any(|word| *word);
             outputs::output_files(name, &words[index + 1..], unchecked)
         });
         if command

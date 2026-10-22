@@ -192,6 +192,7 @@ impl Classifier {
             previous: cwd.to_string(),
             stack: std::rc::Rc::default(),
             unfollowed: false,
+            unchecked: false,
         };
         let mut found = Found {
             braces: command.iter().any(|arg| arg.contains('{')),
@@ -535,6 +536,7 @@ impl Classifier {
                     previous: folders.previous.clone(),
                     stack: folders.stack.clone(),
                     unfollowed: false,
+                    unchecked: false,
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;
