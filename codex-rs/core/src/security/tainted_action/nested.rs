@@ -425,6 +425,28 @@ impl Classifier {
                     }
                 }
                 if resolved_name == "eval" {
+                    // #1283: `eval` joins its words and parses them again, so
+                    // quoting split across them takes effect (`eval git config
+                    // --comment \'x --get \' core.pager sh`): the line it runs
+                    // is judged as a script. Words without quotes or
+                    // backslashes parse back the same (and their quoted
+                    // text is walked below), so a chain of `eval`s is read
+                    // once.
+                    let requotes = texts[at + 1..].iter().any(|text| {
+                        work::step();
+                        text.contains(['\'', '"', '\\'])
+                    });
+                    if requotes {
+                        let line = joined(
+                            String::new(),
+                            &texts[at + 1..],
+                            &mut joined_left,
+                            &mut found.unreadable,
+                        );
+                        found
+                            .scripts
+                            .push((line, folders.cwd.clone(), replaced(launches[at])));
+                    }
                     continue;
                 }
                 let shell = SHELLS.contains(&resolved_name.as_str());
@@ -1070,8 +1092,6 @@ fn fish_codes(texts: &[String], at: usize, cut: &mut bool) -> Vec<String> {
     codes
 }
 
-/// What a launcher puts into a shell's script (`xargs -I% sh -c 'git %'`):
-/// its added words go to the shell's own arguments, not the script.
 /// #1283: note `kind` once (a few kinds at most, so checking is cheap).
 fn note_git(found: &mut Found, kind: ProtectedActionKind) {
     if !found.git.contains(&kind) {
@@ -1091,6 +1111,8 @@ fn spells_git(text: &str) -> bool {
     bare.to_lowercase().contains("git") || text.contains("$'")
 }
 
+/// What a launcher puts into a shell's script (`xargs -I% sh -c 'git %'`):
+/// its added words go to the shell's own arguments, not the script.
 fn replaced(launch: launched_git::Launch) -> launched_git::Launch {
     launched_git::Launch {
         fed: false,

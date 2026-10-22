@@ -5155,6 +5155,12 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         // quoted.
         "set -- core.pager; for k; do git config --comment 'x --get' \"$k\" sh; done",
         "sh -c 'for k; do git config --comment \"x --get\" \"$k\" sh; done' _ core.pager",
+        // Review 3: `eval` parses its joined words again; a loop variable
+        // keeps its meaning where the value's quoting takes effect.
+        r"eval git config --comment \'x --get \' core.pager sh",
+        r#"eval git config --comment "'x" --get "'" core.pager sh"#,
+        r#"sh -c 'for k; do eval "git config --comment \"x --get\" \"\$k\" sh"; done' _ core.pager"#,
+        r#"set -- core.pager; for k; do sh -c "git config --comment 'x --get' $k sh"; done"#,
     ] {
         assert_eq!(
             script(command),
@@ -5196,6 +5202,8 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         "git config --get core.pager 2>/dev/null",
         "git -C /tmp config --get core.pager",
         "v=me; git config user.name \"$v\"",
+        "eval git config --get core.pager",
+        "eval \"echo hi\"",
         "v=me; git config --get user.name; echo \"$v\"",
         "cp a{,.bak} && git config --get core.pager",
         "sh -c 'git config --get core.pager'",
@@ -5280,11 +5288,18 @@ fn issue_1283_1276_checks_are_linear() {
         ("output files", "-f ~/.x "),
         ("loops", "for k; "),
         ("underscores", "$_ "),
+        ("evals", "eval "),
+        ("requoted evals", r"eval \' "),
     ] {
         work::assert_linear(label, |scale| {
             let line = format!("git config {} core.pager sh", unit.repeat(400 * scale));
             let _ = script(&line);
             let line = format!("xargs git {} config --get", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!(
+                "{}git config --comment \\'x --get \\' sh",
+                unit.repeat(400 * scale)
+            );
             let _ = script(&line);
         });
     }

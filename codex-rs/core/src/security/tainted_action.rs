@@ -1301,9 +1301,15 @@ impl Classifier {
         depth: usize,
     ) {
         let lower: Vec<String> = words.iter().map(|word| word.to_lowercase()).collect();
-        let (hidden, unchecked) = self.word_marks(simple, words, variables);
+        let (hidden, mut unchecked) = self.word_marks(simple, words, variables);
         loops.read(&simple.words);
         let looped = loops.marks(&simple.words);
+        // #1283: a loop variable over the positional parameters is a value
+        // neither reading knows, wherever its quoting takes effect.
+        for (unchecked, looped) in unchecked.iter_mut().zip(&looped) {
+            work::step();
+            *unchecked |= *looped;
+        }
         let command = indirect::command_word(words);
         // Assignments (`A=x`, `export A=x`) feed later `$A` words.
         let comment = words.first().is_some_and(|word| word.starts_with('#'));
