@@ -27,3 +27,11 @@ How these results count is the owner's decision; this record changes no sign-off
 - **Moderate** (34 cases): D72 already counts MOD-09 accepted. Items 5 and 7 now meet their expectations (item 7 as D72
   amends it); items 1-4 and 8 met them in the first local-model run on candidate `8bf182de43`, and item 6 has never been
   exercised (no `~/Library/Keychains` in the test account).
+
+## Counted by the owner (2026-10-21)
+
+- **D113:** AGG-18, AGG-R10 and ACC-04 count as passed, and MOD-09 items 5 and 7 as meeting D72 (MOD-09 stays
+  accepted). Aggressive: 60 passed, 1 failed, 3 blocked.
+- **D110:** AGG-R07's pass rule is amended ([amendment 7](../aggressive-amendment7-20261021/README.md)), and R02 is
+  judged against it there: **passed**. Aggressive: **61 passed, 0 failed, 3 blocked** (AGG-R06, AGG-R14, AGG-20).
+  The R02 row above keeps this record's own disposition (failed under L2's rule).

@@ -14,10 +14,12 @@ use super::FileText;
 use super::Folders;
 use super::ProtectedActionKind;
 use super::WRITERS;
+use super::git_helpers;
 use super::indirect;
 use super::invocation;
 use super::invocation::Code;
 use super::outbound;
+use super::outputs;
 use super::quoted;
 use super::quoted::Command;
 use super::quoted::Word;
@@ -191,8 +193,11 @@ impl Classifier {
         for script in scripts {
             work::step();
             let reading = quoted::commands(script);
-            // #932 phase 2: compared and logged; decides nothing.
-            shadow::shadow(script, &reading, &mut self.compared);
+            // #932 phase 2: compared and logged; decides nothing. Once per
+            // action: not again in the Windows view (#1240).
+            if !self.homes.is_windows() {
+                shadow::shadow(script, &reading, &mut self.compared);
+            }
             found.unreadable |=
                 reading.too_deep || reading.unsure || (strict && reading.unterminated);
             self.walk(
@@ -271,6 +276,8 @@ impl Classifier {
                     .extend(pipeline_targets(commands, command));
             }
             found.written.extend(targets);
+            // D153: a git setting whose quoted text names git.
+            found.unreadable |= git_helpers::setting_holds_git_name(&command.words);
             let (starts, overflow) = sed::command_starts(&texts);
             found.unreadable |= overflow;
             let mut roles = vec![Role::Code; texts.len()];
@@ -315,15 +322,24 @@ impl Classifier {
                 }
                 if sed::NAMES.contains(&resolved_name.as_str()) {
                     sed_command = true;
-                } else if WRITERS.contains(&resolved_name.as_str()) || !command.writes_to.is_empty()
-                {
-                    found.other_writes = true;
-                    found.written.extend(
-                        texts[at + 1..]
-                            .iter()
-                            .filter(|word| !word.starts_with('-'))
-                            .map(|word| target(Some(file_operand(word).to_string()))),
-                    );
+                } else {
+                    // #1141: an output option's file (`git log --output=f`).
+                    let outputs = outputs::output_files(&resolved_name, &texts[at + 1..]);
+                    if WRITERS.contains(&resolved_name.as_str())
+                        || outputs.is_some()
+                        || !command.writes_to.is_empty()
+                    {
+                        found.other_writes = true;
+                        found.written.extend(
+                            texts[at + 1..]
+                                .iter()
+                                .filter(|word| !word.starts_with('-'))
+                                .map(|word| target(Some(file_operand(word).to_string()))),
+                        );
+                        found
+                            .written
+                            .extend(outputs.into_iter().flatten().map(|file| target(Some(file))));
+                    }
                 }
                 if resolved_name == "eval" {
                     continue;
@@ -438,6 +454,11 @@ impl Classifier {
     /// line runs is code the host cannot read; an in-place edit that only
     /// keeps, drops or adds lines has the text it adds judged instead.
     fn judge_sed(&mut self, sed: Sed, line: &Found, depth: usize) {
+        // #1240: judged once, by the first judgment (it reads program
+        // files; the Windows view does not open files).
+        if self.homes.is_windows() {
+            return;
+        }
         let call = &sed.call;
         let dynamic = call
             .programs

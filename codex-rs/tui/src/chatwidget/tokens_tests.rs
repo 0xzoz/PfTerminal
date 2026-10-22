@@ -2660,6 +2660,58 @@ fn accounting_inspect_first_screen_names_provider_model_and_billing_type() {
 }
 
 #[test]
+fn accounting_operator_preserves_alias_wire_and_custom_route_identity() {
+    let cases = [
+        ("corbanu-plan", "pfterminal-plan"),
+        ("corbanu-terminal-plan", "pfterminal-plan"),
+        ("corbanu-plan-anthropic", "pfterminal-plan"),
+        ("pfterminal-plan-anthropic", "pfterminal-plan"),
+        ("zai-anthropic", "zai"),
+        ("openrouter-anthropic", "openrouter"),
+        ("baseten-anthropic", "baseten"),
+        ("vercel-anthropic", "vercel"),
+        ("vercel-anthropic-fast", "vercel"),
+        ("pfterminal-plan", "pfterminal-plan"),
+        ("openai", "openai"),
+        ("anthropic", "anthropic"),
+    ];
+    let actual = cases.map(|(route, _)| (route, operator(route)));
+    assert_eq!(actual, cases);
+
+    // Custom IDs remain exact: sharing alias normalization must not start
+    // treating different case, whitespace, or similar names as built-ins.
+    let mut custom = vec![String::new(), "private/自分のモデル".to_string()];
+    for (route, _) in cases {
+        custom.extend([
+            route.to_uppercase(),
+            format!(" {route}"),
+            format!("{route} "),
+            format!("{route}-custom"),
+        ]);
+    }
+    let unchanged = custom.iter().map(String::as_str).collect::<Vec<_>>();
+    let actual = custom
+        .iter()
+        .map(|route| operator(route))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, unchanged);
+}
+
+#[test]
+fn accounting_model_names_resolve_corbanu_alias_routes() {
+    let slug = "corbanu/deepseek-v4.1-flash";
+    let routes = [
+        "pfterminal-plan",
+        "pfterminal-plan-anthropic",
+        "corbanu-plan",
+        "corbanu-terminal-plan",
+        "corbanu-plan-anthropic",
+    ];
+    let actual = routes.map(|route| model_name(route, slug));
+    assert_eq!(actual, ["DeepSeek V4.1 Flash"; 5]);
+}
+
+#[test]
 fn accounting_inspect_plain_wording_counts_attempts_and_names_every_route() {
     let mut first = quote();
     first.all_buckets_priced = None;
@@ -2712,6 +2764,46 @@ fn accounting_inspect_plain_wording_counts_attempts_and_names_every_route() {
     );
     // A provider you configured shows the slug: the name's brand is unknown.
     assert_eq!(model_name("my-zai", "glm-5.2"), "glm-5.2");
+    // #1196: a name without a route brand names the model on any route.
+    assert_eq!(
+        model_name("my-claude-proxy", "claude-opus-5-5"),
+        "Claude Opus 5.5"
+    );
+    assert_eq!(
+        model_name("openrouter", "claude-opus-5-5"),
+        "Claude Opus 5.5"
+    );
+    assert_eq!(model_name("my-openai", "gpt-6-sol"), "GPT-6 Sol");
+    // A brand of several words counts only when every word is in the name.
+    assert_eq!(
+        model_name("anthropic", "claude-opus-5-5-plan"),
+        "claude-opus-5-5-plan"
+    );
+    assert_eq!(model_name("kimi-code", "k3"), "Kimi Code K3");
+    assert_eq!(model_name("openrouter", "k3"), "k3");
+    assert_eq!(
+        model_name("openrouter", "deepseek-v4-pro"),
+        "deepseek-v4-pro"
+    );
+    // The brand is the operator's: Vercel owns its Anthropic-wire fast route.
+    assert_eq!(
+        model_name("openrouter", "zai/glm-5.2-fast"),
+        "zai/glm-5.2-fast"
+    );
+    // No catalogue name read on another route says how a route sells the model.
+    let catalogue = codex_models_manager::bundled_models_response().unwrap();
+    for model in catalogue.models {
+        let name = model_name("my-route", &model.slug);
+        let lower = name.to_lowercase();
+        assert!(
+            name == model.slug
+                || !lower
+                    .split_whitespace()
+                    .any(|word| ["plan", "(direct)", "free"].contains(&word)),
+            "{} reads as {name:?} on another route",
+            model.slug
+        );
+    }
 }
 
 #[test]
