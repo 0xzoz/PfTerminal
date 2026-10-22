@@ -814,8 +814,8 @@ fn issue_1296_windows_spellings_of_a_protected_path_are_found() {
 /// #1296: under Aggressive on Windows, a protected read PowerShell or cmd
 /// was denied is explained where it failed (Windows PowerShell's, PowerShell
 /// 7's and cmd's denial texts), and a recursive listing of the folder above
-/// the Corbanu home like a listing of the home (#554); not under Permissive,
-/// for a command that succeeded, or for a failure that is not a denial.
+/// the Corbanu home like a listing of the home (#554); not under Permissive
+/// or for a failure that is not a denial.
 #[cfg(windows)]
 #[tokio::test]
 async fn issue_1296_powershell_and_cmd_denials_are_explained_under_aggressive() {
@@ -885,7 +885,13 @@ async fn issue_1296_powershell_and_cmd_denials_are_explained_under_aggressive() 
             Some(explanation(&shown)),
             "{command:?}: {output}"
         );
-        assert_eq!(explain(&command, 0, &output).await, None, "{command:?}");
+        // #1312: the command names the path, so also when a later command
+        // on the line made it exit 0.
+        assert_eq!(
+            explain(&command, 0, &output).await,
+            Some(explanation(&shown)),
+            "{command:?}"
+        );
     }
     let listing = powershell(&format!("Get-ChildItem -Recurse '{parent}'"));
     assert_eq!(
