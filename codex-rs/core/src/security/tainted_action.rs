@@ -44,6 +44,7 @@ mod quoted;
 mod sed;
 mod shadow;
 mod shell;
+mod unknown_folder;
 mod windows_paths;
 mod windows_shell;
 mod work;

@@ -29,6 +29,7 @@ use super::sed;
 use super::shadow;
 use super::shell::SHELLS;
 use super::shell::basename;
+use super::unknown_folder;
 use super::work;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -91,6 +92,12 @@ struct Found {
     runs_code: bool,
     /// #1283: what git does with the words as the shell passes them on.
     git: Vec<ProtectedActionKind>,
+    /// #1309: the text defines code run later than it is read (a
+    /// function, trap or alias), or a loop has started: a script collected
+    /// before a later folder change may run after it.
+    deferred: bool,
+    /// #1309: scripts collected before the last folder change.
+    before_change: usize,
 }
 
 /// One reading of a sed invocation and where it runs.
@@ -197,6 +204,10 @@ impl Classifier {
         };
         let mut found = Found {
             braces: command.iter().any(|arg| arg.contains('{')),
+            deferred: command.iter().any(|arg| {
+                work::step();
+                unknown_folder::defines(arg)
+            }),
             ..Found::default()
         };
         // The words around the scripts start no launcher's input: under an
@@ -233,6 +244,15 @@ impl Classifier {
             self.note(kind);
         }
         self.written.extend(found.written.iter().cloned());
+        // #1309: a script collected before a later folder change, in text
+        // that may run it later (`f() { sh -c '...'; }; cd ~; f`), may run
+        // in that folder.
+        if found.deferred {
+            for entry in found.scripts.iter_mut().take(found.before_change) {
+                work::step();
+                entry.3 = true;
+            }
+        }
         let mut judged = HashSet::new();
         for (script, cwd, launched, unknown) in std::mem::take(&mut found.scripts) {
             work::step();
@@ -283,17 +303,47 @@ impl Classifier {
                 return;
             }
             let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
+            // #1309: a later iteration of a loop starts where the one
+            // before it left.
+            found.deferred |= unknown_folder::starts_loop(&texts);
+            let command_at = indirect::command_word(&texts);
             // A substitution's `cd` does not move this line.
             if !command.substituted
-                && let Some((index, name)) = indirect::command_word(&texts)
+                && let Some((index, name)) = &command_at
             {
-                self.change_folder(&name, &texts[index + 1..], folders, &mut HashMap::new());
+                self.change_folder(name, &texts[index + 1..], folders, &mut HashMap::new());
                 // #1283: `cd "$d"` goes where this reading cannot follow.
                 folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
                     && texts[index + 1..].iter().any(|text| {
                         work::step();
                         self.homes.resolve(text, "").contains(['$', '`'])
                     });
+            }
+            // #1309: nor where `CDPATH`, `cdable_vars`, `OLDPWD`, a
+            // sourced file, `eval 'cd ~'`, zsh `chdir`, `cd old new` or the
+            // folder stack send it, nor any change in code that may run
+            // later (a function, loop, trap or alias).
+            let searched = texts.iter().any(|text| {
+                work::step();
+                unknown_folder::searches(text)
+            });
+            let (changes, carried, odd) =
+                command_at
+                    .as_ref()
+                    .map_or((false, false, false), |(index, name)| {
+                        let args = &texts[index + 1..];
+                        let changes = unknown_folder::CHANGERS.contains(&name.as_str());
+                        (
+                            changes,
+                            !command.substituted && unknown_folder::carries_change(name, args),
+                            changes
+                                && !command.substituted
+                                && unknown_folder::odd_change(name, args),
+                        )
+                    });
+            folders.unchecked |= searched || carried || odd || (changes && found.deferred);
+            if searched || carried || changes {
+                found.before_change = found.scripts.len();
             }
             let first = texts.first().map(|word| name(word));
             let compound = first
@@ -324,12 +374,10 @@ impl Classifier {
             let launches = launched_git::launches(&texts, found.braces, self.launched);
             // #1283: scripts run in a folder this reading does not follow
             // (after `cd "$d"`, or a wrapper's: `env -C "$d" sh -c`).
-            let unknown = folders.unchecked
-                || texts.iter().any(|text| {
-                    work::step();
-                    let flag = text.split_once('=').map_or(text.as_str(), |(flag, _)| flag);
-                    super::FOLDER_FLAGS.contains(&flag)
-                });
+            // #1309: in any of a wrapper's spellings (`env -C"$d"`, `sudo
+            // -D`, `nsenter --wd=`, `find -execdir`).
+            let elsewhere = unknown_folder::runs_elsewhere(&texts);
+            let unknown = folders.unchecked || elsewhere;
             for (word, script) in replaced_shell_scripts(&texts, &launches, &mut found.unreadable) {
                 work::step();
                 found.scripts.push((
@@ -338,6 +386,29 @@ impl Classifier {
                     replaced(launches[word]),
                     unknown,
                 ));
+            }
+            // #1309: an option the command-word reading does not know may
+            // hide the shell such a command runs (`env -iC ~ sh -c`,
+            // `docker exec -w ~ c sh -c`): its scripts, wherever they are.
+            let shell_command = command_at
+                .as_ref()
+                .is_some_and(|(_, name)| SHELLS.contains(&name.as_str()));
+            if elsewhere && !shell_command {
+                let anywhere = vec![
+                    launched_git::Launch {
+                        fed: false,
+                        replaced: true,
+                    };
+                    texts.len() + 1
+                ];
+                for (word, script) in
+                    replaced_shell_scripts(&texts, &anywhere, &mut found.unreadable)
+                {
+                    work::step();
+                    found
+                        .scripts
+                        .push((script, folders.cwd.clone(), launches[word], true));
+                }
             }
             let (starts, overflow) = sed::command_starts(&texts);
             found.unreadable |= overflow;
@@ -571,6 +642,7 @@ impl Classifier {
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;
                 if role == Role::Code {
+                    found.deferred |= unknown_folder::defines(&word.text);
                     // Commands in data the word lexer does not read as
                     // command lines do not count: a decoy (`echo 'sed p'`)
                     // must not make up for a command this reading missed.

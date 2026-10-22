@@ -5329,3 +5329,118 @@ fn issue_1283_1276_checks_are_linear() {
         });
     }
 }
+
+/// #1309: more ways a nested script's folder becomes one the quote-aware
+/// reading cannot know: a wrapper's folder option in other spellings,
+/// `CDPATH`-style lookups, the folder stack, `cd` in a function, alias,
+/// `eval` or sourced file, and code that runs later than it is read. A
+/// relative write in such a script asks.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1309_unknown_folders_ask() {
+    for command in [
+        // A wrapper's folder, attached, clustered, abbreviated or under
+        // another wrapper's option.
+        r#"D=~; env -C"$D" sh -c 'echo x >> .zshenv'"#,
+        "env -C~ sh -c 'echo x >> .zshenv'",
+        "env -iC ~ sh -c 'echo x >> .zshenv'",
+        "env --chd ~ sh -c 'echo x >> .zshenv'",
+        "sudo -D ~ sh -c 'echo x >> .zshenv'",
+        "sudo -D~ sh -c 'echo x >> .zshenv'",
+        r#"nsenter --wd="$HOME" sh -c 'echo x >> .zshenv'"#,
+        r#"nsenter -w"$HOME" sh -c 'echo x >> .zshenv'"#,
+        "docker exec -w ~ c sh -c 'echo x >> .zshenv'",
+        r#"systemd-run --working-directory="$HOME" sh -c 'echo x >> .zshenv'"#,
+        "systemd-run -p WorkingDirectory=~ sh -c 'echo x >> .zshenv'",
+        r"find ~/.bashrc -execdir sh -c 'echo x >> .zshenv' \;",
+        "parallel --wd ~ 'echo x >> .zshenv' ::: 1",
+        // Where `cd` looks things up.
+        "CDPATH=~ cd .; sh -c 'echo x >> .zshenv'",
+        "shopt -s cdable_vars; h=~; cd h; sh -c 'echo x >> .zshenv'",
+        "OLDPWD=~; cd -; sh -c 'echo x >> .zshenv'",
+        // The folder stack and zsh's other spellings.
+        "cd ~; pushd /tmp; pushd; sh -c 'echo x >> .zshenv'",
+        "chdir ~; sh -c 'echo x >> .zshenv'",
+        "cd /tmp; cd tmp home; sh -c 'echo x >> .zshenv'",
+        // `cd` in code that runs elsewhere in the line.
+        "go() { cd ~; }; cd /tmp; go; sh -c 'echo x >> .zshenv'",
+        "function go { cd ~; }; cd /tmp; go; sh -c 'echo x >> .zshenv'",
+        "alias go='cd ~'; go; sh -c 'echo x >> .zshenv'",
+        "eval 'cd ~'; sh -c 'echo x >> .zshenv'",
+        "eval cd ~; sh -c 'echo x >> .zshenv'",
+        ". ./x.sh; sh -c 'echo x >> .zshenv'",
+        // Code that runs later than it is read.
+        "f() { sh -c 'echo x >> .zshenv'; }; cd ~; f",
+        "f() { sh -c 'echo x >> .zshenv'; }; D=~; cd \"$D\"; f",
+        "for i in 1 2; do sh -c 'echo x >> .zshenv'; cd ~; done",
+        "cd ~/a/b; while true; do cd ..; sh -c 'echo x >> .zshenv'; done",
+        "trap \"sh -c 'echo x >> .zshenv'\" EXIT; cd ~",
+        // An output file too.
+        "env -iC ~ sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+        "alias go='cd ~'; go; sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+    // Already asked on main; kept as regressions.
+    for command in [
+        "read D <<< ~; cd \"$D\"; sh -c 'echo x >> .zshenv'",
+        "printf -v D %s ~; cd \"$D\"; sh -c 'echo x >> .zshenv'",
+        "for D in ~; do cd \"$D\"; sh -c 'echo x >> .zshenv'; done",
+        "sh -c 'cd \"$1\"; sh -c \"echo x >> .zshenv\"' _ ~",
+        "cd \"$XDG_CONFIG_HOME\"; sh -c 'echo x >> .zshenv'",
+        "go() { cd \"$1\"; }; go ~; sh -c 'echo x >> .zshenv'",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+    for command in [
+        "cd /tmp; sh -c 'echo x > out.txt'",
+        "sh -c 'echo x > out.txt'; cd /tmp",
+        "DIR=$(cd \"$(dirname \"$0\")\" && pwd); sh -c 'echo x > out.txt'",
+        "cd /tmp; for i in 1 2; do sh -c 'echo x > out.txt'; done",
+        "for i in 1 2; do echo $i; done; sh -c 'echo x > out.txt'",
+        "xargs -d '\\n' sh -c 'echo x > out.txt'",
+        "env -i sh -c 'echo x > out.txt'",
+        "sudo -u me sh -c 'echo x > out.txt'",
+        "docker exec -it c sh -c 'echo x > out.txt'",
+        "git -C /tmp commit -m 'fix (x): cd into it'",
+        "pushd /tmp; popd; sh -c 'echo x > out.txt'",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1309: the new checks stay linear when the words they read repeat.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1309_checks_are_linear() {
+    for (label, unit) in [
+        // Absolute folders: a chain of relative ones (`cd b; cd b`) grows
+        // the followed path up to `MAX_FOLDER_BYTES`, on main too.
+        ("changes after scripts", "sh -c 'echo x > a'; cd /b; "),
+        ("loops", "for i in 1; do cd /b; done; "),
+        ("wrapper options", "env -iC b --chd=b -D b "),
+        ("lookups", "CDPATH=b OLDPWD=b "),
+        ("carriers", "eval 'cd /b'; "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("f() {{ :; }}; {} sh -c 'echo x'", unit.repeat(200 * scale));
+            let _ = script(&line);
+            let line = format!("{} sh -c 'echo x'", unit.repeat(200 * scale));
+            let _ = script(&line);
+        });
+    }
+}
