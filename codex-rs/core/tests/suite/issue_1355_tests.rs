@@ -63,7 +63,7 @@ async fn held_child_mail_warns_the_parent_and_survives_account_recovery() -> any
         })
         .build_with_auto_env(&server)
         .await?;
-    let child_path = AgentPath::try_from("/root/worker")?;
+    let child_path = AgentPath::try_from("/root/worker").map_err(anyhow::Error::msg)?;
     let mut child_config = test.config.clone();
     child_config.model_provider.account = Some(NamedProviderAccount {
         provider_id: account.provider_id.clone(),
