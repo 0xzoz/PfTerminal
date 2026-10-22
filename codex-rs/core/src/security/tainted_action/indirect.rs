@@ -231,7 +231,8 @@ pub(super) fn command_word(words: &[String]) -> Option<(usize, String)> {
     while let Some(word) = words.get(index) {
         work::step();
         let name = basename(word).to_lowercase();
-        let assignment = word.contains('=') && !word.starts_with('-');
+        // #1159: zsh `=git` is a command (`$(which git)`), not an assignment.
+        let assignment = word.contains('=') && !word.starts_with(['-', '=']);
         if assignment || KEYWORDS.contains(&name.as_str()) {
             index += 1;
             continue;
@@ -256,7 +257,7 @@ pub(super) fn command_word(words: &[String]) -> Option<(usize, String)> {
                     operands = 0;
                 }
                 index += 1 + usize::from(value_options.contains(&option.as_str()));
-            } else if option.contains('=') {
+            } else if option.contains('=') && !option.starts_with('=') {
                 index += 1;
             } else {
                 break;

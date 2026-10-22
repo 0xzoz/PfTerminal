@@ -92,7 +92,9 @@ pub(super) struct Lexed {
 /// depth squared (#1020).
 pub(super) const MAX_SUBSTITUTION_DEPTH: usize = 32;
 
+/// #1159: zsh `=git` runs the `git` found on the path, like `$(which git)`.
 pub(super) fn basename(word: &str) -> &str {
+    let word = word.strip_prefix('=').unwrap_or(word);
     word.trim_end_matches('/')
         .rsplit('/')
         .next()
@@ -140,8 +142,12 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
 /// removed (`${v@'P'}`). The lexed words (braces dropped, `$'...'` decoded,
 /// known variables substituted) are checked the same way by the caller.
 /// Read without quotes, so nested shells' scripts count. Linear.
+///
+/// #1064: also a transformation whose operator is not one of the letters
+/// that only quote or describe the value (`${v@$p}`, `${!r@${p^}}`): it may
+/// be `P` when it runs.
 pub(super) fn prompt_expansion(text: &str) -> bool {
-    if !text.contains('P') {
+    if !text.contains('@') {
         return false;
     }
     let joined = text.replace("\\\n", "");
@@ -152,6 +158,39 @@ pub(super) fn prompt_expansion(text: &str) -> bool {
     [joined.as_str(), bare.as_str()].iter().any(|text| {
         text.match_indices("@P").any(|(at, _)| {
             !text[at + 2..].starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+        }) || computed_transformation(text)
+    })
+}
+
+/// Whether text holds `${name@op}` (`name` with an optional `!` or `#`
+/// before it and a subscript after it) whose `op` is not one of `QEAKakUuL`
+/// (`${!prefix@}` lists names). A subscript is read at most 64 bytes; one
+/// not closed by then counts. Linear.
+fn computed_transformation(text: &str) -> bool {
+    text.match_indices("${").any(|(at, _)| {
+        work::step();
+        let mut rest = &text[at + "${".len()..];
+        let bang = rest.starts_with('!');
+        if rest.len() > 1 && rest.starts_with(['!', '#']) && !rest[1..].starts_with('}') {
+            rest = &rest[1..];
+        }
+        let name = rest
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .unwrap_or(rest.len());
+        let name = match name {
+            0 if rest.starts_with(['@', '*', '#', '?', '$', '!', '-']) => 1,
+            name => name,
+        };
+        rest = &rest[name..];
+        if rest.starts_with('[') {
+            let window = &rest.as_bytes()[..rest.len().min(64)];
+            match window.iter().position(|byte| *byte == b']') {
+                Some(close) => rest = &rest[close + 1..],
+                None => return true,
+            }
+        }
+        rest.strip_prefix('@').is_some_and(|op| {
+            !(op.starts_with(|ch: char| "QEAKakUuL".contains(ch)) || (bang && op.starts_with('}')))
         })
     })
 }
@@ -410,6 +449,9 @@ struct Open {
     outer_hidden: bool,
     /// The outer word already holds a parameter operator.
     outer_operated: bool,
+    /// #1159: the redirection the outer word is the target of (`> $(cat
+    /// f)`), not the substitution's first word.
+    outer_redirect: Redirect,
     first: usize,
     backtick: bool,
     /// `>(...)`: the substitution reads the outer command's output.
@@ -580,12 +622,14 @@ impl Lexer {
         let outer_looked_up = std::mem::take(&mut self.looked_up);
         let outer_hidden = std::mem::take(&mut self.hidden);
         let outer_operated = std::mem::take(&mut self.operated);
+        let outer_redirect = std::mem::take(&mut self.redirect);
         self.open.push(Open {
             outer,
             outer_word,
             outer_looked_up,
             outer_hidden,
             outer_operated,
+            outer_redirect,
             first: self.done.len(),
             backtick,
             output,
@@ -612,6 +656,7 @@ impl Lexer {
             self.looked_up = open.outer_looked_up;
             self.hidden = open.outer_hidden;
             self.operated = open.outer_operated;
+            self.redirect = open.outer_redirect;
             if !open.output {
                 self.word.push_str(UNSEEN_OUTPUT);
             }
@@ -653,6 +698,7 @@ impl Lexer {
         self.looked_up = open.outer_looked_up;
         self.hidden = open.outer_hidden || spliced.is_some();
         self.operated = open.outer_operated;
+        self.redirect = open.outer_redirect;
         if !open.output {
             // Not literal text: the output of a lookup or of `cd X && pwd`.
             self.looked_up |= spliced.is_some()

@@ -151,6 +151,7 @@ mod tests {
         ("nested.rs", include_str!("nested.rs")),
         ("code_variables.rs", include_str!("code_variables.rs")),
         ("outbound.rs", include_str!("outbound.rs")),
+        ("rerun.rs", include_str!("rerun.rs")),
         ("outputs.rs", include_str!("outputs.rs")),
         ("git_helpers.rs", include_str!("git_helpers.rs")),
         ("paths.rs", include_str!("paths.rs")),

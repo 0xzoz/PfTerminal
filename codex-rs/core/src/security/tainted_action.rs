@@ -41,6 +41,7 @@ mod outbound;
 mod outputs;
 mod paths;
 mod quoted;
+mod rerun;
 mod sed;
 mod shadow;
 mod shell;
@@ -335,6 +336,8 @@ const RECURSIVE_READERS: &[(&str, &[&str])] = &[
 pub(super) const WRITERS: &[&str] = &[
     "tee", "cp", "mv", "install", "ln", "rsync", "dd", "truncate", "touch", "ditto", "sed", "perl",
     "ed", "ex", "patch", "chmod", "unzip", "tar", "curl", "wget", "rm", "rmdir", "unlink", "mkdir",
+    // #1159: `script FILE` writes its typescript to FILE.
+    "script",
 ];
 /// `git config` keys that make git run a program (PF-23-S02).
 const GIT_RUN_KEYS: &[&str] = &[
@@ -1358,6 +1361,13 @@ impl Classifier {
                 }
             }
         }
+        // #1064: a nameref (`declare -n r=v`) reads another variable's
+        // value, which the substituted words do not follow: its value is
+        // unseen.
+        for name in rerun::namerefs(command.as_ref(), words) {
+            work::step();
+            variables.insert(name.to_string(), shell::UNSEEN_OUTPUT.to_string());
+        }
         if self.rebuilt == 0 && indirect::misread_command(simple, words) {
             self.note(ProtectedActionKind::UnseenCode);
         }
@@ -1377,8 +1387,10 @@ impl Classifier {
             });
             // #988: `trap` runs its action later, like `eval` now. The word
             // lexer splits a quoted action, so every operand counts.
-            let eval_unseen = matches!(name.as_str(), "eval" | "trap")
-                && unseen[index + 1..].iter().any(|unseen| *unseen);
+            // #1064: and other commands that run an operand as code.
+            let eval_unseen = (matches!(name.as_str(), "eval" | "trap")
+                && unseen[index + 1..].iter().any(|unseen| *unseen))
+                || rerun::runs_unseen(name, words, unseen, *index);
             if self.rebuilt == 0 && (unseen[*index] || inline_unseen || eval_unseen) {
                 self.note(ProtectedActionKind::UnseenCode);
             }
@@ -1399,6 +1411,7 @@ impl Classifier {
             },
         );
         let mut later = LaterWords::new(&lower);
+        let mut git_programs_read = false;
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.
         for (index, word) in lower.iter().enumerate() {
@@ -1444,8 +1457,13 @@ impl Classifier {
                 &words[index + 1..],
                 simple.words.get(index + 1..).unwrap_or_default(),
             );
+            // #1159: programs git runs or copies, read once per command.
+            let git_program = (is_git || helper.is_some())
+                && !std::mem::replace(&mut git_programs_read, true)
+                && rerun::git_runs_program(git_args.0, subcommand);
             if (is_git && code_variables::git_runs_code_after_git(git_args.0, git_args.1))
                 || (helper == Some(None) && code_variables::git_runs_code(git_args.0, git_args.1))
+                || git_program
             {
                 self.note(ProtectedActionKind::UnseenCode);
             }
@@ -1506,6 +1524,15 @@ impl Classifier {
                 WRITERS.contains(&name.as_str()) || outputs.is_some(),
             )
         });
+        let path_writer = command
+            .as_ref()
+            .filter(|(_, name)| outputs::PATH_WRITERS.contains(&name.as_str()))
+            .map(|(index, _)| *index);
+        // #1159: `time -o FILE cmd` writes FILE.
+        let wrapper_outputs = command
+            .as_ref()
+            .map(|(index, _)| outputs::wrapper_output_files(&words[..*index]))
+            .unwrap_or_default();
         let cwd = folders.cwd.clone();
         // Words resolve against the folder of a `-C`/`--directory` flag
         // (`tar -C ~ ...`, `git -C ~/.codex ...`) once one has been given.
@@ -1540,6 +1567,16 @@ impl Classifier {
                 bases = folder_bases(&folder, &chained, &cwd);
             }
             previous = Some(word.as_str());
+            // #1159: a file written whose name holds output the classifier
+            // cannot see (`tee "$(cat f)"`, `> $(cat f)`) may be any file.
+            if (simple.writes_to.contains(&position)
+                || (path_writer.is_some_and(|index| position > index)
+                    && simple.stdin_from != Some(position)
+                    && simple.here_string != Some(position)))
+                && outputs::unseen_place(word)
+            {
+                self.note(ProtectedActionKind::Persistence);
+            }
             // Attached, assigned and volume forms (`-o/path`, `f=@/path`,
             // `~/.aws:/c`) are paths too.
             let pieces = std::iter::once(word.as_str()).chain(
@@ -1576,8 +1613,22 @@ impl Classifier {
                 self.script(&payload, &cwd, depth + 1);
             }
         }
-        for file in outputs.iter().flatten() {
+        // #1159: git writing the working tree in a folder that is or holds
+        // a home.
+        if command
+            .as_ref()
+            .is_some_and(|(index, name)| outputs::writes_working_tree(name, &words[index + 1..]))
+            && bases
+                .iter()
+                .any(|base| self.homes.holds_a_home(&self.homes.resolve(".", base)))
+        {
+            self.note(ProtectedActionKind::Persistence);
+        }
+        for file in outputs.iter().flatten().chain(&wrapper_outputs) {
             work::step();
+            if outputs::unseen_place(file) {
+                self.note(ProtectedActionKind::Persistence);
+            }
             for base in &bases {
                 work::step();
                 let resolved = self.homes.resolve(file, base);

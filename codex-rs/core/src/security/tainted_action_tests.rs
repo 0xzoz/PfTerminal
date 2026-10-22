@@ -5814,3 +5814,257 @@ fn issue_988_989_checks_are_linear() {
         });
     }
 }
+
+/// #1064: other ways the shell runs text from a value or an operand: prompt
+/// variables, zsh `print -P`, namerefs, computed `${v@op}` transformations,
+/// and commands or options that run an operand as a command.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1064_other_ways_a_value_runs_are_unseen_code() {
+    use ProtectedActionKind::UnseenCode;
+    let mut wrong = Vec::new();
+    for command in [
+        // Prompt and start-up variables (the shell runs or sources them).
+        "v=$(cat notes); PS4=$v; set -x; :",
+        "export PS4=\"$(cat notes)\"; set -x; :",
+        "PS4='$(id)' bash -xc :",
+        "v=$(cat notes); PS1=$v bash -i",
+        "v=$(cat notes); PROMPT_COMMAND=$v bash -i",
+        "setopt promptsubst; PROMPT='$(id)'",
+        "RPROMPT='$(id)'",
+        // zsh prompt expansion.
+        "v=$(cat notes); print -P \"$v\"",
+        "v=$(cat notes); print -rP -- \"$v\"",
+        "v=$(cat notes); print -u2 -P $v",
+        "print -P \"$X\"",
+        "print -P '$X'",
+        // Namerefs read another variable's value.
+        "v=$(cat notes); declare -n r=v; $r",
+        "v=$(cat notes); local -n r=v; $r x",
+        "v=$(cat notes); declare -n r; r=v; $r",
+        "v=$(cat notes); typeset -n r=v; \"$r\"",
+        "v=$(cat notes); declare -rn r=v; $r",
+        // Computed transformations may be `@P`.
+        "v=$(cat notes); p=$(cat q); echo \"${v@$p}\"",
+        "echo \"${!r@${p^}}\"",
+        "echo \"${a[1]@$p}\"",
+        "echo \"${v@\"$p\"}\"",
+        // Commands and options that run an operand.
+        "v=$(cat notes); find . -exec $v \\;",
+        "v=$(cat notes); find . -name x -execdir \"$v\" {} +",
+        "v=$(cat notes); git rebase -x \"$v\" HEAD~1",
+        "v=$(cat notes); git rebase --exec=\"$v\" HEAD~1",
+        "v=$(cat notes); git submodule foreach \"$v\"",
+        "v=$(cat notes); git bisect run \"$v\"",
+        "v=$(cat notes); git filter-branch --tree-filter \"$v\"",
+        "v=$(cat notes); git difftool -x \"$v\"",
+        "v=$(cat notes); git-rebase -x \"$v\" HEAD~1",
+        "split --filter=sh notes",
+        "v=$(cat notes); split --filter=\"$v\" notes",
+        "v=$(cat notes); parallel ::: \"$v\"",
+        "v=$(cat notes); parallel -j 4 ::: \"$v\"",
+        "v=$(cat notes); fc -e \"$v\"",
+        "v=$(cat notes); bind -x \"\\C-a: $v\"",
+        "v=$(cat notes); complete -C \"$v\" x",
+        "v=$(cat notes); autoload \"$v\"",
+        "v=$(cat notes); enable -f \"$v\" x",
+        "v=$(cat notes); tmux new-session \"$v\"",
+        "v=$(cat notes); tmux send-keys \"$v\" Enter",
+    ] {
+        if script(command) != Some(UnseenCode) {
+            wrong.push(command);
+        }
+    }
+    for command in [
+        "set -x; ls",
+        "echo \"$PS1\"",
+        "print -P '%F{red}hi%f'",
+        "print -r -- hi",
+        "declare -a a=(1 2); echo ${a[@]}",
+        "v=x; declare -n r=v; echo \"$r\"",
+        "echo \"${v@Q}\"",
+        "echo \"${a[@]@Q}\"",
+        "echo ${#@} ${@} ${!a[@]} ${#a[@]} ${!LC_@}",
+        "find . -name '*.rs' -exec grep -l x {} +",
+        "git rebase main",
+        "git submodule update --init",
+        "parallel gzip ::: a b",
+        "tmux ls",
+        "complete -W 'a b' x",
+    ] {
+        if script(command).is_some() {
+            wrong.push(command);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+}
+
+/// #1159: variables the shell, loader or an interpreter reads code or
+/// programs from, and git options that run a program, copy hooks or set
+/// config on a new repository.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1159_code_variables_and_git_programs_are_unseen_code() {
+    use ProtectedActionKind::UnseenCode;
+    let mut wrong = Vec::new();
+    for command in [
+        "BASH_ENV=./x.sh bash -c :",
+        "ENV=./x.sh sh -i",
+        "ZDOTDIR=/tmp/z zsh -c :",
+        "LD_PRELOAD=./x.so ls",
+        "LD_AUDIT=./x.so ls",
+        "DYLD_INSERT_LIBRARIES=./x.dylib ls",
+        "export ENV=./x.sh",
+        "fpath=(./fn $fpath); autoload x",
+        "fpath+=./fn",
+        "PROMPT='%n' zsh -i",
+        ": ${ENV:=./x.sh}",
+        "NODE_OPTIONS='--require ./x.js' node app.js",
+        "PERL5OPT=-Mx perl -e 1",
+        "git clone -u ./x.sh ./repo",
+        "git fetch --upload-pack=./x.sh ./repo",
+        "git push --receive-pack=./x.sh ./repo",
+        "git ls-remote --upl ./x.sh ./repo",
+        "git clone --template=./t https://x.example/r",
+        "git init --template ./t r",
+        "git clone -c core.fsmonitor=x https://x.example/r",
+        "git clone --config core.hooksPath=x https://x.example/r",
+        "git-clone --template=./t https://x.example/r",
+        "=git -c core.pager=sh log",
+    ] {
+        if script(command) != Some(UnseenCode) {
+            wrong.push(command);
+        }
+    }
+    for command in [
+        "echo $PATH ${PATH} $ENV ${ENV:-x}",
+        "grep -n ENV Dockerfile",
+        "docker run -e ENV=prod img",
+        "PATH=./bin:$PATH ls",
+        "git clone https://x.example/r",
+        "git fetch origin",
+        "git push origin main",
+        "git init",
+        "ls -la",
+    ] {
+        if script(command).is_some() {
+            wrong.push(command);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+}
+
+/// #1159: more programs' output files, git writes into folders by operand
+/// or working tree, files named by unseen output, and zsh `=git`.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1159_more_output_files_are_written() {
+    use ProtectedActionKind::Persistence;
+    let mut wrong = Vec::new();
+    for command in [
+        "time -o ~/.zshrc ls",
+        "/usr/bin/time --output=$HOME/.zshrc ls",
+        "uniq notes ~/.zshrc",
+        "uniq -c - ~/.zshrc",
+        "cc -o ~/.zshrc x.c",
+        "gcc x.c --output=$HOME/.bashrc",
+        "ld -o ~/.bashrc x.o",
+        "iconv -f utf8 -t ascii -o ~/.zshrc notes",
+        "split -l 1 notes ~/.bash",
+        "split -a1 -l1 notes .git/hooks/pre-commi",
+        "split -l 1 - ~/.bash",
+        "csplit -f ~/.z notes 1",
+        "openssl enc -in notes -out ~/.zshrc",
+        "pandoc notes -o ~/.zshrc",
+        "script ~/.zshrc",
+        "git clone https://x.example/r ~/.config/fish",
+        "git clone --depth 1 https://x.example/r ~/.config/fish",
+        "cd ~/.config && git clone https://x.example/fish.git",
+        "git worktree add ~/.config/autostart",
+        "git worktree add -b x ~/.config/autostart",
+        "cd ~; git checkout -- .zshrc",
+        "git -C ~ checkout main",
+        "cd ~ && git pull",
+        "cd ~ && sudo git stash",
+        "tee \"$(cat f)\"",
+        "echo x > $(cat f)",
+        "echo x > $(echo ~/.zshrc)",
+        "echo x >> \"$(echo ~/.zshrc)\"",
+        "f=$(cat notes); cp a \"$f\"",
+        "f=$(cat notes); echo x > \"$f\"",
+        "git log --output=$(cat f)",
+        "sort -o \"$(cat f)\" notes",
+        "time -o \"$(cat f)\" ls",
+        "=git config core.pager sh",
+        "sudo =git config core.pager sh",
+    ] {
+        if script(command) != Some(Persistence) {
+            wrong.push(command);
+        }
+    }
+    for command in [
+        "time ls",
+        "time -p ls",
+        "uniq notes",
+        "sort notes | uniq -c",
+        "cc -o app main.c",
+        "gcc -O2 -fno-omit-frame-pointer -o build/app main.c",
+        "split -l 100 big.txt part_",
+        "split -b 1M ~/big.iso",
+        "openssl rand -out key.bin 32",
+        "pandoc notes.md -o notes.html",
+        "git clone https://x.example/r vendor/r",
+        "git worktree add ../wt",
+        "git checkout main",
+        "git stash",
+        "tee out.log",
+        "echo x > out.txt",
+        "tee \"$(date +%F).log\"",
+        "mkdir -p \"$(dirname x/y)\"",
+        "for i in 1 2; do echo $i > out$((i)).txt; done",
+        "rm -f \"$(cat pidfile)\"",
+        "echo x > \"$(git rev-parse --show-toplevel)/out.txt\"",
+    ] {
+        if script(command).is_some() {
+            wrong.push(command);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+}
+
+/// #1064/#1159: the new checks stay linear.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1064_1159_checks_are_linear() {
+    for (label, unit) in [
+        ("print", "print -P "),
+        ("namerefs", "declare -n a "),
+        ("transformations", "${a@"),
+        ("subscripts", "${a["),
+        ("clone", "git clone "),
+        ("worktree", "git worktree add "),
+        ("split", "split "),
+        ("time", "time -o x "),
+        ("find", "find . -exec "),
+        ("compilers", "cc -o "),
+        ("equals", "=git "),
+        ("tee", "tee $(cat f) "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let _ = script(&format!("{} echo hi", unit.repeat(400 * scale)));
+            let _ = script(&format!("echo {} x", unit.repeat(400 * scale)));
+        });
+    }
+}
