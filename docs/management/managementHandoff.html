@@ -759,7 +759,7 @@ developer-accounting, signed with Travis's Developer ID (“Developer ID Applica
 <li><code>d88d018ab2</code> (12:59Z; the merge of #1319; adds #1328, #1321 and #1319).</li>
 </ul>
 Next to the real binary in <code>integration-package-dev/bin/</code>: <code>corbanu.prev-b0fa02105f</code> (the previous install), <code>corbanu.prev-0e2c02529d</code> and
-<code>corbanu.prev-11443dc2b5</code>; <code>corbanu.prev-333f0b8db7</code> is no longer there. Moved to <code>.codex-work/integration-build-20260922a/old-binaries/</code> since #1281: <code>corbanu.31b9f3ca</code> (pf84-cb1's separately signed copy
+<code>corbanu.prev-11443dc2b5</code>. Moved to <code>.codex-work/integration-build-20260922a/old-binaries/</code> since #1281: <code>corbanu.prev-333f0b8db7</code>, <code>corbanu.31b9f3ca</code> (pf84-cb1's separately signed copy
 of main <code>31b9f3cad8</code>, no longer needed) and <code>2f9d05c51e</code> at 04:50Z, <code>8c73c8ea80</code> at 07:15Z (it was kept for parity runs until D161 was answered), <code>9750861c2a</code> at 12:23Z.
 Workers that need a fixed candidate build and sign their own private copy and never install it: pf84-rerun used main <code>f61397ca41</code>, acct-rerun keeps <code>63c9daca26</code>
 (sha256 begins <code>e942b095</code>) for its resume.</li>
@@ -2154,7 +2154,7 @@ code-setting variables, output files and git programs ask after untrusted conten
 merged main (<code>c861c9b971</code>), and the coordinator's grant (12:59Z) lets that merge commit merge on green without a re-review (the PR's lines are identical).</td></tr>
 <tr><td>sec-1309c</td><td>10-22 11:51</td><td>#1309 item 2A (coordinator call 12:02Z): the line's own relative writes, redirections, seds and <code>--output=</code> files after a <code>cd</code> that may not
 happen are judged in every folder the line may be in, like #1321 does for nested scripts.</td><td><b>#1339</b> (head <code>abc65bc18e</code>, checks running).</td></tr>
-<tr><td>tui-qa2</td><td>10-22 12:03</td><td>Interactive true-TUI checks of #1327, #1322, #1320 and #1319 in a throwaway home, GLM 5.3 Flash on Z.AI (the installed <code>b0fa02105f</code>;
+<tr><td>tui-qa2</td><td>10-22 12:03</td><td>Interactive true-TUI checks of #1327, #1322, #1320 and #1319 in a throwaway home, GLM 5.3 Flash on Z.AI (<code>b0fa02105f</code>, then installed;
 #1319's “after” check on a dev build of <code>d88d018ab2</code>).</td><td>Record
 <b>#1341</b> merged 12:51Z (<code>e2ddef8698</code>); filed #1340 (#1327 follow-up). <b>Finished 12:59Z</b> (EXIT 0): #1327, #1322, #1320 and #1319 all pass in the real TUI; no declined
 model step. Coordinator call: #1340 is low priority, for the next TUI batch.</td></tr>
@@ -2269,7 +2269,7 @@ command-line path, and neither is confirmed done. Travis said at 08:20Z he would
 up.</p>
 <div><b>Coming next</b> (raise when ready; not yet numbered):
 <ul>
-<li><b>New contributor PRs</b> #1336, #1337, #1338, #1342, #1344 and #1346 (and draft #1348): first replies and reviews (SWEEP RULE). Merges under D152 if they qualify; #1337/#1338 touch PF-84, so check them against #1080
+<li><b>New contributor PRs</b> #1336, #1337, #1338, #1342, #1344 and #1346 (and draft #1348): first replies and reviews (SWEEP RULE). Merges under D152 if they qualify; #1337/#1338/#1346 touch PF-84, so check them against #1080
 and D176.</li>
 <li><b>#1330</b>: merge under D152 once its author marks it ready; <b>#1329</b>: the suggested re-check, then merge.</li>
 <li><b>#1277</b>: close with credit at or after 10-23 02:03Z (D169).</li>
@@ -2306,7 +2306,7 @@ The overnight window runs until 16:30Z; until then launch only decision-free wor
 <li><b>When Travis is back (about 16:30Z):</b> lead with <b>D190</b> (the Z.AI recharge blocks acct-rerun and the Windows gate) and ask whether his Windows machine is up; then D182–D189.</li>
 <li><b>After D190:</b> relaunch acct-rerun with a RECOVERY NOTE pointing at its RESUME.md; when the Windows machine is up, launch <code>win-gate-pf84</code> from <code>$W/win-gate-pf84.md</code>
 (it needs a free slot and Z.AI).</li>
-<li><b>When each running worker finishes</b>, read its result and bring its decisions to Travis: sec-1261 (#1302), sec-1064 (#1332), sec-1309c (#1339) and fu-1323 (tui-qa2's result is in: #1341 merged, #1340 low priority).
+<li><b>When each running worker finishes</b>, read its result and bring its decisions to Travis: sec-1261 (#1302), sec-1064 (#1332), sec-1309c (#1339) and fu-1323 (#1347); tui-qa2's result is in (#1341 merged, #1340 low priority).
 Don't merge a running worker's PR.</li>
 <li><b>Decision-free work as slots free:</b> a contributor sweep (SWEEP RULE: #1336, #1337, #1338, #1342, #1344 and #1346 first; #1330/#1329; #1277 after 10-23 02:03Z with credit; Task Node acknowledgement
 requests); the #636 nightly worker; the stale-worktree and local-branch cleanup (section 10).</li>
@@ -2329,7 +2329,7 @@ if still a draft (D83).</li>
 <ul>
 <li>#932: read phase 2's logs before widening (D129); D156's split gap; the extra prompts accepted until #932 (D88, D90, D104, D157); the #989 remnants, the <code>cd &amp;&amp; cd</code> cap and the
 <code>cd "$VAR"</code> case.</li>
-<li>#1309's remaining gaps, #1276, #1159's remainder (with sec-1064), #1261 (after #1302), #1323 (fu-1323), #1334, #1335 (bradsbots' #1342), #1132/#1111/#1112 (contributor #1147/#1152),
+<li>#1309's remaining gaps, #1276, #1159's remainder (with sec-1064), #1261 (after #1302), #1323 (fu-1323's #1347), #1334 (citadelculture's draft #1348), #1335 (bradsbots' #1342), #1132/#1111/#1112 (contributor #1147/#1152),
 #1064 (sec-1064).</li>
 <li>#943's remaining follow-ups and the rootless-Docker (FUSE) noise noted there; #1056 (<code>statx</code>, #1246); #1011, #1001's remainder, the D56 (b) Windows key hand-over redesign (P2).</li>
 <li>Older open items: #505, #594, #674, #675, #716, #722, #732 (narrows a protection, so it needs Travis), #733, #802, #807, #818 (close it: AGG-R03 passed) and #863.</li>
