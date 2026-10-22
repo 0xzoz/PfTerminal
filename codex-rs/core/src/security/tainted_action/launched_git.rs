@@ -20,6 +20,15 @@ use super::outputs;
 use super::shell::basename;
 use super::work;
 
+/// Launchers that add words from their input to the line they run (#1276:
+/// `xjobs` too).
+const FEEDERS: &[&str] = &["xargs", "gxargs", "xjobs"];
+/// Launchers like GNU `parallel` (#1276: `env_parallel`, `rush`): they
+/// also put input where placeholders are and run the line with a shell.
+pub(super) const PARALLELS: &[&str] = &["parallel", "env_parallel", "rush"];
+/// Finders whose exec options start a launched command (#1276: `bfs`).
+const FINDERS: &[&str] = &["find", "gfind", "fd", "fdfind", "bfs"];
+
 /// Replacement strings (`xargs -I R`) remembered; past this many, any word
 /// may be one.
 const MAX_REPLACEMENTS: usize = 8;
@@ -37,6 +46,8 @@ pub(super) struct LaunchedGit<'a> {
     fed: bool,
     /// A `find` or `fd`, whose exec options start such a command.
     finder: bool,
+    /// An `fd`, whose `-x` may hold its command (`-xgit`).
+    fd: bool,
     /// The launcher puts input where placeholders (`{}`) are: `find -exec`,
     /// `fd -x`, `parallel`.
     placeholders: bool,
@@ -51,6 +62,10 @@ pub(super) struct LaunchedGit<'a> {
     /// For each word (and the end): whether, as the words after `config`,
     /// they read, and whether one of them is a positional parameter.
     seen: Option<(Vec<bool>, Vec<bool>)>,
+    /// #1283: which words the quote-aware reading cannot spell (empty when
+    /// unknown), and whether a launcher met so far was one.
+    hidden: &'a [bool],
+    hidden_launcher: bool,
 }
 
 impl<'a> LaunchedGit<'a> {
@@ -62,6 +77,7 @@ impl<'a> LaunchedGit<'a> {
         lower: &'a [String],
         braces: bool,
         launched: Launch,
+        hidden: &'a [bool],
     ) -> Self {
         Self {
             words,
@@ -69,6 +85,7 @@ impl<'a> LaunchedGit<'a> {
             braces,
             fed: launched.fed || launched.replaced,
             finder: false,
+            fd: false,
             placeholders: false,
             replacement_next: false,
             parallel_options: false,
@@ -76,7 +93,13 @@ impl<'a> LaunchedGit<'a> {
             replacements: Vec::new(),
             any_replacement: launched.replaced,
             seen: None,
+            hidden,
+            hidden_launcher: false,
         }
+    }
+
+    fn hidden(&self, index: usize) -> bool {
+        self.hidden.get(index).copied().unwrap_or(false)
     }
 
     /// Whether a launcher's input words may be put inside the words that
@@ -102,20 +125,42 @@ impl<'a> LaunchedGit<'a> {
         if self.parallel_options {
             self.parallel_option(word);
         }
-        // `fd` takes `-x`/`-X` at the end of a group too (`-HX`).
+        // `fd` takes `-x`/`-X` at the end of a group too (`-HX`), and its
+        // command attached (#1276: `--exec=git`, `-xgit`).
         let finder_exec = self.finder
             && (matches!(
                 word,
                 "-exec" | "-execdir" | "-ok" | "-okdir" | "--exec" | "--exec-batch"
             ) || (word.starts_with('-')
                 && !word.starts_with("--")
-                && word.ends_with(['x', 'X'])));
-        self.placeholders |= finder_exec || name == "parallel";
-        if matches!(name, "xargs" | "gxargs" | "parallel") || finder_exec {
+                && word.ends_with(['x', 'X']))
+                || self.attached(index).is_some());
+        let parallel = PARALLELS.contains(&name);
+        self.placeholders |= finder_exec || parallel;
+        if FEEDERS.contains(&name) || parallel || finder_exec {
             self.fed = true;
+            self.hidden_launcher |= self.hidden(index);
         }
-        self.finder |= matches!(name, "find" | "gfind" | "fd" | "fdfind");
-        self.parallel_options |= name == "parallel";
+        self.finder |= FINDERS.contains(&name);
+        self.fd |= matches!(name, "fd" | "fdfind");
+        self.parallel_options |= parallel;
+    }
+
+    /// #1276: the command a finder's exec option holds attached
+    /// (`--exec=git`, `--exec-batch=git`, `fd -xgit`, `fd -Hxgit`), lowercase.
+    pub(super) fn attached(&self, index: usize) -> Option<&'a str> {
+        if !self.finder {
+            return None;
+        }
+        let word: &'a str = self.lower[index].as_str();
+        if let Some(long) = word.strip_prefix("--") {
+            return ["exec=", "exec-batch="]
+                .iter()
+                .find_map(|option| long.strip_prefix(option));
+        }
+        let group = word.strip_prefix('-').filter(|_| self.fd)?;
+        let at = group.find(['x', 'X'])?;
+        Some(&group[at + 1..]).filter(|command| !command.is_empty())
     }
 
     /// One of `parallel`'s own options, before its command. It has many
@@ -268,7 +313,13 @@ impl<'a> LaunchedGit<'a> {
         index: usize,
         helper: Option<&Option<String>>,
     ) -> Option<ProtectedActionKind> {
-        let name = basename(&self.lower[index]);
+        // #1276: a finder's exec option with its command attached runs it.
+        let attached = self.attached(index);
+        if attached.is_some() {
+            self.fed = true;
+            self.placeholders = true;
+        }
+        let name = basename(attached.unwrap_or(&self.lower[index]));
         if helper.is_none() && name != "git" {
             // A dashed helper whose name lost a placeholder (`git-{}`).
             let dropped = matches!(name, "git-" | "git-.exe");
@@ -276,8 +327,13 @@ impl<'a> LaunchedGit<'a> {
         }
         let config = |this: &mut Self, from: usize| {
             let fed = this.fed;
+            // #1283: the launcher, git or `config` spelled by text the
+            // quote-aware reading cannot see, which then cannot check what
+            // this reading makes of quoted values.
+            let unchecked = this.hidden_launcher || this.hidden(index) || this.hidden(from - 1);
             let (reads, positional) = this.seen();
-            ((fed || positional[from]) && !reads[from]).then_some(ProtectedActionKind::Persistence)
+            ((fed || positional[from]) && (unchecked || !reads[from]))
+                .then_some(ProtectedActionKind::Persistence)
         };
         if let Some(Some(subcommand)) = helper {
             // A dashed helper: its name gives the subcommand.
@@ -325,7 +381,13 @@ fn holds_positional(word: &str) -> bool {
             Some(inside) => (true, inside),
             None => (false, after),
         };
-        after.starts_with("argv")
+        // #1276: `$_` is the last word of the command before, which may
+        // be one of them (`: "$@"; git config $_`).
+        let underscore = after.strip_prefix('_').is_some_and(|rest| {
+            !rest.starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+        });
+        underscore
+            || after.starts_with("argv")
             || after.chars().next().is_some_and(|ch| {
                 ch == '@' || ch == '*' || ch.is_ascii_digit() || (braced && ch == '!')
             })
@@ -340,7 +402,7 @@ fn holds_positional(word: &str) -> bool {
 /// with its input in the script these words are in.
 pub(super) fn launches(texts: &[String], braces: bool, inherited: Launch) -> Vec<Launch> {
     let lower: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
-    let mut launched = LaunchedGit::new(texts, &lower, braces, inherited);
+    let mut launched = LaunchedGit::new(texts, &lower, braces, inherited, &[]);
     let mut each = Vec::with_capacity(texts.len() + 1);
     for index in 0..=texts.len() {
         work::step();

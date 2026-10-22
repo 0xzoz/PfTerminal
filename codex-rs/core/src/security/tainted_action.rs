@@ -671,6 +671,25 @@ impl<'a> LaterWords<'a> {
     }
 }
 
+/// #1283: for each of a simple command's words, whether the quote-aware
+/// reading (`nested.rs`), which checks git on the words as the shell passes
+/// them on, cannot spell it: a variable's value (`$g` for `git`), or a word
+/// the lexer marked (a brace expansion, `$IFS`, a substitution's output).
+fn hidden_words(simple: &SimpleCommand, words: &[String]) -> Vec<bool> {
+    let mut hidden: Vec<bool> = words
+        .iter()
+        .zip(&simple.words)
+        .map(|(word, raw)| word != raw)
+        .collect();
+    for at in &simple.hidden {
+        work::step();
+        if let Some(word) = hidden.get_mut(*at) {
+            *word = true;
+        }
+    }
+    hidden
+}
+
 /// For each of `len` words and the end, whether `check` holds for it or a
 /// word after it.
 fn suffix_any(len: usize, check: impl Fn(usize) -> bool) -> Vec<bool> {
@@ -691,6 +710,9 @@ fn suffix_any(len: usize, check: impl Fn(usize) -> bool) -> Vec<bool> {
 struct GitConfigWrites<'a> {
     /// The command's words, lowercase.
     words: &'a [String],
+    /// #1283: which of them the quote-aware reading cannot spell (see
+    /// [`hidden_words`]); empty when unknown.
+    hidden: &'a [bool],
     seen: Option<FollowingWords>,
 }
 
@@ -712,8 +734,12 @@ struct FollowingWords {
 }
 
 impl<'a> GitConfigWrites<'a> {
-    fn new(words: &'a [String]) -> Self {
-        Self { words, seen: None }
+    fn new(words: &'a [String], hidden: &'a [bool]) -> Self {
+        Self {
+            words,
+            hidden,
+            seen: None,
+        }
     }
 
     /// Whether `git <subcommand> words[from..]` (or `git words[from..]`)
@@ -759,6 +785,13 @@ impl<'a> GitConfigWrites<'a> {
                 None => return edits,
             }
         };
+        // #1283: git or its `config` spelled by text the quote-aware reading
+        // cannot see (`{git,config}`, `$g config`): that reading, which keeps
+        // quoted values whole, cannot check what this one makes of them.
+        let hidden = |at: usize| self.hidden.get(at).copied().unwrap_or(false);
+        if hidden(from - 1) || hidden(start - 1) {
+            return true;
+        }
         edits || (start < seen.reads.len() && !seen.reads[start] && seen.persisting[start])
     }
 }
@@ -1267,6 +1300,7 @@ impl Classifier {
         depth: usize,
     ) {
         let lower: Vec<String> = words.iter().map(|word| word.to_lowercase()).collect();
+        let hidden = hidden_words(simple, words);
         let command = indirect::command_word(words);
         // Assignments (`A=x`, `export A=x`) feed later `$A` words.
         let comment = words.first().is_some_and(|word| word.starts_with('#'));
@@ -1304,6 +1338,21 @@ impl Classifier {
                 }
             }
         }
+        // #1276: `for k;` and `select k;` (no `in`) loop over the positional
+        // parameters, which the classifier never sees (`xargs sh -c 'for k;
+        // do git config "$k" sh; done' _`): `$k` holds one, and is unseen.
+        if lower
+            .first()
+            .is_some_and(|word| matches!(word.as_str(), "for" | "select"))
+            && let Some(name) = words.get(1)
+            && lower.get(2).is_none_or(|word| word == "do")
+            && !name.is_empty()
+            && name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
+            variables.insert(name.clone(), format!("$@{}", shell::UNSEEN_OUTPUT));
+        }
         if let Some((index, name)) = &command {
             let args = &words[index + 1..];
             // Code named by a variable or substitution the classifier cannot
@@ -1324,8 +1373,9 @@ impl Classifier {
             }
             self.change_folder(name, args, folders, variables);
         }
-        let mut git_config = GitConfigWrites::new(&lower);
-        let mut launched_git = launched_git::LaunchedGit::new(words, &lower, braces, self.launched);
+        let mut git_config = GitConfigWrites::new(&lower, &hidden);
+        let mut launched_git =
+            launched_git::LaunchedGit::new(words, &lower, braces, self.launched, &hidden);
         let mut later = LaterWords::new(&lower);
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.
@@ -1338,11 +1388,14 @@ impl Classifier {
             }
             // #1159: git under another name (`git.exe`), or a dashed helper
             // (`/usr/lib/git-core/git-config`) that runs `git <subcommand>`.
-            let helper = git_helpers::git_name(word);
+            // #1276: or a finder's exec option with git attached
+            // (`fd --exec=git`).
+            let git_word = launched_git.attached(index).unwrap_or(word);
+            let is_git = basename(git_word) == "git";
+            let helper = git_helpers::git_name(git_word);
             let subcommand = helper.as_ref().and_then(Option::as_deref);
             if persistence_command(name, &mut later, index + 1)
-                || ((name == "git" || helper.is_some())
-                    && git_config.persists(index + 1, subcommand))
+                || ((is_git || helper.is_some()) && git_config.persists(index + 1, subcommand))
             {
                 self.note(ProtectedActionKind::Persistence);
             }
@@ -1369,7 +1422,7 @@ impl Classifier {
                 &words[index + 1..],
                 simple.words.get(index + 1..).unwrap_or_default(),
             );
-            if (name == "git" && code_variables::git_runs_code_after_git(git_args.0, git_args.1))
+            if (is_git && code_variables::git_runs_code_after_git(git_args.0, git_args.1))
                 || (helper == Some(None) && code_variables::git_runs_code(git_args.0, git_args.1))
             {
                 self.note(ProtectedActionKind::UnseenCode);
@@ -1411,9 +1464,15 @@ impl Classifier {
         }
         // #1141: an output option makes a writer of its command, and its
         // value is a file written (`git log --output=~/.zshrc`, `-o.zshrc`).
-        let outputs = command
-            .as_ref()
-            .and_then(|(index, name)| outputs::output_files(name, &words[index + 1..]));
+        let outputs = command.as_ref().and_then(|(index, name)| {
+            // #1283: a `config` the quote-aware reading cannot spell.
+            let unchecked = hidden[*index]
+                || lower[index + 1..]
+                    .iter()
+                    .position(|word| word == "config")
+                    .is_some_and(|at| hidden[index + 1 + at]);
+            outputs::output_files(name, &words[index + 1..], unchecked)
+        });
         if command
             .as_ref()
             .is_some_and(|(index, name)| outputs::joins_names(name, &words[index + 1..]))

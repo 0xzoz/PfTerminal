@@ -12,6 +12,7 @@
 use super::Classifier;
 use super::FileText;
 use super::Folders;
+use super::GitConfigWrites;
 use super::ProtectedActionKind;
 use super::WRITERS;
 use super::git_helpers;
@@ -87,6 +88,8 @@ struct Found {
     /// An interpreter runs code that may write files the classifier does
     /// not see (`python3 -c "open('x','w')..."`).
     runs_code: bool,
+    /// #1283: what git does with the words as the shell passes them on.
+    git: Vec<ProtectedActionKind>,
 }
 
 /// One reading of a sed invocation and where it runs.
@@ -223,6 +226,10 @@ impl Classifier {
         if found.unreadable || folders.unfollowed {
             self.note(ProtectedActionKind::UnseenCode);
         }
+        for kind in std::mem::take(&mut found.git) {
+            work::step();
+            self.note(kind);
+        }
         self.written.extend(found.written.iter().cloned());
         let mut judged = HashSet::new();
         for (script, cwd, launched) in std::mem::take(&mut found.scripts) {
@@ -297,6 +304,7 @@ impl Classifier {
             found.written.extend(targets);
             // D153: a git setting whose quoted text names git.
             found.unreadable |= git_helpers::setting_holds_git_name(&command.words);
+            self.judge_git(&texts, found);
             // #1268: where a launcher's input reaches the words, and the
             // scripts of shells it puts input into, wherever the command
             // word is read to be (`xargs --replace sh -c '... {}'`).
@@ -367,7 +375,14 @@ impl Classifier {
                     sed_command = true;
                 } else {
                     // #1141: an output option's file (`git log --output=f`).
-                    let outputs = outputs::output_files(&resolved_name, &texts[at + 1..]);
+                    let outputs = outputs::output_files(
+                        &resolved_name,
+                        &texts[at + 1..],
+                        /*unchecked*/ false,
+                    );
+                    if let Some(files) = &outputs {
+                        self.judge_outputs(&texts[at + 1..], files, &folders.cwd, found);
+                    }
                     if WRITERS.contains(&resolved_name.as_str())
                         || outputs.is_some()
                         || !command.writes_to.is_empty()
@@ -387,7 +402,7 @@ impl Classifier {
                 // #1268: GNU parallel joins its command words, adds its
                 // input and runs the line with a shell (`parallel 'cd x &&
                 // git config'`).
-                if resolved_name == "parallel" {
+                if launched_git::PARALLELS.contains(&resolved_name.as_str()) {
                     let end = texts[at + 1..]
                         .iter()
                         .position(|word| word.starts_with(":::"))
@@ -504,6 +519,86 @@ impl Classifier {
                 }
                 found.unreadable |= counted.unreadable || inner.unfollowed;
             }
+        }
+    }
+
+    /// #1283: the git checks of `simple_command` on the words as the shell
+    /// passes them on. The word lexer splits quoted text, so a value's text
+    /// can read as an option there (`git config --comment 'x --get'
+    /// core.pager sh` as a read); here each value stays one word. Git
+    /// spelled by text this reading cannot see is checked there instead
+    /// (`hidden_words`).
+    fn judge_git(&self, texts: &[String], found: &mut Found) {
+        if !texts.iter().any(|text| text.to_lowercase().contains("git")) {
+            return;
+        }
+        let lower: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
+        let mut config = GitConfigWrites::new(&lower, &[]);
+        let mut launched =
+            launched_git::LaunchedGit::new(texts, &lower, found.braces, self.launched, &[]);
+        for (index, word) in lower.iter().enumerate() {
+            work::step();
+            // #1276: or a finder's exec option with git attached.
+            let git_word = launched.attached(index).unwrap_or(word);
+            let helper = git_helpers::git_name(git_word);
+            let subcommand = helper.as_ref().and_then(Option::as_deref);
+            let mut kinds = Vec::new();
+            if (basename(git_word) == "git" || helper.is_some())
+                && config.persists(index + 1, subcommand)
+            {
+                kinds.push(ProtectedActionKind::Persistence);
+            }
+            kinds.extend(launched.judge(index, helper.as_ref()));
+            launched.step(index);
+            for kind in kinds {
+                work::step();
+                if !found.git.contains(&kind) {
+                    found.git.push(kind);
+                }
+            }
+        }
+    }
+
+    /// #1283: the files an output option names (`git config -f ~/.zshenv
+    /// --comment x,--get k v`), with quoted values kept whole, resolved
+    /// against the working folder and every `-C`-style folder in `args`.
+    fn judge_outputs(&self, args: &[String], files: &[String], cwd: &str, found: &mut Found) {
+        const MAX_BASES: usize = 8;
+        let mut bases = vec![cwd.to_string()];
+        let mut previous: Option<&str> = None;
+        for word in args {
+            work::step();
+            let value = match previous {
+                Some(flag) if super::FOLDER_FLAGS.contains(&flag) => Some(word.as_str()),
+                _ => word
+                    .split_once('=')
+                    .filter(|(flag, _)| super::FOLDER_FLAGS.contains(flag))
+                    .map(|(_, value)| value),
+            };
+            previous = Some(word);
+            let Some(value) = value else {
+                continue;
+            };
+            if bases.len() + 2 > MAX_BASES {
+                // Too many folders to follow: fail closed.
+                found.git.push(ProtectedActionKind::Persistence);
+                return;
+            }
+            // Against the folder before it and the working folder.
+            let last = bases.last().cloned().unwrap_or_default();
+            bases.push(self.homes.resolve(value, &last));
+            bases.push(self.homes.resolve(value, cwd));
+        }
+        let writes_home = files.iter().any(|file| {
+            bases.iter().any(|base| {
+                work::step();
+                let resolved = self.homes.resolve(file, base);
+                self.homes.is_persistence(&resolved)
+                    || (file.ends_with('/') && self.homes.holds_a_home(&resolved))
+            })
+        });
+        if writes_home && !found.git.contains(&ProtectedActionKind::Persistence) {
+            found.git.push(ProtectedActionKind::Persistence);
         }
     }
 
