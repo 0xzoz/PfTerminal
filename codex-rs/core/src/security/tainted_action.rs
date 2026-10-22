@@ -1469,7 +1469,8 @@ impl Classifier {
         // value is a file written (`git log --output=~/.zshrc`, `-o.zshrc`).
         let outputs = command.as_ref().and_then(|(index, name)| {
             // #1283: a `config` the quote-aware reading cannot spell.
-            let unchecked = hidden[*index] || unchecked[*index..].iter().any(|word| *word);
+            // A wrapper's words count too (`env -C "$d" git`).
+            let unchecked = hidden[*index] || unchecked.iter().any(|word| *word);
             outputs::output_files(name, &words[index + 1..], unchecked)
         });
         if command

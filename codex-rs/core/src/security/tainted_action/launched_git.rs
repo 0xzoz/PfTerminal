@@ -238,7 +238,9 @@ impl<'a> LaunchedGit<'a> {
         }
         let group = word.strip_prefix('-').filter(|_| self.fd)?;
         let at = group.find(['x', 'X'])?;
-        Some(&group[at + 1..]).filter(|command| !command.is_empty())
+        // `-x=git` too.
+        let command = &group[at + 1..];
+        Some(command.strip_prefix('=').unwrap_or(command)).filter(|command| !command.is_empty())
     }
 
     /// One of `parallel`'s own options, before its command. It has many

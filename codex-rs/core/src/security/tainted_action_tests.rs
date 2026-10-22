@@ -5161,6 +5161,14 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         r#"eval git config --comment "'x" --get "'" core.pager sh"#,
         r#"sh -c 'for k; do eval "git config --comment \"x --get\" \"\$k\" sh"; done' _ core.pager"#,
         r#"set -- core.pager; for k; do sh -c "git config --comment 'x --get' $k sh"; done"#,
+        // Review 4: a wrapper's folder holds the output file.
+        "env -C ~ git config -f .zshenv --comment x,--get a.b v",
+        "env --chdir \"$HOME\" git config -f .zshenv --comment x,--get a.b v",
+        "D=~; env -C \"$D\" git config -f .zshenv --comment x,--get a.b v",
+        "cd ~ && git config -f .zshenv --comment x,--get a.b v",
+        "pushd ~; git config -f .zshenv --comment x,--get a.b v",
+        "(cd; git config -f .zshenv --comment x,--get a.b v)",
+        "git --git-dir=x -C ~ config -f .zshenv --comment x,--get a.b v",
     ] {
         assert_eq!(
             script(command),
@@ -5231,6 +5239,7 @@ fn issue_1276_more_launchers_ask() {
         ("fd --exec-batch=git config", Persistence),
         ("fd -xgit config", Persistence),
         ("fd -Hxgit config", Persistence),
+        ("fd -x=git config", Persistence),
         ("fd --exec=git config core.pager sh", Persistence),
         (
             "xargs sh -c 'for k; do git config \"$k\" sh; done' _",

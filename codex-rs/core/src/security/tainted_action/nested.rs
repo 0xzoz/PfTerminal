@@ -384,7 +384,8 @@ impl Classifier {
                         /*unchecked*/ false,
                     );
                     if let Some(files) = &outputs {
-                        self.judge_outputs(&texts[at + 1..], files, &folders.cwd, found);
+                        // A wrapper's folder counts too (`env -C ~ git`).
+                        self.judge_outputs(&texts, files, &folders.cwd, found);
                     }
                     if WRITERS.contains(&resolved_name.as_str())
                         || outputs.is_some()
@@ -615,12 +616,13 @@ impl Classifier {
 
     /// #1283: the files an output option names (`git config -f ~/.zshenv
     /// --comment x,--get k v`), with quoted values kept whole, resolved
-    /// against the working folder and every `-C`-style folder in `args`.
-    fn judge_outputs(&self, args: &[String], files: &[String], cwd: &str, found: &mut Found) {
+    /// against the working folder and every `-C`-style folder in `words`
+    /// (the command's, wrappers' included).
+    fn judge_outputs(&self, words: &[String], files: &[String], cwd: &str, found: &mut Found) {
         const MAX_BASES: usize = 8;
         let mut bases = vec![cwd.to_string()];
         let mut previous: Option<&str> = None;
-        for word in args {
+        for word in words {
             work::step();
             let value = match previous {
                 Some(flag) if super::FOLDER_FLAGS.contains(&flag) => Some(word.as_str()),
@@ -633,8 +635,8 @@ impl Classifier {
             let Some(value) = value else {
                 continue;
             };
-            if bases.len() + 2 > MAX_BASES {
-                // Too many folders to follow: fail closed.
+            if bases.len() + 2 > MAX_BASES || value.len() > super::MAX_FOLDER_BYTES {
+                // Too many folders, or one too long, to follow: fail closed.
                 note_git(found, ProtectedActionKind::Persistence);
                 return;
             }
