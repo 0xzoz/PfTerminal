@@ -151,7 +151,7 @@ The model picker maps these model slugs to the correct built-in provider.
 ## Reopen Warm-Up
 
 When you reopen a conversation (`/resume`, restarting Corbanu on it) or fork it (`/side`, editing an earlier
-message) on a provider that uses a WebSocket connection, such as OpenAI, Corbanu sends one warm-up request to prime
+message, including the first one) on a provider that uses a WebSocket connection, such as OpenAI, Corbanu sends one warm-up request to prime
 the model's cache, so the first reply is faster. It is billed like any request (the session's instructions and
 tools, typically 10,000 to 15,000 input tokens), and Corbanu says so once it has been sent. To skip it, set this at
 the top level of `config.toml` (or pass `-c skip_reopen_warmup=true`):
@@ -162,6 +162,11 @@ skip_reopen_warmup = true
 
 The first reply after reopening may then be slower, and when approvals go to the auto-reviewer, its session starts at
 the first review instead of on reopen. A new conversation still warms up, and so do sub-agents.
+
+App-server clients that start a thread only for realtime voice (`thread/start`, then `thread/realtime/start`) get
+the new-conversation warm-up too, on the thread's text model, which realtime uses only for handoffs (and the
+optional end-of-session transcript turn). Pass a cheap
+`model` on `thread/start` to make it cheaper; see "Realtime-only threads" in `codex-rs/app-server/README.md` (#1045).
 
 ## Vault And Secrets
 
@@ -245,16 +250,16 @@ files:
   transcripts (`sessions`, `archived_sessions`), logs (`log`), shell
   snapshots (`shell_snapshots`), its runtime folder (`run`), its databases
   (`*.sqlite*` at the top of its home), the database init lock
-  (`pfterminal_db_init.lock`), databases recovery set aside beside its home
-  (`<home>.db-backups`), and the credential broker's runtime folder. If you
-  keep the databases in a separate folder (`sqlite_home` or
+  (`pfterminal_db_init.lock`), the GPU controller lock
+  (`gpu-controller.lock`), pending accounting records
+  (`accounting-pending`), databases recovery set aside (`db-backups` in its
+  home, `<home>.db-backups` beside it), and the credential broker's runtime
+  folder. If you keep the databases in a separate folder (`sqlite_home` or
   `CODEX_SQLITE_HOME`), commands can't read that folder's databases, init
-  lock, GPU controller lock (`gpu-controller.lock`), pending accounting
-  records (`accounting-pending`) and backups (`db-backups` in it,
-  `<folder>.db-backups` beside it) either. On Linux a backup folder beside a
-  folder is covered only when it exists at the command's start. Not yet
-  covered: the `db-backups` and `accounting-pending` folders inside the home
-  itself, and on macOS and Linux its `gpu-controller.lock` (#1107).
+  lock, GPU controller lock, pending accounting records and backups
+  (`db-backups` in it, `<folder>.db-backups` beside it) either. On Linux a
+  backup folder beside a folder is covered only when it exists at the
+  command's start.
 - CLI tokens: the files `~/.netrc`, `~/.git-credentials`,
   `~/.config/gh/hosts.yml`, `~/.aws/credentials`, `~/.docker/config.json`,
   `~/.npmrc` and Claude's sign-in (`~/.claude/.credentials.json`, and
@@ -268,8 +273,8 @@ files:
 On Windows, one of these that doesn't exist when a command starts isn't
 covered for that command (such as a backup recovery creates while it runs),
 except Corbanu's own folders inside its home (`secrets`, `wallet`, `run`,
-`shell_snapshots`, `log`, `sessions`, `archived_sessions`) and files created
-directly in its home.
+`shell_snapshots`, `log`, `sessions`, `archived_sessions`,
+`accounting-pending`, `db-backups`) and files created directly in its home.
 
 Approving a command never unlocks these, at any level; under Moderate the
 approval prompt names such a file and says so. Nothing runs outside the

@@ -51,6 +51,7 @@ nav:
   - Corbanu Product Specification: corbanu-product-spec.md
   - Start Here:
       - Install: install.md
+      - Windows Upgrade Diagnostics: windows-upgrade-diagnostics.md
       - Getting Started: getting-started.md
       - Authentication: authentication.md
       - Configuration: config.md
@@ -272,6 +273,7 @@ nav:
       - Contributing: contributing.md
       - Tmux TUI Harness: tmuxHarness.md
       - CI Coverage: ci.md
+      - Rust Toolchain Bump: rust-toolchain-bump.md
       - License: license.md
 
 plugins:
