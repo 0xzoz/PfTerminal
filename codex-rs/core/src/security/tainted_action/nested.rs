@@ -306,6 +306,7 @@ impl Classifier {
             let mut resolved = HashSet::new();
             // Words before it were checked as wrappers (starts ascend).
             let mut wrappers_checked = 0;
+            let mut joined_left = MAX_JOINED_BYTES;
             let mut runners = 0;
             let mut watched = false;
             let mut sed_command = false;
@@ -329,7 +330,9 @@ impl Classifier {
                     if is_watch && std::mem::replace(&mut watched, true) {
                         continue;
                     }
-                    for (word, script) in runner_scripts(&texts, wrapper, &mut found.unreadable) {
+                    let runs =
+                        runner_scripts(&texts, wrapper, &mut joined_left, &mut found.unreadable);
+                    for (word, script) in runs {
                         work::step();
                         roles[word] = Role::Script;
                         // Input words a launcher adds go to the wrapper's
@@ -382,8 +385,12 @@ impl Classifier {
                         .position(|word| word.starts_with(":::"))
                         .map_or(texts.len(), |offset| at + 1 + offset);
                     if end > at + 1 {
-                        let line =
-                            joined(String::new(), &texts[at + 1..end], &mut found.unreadable);
+                        let line = joined(
+                            String::new(),
+                            &texts[at + 1..end],
+                            &mut joined_left,
+                            &mut found.unreadable,
+                        );
                         let launch = launched_git::Launch {
                             fed: true,
                             replaced: launches[end].replaced,
@@ -404,19 +411,8 @@ impl Classifier {
                         let Some(inline) = inline else {
                             continue;
                         };
-                        let Some(first) = word_holding(&texts, at + 1, inline) else {
+                        let Some(candidates) = script_candidates(&texts, at, inline) else {
                             continue;
-                        };
-                        // After `-c`, bash reads further options (`-o
-                        // pipefail`) and runs the first operand; other
-                        // shells run the word after `-c`. Every word that
-                        // may be the script is judged.
-                        let candidates: Vec<usize> = if texts[first].starts_with(['-', '+']) {
-                            (first..texts.len())
-                                .filter(|&index| !texts[index].starts_with(['-', '+']))
-                                .collect()
-                        } else {
-                            vec![first]
                         };
                         for candidate in candidates {
                             work::step();
@@ -755,20 +751,23 @@ fn file_operand(word: &str) -> &str {
     word.rsplit_once('=').map_or(word, |(_, file)| file)
 }
 
-/// Bytes of words joined into one line (`env -S'git config' k v`).
+/// Bytes of words joined into lines (`env -S'git config' k v`), for each
+/// command.
 const MAX_JOINED_BYTES: usize = 64 * 1024;
 
 /// `line` with `words` after it, each after a space, as a shell would run
-/// them: at most `MAX_JUDGED_POSITIONS` words and `MAX_JOINED_BYTES`
-/// bytes. `cut`: some were left out, so the line is not seen in full.
-fn joined(mut line: String, words: &[String], cut: &mut bool) -> String {
+/// them: at most `MAX_JUDGED_POSITIONS` words, adding at most the bytes
+/// `left` of one command's `MAX_JOINED_BYTES`. `cut`: some were left out,
+/// so the line is not seen in full.
+fn joined(mut line: String, words: &[String], left: &mut usize, cut: &mut bool) -> String {
     *cut |= words.len() > outbound::MAX_JUDGED_POSITIONS;
     for word in words.iter().take(outbound::MAX_JUDGED_POSITIONS) {
         work::step();
-        if line.len() + 1 + word.len() > MAX_JOINED_BYTES {
+        let Some(rest) = left.checked_sub(word.len() + 1) else {
             *cut = true;
             break;
-        }
+        };
+        *left = rest;
         if !line.is_empty() {
             line.push(' ');
         }
@@ -777,10 +776,26 @@ fn joined(mut line: String, words: &[String], cut: &mut bool) -> String {
     line
 }
 
+/// The words that may be the script of the shell at `at`, given the
+/// inline code `invocation::parse` found in its words. After `-c`, bash
+/// reads further options (`-o pipefail`) and runs the first operand; other
+/// shells run the word after `-c`. Every word that may be the script is
+/// judged.
+fn script_candidates(texts: &[String], at: usize, inline: &str) -> Option<Vec<usize>> {
+    let first = word_holding(texts, at + 1, inline)?;
+    Some(if texts[first].starts_with(['-', '+']) {
+        (first..texts.len())
+            .filter(|&index| !texts[index].starts_with(['-', '+']))
+            .collect()
+    } else {
+        vec![first]
+    })
+}
+
 /// #1268: the `-c` scripts of shells after a launcher that puts its input
-/// into their words, with each shell's word: the word after the first
-/// option group holding `c`. At most `MAX_JUDGED_POSITIONS` shells are
-/// read; more set `cut`.
+/// into their words, with each shell's word, wherever the command word is
+/// read to be. A script that cannot be found sets `cut`, as do more than
+/// `MAX_JUDGED_POSITIONS` such shells.
 fn replaced_shell_scripts(
     texts: &[String],
     launches: &[launched_git::Launch],
@@ -790,7 +805,8 @@ fn replaced_shell_scripts(
     let mut shells = 0;
     for (at, text) in texts.iter().enumerate() {
         work::step();
-        if !launches[at].replaced || !SHELLS.contains(&name(text).as_str()) {
+        let shell = name(text);
+        if !launches[at].replaced || !SHELLS.contains(&shell.as_str()) {
             continue;
         }
         shells += 1;
@@ -798,18 +814,17 @@ fn replaced_shell_scripts(
             *cut = true;
             break;
         }
-        let mut next = at + 1;
-        while let Some(option) = texts.get(next)
-            && option.starts_with(['-', '+'])
-        {
-            work::step();
-            next += 1;
-            if !option.starts_with("--") && option.contains('c') {
-                if let Some(script) = texts.get(next) {
-                    scripts.push((at, script.clone()));
-                }
-                break;
-            }
+        match invocation::parse(&shell, &texts[at + 1..]).map(|invocation| invocation.code) {
+            Some(Code::Inline(Some(inline))) => match script_candidates(texts, at, inline) {
+                Some(candidates) => scripts.extend(
+                    candidates
+                        .into_iter()
+                        .map(|candidate| (at, texts[candidate].clone())),
+                ),
+                None => *cut = true,
+            },
+            Some(Code::Inline(None)) => *cut = true,
+            _ => {}
         }
     }
     scripts
@@ -828,8 +843,14 @@ fn replaced(launch: launched_git::Launch) -> launched_git::Launch {
 /// holds each: `watch CMD...`, `su -c CMD`, `runuser -c`, `flock F -c`,
 /// `script -c`, `env -S STRING`, also in a group of short options
 /// (`su -lc`, `script -qc`). Options are looked for among the next
-/// `MAX_JUDGED_POSITIONS` words. `cut`: a script was cut short.
-fn runner_scripts(texts: &[String], at: usize, cut: &mut bool) -> Vec<(usize, String)> {
+/// `MAX_JUDGED_POSITIONS` words. `left`: bytes the command may still join
+/// ([`joined`]); `cut`: a script was cut short.
+fn runner_scripts(
+    texts: &[String],
+    at: usize,
+    left: &mut usize,
+    cut: &mut bool,
+) -> Vec<(usize, String)> {
     let wrapper = name(&texts[at]);
     let args = at + 1..texts.len().min(at + 1 + outbound::MAX_JUDGED_POSITIONS);
     match wrapper.as_str() {
@@ -888,7 +909,7 @@ fn runner_scripts(texts: &[String], at: usize, cut: &mut bool) -> Vec<(usize, St
                     work::step();
                     let later = &texts[*index + 1..];
                     if !later.is_empty() {
-                        with_later.push((*index, joined(script.clone(), later, cut)));
+                        with_later.push((*index, joined(script.clone(), later, left, cut)));
                     }
                 }
                 scripts.extend(with_later);

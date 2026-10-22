@@ -4355,6 +4355,17 @@ fn issue_1268_git_given_input_words_asks() {
     ] {
         assert_eq!(script(command), Some(want), "{command}");
     }
+    // Review round 3: a replaced shell's script after options the command
+    // word reading does not follow (any kind asks).
+    for command in [
+        "printf 'core.pager sh\\n' | xargs --replace bash -o pipefail -c 'cd . && git config {}'",
+        "xargs --replace sh -c -e 'cd . && git config {}' < keys",
+        "fd -x bash -o pipefail -c 'cd . && git config {}'",
+        "xargs --replace fish --command 'cd .; git config {}' < keys",
+        "xargs -I% prlimit bash -O extglob -c 'cd . && git config %' < keys",
+    ] {
+        assert!(script(command).is_some(), "{command}");
+    }
     for command in [
         "printf x | xargs git log --oneline",
         "printf x | xargs git config --get user.name",
