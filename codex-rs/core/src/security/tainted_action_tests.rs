@@ -5099,10 +5099,13 @@ fn issue_1261_folders_reached_through_a_share_are_not_read() {
         let parent = homes.resolve("..", &below);
         assert_eq!(homes.windows_read_path("run.sh", &parent), None, "{share}");
     }
-    let plain = homes.resolve(r"D:\work\sub", r"C:\other");
+    let plain = homes.resolve(r"work\sub", r"D:\other");
     assert_eq!(
         homes.windows_read_path("run.sh", &plain),
-        Some(('D', vec!["work".into(), "sub".into(), "run.sh".into()]))
+        Some((
+            'D',
+            vec!["other".into(), "work".into(), "sub".into(), "run.sh".into()]
+        ))
     );
 }
 
@@ -5147,8 +5150,8 @@ fn issue_1261_windows_reads_stop_at_links() {
 }
 
 /// #1261: on Windows a `subst` drive is not proven local, and neither is a
-/// drive letter not in use: only the drive itself is queried, and the line
-/// asks.
+/// drive letter not in use: run from one, only the drive itself is queried,
+/// and the line asks.
 #[cfg(windows)]
 #[test]
 fn issue_1261_windows_reads_need_a_proven_local_drive() {
@@ -5181,15 +5184,25 @@ fn issue_1261_windows_reads_need_a_proven_local_drive() {
         })
         .expect("a free drive letter for subst");
     let unsubst = Unsubst(letter);
-    let line = format!("bash {letter}:/run.sh");
-    assert_eq!(kind(&line), Some(UnseenCode), "{line}");
+    // Run from the drive's root: only the drive is queried.
+    let root = format!("{letter}:\\");
+    let on_drive = || classify_fixture(&shell_in(&root, &["bash", "-lc", "bash run.sh"]));
+    assert_eq!(on_drive(), Some(UnseenCode), "{root}");
     assert_eq!(windows_reads::take_touched(), vec![format!("{letter}:")]);
-    // The backslash spelling is not looked up at all.
-    let backslashed = format!(r"bash '{letter}:\run.sh'");
-    assert_eq!(kind(&backslashed), Some(UnseenCode), "{backslashed}");
-    assert_eq!(windows_reads::take_touched(), Vec::<String>::new());
+    // Named with its drive, it is not looked up at all.
+    for line in [
+        format!("bash {letter}:/run.sh"),
+        format!(r"bash '{letter}:\run.sh'"),
+    ] {
+        assert_eq!(kind(&line), Some(UnseenCode), "{line}");
+        assert_eq!(
+            windows_reads::take_touched(),
+            Vec::<String>::new(),
+            "{line}"
+        );
+    }
     drop(unsubst);
-    assert_eq!(kind(&line), Some(UnseenCode), "{line}");
+    assert_eq!(on_drive(), Some(UnseenCode), "{root}");
     assert_eq!(windows_reads::take_touched(), vec![format!("{letter}:")]);
 }
 
@@ -5310,6 +5323,70 @@ fn issue_1261_windows_script_files_are_read_as_windows_code_too() {
         assert_eq!(
             classify_fixture(&shell_in(&cwd, &["bash", "-lc", line])),
             Some(ProtectedActionKind::Credentials),
+            "{line}"
+        );
+    }
+}
+
+/// #1261 review 2: text read from a file on Windows may be cmd or
+/// PowerShell code (folder changes, jumps and encoded payloads the POSIX
+/// reading does not follow), so no file it names is opened, and its payloads
+/// are read as the Windows view reads them.
+#[cfg(windows)]
+#[test]
+fn issue_1261_windows_files_named_by_read_files_are_not_opened() {
+    use ProtectedActionKind::*;
+    use base64::Engine;
+    let root = tempfile::tempdir().expect("tempdir");
+    let work = root.path();
+    std::fs::create_dir(work.join("sub")).expect("folder");
+    std::fs::write(work.join("run2.sh"), "true\n").expect("decoy");
+    std::fs::write(work.join("sub").join("run2.sh"), "corbanu vault list\n").expect("script");
+    std::fs::write(work.join("run.bat"), "chdir sub\nbash run2.sh\n").expect("bat");
+    let auth = fixture(HOME).join("auth.json");
+    let payload: Vec<u8> = format!("Get-Content {}", auth.display())
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(payload);
+    std::fs::write(
+        work.join("enc.bat"),
+        format!("powershell -EncodedCommand {encoded}\n"),
+    )
+    .expect("bat");
+    let cwd = work.to_string_lossy().into_owned();
+    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-lc", line]));
+    assert_eq!(kind("./run.bat"), Some(UnseenCode));
+    assert_eq!(kind("./enc.bat"), Some(Credentials));
+    // Read from the line itself, the same scripts are read.
+    assert_eq!(kind("bash sub/run2.sh"), Some(Vault));
+    assert_eq!(kind("bash run2.sh"), None);
+}
+
+/// #1261 review 2: a home or drive spelling read through the classifier's
+/// own substitutions (`$HOME`, a bare `cd`, `C:/x`) is not opened: WSL's
+/// bash reads them otherwise. Runs on every platform.
+#[test]
+fn issue_1261_home_and_drive_spellings_are_not_read() {
+    let _ = windows_reads::take_touched();
+    for line in [
+        "bash $HOME/run.sh",
+        "cd $HOME && bash run.sh",
+        "cd && bash run.sh",
+        "cd ~ && bash run.sh",
+        "cd C:/work/sub && bash run.sh",
+        "cd C:sub && bash run.sh",
+        "bash C:/work/run.sh",
+        "bash r[u]n.sh",
+    ] {
+        assert_eq!(
+            windows_kind(&["bash", "-lc", line]),
+            Some(ProtectedActionKind::UnseenCode),
+            "{line}"
+        );
+        assert_eq!(
+            windows_reads::take_touched(),
+            Vec::<String>::new(),
             "{line}"
         );
     }

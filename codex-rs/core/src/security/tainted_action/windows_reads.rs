@@ -6,9 +6,11 @@
 //! offline) file; the file is then opened without following a link. Anything
 //! else fails closed, and the classifier asks.
 //!
-//! A plain path is a drive-letter path with ordinary names only: no network
-//! share or device path (`\\server\share`, `\\?\`, `\\.\`, anything starting
-//! with two separators), no `..`, stream (`:`), wildcard or other reserved
+//! A plain path is a word relative to the working folder, which is a
+//! drive-letter path, with ordinary names only: no network share or device
+//! path (`\\server\share`, `\\?\`, `\\.\`, anything starting with two
+//! separators), no drive or drive root in the word (Git Bash and WSL may read
+//! them otherwise), no `..`, stream (`:`), wildcard, brace or other reserved
 //! character, no name ending in a dot or space (Win32 drops them, a `\\?\`
 //! path keeps them: two spellings of different files) and no device name
 //! (`CON`, `NUL`, `COM1`, ...).
@@ -71,16 +73,15 @@ fn folder(cwd: &str) -> Option<(char, &str)> {
     (rest.is_empty() || rest.starts_with('/')).then_some((letter, rest))
 }
 
-/// Whether `word` (home spellings expanded) is a plain spelling of a place:
-/// not a share or device path, not from the current drive's root (`\x`,
-/// `/x`: Git Bash and WSL read it otherwise), and only plain names, `.` and
-/// `..` after an optional drive (`C:`).
+/// Whether `word` (home spellings expanded) is a plain spelling of a place
+/// relative to the working folder: no share or device path, no drive
+/// (`C:\x`, `C:x`) or drive root (`\x`, `/x`), which Git Bash or WSL may
+/// read otherwise, and only plain names, `.` and `..`.
 pub(super) fn plain_spelling(word: &str) -> bool {
-    if word.starts_with(separator) {
+    if word.starts_with(separator) || drive(word).is_some() {
         return false;
     }
-    let rest = drive(word).map_or(word, |(_, rest)| rest);
-    rest.split(separator).all(|name| {
+    word.split(separator).all(|name| {
         work::step();
         matches!(name, "" | "." | "..") || plain_name(name)
     })
@@ -97,9 +98,13 @@ pub(super) fn expanded_spelling(word: &str) -> bool {
 fn plain_name(name: &str) -> bool {
     name != ".."
         && !name.ends_with(['.', ' '])
-        && !name
-            .chars()
-            .any(|ch| ch < ' ' || matches!(ch, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+        && !name.chars().any(|ch| {
+            ch < ' '
+                || matches!(
+                    ch,
+                    ':' | '*' | '?' | '"' | '<' | '>' | '|' | '[' | ']' | '{' | '}'
+                )
+        })
         && !device_name(name)
 }
 
@@ -124,23 +129,21 @@ fn device_name(name: &str) -> bool {
         && matches!(number.as_slice(), [digit] if digit.is_ascii_digit() || matches!(digit, '¹' | '²' | '³'))
 }
 
-/// `word` (home spellings already expanded) made absolute against `cwd` as
-/// Windows does, as its drive letter and the names below the drive's root,
-/// when both are plain paths (see the module comment). A drive-relative
-/// word (`C:x`) is plain only on the working folder's drive.
+/// `word` (home spellings already expanded) made absolute against `cwd`, as
+/// the drive letter and the names below the drive's root, when `cwd` is a
+/// plain path and `word` a plain relative one (see the module comment): a
+/// word with a drive (`C:\x`, `C:x`) or from the drive's root (`\x`) is
+/// not, as Git Bash and WSL may read it otherwise.
 pub(super) fn plain_path(word: &str, cwd: &str) -> Option<(char, Vec<String>)> {
     if starts_at_a_share(word) || starts_at_a_share(cwd) {
         return None;
     }
     let (cwd_drive, cwd_rest) = folder(cwd)?;
-    let (letter, path) = match drive(word) {
-        Some((letter, rest)) if rest.starts_with(separator) => (letter, rest.to_string()),
-        Some((letter, rest)) if letter == cwd_drive => (letter, format!("{cwd_rest}\\{rest}")),
-        Some(_) => return None,
-        // From the current drive's root: Git Bash and WSL read it otherwise.
-        None if word.starts_with(separator) => return None,
-        None => (cwd_drive, format!("{cwd_rest}\\{word}")),
-    };
+    // A drive or the drive's root: Git Bash and WSL may read it otherwise.
+    if drive(word).is_some() || word.starts_with(separator) {
+        return None;
+    }
+    let (letter, path) = (cwd_drive, format!("{cwd_rest}\\{word}"));
     let mut names = Vec::new();
     for name in path.split(separator) {
         work::step();
@@ -252,9 +255,6 @@ mod tests {
             ("run.sh", r"C:\work", r"C:\work\run.sh"),
             (r".\tools\run.sh", r"c:\work", r"C:\work\tools\run.sh"),
             ("./run.sh", "/C:/work/sub", r"C:\work\sub\run.sh"),
-            (r"D:\x\run.sh", r"C:\work", r"D:\x\run.sh"),
-            ("d:/x/run.sh", r"C:\work", r"D:\x\run.sh"),
-            ("C:run.sh", r"C:\work", r"C:\work\run.sh"),
             ("run.sh", r"C:\", r"C:\run.sh"),
             ("run.sh", "/C:", r"C:\run.sh"),
             (r"PROGRA~1\run.sh", r"C:\", r"C:\PROGRA~1\run.sh"),
@@ -297,6 +297,13 @@ mod tests {
             // From the current drive's root.
             (r"\x\run.sh", r"C:\work"),
             ("/home/fixture/run.sh", r"C:\work"),
+            // A drive (WSL reads it as a relative name).
+            (r"D:\x\run.sh", r"C:\work"),
+            ("d:/x/run.sh", r"C:\work"),
+            ("C:run.sh", r"C:\work"),
+            // Globs and braces the shell expands.
+            ("r[u]n.sh", r"C:\work"),
+            ("{run,x}.sh", r"C:\work"),
             // Another drive's working folder is not known.
             ("D:run.sh", r"C:\work"),
             // Names Windows reads differently.

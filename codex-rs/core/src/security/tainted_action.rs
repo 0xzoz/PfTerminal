@@ -420,9 +420,10 @@ pub(super) fn classify_as_named_with(
 /// The classifier after judging the action, with its counters. `as_named`:
 /// the host runs the action as its argv names (see [`classify_as_named`]).
 /// #1240: on Windows the action is also judged under Windows path rules
-/// (`windows_paths`, `windows_shell`), and the stronger finding is kept:
-/// the first judgment is the same as on every other platform, so the
-/// Windows view only adds findings.
+/// (`windows_paths`, `windows_shell`), and the stronger finding is kept, so
+/// the Windows view only adds findings. #1261: on Windows the first
+/// judgment uses Windows path rules too and opens files only through
+/// `windows_reads`.
 fn classified(
     action: &ApprovalAction,
     codex_home: &Path,
@@ -542,6 +543,7 @@ impl Classifier {
             windows_decoded: HashSet::new(),
             windows_budget: windows_shell::RESOLVE_BUDGET,
             backslash: false,
+            in_file: 0,
         }
     }
 
@@ -841,6 +843,11 @@ struct Classifier {
     /// the folder `ab`), so a file a word then names may not be the one that
     /// runs: from then on no file is opened.
     backslash: bool,
+    /// #1261: judging text read from a file. Under Windows path rules such
+    /// text may be cmd or PowerShell code, whose folder changes and control
+    /// flow the POSIX reading does not follow, so no file it names is
+    /// opened, and it is also read as cmd and PowerShell read it.
+    in_file: usize,
     /// Inside text rebuilt from joined literals: it names things but is not
     /// itself run, so its variables are not judged as unseen code.
     rebuilt: usize,
@@ -1132,6 +1139,12 @@ impl Classifier {
         {
             self.note(ProtectedActionKind::UnseenCode);
             return;
+        }
+        // #1261: text read from a file under Windows path rules may be cmd
+        // or PowerShell code, which the POSIX lexer misreads: it is also read
+        // as the Windows view reads a line (its decoded payloads too).
+        if self.homes.windows_paths() && !self.homes.is_windows_view() && self.in_file > 0 {
+            self.windows_text(command, cwd, depth);
         }
         // #1261: see `backslash`.
         if self.homes.windows_paths() && !self.backslash {
@@ -1656,6 +1669,11 @@ impl Classifier {
             .iter()
             .find(|word| !word.starts_with('-') || *word == "-");
         let next = match (name, target) {
+            // #1261: under Windows path rules through `resolve`, which keeps
+            // the home from being read (WSL's is not Windows').
+            ("cd", None) if self.homes.windows_paths() => {
+                Some(self.homes.resolve("~", &folders.cwd))
+            }
             ("cd", None) => self.homes.user_home().map(str::to_string),
             ("cd", Some(target)) if target == "-" => Some(folders.previous.clone()),
             ("cd" | "pushd", Some(target)) => Some(self.homes.resolve(target, &folders.cwd)),
@@ -1720,14 +1738,10 @@ impl Classifier {
             FileText::Unreadable => unreadable(self, /*missing*/ false),
             FileText::Binary => {}
             FileText::Text(text) => {
-                // #1261: under Windows path rules a file may be cmd or
-                // PowerShell code (`run.ps1`, `run.bat`), which the POSIX
-                // lexer misreads (it drops backslashes): it is also read as
-                // the Windows view reads a line.
-                if self.homes.windows_paths() {
-                    self.windows_text(std::slice::from_ref(&text), cwd, depth + 1);
-                }
+                // #1261: see `in_file`.
+                self.in_file += 1;
                 self.script(&text, cwd, depth + 1);
+                self.in_file -= 1;
             }
         }
     }
@@ -1770,7 +1784,7 @@ impl Classifier {
     /// #1261: [`Self::read_file`] under Windows path rules: only a plain path
     /// on a local fixed drive, never through a link or share.
     fn read_windows_file(&mut self, word: &str, cwd: &str) -> FileText {
-        if self.backslash {
+        if self.backslash || self.in_file > 0 {
             return FileText::Unreadable;
         }
         let Some((drive, names)) = self.homes.windows_read_path(word, cwd) else {
