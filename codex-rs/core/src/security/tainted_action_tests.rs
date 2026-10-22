@@ -4910,6 +4910,11 @@ fn issue_1268_git_given_input_words_asks() {
         "printf 'core.pager sh\\n' | xargs -I% fish -c true -c 'cd .; git config %'",
         "xargs -I% fish --init-command 'cd .; git config %' < keys",
         "xargs -I% fish -d 1 --comm 'cd .; git config %' < keys",
+        // Review round 6: shells one level down in a replaced script.
+        "printf 'core.pager sh\\n' | xargs -I% sh -c \"fish -c true -C 'git config %'\"",
+        "xargs -I% sh -c \"fish -C 'git config %'\" < keys",
+        "parallel \"fish -c true -C 'git config {1} {2}'\" ::: core.pager ::: sh",
+        "xargs -I% sh -c 'prlimit bash -O extglob -c \"git config %\"' < keys",
     ] {
         assert!(script(command).is_some(), "{command}");
     }

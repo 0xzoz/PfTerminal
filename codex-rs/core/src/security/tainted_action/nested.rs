@@ -295,7 +295,7 @@ impl Classifier {
             // #1268: where a launcher's input reaches the words, and the
             // scripts of shells it puts input into, wherever the command
             // word is read to be (`xargs --replace sh -c '... {}'`).
-            let launches = launched_git::launches(&texts, found.braces);
+            let launches = launched_git::launches(&texts, found.braces, self.launched);
             for (word, script) in replaced_shell_scripts(&texts, &launches, &mut found.unreadable) {
                 work::step();
                 found

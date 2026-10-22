@@ -336,10 +336,11 @@ fn holds_positional(word: &str) -> bool {
 /// whether a launcher before it adds input words to the line it runs, and
 /// whether it puts them inside that line's words (`xargs -I%`, `find -exec`
 /// with a `{}`). `braces`: the line as written holds a brace.
-/// And the same after the last word.
-pub(super) fn launches(texts: &[String], braces: bool) -> Vec<Launch> {
+/// And the same after the last word. `inherited`: what a launcher does
+/// with its input in the script these words are in.
+pub(super) fn launches(texts: &[String], braces: bool, inherited: Launch) -> Vec<Launch> {
     let lower: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
-    let mut launched = LaunchedGit::new(texts, &lower, braces, Launch::default());
+    let mut launched = LaunchedGit::new(texts, &lower, braces, inherited);
     let mut each = Vec::with_capacity(texts.len() + 1);
     for index in 0..=texts.len() {
         work::step();
