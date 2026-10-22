@@ -12,7 +12,7 @@ and the D86/D124/D125 `/status` behaviour. Out of scope by owner decision: live 
 for the same reason, and its NO-SECRET checks untested because of a tester error), 1 not complete (NA-06: rename not
 exercised), 2 failed.** The failures: **D136** blocks (after the account is removed the running session shows no
 recovery text; it also kept answering on the removed sign-in, recorded as `[observe]` pending decision 1); **NA-05** (in-app `/resume` silently re-accounts a
-conversation whose account is gone when the TUI was started with `--account`; the docs contradict each other, owner
+conversation whose account is gone when the TUI was started with `--account`; the docs are ambiguous, owner
 decision). Per case: [Results](#results). Open owner questions: [below](#open-owner-decisions).
 
 ## Build
@@ -92,9 +92,10 @@ decision). Per case: [Results](#results). Open owner questions: [below](#open-ow
 - **Order:** G9 ran first so that the human sign-in fell in working hours; groups are independent (fresh machines).
 - **Safety checks per clone:** 0 `SECURITYAGENT-SEEN` lines (no system password prompt); synthetic credential files left:
   0; mediator leaf key and placeholder key file absent (`runs/*/clone-*`, `harness/shakedown/clone-*`,
-  `integrator-probe-na05/clone-*`). Per-clone binary and harness digests and the host-side signature check:
-  [candidate-identity.md](candidate-identity.md). Travis's approval: [runs/G9/signin-handoff.md](runs/G9/signin-handoff.md)
-  (code redacted; approval per the coordinator). The real login keychain and the owner's home were not touched.
+  `integrator-probe-na05/clone-*`, `integrator-probe-na05/armB/clone-*`, `…/armB/discarded/*`; one discarded clone
+  stopped at staging, so its guard recorded nothing). Per-clone binary and harness digests and the host-side signature
+  check: [candidate-identity.md](candidate-identity.md). Sign-in approval (per the coordinator):
+  [runs/G9/signin-handoff.md](runs/G9/signin-handoff.md) (code redacted). The real login keychain and the owner's home were not touched.
 
 ### Harness changes in this run
 
@@ -122,7 +123,7 @@ Relay/files lines were checked by the integrator; detail in [harness/host/integr
 | NA-04 | AC3/AC6 rejected key | R1 | passed | **passed** | Two 401s carrying only `badkey`; no fallback. |
 | PR-01 | #555 leg, precedence | R2 | passed | **passed** | Amended run: `/status` and relay at every step: `work`, `personal`, `work`, `personal`, `default`; files: `<id>` records `work, personal, work, work`. The frozen "no-flag resume after a turn on `personal` → `work`" check **failed in G2** and is now `[observe]` (v2-Q1, see Method). |
 | GH-02 | #555 leg | R2 | passed | **passed** | After removing `work`, `resume <gid>` exits 1 naming `work` with `corbanu account add zai work`. `[advisory]` `ghost` not mentioned (as in 10-13). G2's version never set up its situation (premise). |
-| NA-05 | AC3/AC4 in-app resume | R2 | failed | **failed (owner decision)** | In a TUI started with `--account personal`, in-app `/resume` of a conversation recorded only on removed `work` resumed it on `personal` with no message (relay `rtwo`→`zpersonal`; session file: turns 1–2 `work`, turn 3 `personal`). Integrator probe: started **without** `--account`, the same resume is refused with REF-10's message and the session stays put; started **with** `--account personal` (arm B, `[provider_accounts]` = `personal`), it resumes silently on `personal` — so the launch `--account` is the cause. `docs/provider-accounts.md` contradicts itself: "Choosing an account" lets an explicit `--account` win, "Fail closed" says in-session `/resume` shows the error and stays on the current conversation. |
+| NA-05 | AC3/AC4 in-app resume | R2 | failed | **failed (owner decision)** | In a TUI started with `--account personal`, in-app `/resume` of a conversation recorded only on removed `work` resumed it on `personal` with no message (relay `rtwo`→`zpersonal`; session file: turns 1–2 `work`, turn 3 `personal`). Integrator probe: started **without** `--account`, the same resume is refused with REF-10's message and the session stays put; started **with** `--account personal` (arm B, `[provider_accounts]` = `personal`), it resumes silently on `personal` — so the launch `--account` is the cause. `docs/provider-accounts.md` is ambiguous: "Choosing an account" lets an explicit `--account` win; "Fail closed" says in-session `/resume` shows the error and stays on the current conversation, and then "An explicit `--account` of the same provider still wins", without saying whether a launch `--account` counts for an in-session `/resume`. |
 | NA-06 | AC1 rows, add, rename | R3 | failed | **not complete** | Rows, kinds, fingerprints and markers passed; add with masked key passed. Rename not exercised: the tester chose "Use for this session" by mistake; the product then rightly refused renaming the in-use account. |
 | ESC-03 | #555 leg | G3 | passed | **passed** | Same session, account and transcript after Esc. Draft clause: no route found (`/resume <text>` searches); open question Q2. |
 | NA-07 | AC1/AC2/AC3 use/make-default/remove in use | R3 | passed | **passed** | G3 blocked (row 10 hidden, below). |
@@ -186,7 +187,7 @@ showed no named accounts.
 1. **D136 / Q1:** may a session keep using credentials it holds in memory after its account is removed (G9: yes, for a
    ChatGPT sign-in; R3: an API-key account is refused at once)? This decides the fix for #1286.
 2. **NA-05:** in-app `/resume` of a conversation whose account is gone, in a TUI started with `--account`: keep the
-   launch account (with a notice) or refuse (#1287; the docs contradict each other).
+   launch account (with a notice) or refuse (#1287; the docs are ambiguous on this).
 3. **v2-Q1 (PR-01):** after a conversation has run on two accounts, a no-flag resume uses the latest one (observed).
    Is that intended? The frozen PR-01 text expected the first.
 4. **"Use … for this session" starts a new session** (NA-10, ST-02): intended? It leaves the current conversation.

@@ -38,3 +38,11 @@ probe-na05-20261022T024612Z corbanu=bbae7d37dff90232 agms-tui=8c99e064b9fe agms-
 shakedown-20261021T215325Z corbanu=bbae7d37dff90232 agms-tui=54d2cb4f1112 agms-prep=d9cb0744bc2d agms-launch=2778aa90d324
 shakedown1-prep-bug-20261021T214835Z corbanu=bbae7d37dff90232 agms-tui=54d2cb4f1112 agms-prep=d9cb0744bc2d agms-launch=99fd3dc6dea1
 ```
+
+# Integrator probe arm B clones (added after review round 3)
+
+```
+probe-na05B-20261022T032245Z corbanu=bbae7d37dff90232 agms-tui=8c99e064b9fe agms-prep=76f197a77989 agms-launch=7ade4dd0528a
+failed-norelay-probe-na05B-20261022T031535Z corbanu=bbae7d37dff90232 agms-tui=8c99e064b9fe agms-prep=76f197a77989 agms-launch=7ade4dd0528a
+failed-stage-probeB-0315 (staging failed before provisioning; no digests)
+```
