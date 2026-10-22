@@ -307,6 +307,9 @@ impl Classifier {
             // before it left.
             found.deferred |= unknown_folder::starts_loop(&texts);
             let command_at = indirect::command_word(&texts);
+            // #1309: no folder change followed yet (`cd -` goes to the
+            // inherited `OLDPWD`).
+            let fresh = folders.previous == folders.cwd && folders.stack.is_empty();
             // A substitution's `cd` does not move this line.
             if !command.substituted
                 && let Some((index, name)) = &command_at
@@ -338,7 +341,7 @@ impl Classifier {
                             !command.substituted && unknown_folder::carries_change(name, args),
                             changes
                                 && !command.substituted
-                                && unknown_folder::odd_change(name, args),
+                                && unknown_folder::odd_change(name, args, fresh),
                         )
                     });
             folders.unchecked |= searched || carried || odd || (changes && found.deferred);
@@ -405,9 +408,12 @@ impl Classifier {
                     replaced_shell_scripts(&texts, &anywhere, &mut found.unreadable)
                 {
                     work::step();
-                    found
-                        .scripts
-                        .push((script, folders.cwd.clone(), launches[word], true));
+                    found.scripts.push((
+                        script,
+                        folders.cwd.clone(),
+                        replaced(launches[word]),
+                        true,
+                    ));
                 }
             }
             let (starts, overflow) = sed::command_starts(&texts);

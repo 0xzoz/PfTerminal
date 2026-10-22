@@ -14,6 +14,7 @@ use super::work;
 const LONG_FOLDER_FLAGS: &[&str] = &[
     "--chdir",
     "--cwd",
+    "--wdns",
     "--cd",
     "--directory",
     "--wd",
@@ -30,6 +31,8 @@ const SHORT_FOLDER_FLAGS: &[(&str, char)] = &[
     ("env", 'C'),
     ("sudo", 'D'),
     ("nsenter", 'w'),
+    ("nsenter", 'W'),
+    ("unshare", 'w'),
     ("docker", 'w'),
     ("podman", 'w'),
     ("nerdctl", 'w'),
@@ -127,11 +130,14 @@ pub(super) fn defines(text: &str) -> bool {
     tokens(text).any(|token| DEFINERS.contains(&token))
 }
 
-/// Whether a command whose words are `texts` starts a loop.
+/// Whether a command whose words are `texts` may start a loop: the
+/// reading keeps reserved words before it (`then for ...`, `do while
+/// ...`), so any word counts.
 pub(super) fn starts_loop(texts: &[String]) -> bool {
-    texts
-        .first()
-        .is_some_and(|first| LOOPS.contains(&first.as_str()))
+    texts.iter().any(|text| {
+        work::step();
+        LOOPS.contains(&text.as_str())
+    })
 }
 
 /// Whether `text` names something that changes where `cd` goes.
@@ -153,20 +159,26 @@ pub(super) fn searches(text: &str) -> bool {
 }
 
 /// Whether `name` (a command word) runs text that may change the folder of
-/// the line: a sourced file, or `eval`/`alias`/`trap` text with a `cd`.
+/// the line: a sourced file, or `eval`/`alias`/`trap` text with a `cd`, or
+/// with quoting or expansions the shell removes when it reads the text
+/// again (`eval 'c\d ~'`, `alias go='c""d ~'`).
 pub(super) fn carries_change(name: &str, args: &[String]) -> bool {
     matches!(name, "source" | ".")
         || (CARRIERS.contains(&name)
             && args.iter().any(|arg| {
                 work::step();
-                tokens(arg).any(|token| CHANGERS.contains(&token))
+                arg.contains(['\'', '"', '\\', '$', '`'])
+                    || tokens(arg).any(|token| CHANGERS.contains(&token))
             }))
 }
 
 /// Whether a folder change goes where the walk does not follow: zsh
 /// `chdir`, a place on the folder stack (`cd -2`, `pushd +1`, `popd +1`, a
-/// bare `pushd`), zsh's two-word `cd old new`, or operands after `--`.
-pub(super) fn odd_change(name: &str, args: &[String]) -> bool {
+/// bare `pushd`, `cd ~1`), `cd ~-`/`~+` and other tilde forms (a named
+/// folder, `cd ~h`), `pushd -n`, zsh's two-word `cd old new`, operands
+/// after `--`, or the first `cd -` of a line (`fresh`: no change followed
+/// yet), which goes to the inherited `OLDPWD`.
+pub(super) fn odd_change(name: &str, args: &[String], fresh: bool) -> bool {
     if name == "chdir" {
         return true;
     }
@@ -176,11 +188,18 @@ pub(super) fn odd_change(name: &str, args: &[String]) -> bool {
         if arg == "--" || arg.starts_with('+') {
             return true;
         }
+        if arg == "-" && name == "cd" && fresh {
+            return true;
+        }
         if arg.starts_with('-') && arg != "-" {
-            if arg[1..].starts_with(|ch: char| ch.is_ascii_digit()) {
+            // `pushd -n`, `popd -n`: the stack changes, the folder does not.
+            if name != "cd" || arg[1..].starts_with(|ch: char| ch.is_ascii_digit()) {
                 return true;
             }
             continue;
+        }
+        if arg.starts_with('~') && arg != "~" && !arg.starts_with("~/") {
+            return true;
         }
         operands += 1;
     }

@@ -5378,6 +5378,20 @@ fn issue_1309_unknown_folders_ask() {
         "for i in 1 2; do sh -c 'echo x >> .zshenv'; cd ~; done",
         "cd ~/a/b; while true; do cd ..; sh -c 'echo x >> .zshenv'; done",
         "trap \"sh -c 'echo x >> .zshenv'\" EXIT; cd ~",
+        // Review 1: a loop after a reserved word, a `cd` the carrier's
+        // quoting splits, tilde forms of the folder stack, `pushd -n`, a
+        // first `cd -`, and nsenter's `--wdns`.
+        "if :; then for i in 1 2; do sh -c 'echo x >> .zshenv'; cd ~; done; fi",
+        "while :; do for i in 1 2; do sh -c 'echo x >> .zshenv'; cd ~; done; break; done",
+        r"eval 'c\d ~'; sh -c 'echo x >> .zshenv'",
+        r#"alias go='c""d ~'; go; sh -c 'echo x >> .zshenv'"#,
+        "cd ~; cd /tmp; cd ~-; sh -c 'echo x >> .zshenv'",
+        "cd ~; cd ~+; sh -c 'echo x >> .zshenv'",
+        "pushd ~; pushd /tmp; cd ~1; sh -c 'echo x >> .zshenv'",
+        "cd ~; pushd -n /tmp; sh -c 'echo x >> .zshenv'",
+        "cd -; sh -c 'echo x >> .zshenv'",
+        r#"nsenter --wdns="$HOME" sh -c 'echo x >> .zshenv'"#,
+        r#"nsenter -W"$HOME" sh -c 'echo x >> .zshenv'"#,
         // An output file too.
         "env -iC ~ sh -c 'git config -f .zshenv --comment x,--get a.b v'",
         "alias go='cd ~'; go; sh -c 'git config -f .zshenv --comment x,--get a.b v'",
