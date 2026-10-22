@@ -76,7 +76,9 @@ impl VT100Backend {
     pub fn new(width: u16, height: u16) -> Self {
         crossterm::style::force_color_output(true);
         Self {
-            crossterm_backend: CrosstermBackend::new(ScrollOnClearParser::new(height, width, 0)),
+            crossterm_backend: CrosstermBackend::new(ScrollOnClearParser::new(
+                height, width, /*scrollback*/ 0,
+            )),
         }
     }
 

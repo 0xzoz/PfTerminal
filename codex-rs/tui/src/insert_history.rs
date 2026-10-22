@@ -186,17 +186,9 @@ where
         InsertHistoryMode::ZellijRaw => {
             // The existing viewport is immediately replaced in the same draw pass. Clear it
             // before terminal scrolling can move composer contents into scrollback.
-            //
-            // #1340: erase row by row (`EL`) rather than to the end of the screen (`ED`). With a
-            // viewport filling the screen the clear starts at the home position, and tmux's
-            // default `scroll-on-clear` (like some terminals) saves a whole-screen `ED` into
-            // scrollback first: the popup was copied into history once per batch.
-            let clear_bottom = screen_size.height.max(area.bottom());
-            let writer = terminal.backend_mut();
-            for row in area.top()..clear_bottom {
-                queue!(writer, MoveTo(/*x*/ 0, row), Clear(ClearType::CurrentLine))?;
-            }
-            terminal.invalidate_viewport();
+            // `clear_after_position` erases row by row, so a viewport filling the screen does
+            // not copy the composer or popup into tmux scrollback (#1340).
+            terminal.clear_after_position(area.as_position())?;
             let writer = terminal.backend_mut();
             queue!(writer, MoveTo(/*x*/ 0, area.top()))?;
             for (index, line) in wrapped.iter().enumerate() {
