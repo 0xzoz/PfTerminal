@@ -63,8 +63,8 @@ jobs:
           windows_native_tests=false
           # Schema fixture tests run on PRs that change the protocol crates,
           # a crate whose types they export (security-policy, absolute-path,
-          # path-uri, ext/items), or this workflow; postmerge rust-ci-full
-          # runs them on main.
+          # path-uri, ext/items), the experimental API macros, the lockfile,
+          # or this workflow; postmerge rust-ci-full runs them on main.
           app_server_schema=false
           for f in "${files[@]}"; do
             [[ $f == codex-rs/* ]] && codex=true
@@ -76,6 +76,7 @@ jobs:
             [[ $f == .github/workflows/rust-ci-windows-native-tests.yml ]] && windows_native_tests=true
             [[ $f == codex-rs/protocol/* || $f == codex-rs/app-server-protocol/* || $f == .github/workflows/rust-ci.yml ]] && app_server_schema=true
             [[ $f == codex-rs/security-policy/* || $f == codex-rs/utils/absolute-path/* || $f == codex-rs/utils/path-uri/* || $f == codex-rs/ext/items/* ]] && app_server_schema=true
+            [[ $f == codex-rs/codex-experimental-api-macros/* || $f == codex-rs/Cargo.lock ]] && app_server_schema=true
           done
 
           echo "argument_comment_lint=$argument_comment_lint" >> "$GITHUB_OUTPUT"
@@ -219,7 +220,7 @@ jobs:
 
   # codex-app-server-protocol schema fixture tests on PRs that change
   # codex-protocol, codex-app-server-protocol or a crate whose types they
-  # export (#1165). Only postmerge
+  # export (#1165), or schema-generation inputs (#1298). Only postmerge
   # rust-ci-full ran them, so a changed protocol type or doc comment without
   # `just write-app-server-schema` turned main red (#1140, fixed by #1164).
   app_server_schema_fixtures:
