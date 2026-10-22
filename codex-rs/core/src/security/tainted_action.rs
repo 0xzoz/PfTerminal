@@ -920,7 +920,6 @@ const BUILDS_NO_CODE: &[&str] = &[
     "head",
     "tail",
     "wc",
-    "sort",
     "uniq",
     "cut",
     "tr",
@@ -952,25 +951,53 @@ fn runs_no_built_text(simple: &SimpleCommand) -> bool {
     let Some((index, name)) = indirect::command_word(&simple.words) else {
         return simple.words.iter().all(|word| {
             work::step();
-            word.contains('=')
+            is_assignment(word)
         });
     };
     // Before it only assignments and keywords (`do`, `then`, `!`), no
     // wrapper.
     let bare = simple.words[..index].iter().all(|word| {
         work::step();
-        (word.contains('=') && !word.starts_with('-'))
+        is_assignment(word)
             || matches!(
                 word.as_str(),
                 "!" | "if" | "then" | "elif" | "else" | "do" | "while" | "until"
             )
     });
+    // The program by its name, not a file named by a path (`./echo`).
+    let named = simple.words[index].to_lowercase() == name;
+    let args = &simple.words[index + 1..];
+    // `mapfile -C eval` runs its callback on each line it reads.
+    let callback = matches!(name.as_str(), "mapfile" | "readarray")
+        && args.iter().any(|arg| {
+            work::step();
+            arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C')
+        });
     let inline_script = shell::SHELLS.contains(&name.as_str())
         && matches!(
-            invocation::parse(&name, &simple.words[index + 1..]).map(|invocation| invocation.code),
+            invocation::parse(&name, args).map(|invocation| invocation.code),
             Some(Code::Inline(None))
         );
-    bare && (BUILDS_NO_CODE.contains(&name.as_str()) || inline_script)
+    bare && named && !callback && (BUILDS_NO_CODE.contains(&name.as_str()) || inline_script)
+}
+
+/// #1064: whether `word` is an assignment as the shell reads one: a name,
+/// an optional subscript, an optional `+`, then `=` (`./b=1` and zsh's
+/// `=bash` are commands).
+fn is_assignment(word: &str) -> bool {
+    let Some((target, _)) = word.split_once('=') else {
+        return false;
+    };
+    let target = target.strip_suffix('+').unwrap_or(target);
+    let name = match target.split_once('[') {
+        Some((name, subscript)) if subscript.ends_with(']') => name,
+        Some(_) => return false,
+        None => target,
+    };
+    name.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_')
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 /// #1064: folders a line may be in that a value the lexer cuts short is

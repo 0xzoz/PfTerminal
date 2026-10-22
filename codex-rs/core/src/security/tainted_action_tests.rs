@@ -6893,6 +6893,14 @@ fn issue_1064_uncertain_subscripts_ask_only_before_an_operator() {
         "shopt -s expand_aliases; alias p='env python3'; p -c 'import os; t=\"[@]\"; os.system(\"echo ${a[$((0))]\" + t[1] + \"P}\")'",
         "printf 'echo ${a[$((0))]\\x40P}' | echo $(perl -e 'exec bash') # x@y",
         "printf 'echo ${a[$((0))]\\x40P}' | echo $(sh + 1) # x@y",
+        // Review 3: allowlisted commands that run code, and words that only
+        // look like assignments.
+        "mapfile -C eval -c 1 a < notes; echo \"${a[${#a[@]}-1]}\"",
+        "readarray -tC eval -c 1 a < notes; echo \"${a[${#a[@]}-1]}\"",
+        "sort -S 1 --compress-program=sh notes; echo \"${a[${#a[@]}-1]}\"",
+        "cp /bin/bash ./b=1; cat notes | ./b=1; echo \"${a[${#a[@]}-1]}\"",
+        "cat notes | =bash; echo \"${a[${#a[@]}-1]}\"",
+        "cp /bin/bash ./echo; cat notes | ./echo; echo \"${a[${#a[@]}-1]}\"",
     ] {
         if script(command) != Some(UnseenCode) {
             wrong.push(command);
@@ -6908,6 +6916,7 @@ fn issue_1064_uncertain_subscripts_ask_only_before_an_operator() {
         "echo \"${a[$(date +%s)]}\" user@host",
         "for i in 0 1; do echo \"${a[$((i+1))]}\" ${#a[@]}; done",
         "x=\"${a[$(date +%s)]}\"; printf '%s\\n' \"$x\" \"$@\"",
+        "mapfile -t a < notes; echo \"${a[${#a[@]}-1]}\"",
     ] {
         if script(command).is_some() {
             wrong.push(command);
