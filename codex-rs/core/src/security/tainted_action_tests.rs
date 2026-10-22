@@ -5437,7 +5437,6 @@ fn issue_1261_windows_reads_follow_only_plain_posix_scripts() {
         "sh -x run.sh",
         "source run.sh",
         "python3 tool.py count",
-        "cd sub && bash run.sh",
         "git status | head -n 5; ./run.sh",
         "bash -c \"sh -c './present.sh'\"",
         "sed -n 1p f && bash present.sh",
@@ -5445,6 +5444,19 @@ fn issue_1261_windows_reads_follow_only_plain_posix_scripts() {
         assert!(follows(&["bash", "-c", line]), "{line}");
     }
     for argv in [
+        // A folder change the shell may not make (`&&`, `pushd -n`), a
+        // mount, zsh's start-up files (review 5).
+        vec!["bash", "-c", "cd sub && bash run.sh"],
+        vec!["bash", "-c", "false && cd sub; bash run.sh"],
+        vec!["bash", "-c", "pushd -n sub; bash run.sh"],
+        vec!["bash", "-c", "popd; bash run.sh"],
+        vec![
+            "bash",
+            "-c",
+            "mount C:/evil /cygdrive/c/work/sub; bash sub/run.sh",
+        ],
+        vec!["bash", "-c", "zsh -c ./run.sh"],
+        vec!["zsh", "-c", "./run.sh"],
         // Login shells (an MSYS2 or Cygwin profile may `cd` to the home).
         vec!["bash", "-lc", "bash run.sh"],
         vec!["bash", "-c", "bash -l run.sh"],
@@ -6058,5 +6070,43 @@ fn issue_1309_checks_are_linear() {
             let line = format!("{} sh -c 'echo x'", unit.repeat(200 * scale));
             let _ = script(&line);
         });
+    }
+}
+
+/// #1261 review 5: under Windows path rules a drive-relative word (`C:x`)
+/// in a folder the classifier cannot know is any file there, as `x` is.
+/// Runs on every platform.
+#[test]
+fn issue_1261_drive_relative_words_in_unknown_folders_ask() {
+    for line in [
+        "env -iC ~ sh -c 'echo x >> C:.zshenv'",
+        "env -iC ~ sh -c 'git config -f C:.zshenv --comment x,--get a.b v'",
+        "sudo -D ~ sh -c 'echo x >> C:.bashrc'",
+    ] {
+        assert_eq!(
+            windows_kind(&["bash", "-c", line]),
+            Some(ProtectedActionKind::Persistence),
+            "{line}"
+        );
+    }
+}
+
+/// #1261 review 5: a Windows shortcut (`x.lnk`, or a file with a shortcut's
+/// header), which Cygwin's runtime may follow as a link, is not read.
+#[cfg(windows)]
+#[test]
+fn issue_1261_windows_shortcut_links_are_not_read() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let work = root.path();
+    let header: &[u8] = b"L\0\0\0\x01\x14\x02\0\0\0\0\0\xc0\0\0\0\0\0\0\x46true\n";
+    std::fs::write(work.join("tool.lnk"), "true\n").expect("lnk");
+    std::fs::write(work.join("tool.sh"), header).expect("shortcut");
+    let cwd = work.to_string_lossy().into_owned();
+    for line in ["bash tool.lnk", "bash TOOL.LNK", "bash tool.sh"] {
+        assert_eq!(
+            classify_fixture(&shell_in(&cwd, &["bash", "-c", line])),
+            Some(ProtectedActionKind::UnseenCode),
+            "{line}"
+        );
     }
 }

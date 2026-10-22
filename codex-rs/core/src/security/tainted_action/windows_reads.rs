@@ -89,6 +89,12 @@ pub(super) fn plain_spelling(word: &str) -> bool {
     })
 }
 
+/// Whether `word` starts with a drive and no separator (`C:x`): relative to
+/// that drive's own current folder, which the classifier does not know.
+pub(super) fn drive_relative(word: &str) -> bool {
+    drive(word).is_some_and(|(_, rest)| !rest.starts_with(separator))
+}
+
 /// Whether a word read as a file is spelled with something the first
 /// judgment expands but a POSIX shell may not, or reads otherwise: a
 /// variable (`$HOME`, `%USERPROFILE%`) or `~` (WSL's home is not Windows').
@@ -146,6 +152,14 @@ pub(super) fn plain_path(word: &str, cwd: &str) -> Option<(char, Vec<String>)> {
         return None;
     }
     let (letter, path) = (cwd_drive, format!("{cwd_rest}\\{word}"));
+    // A Cygwin shortcut link (`x.lnk`), which Git Bash follows.
+    if path
+        .rsplit(separator)
+        .next()
+        .is_some_and(|name| name.to_ascii_lowercase().ends_with(".lnk"))
+    {
+        return None;
+    }
     let mut names = Vec::new();
     for name in path.split(separator) {
         work::step();
@@ -326,6 +340,9 @@ mod tests {
             ("conin$", r"C:\work"),
             ("tools/NUL/run.sh", r"C:\work"),
             ("con.sh.d/run.sh", r"C:\work"),
+            // A shortcut, which Cygwin may follow as a link.
+            ("tool.lnk", r"C:\work"),
+            ("sub/TOOL.LNK", r"C:\work"),
         ] {
             assert_eq!(plain(word, cwd), None, "{word} in {cwd}");
         }

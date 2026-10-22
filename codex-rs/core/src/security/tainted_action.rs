@@ -1799,6 +1799,9 @@ impl Classifier {
     fn unknown_place(&self, word: &str) -> bool {
         self.unknown_folder > 0
             && (word.contains("..")
+                // #1261: under Windows path rules `C:x` is relative to drive
+                // `C:`'s own folder, which the probes below do not change.
+                || (self.homes.windows_paths() && windows_reads::drive_relative(word))
                 || self.homes.resolve(word, "/a") != self.homes.resolve(word, "/b"))
     }
 
@@ -1949,9 +1952,13 @@ impl Classifier {
             return FileText::Unreadable;
         }
         match Self::read_text(handle) {
-            // A Cygwin or Interix link, which Git Bash follows.
+            // A Cygwin or Interix link, or a Windows shortcut (its header
+            // `L 00 00 00 01 14 02 00` without the NUL bytes), which Git Bash
+            // follows.
             FileText::Text(text)
-                if text.starts_with("!<symlink>") || text.starts_with("IntxLNK") =>
+                if text.starts_with("!<symlink>")
+                    || text.starts_with("IntxLNK")
+                    || text.starts_with("L\u{1}\u{14}\u{2}") =>
             {
                 FileText::Unreadable
             }

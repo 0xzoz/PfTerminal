@@ -120,6 +120,9 @@ pub(super) fn grammar_proves_data(command: &[String]) -> bool {
 /// #1261: how deep `-c` scripts of POSIX shells are followed for
 /// [`windows_reads_follow`].
 const MAX_FOLLOWED_DEPTH: usize = 3;
+/// Programs besides [`DATA_ONLY`] that run no script and change no folder
+/// or mount, in a script [`windows_reads_follow`] follows.
+const FOLLOWED_TOOLS: &[&str] = &["sed", "sort", "uniq", "cut", "tr", "rg"];
 /// Interpreters whose first word, a file, is a script they run.
 const SCRIPT_INTERPRETERS: &[&str] = &["python", "python3", "node", "ruby", "perl"];
 
@@ -132,9 +135,9 @@ const SCRIPT_INTERPRETERS: &[&str] = &["python", "python3", "node", "ruby", "per
 /// login shell: an MSYS2 or Cygwin profile may `cd` to the home first) and
 /// a script the bash grammar reads as plain commands of literal words
 /// with no shell syntax in them, each a script run by file (`bash x.sh`,
-/// `sh -x x.sh`, `./x`, `source x`, `python3 x.py`), `cd`/`pushd`/`popd`,
-/// `sed`, a program that never runs its words, or such a shell's `-c`
-/// script that is one too.
+/// `sh -x x.sh`, `./x`, `source x`, `python3 x.py`), a listed program
+/// that never runs its words or changes a folder (no `cd`, `pushd`,
+/// `popd`, `mount`), or such a shell's `-c` script that is one too.
 pub(super) fn windows_reads_follow(command: &[String]) -> bool {
     follows(command, /*depth*/ 0)
 }
@@ -163,7 +166,9 @@ fn follows(command: &[String], depth: usize) -> bool {
 fn posix_shell(word: &str) -> bool {
     let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
     let name = name.strip_suffix(".exe").unwrap_or(name);
-    matches!(name, "bash" | "sh" | "dash" | "zsh")
+    // Not zsh: it reads `~/.zshenv` (and `/etc/zshenv`, writable under
+    // MSYS2) before any `-c` script.
+    matches!(name, "bash" | "sh" | "dash")
 }
 
 /// One plain command [`windows_reads_follow`] accepts: its words hold no
@@ -230,7 +235,15 @@ fn followed(words: &[PlainWord], depth: usize) -> bool {
         return false;
     }
     match super::invocation::parse(&command, &texts[1..]) {
-        None => true,
+        // A script run by its path (`./x`, `sub/x`), or a command that runs
+        // nothing and changes no folder or mount (not `cd`: a `cd` that
+        // `&&`, `||`, `&` or a pipeline skips, or `pushd -n`, would leave
+        // the shell elsewhere than the classifier follows).
+        None => {
+            name.contains('/')
+                || (command != "cd"
+                    && (data_only(words) || FOLLOWED_TOOLS.contains(&command.as_str())))
+        }
         Some(invocation) => {
             matches!(invocation.code, super::invocation::Code::File(_))
                 && invocation.preloads.is_empty()
