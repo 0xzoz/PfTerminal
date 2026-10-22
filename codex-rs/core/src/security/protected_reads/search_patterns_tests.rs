@@ -65,4 +65,13 @@ fn searched_paths_are_not_patterns() {
     assert_eq!(patterns("grep --context token .env"), ["token"]);
     assert_eq!(patterns("grep &>> log token .env"), ["token"]);
     assert_eq!(patterns("grep 2>&1 token .env"), ["token"]);
+    // GNU grep's abbreviations of `--regexp`.
+    assert_eq!(patterns("grep --reg=token .env"), ["--reg=token"]);
+    assert_eq!(patterns("grep --rege token .env"), ["token"]);
+    // A pattern that runs a command names what that command opens.
+    assert!(patterns("grep \"$(cat ~/.ssh/id_rsa)\" notes.md").is_empty());
+    assert!(patterns("rg -e \"`cat .env`\" logs/").is_empty());
+    // A keyword or wrapper only starts a program where it is one itself.
+    assert!(patterns("cat do grep .env").is_empty());
+    assert_eq!(patterns("sudo grep .env x.log"), [".env"]);
 }

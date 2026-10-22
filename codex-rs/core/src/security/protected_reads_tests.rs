@@ -1539,6 +1539,9 @@ async fn issue_1323_a_search_pattern_is_not_a_denied_path() {
     let grep_denied = format!("grep: {auth}: Permission denied\nexit=2\n");
     let grep = format!("grep token '{auth}'; echo \"exit=$?\"");
     assert_eq!(explain(&grep, 0, &grep_denied).await, read);
+    // A pattern that runs a command: what that command opens is explained.
+    let substituted = format!("grep \"$(cat '{auth}')\" notes.md; echo \"exit=$?\"");
+    assert_eq!(explain(&substituted, 0, &denied).await, read);
     // A failed search: unchanged.
     let search = format!("rg '{auth}' logs/");
     assert_eq!(explain(&search, 1, &old_line).await, read);

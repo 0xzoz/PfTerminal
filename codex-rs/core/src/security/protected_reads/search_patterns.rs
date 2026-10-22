@@ -137,14 +137,16 @@ pub(super) fn search_pattern_indices(words: &[String]) -> HashSet<usize> {
 }
 
 /// Whether `words[index]` is where a program is named.
-fn program_position(words: &[String], index: usize) -> bool {
+fn program_position(words: &[String], mut index: usize) -> bool {
+    // `sudo grep`, `then grep`: where the word before is itself a program
+    // or a keyword (not `cat do grep .env`).
+    while index > 0 && PROGRAM_BEFORE.contains(&words[index - 1].as_str()) {
+        index -= 1;
+    }
     let Some(previous) = index.checked_sub(1).map(|index| words[index].as_str()) else {
         return true;
     };
-    if SEPARATORS.contains(&previous)
-        || PROGRAM_BEFORE.contains(&previous)
-        || previous.ends_with([';', '|', '&'])
-    {
+    if SEPARATORS.contains(&previous) || previous.ends_with([';', '|', '&']) {
         return true;
     }
     // `bash -c 'grep …'`, `sh -lc …`: the script's first word.
@@ -197,6 +199,15 @@ fn mark_patterns(
             let (option, value) = match word.split_once('=') {
                 Some((option, _)) => (option, true),
                 None => (word, false),
+            };
+            // GNU getopt takes an unambiguous abbreviation (`--reg`).
+            let option = if search == Search::Grep
+                && option.len() >= "--reg".len()
+                && "--regexp".starts_with(option)
+            {
+                "--regexp"
+            } else {
+                option
             };
             match option {
                 "--regexp" => {
@@ -253,8 +264,18 @@ fn mark_patterns(
             break;
         }
     }
-    patterns.extend(given.into_iter().filter(|&index| index < words.len()));
-    if !no_operand_pattern && let Some(&pattern) = operands.first() {
+    // A pattern that runs a command (`grep "$(cat ~/.ssh/id_rsa)" notes`)
+    // names the paths that command opens: kept.
+    let plain = |&index: &usize| {
+        words
+            .get(index)
+            .is_some_and(|word| !word.contains("$(") && !word.contains('`'))
+    };
+    patterns.extend(given.into_iter().filter(plain));
+    if !no_operand_pattern
+        && let Some(&pattern) = operands.first()
+        && plain(&pattern)
+    {
         patterns.insert(pattern);
     }
     index
