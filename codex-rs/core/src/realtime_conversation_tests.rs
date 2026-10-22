@@ -743,6 +743,23 @@ async fn realtime_ledger_session_with(
     Arc<crate::session::session::Session>,
     Arc<codex_state::StateRuntime>,
 )> {
+    let (owner, db, _events) =
+        realtime_ledger_session_with_events(home, cwd, endpoint, accounting, configure).await?;
+    Ok((owner, db))
+}
+
+/// [`realtime_ledger_session_with`], also returning the session's events.
+async fn realtime_ledger_session_with_events(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    endpoint: &str,
+    accounting: crate::config::AccountingMode,
+    configure: impl FnOnce(&mut crate::config::Config),
+) -> anyhow::Result<(
+    Arc<crate::session::session::Session>,
+    Arc<codex_state::StateRuntime>,
+    async_channel::Receiver<codex_protocol::protocol::Event>,
+)> {
     use codex_state::SqliteConfig;
     use codex_state::StateRuntime;
     use codex_state::ThreadMetadataBuilder;
@@ -766,6 +783,7 @@ async fn realtime_ledger_session_with(
     configure(&mut config);
     let (mut session, _context) =
         crate::session::tests::make_session_and_context_for_config(config).await;
+    let events = crate::session::tests::capture_events(&mut session);
     let db = StateRuntime::init(
         SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.to_path_buf())?),
         "openai".into(),
@@ -784,7 +802,7 @@ async fn realtime_ledger_session_with(
         .build("openai"),
     )
     .await?;
-    Ok((owner, db))
+    Ok((owner, db, events))
 }
 
 fn realtime_websocket_params() -> codex_protocol::protocol::ConversationStartParams {
@@ -853,7 +871,17 @@ async fn realtime_ledger_settled(
     db: &codex_state::StateRuntime,
     count: usize,
 ) -> anyhow::Result<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
-    let deadline = Instant::now() + std::time::Duration::from_secs(10);
+    realtime_ledger_settled_within(db, count, std::time::Duration::from_secs(10)).await
+}
+
+/// Wait until the ledger holds `count` observations, or give up after
+/// `wait`. A check that nothing more is recorded waits the whole time.
+async fn realtime_ledger_settled_within(
+    db: &codex_state::StateRuntime,
+    count: usize,
+    wait: std::time::Duration,
+) -> anyhow::Result<(Vec<serde_json::Value>, Vec<serde_json::Value>)> {
+    let deadline = Instant::now() + wait;
     loop {
         if realtime_ledger_exists(db).await? {
             let ledger = realtime_ledger(db).await?;

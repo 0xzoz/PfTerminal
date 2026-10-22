@@ -93,6 +93,11 @@ pub(super) fn other_conversations_lines(
         ));
     }
     if let Some(note) = super::warmup_resume::note(&quotes) {
+        // #1000: name the warm-ups the note below refers to.
+        lines.push(match super::reopen_warmups(quotes.iter().copied()).1 {
+            1 => "Of these, 1 request is a reopen warm-up.".into(),
+            n => format!("Of these, {n} requests are reopen warm-ups."),
+        });
         lines.push(RESUME_STEP_SAVED_TURNS.into());
         lines.push(note);
     } else {
