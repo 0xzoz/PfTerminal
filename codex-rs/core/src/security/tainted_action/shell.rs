@@ -679,8 +679,13 @@ impl Lexer {
         let chars: Vec<char> = arg.chars().collect();
         let mut index = 0;
         // #989: arithmetic text (`$((...))`, `((...))`) up to here holds no
-        // command words, so its parameter operators do not count.
+        // command words, so its parameter operators do not count. Not over
+        // a line break: a `((` in a comment or here-document is not
+        // arithmetic, and the lines after it are code.
         let mut arithmetic_end = 0;
+        let arithmetic_line = |start: usize, end: Option<usize>| {
+            end.filter(|end| !chars[start..*end].contains(&'\n'))
+        };
         while index < chars.len() {
             work::step();
             let ch = chars[index];
@@ -700,7 +705,8 @@ impl Lexer {
                     } else {
                         None
                     };
-                    arithmetic_end = arithmetic.unwrap_or(arithmetic_end);
+                    arithmetic_end =
+                        arithmetic_line(index + 3, arithmetic).unwrap_or(arithmetic_end);
                     self.open_substitution(
                         /*backtick*/ false,
                         /*output*/ ch == '>',
@@ -768,7 +774,8 @@ impl Lexer {
                 '(' => {
                     if next == Some('(')
                         && self.word.is_empty()
-                        && let Some(end) = arithmetic_expansion(&chars, index + 2)
+                        && let Some(end) =
+                            arithmetic_line(index + 2, arithmetic_expansion(&chars, index + 2))
                     {
                         arithmetic_end = end;
                     }
@@ -802,9 +809,11 @@ fn misread_parameter(after: &[char]) -> bool {
         // zsh `$=c`, `$~c`, `$^c` change how the value splits or globs.
         Some(ch) if !braced && "=~^".contains(*ch) => return true,
         Some(ch) if braced && "@*#?$!-".contains(*ch) => 1,
-        Some(ch) if braced && ch.is_ascii_digit() => {
-            after.iter().take_while(|ch| ch.is_ascii_digit()).count()
-        }
+        // `${10}` lexes as `$1` then `0`.
+        Some(ch) if braced && ch.is_ascii_digit() => match after.get(1) {
+            Some('}') => 1,
+            _ => return true,
+        },
         Some(ch) if ch.is_ascii_digit() => 0,
         _ => after.iter().take_while(|ch| is_name(ch)).count(),
     };
