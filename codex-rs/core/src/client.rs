@@ -381,9 +381,46 @@ struct ServerConversationState {
 
 type SharedServerConversationState = Arc<StdMutex<Option<ServerConversationState>>>;
 
+/// #1311 (D171): who a websocket connection was opened as (the ChatGPT
+/// account and user, or the API key), as a digest, never the credential. A
+/// session whose sign-in was replaced by another user's or another key never
+/// reuses a connection opened with the old one; a refreshed token of the same
+/// sign-in keeps it.
+#[derive(Clone, PartialEq, Eq)]
+struct ConnectionIdentity([u8; 32]);
+
+impl std::fmt::Debug for ConnectionIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ConnectionIdentity(..)")
+    }
+}
+
+impl ConnectionIdentity {
+    fn of(auth: Option<&CodexAuth>) -> Self {
+        use sha2::Digest;
+        let mut digest = sha2::Sha256::new();
+        let mut field = |value: Option<&str>| match value {
+            Some(value) => {
+                digest.update([1]);
+                digest.update((value.len() as u64).to_le_bytes());
+                digest.update(value.as_bytes());
+            }
+            None => digest.update([0]),
+        };
+        let mode = auth.map(|auth| format!("{:?}", auth.auth_mode()));
+        field(mode.as_deref());
+        field(auth.and_then(CodexAuth::get_account_id).as_deref());
+        field(auth.and_then(CodexAuth::get_chatgpt_user_id).as_deref());
+        field(auth.and_then(CodexAuth::api_key));
+        Self(digest.finalize().into())
+    }
+}
+
 #[derive(Debug, Default)]
 struct WebsocketSession {
     connection: Option<ApiWebSocketConnection>,
+    /// Who `connection` was opened as.
+    identity: Option<ConnectionIdentity>,
     provenance: Option<crate::accounting::websocket::Provenance>,
     last_request: Option<ResponsesApiRequest>,
     last_response_rx: Option<oneshot::Receiver<LastResponse>>,
@@ -3124,8 +3161,19 @@ impl ModelClientSession {
         Ok(body.len())
     }
 
+    /// #1311 (D171): drops a connection (and the conversation state on it)
+    /// opened as another sign-in than the one this request uses.
+    fn drop_websocket_of_another_sign_in(&mut self, identity: &ConnectionIdentity) {
+        if self.websocket_session.connection.is_some()
+            && self.websocket_session.identity.as_ref() != Some(identity)
+        {
+            self.reset_websocket_session();
+        }
+    }
+
     fn reset_websocket_session(&mut self) {
         self.websocket_session.connection = None;
+        self.websocket_session.identity = None;
         self.websocket_session.provenance = None;
         self.websocket_session.last_request = None;
         self.websocket_session.last_response_rx = None;
@@ -3676,15 +3724,16 @@ impl ModelClientSession {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
-        if self.websocket_session.connection.is_some() {
-            return Ok(());
-        }
-
         let client_setup = self.client.current_client_setup().await.map_err(|err| {
             ApiError::Stream(format!(
                 "failed to build websocket prewarm client setup: {err}"
             ))
         })?;
+        let identity = ConnectionIdentity::of(client_setup.auth.as_ref());
+        self.drop_websocket_of_another_sign_in(&identity);
+        if self.websocket_session.connection.is_some() {
+            return Ok(());
+        }
         let auth_context = AuthRequestTelemetryContext::new(
             client_setup.auth.as_ref().map(CodexAuth::auth_mode),
             client_setup.api_auth.as_ref(),
@@ -3708,6 +3757,7 @@ impl ModelClientSession {
             )
             .await?;
         self.websocket_session.connection = Some(connection);
+        self.websocket_session.identity = Some(identity);
         self.websocket_session.provenance = Some(provenance);
         self.websocket_session
             .set_connection_reused(/*connection_reused*/ false);
@@ -3731,6 +3781,7 @@ impl ModelClientSession {
         params: WebsocketConnectParams<'_>,
     ) -> std::result::Result<&ApiWebSocketConnection, ApiError> {
         let WebsocketConnectParams {
+            identity,
             provenance,
             session_telemetry,
             api_provider,
@@ -3740,7 +3791,10 @@ impl ModelClientSession {
             request_route_telemetry,
         } = params;
         let needs_new = match self.websocket_session.connection.as_ref() {
-            Some(conn) => conn.is_closed().await,
+            Some(conn) => {
+                self.websocket_session.identity.as_ref() != Some(&identity)
+                    || conn.is_closed().await
+            }
             None => true,
         };
 
@@ -3769,6 +3823,7 @@ impl ModelClientSession {
                 }
             };
             self.websocket_session.connection = Some(new_conn);
+            self.websocket_session.identity = Some(identity);
             self.websocket_session.provenance = Some(provenance);
             self.websocket_session
                 .set_connection_reused(/*connection_reused*/ false);
@@ -4412,6 +4467,8 @@ impl ModelClientSession {
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
             let client_setup = self.client.current_client_setup().await?;
+            let identity = ConnectionIdentity::of(client_setup.auth.as_ref());
+            self.drop_websocket_of_another_sign_in(&identity);
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -4476,6 +4533,7 @@ impl ModelClientSession {
             }
             match self
                 .websocket_connection(WebsocketConnectParams {
+                    identity,
                     provenance,
                     session_telemetry,
                     api_provider: client_setup.api_provider,
@@ -6779,6 +6837,7 @@ impl AuthRequestTelemetryContext {
 }
 
 struct WebsocketConnectParams<'a> {
+    identity: ConnectionIdentity,
     provenance: crate::accounting::websocket::Provenance,
     session_telemetry: &'a SessionTelemetry,
     api_provider: codex_api::Provider,
@@ -6789,6 +6848,30 @@ struct WebsocketConnectParams<'a> {
 }
 
 async fn handle_unauthorized(
+    transport: TransportError,
+    auth_recovery: &mut Option<UnauthorizedRecovery>,
+    session_telemetry: &SessionTelemetry,
+    provider: &SharedModelProvider,
+) -> Result<UnauthorizedRecoveryExecution> {
+    try_unauthorized_recovery(transport, auth_recovery, session_telemetry, provider)
+        .await
+        .map_err(|error| named_sign_in_revoked(provider).unwrap_or(error))
+}
+
+/// D171 (#1311): a named ChatGPT account removed or signed out while a
+/// request on it was in flight (its tokens were revoked, so the request got a
+/// 401) is reported with the account's recovery, as the next request would
+/// be, instead of a generic unauthorized error.
+fn named_sign_in_revoked(provider: &SharedModelProvider) -> Option<CodexErr> {
+    codex_model_provider::named_sign_in_account(provider.info())?;
+    let reason = provider.auth_manager()?.named_sign_in_unavailable()?;
+    Some(CodexErr::Fatal(format!(
+        "{}: {reason}",
+        provider.info().name
+    )))
+}
+
+async fn try_unauthorized_recovery(
     transport: TransportError,
     auth_recovery: &mut Option<UnauthorizedRecovery>,
     session_telemetry: &SessionTelemetry,
