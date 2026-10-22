@@ -36,16 +36,67 @@ type Registry = HashMap<(PathBuf, NamedChatgptAccount), Weak<AuthManager>>;
 /// D171 (#1286): see [`AuthManager::held_named_sign_in`].
 pub(super) struct NamedAccountStore {
     vault: codex_vault::Vault,
-    seen: Mutex<StoreSeen>,
+    seen: Mutex<Seen>,
+    /// Reads of the stored sign-in, and whether `seen` was free during each.
+    #[cfg(test)]
+    reads: Mutex<Vec<bool>>,
+}
+
+/// What the store was seen holding, and how often the held sign-in changed
+/// (an answer read before a change is not recorded after it).
+struct Seen {
+    state: StoreSeen,
+    epoch: u64,
 }
 
 impl NamedAccountStore {
+    fn new(vault: codex_vault::Vault) -> Self {
+        Self {
+            vault,
+            seen: Mutex::new(Seen {
+                state: StoreSeen::Unknown,
+                epoch: 0,
+            }),
+            #[cfg(test)]
+            reads: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn seen(&self) -> std::sync::MutexGuard<'_, Seen> {
+        self.seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// Drops what the store was last seen holding (the held sign-in changed).
     pub(super) fn forget(&self) {
-        *self
-            .seen
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = StoreSeen::Unknown;
+        let mut seen = self.seen();
+        seen.state = StoreSeen::Unknown;
+        seen.epoch = seen.epoch.wrapping_add(1);
+    }
+
+    /// Records what a read found, unless the held sign-in changed since it
+    /// started.
+    fn record(&self, epoch: u64, state: StoreSeen) {
+        let mut seen = self.seen();
+        if seen.epoch == epoch {
+            seen.state = state;
+        }
+    }
+
+    /// The account's stored sign-in, read through this handle (#1311: with
+    /// `seen` released, so other callers never wait on the decryption).
+    fn read(&self, account: &NamedChatgptAccount) -> std::io::Result<Option<AuthDotJson>> {
+        #[cfg(test)]
+        {
+            let seen_free = self.seen.try_lock().is_ok();
+            self.reads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(seen_free);
+        }
+        VaultAccountAuthStorage::with_vault(self.vault.clone(), account)
+            .and_then(|storage| storage.load())
     }
 }
 
@@ -65,6 +116,9 @@ enum StoreSeen {
     Holds(codex_vault::VaultStorageMarker),
     /// No sign-in, or another one.
     Gone(codex_vault::VaultStorageMarker),
+    /// #1311: the store could not be read; the sign-in is kept and the store
+    /// is read again only once it changes.
+    Unreadable(codex_vault::VaultStorageMarker),
 }
 
 /// Whether `stored` is the sign-in `held` was loaded from (the same ChatGPT
@@ -143,59 +197,63 @@ impl AuthManager {
     /// or it was removed and signed in again). While the store is unchanged
     /// since the last answer this is one file-metadata read; otherwise the
     /// sign-in is read through this manager's own vault handle (whose
-    /// decrypted store stays cached). A store that cannot be read keeps the
-    /// sign-in and is read again next time. Always `Current` for the default
+    /// decrypted store stays cached), without holding what was last seen. A
+    /// store that cannot be read keeps the sign-in and is read again once it
+    /// changes (#1311). Always `Current` for the default
     /// login's manager and while nothing is held.
     pub(super) fn held_named_sign_in(&self) -> HeldSignIn {
         let (Some(account), Some(store)) = (self.named_account.as_ref(), self.named_store.as_ref())
         else {
             return HeldSignIn::Current;
         };
+        // Taken before the held sign-in is read: once the held sign-in
+        // changes, what was seen (and this answer) no longer applies.
+        let epoch = store.seen().epoch;
         let Some(held) = self.auth_cached_unchecked() else {
             return HeldSignIn::Current;
         };
         let marker = store.vault.storage_marker();
-        let mut seen = store
-            .seen
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match (marker, *seen) {
-            (Some(marker), StoreSeen::Holds(seen)) if marker == seen => {
+        let state = {
+            let seen = store.seen();
+            if seen.epoch == epoch {
+                seen.state
+            } else {
+                StoreSeen::Unknown
+            }
+        };
+        match (marker, state) {
+            (Some(marker), StoreSeen::Holds(seen) | StoreSeen::Unreadable(seen))
+                if marker == seen =>
+            {
                 return HeldSignIn::Current;
             }
             (Some(marker), StoreSeen::Gone(seen)) if marker == seen => return HeldSignIn::Gone,
             _ => {}
         }
         let Some(marker) = marker else {
-            *seen = StoreSeen::Unknown;
+            store.record(epoch, StoreSeen::Unknown);
             return HeldSignIn::Gone;
         };
         if store.vault.key_storage() == codex_vault::VaultKeyStorage::NotInitialized {
-            *seen = StoreSeen::Gone(marker);
+            store.record(epoch, StoreSeen::Gone(marker));
             return HeldSignIn::Gone;
         }
-        let stored = VaultAccountAuthStorage::with_vault(store.vault.clone(), account)
-            .and_then(|storage| storage.load());
-        match stored {
+        let (held_sign_in, state) = match store.read(account) {
             Ok(Some(stored)) if stored.has_primary_auth_material() => {
                 if holds_sign_in(&held, &stored) {
-                    *seen = StoreSeen::Holds(marker);
-                    HeldSignIn::Current
+                    (HeldSignIn::Current, StoreSeen::Holds(marker))
                 } else {
-                    *seen = StoreSeen::Unknown;
-                    HeldSignIn::Changed
+                    (HeldSignIn::Changed, StoreSeen::Unknown)
                 }
             }
-            Ok(_) => {
-                *seen = StoreSeen::Gone(marker);
-                HeldSignIn::Gone
-            }
+            Ok(_) => (HeldSignIn::Gone, StoreSeen::Gone(marker)),
             Err(error) => {
                 tracing::warn!(%account, %error, "named account sign-in unreadable; keeping it");
-                *seen = StoreSeen::Unknown;
-                HeldSignIn::Current
+                (HeldSignIn::Current, StoreSeen::Unreadable(marker))
             }
-        }
+        };
+        store.record(epoch, state);
+        held_sign_in
     }
 
     /// Loads the named account's current sign-in, built without awaiting
@@ -259,10 +317,9 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             auth_route_config: self.auth_route_config.clone(),
-            named_store: Some(NamedAccountStore {
-                vault: codex_vault::Vault::new(self.codex_home.clone()),
-                seen: Mutex::new(StoreSeen::Unknown),
-            }),
+            named_store: Some(NamedAccountStore::new(codex_vault::Vault::new(
+                self.codex_home.clone(),
+            ))),
             named_account: Some(account),
             forced_login_method: self.forced_login_method,
             base_manager: Some(base),

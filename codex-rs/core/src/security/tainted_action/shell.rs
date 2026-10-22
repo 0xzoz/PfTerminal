@@ -68,6 +68,10 @@ pub(super) struct SimpleCommand {
     /// made by a brace expansion or `$IFS`, or holding a substitution's
     /// spliced output (`{git,config}`, `git${IFS}config`, `$(echo git)`).
     pub(super) hidden: Vec<usize>,
+    /// #989: indexes of the words holding a parameter expansion the lexer
+    /// misreads (`${c:-eval}`, `${!c}`, `${c}al`, `"$c"al`, zsh `$c:t`): it
+    /// drops braces and quotes, so the substituted word is not its value.
+    pub(super) operated: Vec<usize>,
 }
 
 /// Lexed simple commands, in the order they finish (a substitution comes
@@ -404,6 +408,8 @@ struct Open {
     outer_looked_up: bool,
     /// The outer word is already hidden from the quote-aware reading.
     outer_hidden: bool,
+    /// The outer word already holds a parameter operator.
+    outer_operated: bool,
     first: usize,
     backtick: bool,
     /// `>(...)`: the substitution reads the outer command's output.
@@ -444,6 +450,8 @@ struct Lexer {
     looked_up: bool,
     /// #1283: the word being built is hidden from the quote-aware reading.
     hidden: bool,
+    /// #989: the word being built holds a parameter operator.
+    operated: bool,
     open: Vec<Open>,
     /// Open groups and the pipe that feeds every command inside them.
     groups: Vec<(Group, Option<usize>)>,
@@ -469,6 +477,9 @@ impl Lexer {
             }
             if std::mem::take(&mut self.hidden) {
                 self.current.hidden.push(self.current.words.len());
+            }
+            if std::mem::take(&mut self.operated) {
+                self.current.operated.push(self.current.words.len());
             }
             let word = std::mem::take(&mut self.word);
             self.current.words.push(word);
@@ -568,11 +579,13 @@ impl Lexer {
         let outer_word = std::mem::take(&mut self.word);
         let outer_looked_up = std::mem::take(&mut self.looked_up);
         let outer_hidden = std::mem::take(&mut self.hidden);
+        let outer_operated = std::mem::take(&mut self.operated);
         self.open.push(Open {
             outer,
             outer_word,
             outer_looked_up,
             outer_hidden,
+            outer_operated,
             first: self.done.len(),
             backtick,
             output,
@@ -598,6 +611,7 @@ impl Lexer {
             self.word = open.outer_word;
             self.looked_up = open.outer_looked_up;
             self.hidden = open.outer_hidden;
+            self.operated = open.outer_operated;
             if !open.output {
                 self.word.push_str(UNSEEN_OUTPUT);
             }
@@ -638,6 +652,7 @@ impl Lexer {
         self.word = open.outer_word;
         self.looked_up = open.outer_looked_up;
         self.hidden = open.outer_hidden || spliced.is_some();
+        self.operated = open.outer_operated;
         if !open.output {
             // Not literal text: the output of a lookup or of `cd X && pwd`.
             self.looked_up |= spliced.is_some()
@@ -663,24 +678,40 @@ impl Lexer {
     fn arg(&mut self, arg: &str) {
         let chars: Vec<char> = arg.chars().collect();
         let mut index = 0;
+        // #989: arithmetic text (`$((...))`, `((...))`) up to here holds no
+        // command words, so its parameter operators do not count. Not over
+        // a line break: a `((` in a comment or here-document is not
+        // arithmetic, and the lines after it are code.
+        let mut arithmetic_end = 0;
+        let arithmetic_line = |start: usize, end: Option<usize>| {
+            end.filter(|end| !chars[start..*end].contains(&'\n'))
+        };
         while index < chars.len() {
             work::step();
             let ch = chars[index];
             let next = chars.get(index + 1).copied();
             match ch {
+                '$' if index >= arithmetic_end && misread_parameter(&chars[index + 1..]) => {
+                    self.operated = true;
+                    self.word.push(literal_char(ch));
+                }
                 '$' if next == Some('\'') => {
                     index = ansi_c(&chars, index + 2, &mut self.word);
                     continue;
                 }
                 '$' | '<' | '>' if next == Some('(') => {
+                    let arithmetic = if ch == '$' && chars.get(index + 2) == Some(&'(') {
+                        arithmetic_expansion(&chars, index + 3)
+                    } else {
+                        None
+                    };
+                    arithmetic_end =
+                        arithmetic_line(index + 3, arithmetic).unwrap_or(arithmetic_end);
                     self.open_substitution(
                         /*backtick*/ false,
                         /*output*/ ch == '>',
                         /*process*/ ch == '<',
-                        /*arithmetic*/
-                        ch == '$'
-                            && chars.get(index + 2) == Some(&'(')
-                            && arithmetic_expansion(&chars, index + 3),
+                        /*arithmetic*/ arithmetic.is_some(),
                     );
                     index += 2;
                     continue;
@@ -740,7 +771,16 @@ impl Lexer {
                     self.flush();
                     self.redirect = Redirect::Stdout;
                 }
-                '(' => self.open_bracket(),
+                '(' => {
+                    if next == Some('(')
+                        && self.word.is_empty()
+                        && let Some(end) =
+                            arithmetic_line(index + 2, arithmetic_expansion(&chars, index + 2))
+                    {
+                        arithmetic_end = end;
+                    }
+                    self.open_bracket();
+                }
                 ')' => self.close_bracket(),
                 '|' => {
                     let pipe = next != Some('|') && (index == 0 || chars[index - 1] != '|');
@@ -755,23 +795,66 @@ impl Lexer {
     }
 }
 
+/// #989: whether the parameter expansion after a `$` reads otherwise once
+/// the lexer drops braces, quotes and backslashes: a braced form that is not
+/// a plain name (`${c:-eval}`, `${!c}`, `${c#x}`, `${c[0]}`), a name joined
+/// to the text after it (`${c}al`, `"$c"al` read as `$cal`), or a zsh
+/// subscript, modifier or flag (`$c[1]`, `$c:t`, `$=c`). Reads only the name and the
+/// quotes after it, so a line of them stays linear.
+fn misread_parameter(after: &[char]) -> bool {
+    let is_name = |ch: &char| ch.is_ascii_alphanumeric() || *ch == '_';
+    let braced = after.first() == Some(&'{');
+    let after = if braced { &after[1..] } else { after };
+    let len = match after.first() {
+        // zsh `$=c`, `$~c`, `$^c` change how the value splits or globs.
+        Some(ch) if !braced && "=~^".contains(*ch) => return true,
+        Some(ch) if braced && "@*#?$!-".contains(*ch) => 1,
+        // `${10}` lexes as `$1` then `0`.
+        Some(ch) if braced && ch.is_ascii_digit() => match after.get(1) {
+            Some('}') => 1,
+            _ => return true,
+        },
+        Some(ch) if ch.is_ascii_digit() => 0,
+        _ => after.iter().take_while(|ch| is_name(ch)).count(),
+    };
+    let rest = if braced {
+        if len == 0 || after.get(len) != Some(&'}') {
+            return true;
+        }
+        &after[len + 1..]
+    } else if len == 0 {
+        return false;
+    } else {
+        &after[len..]
+    };
+    let quotes = rest
+        .iter()
+        .take_while(|ch| matches!(ch, '\'' | '"' | '\\'))
+        .count();
+    ((braced || quotes > 0) && rest.get(quotes).is_some_and(is_name))
+        // `$c$'al'`: the decoded text joins the name too.
+        || (rest.get(quotes) == Some(&'$') && rest.get(quotes + 1) == Some(&'\''))
+        || (!braced && matches!(rest.first(), Some('[' | ':')))
+}
+
 /// Whether the `$((` before `start` is certainly an arithmetic expansion:
 /// it closes with `))` and holds nothing that could make bash or zsh read it
 /// as a command substitution instead (`$(((1));cat f)`, `$((echo '))';cat f) )`).
-/// When unsure, `false`: its value then counts as command output.
-fn arithmetic_expansion(chars: &[char], start: usize) -> bool {
+/// When unsure, `None`: its value then counts as command output. Otherwise
+/// the index of its first closing `)`.
+fn arithmetic_expansion(chars: &[char], start: usize) -> Option<usize> {
     let mut braces = 0_usize;
     for (at, ch) in chars.iter().enumerate().skip(start) {
         work::step();
         match ch {
-            '\'' | '"' | '`' | '\\' | '(' => return false,
+            '\'' | '"' | '`' | '\\' | '(' => return None,
             '{' => braces += 1,
             '}' => braces = braces.saturating_sub(1),
-            ')' => return braces == 0 && chars.get(at + 1) == Some(&')'),
+            ')' => return (braces == 0 && chars.get(at + 1) == Some(&')')).then_some(at),
             _ => {}
         }
     }
-    false
+    None
 }
 
 /// Decode a bash `$'...'` string starting at `index` (after the quote)
