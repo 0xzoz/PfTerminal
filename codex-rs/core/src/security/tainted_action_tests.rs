@@ -6715,6 +6715,12 @@ fn issue_1064_loading_variables_with_risky_values_are_unseen_code() {
         "PATH=\"${HOME/\\//}:$PATH\" git log",
         "PATH=$HOME:t:$PATH git log",
         "PATH=/proc/self/cwd/bin:$PATH git log",
+        // Review 1.
+        "cd /opt && PATH=\"/usr/my bin:/opt/x\" make",
+        "PATH=/var/tmp/x:$PATH ls",
+        "read PATH[0] < f",
+        "select PATH in ./bin; do git log; done",
+        "JAVA_TOOL_OPTIONS=-Djava.class.path=. java -version",
         "env \"PATH=/usr/bin :.\" git log",
         // Other ways to set it.
         "PATH+=:./bin; git log",
@@ -6870,6 +6876,12 @@ fn issue_1064_uncertain_subscripts_ask_only_before_an_operator() {
         "p=$(cat f); echo \"${a[$((i+1))]@`echo P`}\"",
         "p=$(cat f); echo \"${a[$(f)]\\\n@$p}\"",
         "echo \"${a[$(f)]@P}\"",
+        // Review 1: other code may build the `@` at run time.
+        "python3 -c 'import subprocess as s; s.run([\"bash\",\"-c\",\"mapfile a <notes; p=P; echo ${a[$((0))]\"+chr(64)+\"$p}\"]) # x@y'",
+        "python3 -c 'import os; t=\"[@]\"; os.system(\"echo ${a[$((0))]\" + t[1] + \"P}\")'",
+        "awk 'BEGIN { system(\"echo ${a[$((0))]\" sprintf(\"%c\", 64) \"P}\") }' # @",
+        "py=python3; $py -c 'import os; t=\"[@]\"; os.system(\"echo ${a[$((0))]\" + t[1] + \"P}\")'",
+        "alias p=python3; p -c 'import os; t=\"[@]\"; os.system(\"echo ${a[$((0))]\" + t[1] + \"P}\")'",
     ] {
         if script(command) != Some(UnseenCode) {
             wrong.push(command);
@@ -6906,6 +6918,8 @@ fn issue_1064_loader_checks_are_linear() {
         ("quotes", "'\"$'"),
         ("options", "NODE_OPTIONS=--a "),
         ("shells", "sh -x "),
+        ("shell options", "sh -o "),
+        ("shell files", "bash --rcfile "),
         ("readers", "read PATH "),
         ("subscripts", "${a[$(f)]}"),
         ("operators", "]@"),

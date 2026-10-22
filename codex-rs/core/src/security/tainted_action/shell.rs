@@ -144,7 +144,11 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
 /// #1064: also a transformation whose operator is not one of the letters
 /// that only quote or describe the value (`${v@$p}`, `${!r@${p^}}`): it may
 /// be `P` when it runs.
-pub(super) fn prompt_expansion(text: &str) -> bool {
+///
+/// #1064: `foreign`: the line may run code of another language, which can
+/// build shell text at run time (`chr(64)`); there an uncertain subscript
+/// counts on any line holding an `@`, as before.
+pub(super) fn prompt_expansion(text: &str, foreign: bool) -> bool {
     if !text.contains('@') {
         return false;
     }
@@ -154,10 +158,12 @@ pub(super) fn prompt_expansion(text: &str) -> bool {
         .filter(|ch| !matches!(ch, '\'' | '"' | '\\'))
         .collect();
     // #1064: a subscript whose end is uncertain counts only where some
-    // subscript's end is followed by an operator (in either reading).
-    let after_subscript = [joined.as_str(), bare.as_str()]
-        .iter()
-        .any(|text| operator_after_subscript(text));
+    // subscript's end is followed by an operator (in either reading), or
+    // where other code may build one.
+    let after_subscript = foreign
+        || [joined.as_str(), bare.as_str()]
+            .iter()
+            .any(|text| operator_after_subscript(text));
     [joined.as_str(), bare.as_str()].iter().any(|text| {
         text.match_indices("@P").any(|(at, _)| {
             !text[at + 2..].starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')

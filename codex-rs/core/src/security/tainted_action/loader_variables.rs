@@ -65,6 +65,7 @@ const JAVA_LOADING: &[&str] = &[
     "-Djava.system.class.loader",
     "-Djava.security.manager",
     "-Djava.library.path",
+    "-Djava.class.path",
     "-Djava.ext.dirs",
     "-Djava.endorsed.dirs",
     "-cp",
@@ -265,19 +266,23 @@ pub(super) fn judge(
             judgment.risky = true;
         }
     }
-    // `read PATH`, `printf -v PATH`, `mapfile -t PATH`, `for PATH in`: set
-    // to a value read at run time (also attached: `-vPATH`).
-    if name.is_some_and(|name| READERS.contains(&name) || name == "for") {
+    // `read PATH`, `printf -v PATH`, `mapfile -t PATH`, `for PATH in`,
+    // `select PATH in`: set to a value read at run time (also attached:
+    // `-vPATH`).
+    let looped = matches!(name, Some("for" | "select"));
+    if name.is_some_and(|name| READERS.contains(&name)) || looped {
         for word in operands {
             work::step();
+            // `read PATH[0]`, `printf -v 'PATH[0]'` set it too.
             let operand = word.trim_start_matches('-');
+            let operand = operand.split('[').next().unwrap_or(operand);
             for (found, kind) in VARIABLES {
                 work::step();
                 if operand == *found || (word.starts_with('-') && operand.ends_with(found)) {
                     judgment.unseen(*kind);
                 }
             }
-            if name == Some("for") {
+            if looped {
                 break;
             }
         }
@@ -556,15 +561,18 @@ fn lexed_alike(byte: u8, written: Written) -> bool {
 /// a quoted `~` or `$` is literal (`PATH='~/bin'` is relative). Each such
 /// name is added to `cut`, and a value of one of these variables is judged
 /// here as written (an expansion in it other than the variable's own is
-/// unknown; a search path with a literal `~`, `$` or backslash is risky). An
+/// unknown; a search path with a literal `~`, `$` or backslash is risky).
+/// Search-path and option values are returned in `splits`, to be judged
+/// against the folders the line may be in. An
 /// assignment counts at the start of a word, just inside a quote that
-/// starts one (`env "PATH=…"`), or after `=` or `-S` (`env -S'PATH=…'`).
+/// starts one (`env "PATH=…"`), or unquoted after `=` or `-S`
+/// (`--split-string=PATH=…`, `env -SPATH=…`; a quoted `-S'PATH=…'` is
+/// split at blanks by `env` as the lexer splits it, and judged there).
 /// One pass over `text`.
 pub(super) fn scan_split_values(
     text: &str,
     cut: &mut HashSet<String>,
-    windows: bool,
-    risky_folder: &dyn Fn(&str) -> bool,
+    splits: &mut Vec<Split>,
 ) -> Judgment {
     let mut judgment = Judgment::default();
     let bytes = text.as_bytes();
@@ -621,23 +629,16 @@ pub(super) fn scan_split_values(
         }
         if differs || literal {
             cut.insert(name.to_string());
-            let value = String::from_utf8_lossy(&value);
             match kind_of(name) {
                 Some(Kind::ShellEnv) => judgment.sets_env = true,
                 Some(Kind::SearchPath) if literal => judgment.risky = true,
-                Some(kind)
-                    if risky_value(
-                        kind,
-                        name,
-                        &kept_value(&plain_braces(&value), name),
-                        appended,
-                        windows,
-                        risky_folder,
-                    ) =>
-                {
-                    judgment.risky = true;
-                }
-                _ => {}
+                Some(kind) => splits.push(Split {
+                    kind,
+                    value: kept_value(&plain_braces(&String::from_utf8_lossy(&value)), name),
+                    name: name.to_string(),
+                    appended,
+                }),
+                None => {}
             }
         }
     }
@@ -659,6 +660,31 @@ fn kept_value(value: &str, name: &str) -> String {
     lexed
         .and_then(|lexed| self_default(&format!("{name}={lexed}"), name))
         .unwrap_or_else(|| value.to_string())
+}
+
+/// A value [`scan_split_values`] read as written, judged by [`judge_split`]
+/// once the folders the line may be in are known.
+pub(super) struct Split {
+    kind: Kind,
+    name: String,
+    value: String,
+    appended: bool,
+}
+
+/// Whether a value read as written is risky (see [`risky_value`]).
+pub(super) fn judge_split(
+    split: &Split,
+    windows: bool,
+    risky_folder: &dyn Fn(&str) -> bool,
+) -> bool {
+    risky_value(
+        split.kind,
+        &split.name,
+        &split.value,
+        split.appended,
+        windows,
+        risky_folder,
+    )
 }
 
 /// `${NAME}` as `$NAME`, as the word lexer spells it. Linear.
@@ -684,6 +710,9 @@ fn plain_braces(text: &str) -> String {
     out
 }
 
+/// Options of a shell word read before it counts as interactive.
+const MAX_SHELL_OPTIONS: usize = 64;
+
 /// POSIX shells that source `ENV` when interactive (zsh does when it
 /// emulates sh or ksh).
 const ENV_SHELLS: &[&str] = &[
@@ -705,6 +734,11 @@ pub(super) fn starts_interactive_shell(lower: &[String], fed: bool) -> bool {
         let mut skip = false;
         for (offset, option) in lower[at + 1..].iter().enumerate() {
             work::step();
+            // Past this many options it may be interactive; the cap keeps
+            // the scans from one shell word to the next linear.
+            if offset >= MAX_SHELL_OPTIONS {
+                return !fed;
+            }
             if std::mem::take(&mut skip) {
                 continue;
             }

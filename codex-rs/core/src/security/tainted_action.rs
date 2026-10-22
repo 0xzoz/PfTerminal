@@ -871,6 +871,20 @@ fn has_flag(word: &str, flag: &str) -> bool {
     }
 }
 
+/// #1064: folders a line may be in that a value the lexer cuts short is
+/// judged against; past it such a value asks.
+const MAX_VISITED_FOLDERS: usize = 64;
+/// #1064: temp folders, which the agent may write.
+const TEMP_FOLDERS: &[&str] = &[
+    "/tmp",
+    "/private/tmp",
+    "/var/tmp",
+    "/private/var/tmp",
+    "/var/folders",
+    "/private/var/folders",
+    "/dev/shm",
+];
+
 /// Bytes of variable values left to substitute (#1065): any value, then
 /// only small ones once that runs out.
 struct Budget {
@@ -1238,6 +1252,33 @@ impl Classifier {
         // #841: this line's own sed programs (nested lines have theirs).
         let outer_scope = std::mem::replace(&mut self.sed_scope, SedScope::of(command));
         let lexed = shell::simple_commands(command);
+        // #1064: the line may run another language's code, which can build
+        // shell text at run time (see `shell::prompt_expansion`).
+        // (Text rebuilt from joined literals is read from such a line.)
+        let foreign = self.not_shell > 0
+            || lexed.commands.iter().any(|simple| {
+                // A program named by a variable may be one (`$py -c`), as may
+                // an alias's value (`alias p=python3`).
+                (self.rebuilt == 0
+                    && indirect::command_word(&simple.words).is_some_and(|(_, name)| {
+                        name.contains('$') || name.contains(shell::UNSEEN_OUTPUT)
+                    }))
+                    || simple
+                        .words
+                        .iter()
+                        .flat_map(|word| word.split('='))
+                        .any(|word| {
+                            work::step();
+                            let name = basename(word).to_lowercase();
+                            (!shell::SHELLS.contains(&name.as_str())
+                                && !matches!(name.as_str(), "source" | ".")
+                                && invocation::parse(&name, &[]).is_some())
+                                || matches!(
+                                    name.as_str(),
+                                    "awk" | "gawk" | "mawk" | "nawk" | "busybox"
+                                )
+                        })
+            });
         let pipe_sources: std::collections::HashSet<usize> = lexed
             .commands
             .iter()
@@ -1248,7 +1289,9 @@ impl Classifier {
         // text, which may reach a shell (`os.system`); the lexed words are
         // checked below.
         if (lexed.incomplete && self.not_shell == 0 && self.rebuilt == 0)
-            || command.iter().any(|arg| shell::prompt_expansion(arg))
+            || command
+                .iter()
+                .any(|arg| shell::prompt_expansion(arg, foreign))
             || lexed.too_deep
             || indirect::opaque_execution(&lexed.commands)
         {
@@ -1277,19 +1320,18 @@ impl Classifier {
             }
         }
         // #1064: assignments the word lexer does not read as the shell does
-        // (a quoted blank, `~` or `$`).
+        // (a quoted blank, `~` or `$`), judged once the line's folders are
+        // known.
+        let mut splits = Vec::new();
         for arg in command {
             work::step();
-            let mut cut = std::mem::take(&mut self.cut_values);
-            let judgment = loader_variables::scan_split_values(
-                arg,
-                &mut cut,
-                self.homes.windows_paths(),
-                &|entry| self.writable_folder(entry, &[cwd]),
-            );
-            self.cut_values = cut;
+            let judgment =
+                loader_variables::scan_split_values(arg, &mut self.cut_values, &mut splits);
             self.loader_judgment(&judgment);
         }
+        // #1064: every folder the line is in, up to a limit.
+        let mut visited: Vec<String> = vec![cwd.to_string()];
+        let mut visited_all = true;
         let mut lexed_seds = 0;
         let mut lexed_shells = 0;
         let mut arithmetic = arithmetic::Arithmetic::new(command);
@@ -1325,7 +1367,10 @@ impl Classifier {
             }
             // Decoded, quote-removed and with known variables substituted:
             // `eval "echo \${v@"P"}"`, `$'\x40'`, `p=@P; eval "echo \${v$p}"`.
-            if words.iter().any(|word| shell::prompt_expansion(word)) {
+            if words
+                .iter()
+                .any(|word| shell::prompt_expansion(word, foreign))
+            {
                 self.note(ProtectedActionKind::UnseenCode);
             }
             arithmetic.note(simple, &words);
@@ -1343,6 +1388,34 @@ impl Classifier {
                 &mut loops,
                 depth,
             );
+            if !splits.is_empty() {
+                for folder in std::iter::once(&folders.cwd).chain(&folders.others) {
+                    work::step();
+                    if visited.contains(folder) {
+                        continue;
+                    }
+                    if visited.len() >= MAX_VISITED_FOLDERS {
+                        visited_all = false;
+                    } else {
+                        visited.push(folder.clone());
+                    }
+                }
+            }
+        }
+        if !splits.is_empty() {
+            let here: Vec<&str> = visited.iter().map(String::as_str).collect();
+            let roots = std::cell::OnceCell::new();
+            let windows = self.homes.windows_paths();
+            let risky = !visited_all
+                || splits.iter().any(|split| {
+                    work::step();
+                    loader_variables::judge_split(split, windows, &|entry| {
+                        self.writable_folder(entry, &here, &roots)
+                    })
+                });
+            if risky {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
         }
         // #937: arithmetic on a variable filled from command output or
         // `read` runs the substitutions in its value, like `eval`.
@@ -1589,13 +1662,14 @@ impl Classifier {
             .chain(folders.others.iter().map(String::as_str))
             .collect();
         let mut cut = std::mem::take(&mut self.cut_values);
+        let roots = std::cell::OnceCell::new();
         let judgment = loader_variables::judge(
             simple,
             words,
             command.as_ref(),
             &mut cut,
             self.homes.windows_paths(),
-            &|entry| self.writable_folder(entry, &here),
+            &|entry| self.writable_folder(entry, &here, &roots),
         );
         self.cut_values = cut;
         self.loader_judgment(&judgment);
@@ -1937,8 +2011,14 @@ impl Classifier {
     /// #1064: whether `entry` (a search-path entry, absolute or under `~`)
     /// is a folder the agent may write: in the action's working folder, in
     /// a folder of `here` (where the line is; the first resolves `entry`),
-    /// or in a temp folder. Also through canonical forms.
-    fn writable_folder(&self, entry: &str, here: &[&str]) -> bool {
+    /// or in a temp folder. Also through canonical forms. `roots`: their
+    /// spellings, worked out on first use.
+    fn writable_folder(
+        &self,
+        entry: &str,
+        here: &[&str],
+        roots: &std::cell::OnceCell<Vec<String>>,
+    ) -> bool {
         let cwd = here.first().copied().unwrap_or(&self.workspace);
         let resolved = self.homes.resolve(entry, cwd);
         if resolved.starts_with('~') {
@@ -1951,34 +2031,33 @@ impl Classifier {
             spellings.extend(self.homes.canonical(path).map(|canonical| key(&canonical)));
             spellings
         };
-        let paths = spellings(&resolved);
-        let temp = std::env::temp_dir().to_string_lossy().into_owned();
-        let roots = [self.workspace.as_str()]
-            .into_iter()
-            .chain(here.iter().copied())
-            .chain([
-                "/tmp",
-                "/private/tmp",
-                "/var/folders",
-                "/private/var/folders",
-            ])
-            .chain([temp.as_str()]);
-        let mut found = false;
-        for root in roots {
-            work::step();
-            if root.is_empty() {
-                continue;
-            }
-            for root in spellings(&self.homes.resolve(root, cwd)) {
+        let roots = roots.get_or_init(|| {
+            let temp = std::env::temp_dir().to_string_lossy().into_owned();
+            let mut roots = Vec::new();
+            for root in [self.workspace.as_str()]
+                .into_iter()
+                .chain(here.iter().copied())
+                .chain(TEMP_FOLDERS.iter().copied())
+                .chain([temp.as_str()])
+            {
                 work::step();
-                let root = root.trim_end_matches('/');
-                found |= paths.iter().any(|path| {
-                    path.strip_prefix(root)
-                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
-                });
+                if !root.is_empty() {
+                    roots.extend(
+                        spellings(&self.homes.resolve(root, cwd))
+                            .into_iter()
+                            .map(|root| root.trim_end_matches('/').to_string()),
+                    );
+                }
             }
-        }
-        found
+            roots
+        });
+        spellings(&resolved).iter().any(|path| {
+            roots.iter().any(|root| {
+                work::step();
+                path.strip_prefix(root.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            })
+        })
     }
 
     /// Follow `cd`, `pushd` and `popd` (also behind `builtin`/`command`).
