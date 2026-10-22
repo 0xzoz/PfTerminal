@@ -16,7 +16,7 @@ th{background:#f5f5f7}.warn{background:#fff4e5;border-left:4px solid #f0a020;pad
 <body>
 <h1>Corbanu Terminal — management handoff</h1>
 <p><small>Kept by the coordinating agent (Claude, running in Corbanu Terminal as “coordinator”) for its successor; this update written by the coordinator's handoff-doc11 worker.
-State as of <b>2026-10-22 12:45 UTC (05:45 America/Phoenix)</b>, with <code>todo.md</code> read through its 12:49Z line and GitHub re-checked at about 12:55Z. Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
+State as of <b>2026-10-22 12:45 UTC (05:45 America/Phoenix)</b>, with <code>todo.md</code> read through its 12:59Z lines and GitHub re-checked at about 13:00Z. Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
 <code>2cee3b5984</code>, the merge of #1333 at 12:29Z; main moved to <code>e2ddef8698</code> with tui-qa2's record #1341 at 12:51Z).
 Coordinator since 2026-10-13 04:30Z: a Claude coordinator, resumed from the 2026-10-12 pause handoff when Travis said resume; it runs in Travis's TUI. It stopped with every
 worker during the 429 outage (10-16 13:55Z) and resumed on 2026-10-19 18:30Z (box below).
@@ -57,7 +57,8 @@ run 39767693423). The queue has cleared: #1319's run (<code>d88d018ab2</code>) w
 <li><b>New coordinator rules</b> (section 3): MODEL-DECLINE, CONTRIBUTOR COMMUNICATION, Z.AI KEY, SWEEP, TASK NODE CREDIT, NO TRACING, TEST HOME, the SETTLED reel-voice note, and
 coordinator calls under the D157 precedent.</li>
 </ul>
-Running now (section 10): <code>sec-1261</code>, <code>sec-1064</code>, <code>sec-1309c</code>, <code>tui-qa2</code>, <code>fu-1323</code> and this <code>handoff-doc11</code>: 6 sessions, at the cap.
+Running now (section 10): <code>sec-1261</code>, <code>sec-1064</code>, <code>sec-1309c</code>, <code>fu-1323</code> and this <code>handoff-doc11</code>: 5 sessions under the 6 cap
+(tui-qa2 finished at 12:59Z: #1341 merged, all four PRs passed in the real TUI).
 <b>Waiting on Travis: D182–D190</b> (section 11), plus his own actions D178b (point <code>provider/zai_api_key</code> at the new key in <code>/vault</code>) and D18 (delete the vault label
 <code>kimi_api</code>); neither is confirmed done.<br>
 <b>Goal / working agreement with Travis (unchanged):</b> keep the workstreams moving with independent workers. Check in every <b>5 minutes</b> with a short
@@ -137,7 +138,7 @@ gh run list --branch main --workflow postmerge-ci --limit 10
 W=/Volumes/CorbanuDrive/Corbanu/.codex-work/workers-20261002
 L=$HOME/.corbanu-workers                          # worker tmux server, logs and results (internal disk, section 3)
 /opt/homebrew/bin/tmux -S $L/tmux.sock ls
-$L/mon.sh sec-1261 sec-1064 sec-1309c tui-qa2 fu-1323   # one line per running worker
+$L/mon.sh sec-1261 sec-1064 sec-1309c fu-1323   # one line per running worker
 ls $W/*.request*.md                              # requests waiting for a grant (section 3; numbered files too)
 ls $W/*.hold.md                                  # orchestrator.rs merge holds (section 3)
 ls -lt $W/*.signin.md | head                     # sign-in codes to relay to Travis at once (section 3)
@@ -497,7 +498,7 @@ folder set when the <code>cd</code> target is known (2A; sec-1309c, #1339); the 
 D152) and suggesting the #1329 change; the two uncovered websocket-identity cases filed as #1343.</li>
 </ul></li>
 <li><b>Patch-id / identical-lines rule in practice:</b> sec-1309's grant (08:36Z) let #1310 merge its main-merge commit <code>c08753bea3</code> without a re-review, because the coordinator
-verified the PR's own commits were range-diff identical and the PR-vs-main diff unchanged; sec-1261's grant 2 allows the same for one more trivial re-merge of #1302.</li>
+verified the PR's own commits were range-diff identical and the PR-vs-main diff unchanged; sec-1261's grant 2 allows the same for one more trivial re-merge of #1302, and sec-1064's grant (12:59Z) does it for #1332's merge commit <code>c861c9b971</code>.</li>
 <li><b>Requests and grants since #1281</b> (all in <code>$W</code>, recorded in <code>todo.md</code>):
 <ul>
 <li>sec-1283 (#1294): grant 04:55Z, round 6 limited to <code>bd1def6e51..fce2f59590</code>; same-class spellings non-blocking. Round 6 found nested shells after <code>cd "$D"</code> still quiet
@@ -505,6 +506,8 @@ verified the PR's own commits were range-diff identical and the PR-vs-main diff 
 <li>sec-1309 (#1310): request 08:23Z, budget 4 spent after main moved; grant 08:36Z: no re-review (above). Merged 09:17Z.</li>
 <li>sec-1261 (#1302): grant 1 (10:08Z) round 6 plus round 7 only for one small blocker; grant 2 (12:20Z) round 8 merge-only, including how #1315 and #1321 interact with the Windows read
 rules; grant 3 (12:43Z) a final round 9 on <code>d53140c..HEAD</code> (a 7-line fail-closed fix for programs run by path). Any further non-trivial finding goes to #1261.</li>
+<li>sec-1064 (#1332): request 12:52Z, budget 4 spent and the PR conflicted after #1321; grant 12:59Z: the merge commit <code>c861c9b971</code> needs no re-review (the PR's
+lines are identical), merge on green.</li>
 <li>acct-rerun: request 12:32Z (not a budget request: Z.AI balance exhausted). Grant 12:36Z: Travis must recharge (D190); stop cleanly, don't record the cases as blocked, don't switch tester
 models; the coordinator relaunches it with a RECOVERY NOTE after the recharge.</li>
 </ul>
@@ -761,8 +764,8 @@ Workers that need a fixed candidate build and sign their own private copy and ne
 <li><b>Not in it:</b> #1328 (11:25Z, Windows legacy-sandbox warning), #1321 (11:47Z), #1319 (11:50Z) and #1333 (12:29Z). <code>INSTALL.json</code>'s <code>what_is_new</code> also names
 #1328, but <code>git merge-base</code> shows it isn't an ancestor of <code>b0fa02105f</code>.
 <ul>
-<li>Running workers keep the inode they started with; new launches get the new binary. tui-qa2 checks #1327, #1322, #1320 and #1319 on the installed build (#1319 from a later main, as
-its record says).</li>
+<li>Running workers keep the inode they started with; new launches get the new binary. tui-qa2 checked #1327, #1322, #1320 and #1319 in the real TUI (#1319 on a later main, as
+its record #1341 says); the coordinator's 12:59Z call: rebuild at a green main at or after <code>d88d018ab2</code> at the next opportunity.</li>
 <li>The rollback test to <code>45bfa7d938</code> stays held: #616 has had no episode since 10-15 21:01Z.</li>
 <li>Next install: main was fully green at <code>d88d018ab2</code> (#1319) at 12:49Z; install the newest head whose postmerge run is green in every real job (it would add #1328, #1321,
 #1319, #1333 and whatever running workers merge). Don't swap under a worker whose brief pins the installed build.</li>
@@ -2133,22 +2136,25 @@ key is Travis's own <code>/vault</code> action (D178b, section 11).</td><td><cod
 <h2>10. Current state</h2>
 <h3>Workers</h3>
 <p>Running at 2026-10-22 12:45 UTC (05:45 America/Phoenix), as tmux sessions on <code>$HOME/.corbanu-workers/tmux.sock</code>. Check with
-<code>$HOME/.corbanu-workers/mon.sh sec-1261 sec-1064 sec-1309c tui-qa2 fu-1323</code>. Session <code>watchdog</code> runs <code>watchdog.sh</code> (its last relaunch was sec-891 at 10-16
+<code>$HOME/.corbanu-workers/mon.sh sec-1261 sec-1064 sec-1309c fu-1323</code> (tui-qa2 finished at 12:59Z, just after the snapshot). Session <code>watchdog</code> runs <code>watchdog.sh</code> (its last relaunch was sec-891 at 10-16
 14:01:51Z, during the 429 stop). The stray session <code>f905</code> (an idle bash left from flake-905 on 10-16) can still be killed once confirmed idle. <code>$W/vm-macos3.lock</code> and
-<code>$W/vm-tart.lock</code> are both free; no <code>$W/*.hold.md</code> exists. <b>6 worker sessions, at the 6 cap</b> (5 once this update finishes). Start times below are the tmux
+<code>$W/vm-tart.lock</code> are both free; no <code>$W/*.hold.md</code> exists. <b>6 worker sessions, at the 6 cap</b> at the snapshot; 5 since tui-qa2 exited at 12:59Z (4 once this update finishes). Start times below are the tmux
 sessions' creation times in UTC; <code>todo.md</code>'s launch lines for fu-1323 and handoff-doc11 are stamped about 7–8 minutes later.</p>
-<div><b>Request files:</b> none waiting. The newest are sec-1261's third request (granted 12:43Z, final round 9) and acct-rerun's (answered 12:36Z: paused for D190); section 3 lists them.
+<div><b>Request files:</b> none waiting. The newest are sec-1064's (granted 12:59Z: merge commit without a re-review), sec-1261's third request (granted 12:43Z, final round 9) and acct-rerun's
+(answered 12:36Z: paused for D190); section 3 lists them.
 <b>Sign-in files:</b> <code>pf84-rerun.signin.md</code> (08:20Z) was relayed, approved and marked closed. The Windows gate may write <code>win-gate-pf84.signin.md</code>: relay it at once.</div>
 <table><tr><th>Worker</th><th>Started (UTC)</th><th>What it is doing</th><th>Open work / watch for</th></tr>
 <tr><td>sec-1261</td><td>10-22 05:26</td><td>D166/D167 on #1261: the first (POSIX) judgment on Windows reads scripts through plain local paths only (network shares guarded) and matches homes by Windows
 segments; D167's dot-file assumption kept and documented. Its D168 part merged as #1308.</td><td><b>#1302</b> (head <code>29bc19af63</code>, checks running). Final round 9 on
 <code>d53140c..HEAD</code> granted 12:43Z; merges with the literal head SHA on APPROVE and all green (Windows lane included). Anything further goes to #1261.</td></tr>
 <tr><td>sec-1064</td><td>10-22 10:33</td><td>#1064 and #1159 under the D157 precedent: more ways a variable's value runs (PS4/<code>set -x</code>, zsh <code>${(e)v}</code>, <code>print -P</code>, namerefs),
-code-setting variables, output files and git programs ask after untrusted content.</td><td><b>#1332</b> (head <code>2a705931b3</code>).</td></tr>
+code-setting variables, output files and git programs ask after untrusted content.</td><td><b>#1332</b>: round 4 approved <code>2a705931b3</code>; after #1321 conflicted in the tests file it
+merged main (<code>c861c9b971</code>), and the coordinator's grant (12:59Z) lets that merge commit merge on green without a re-review (the PR's lines are identical).</td></tr>
 <tr><td>sec-1309c</td><td>10-22 11:51</td><td>#1309 item 2A (coordinator call 12:02Z): the line's own relative writes, redirections, seds and <code>--output=</code> files after a <code>cd</code> that may not
 happen are judged in every folder the line may be in, like #1321 does for nested scripts.</td><td><b>#1339</b> (head <code>abc65bc18e</code>, checks running).</td></tr>
 <tr><td>tui-qa2</td><td>10-22 12:03</td><td>Interactive true-TUI checks of #1327, #1322, #1320 and #1319 on the installed <code>b0fa02105f</code> in a throwaway home, GLM 5.3 Flash on Z.AI.</td><td>Record
-<b>#1341</b> merged 12:51Z (<code>e2ddef8698</code>); filed #1340 (#1327 follow-up). No declined model step and no Z.AI balance error in its log. Writing its result at 12:52Z.</td></tr>
+<b>#1341</b> merged 12:51Z (<code>e2ddef8698</code>); filed #1340 (#1327 follow-up). <b>Finished 12:59Z</b> (EXIT 0): #1327, #1322, #1320 and #1319 all pass in the real TUI; no declined
+model step. Coordinator call: #1340 is low priority, for the next TUI batch.</td></tr>
 <tr><td>fu-1323</td><td>10-22 12:38</td><td>Explanation-only follow-ups: #1323 (a search pattern naming a protected file gets a false after-run note) and #1331 item 2 (<code>/providers</code> local-provider
 rows vary by VM). Z.AI is out of balance, so it uses unit tests and mock servers.</td><td>No PR yet (worktrees <code>fu-1323-a</code>, <code>fu-1331-b</code>).</td></tr>
 <tr><td>handoff-doc11</td><td>10-22 12:39</td><td>This update (docs-only PR).</td><td>—</td></tr>
@@ -2282,7 +2288,7 @@ issue yet.</li>
 
 <h2>12. What to do next (recommended order)</h2>
 <ol>
-<li><b>Keep the 5-minute loop</b> on the running workers (<code>$HOME/.corbanu-workers/wait-event.sh 285 sec-1261 sec-1064 sec-1309c tui-qa2 fu-1323</code>). In each round:
+<li><b>Keep the 5-minute loop</b> on the running workers (<code>$HOME/.corbanu-workers/wait-event.sh 285 sec-1261 sec-1064 sec-1309c fu-1323</code>). In each round:
 <ul>
 <li>Check <code>$W/*.request*.md</code> against the <b>newest</b> matching <code>grant*.md</code>, and <code>$W/*.hold.md</code>. Answer with <code>&lt;name&gt;.grant&lt;n&gt;.md</code> under the
 section 3 rules, and record the answer in <code>todo.md</code> and on the PR.</li>
@@ -2295,7 +2301,7 @@ The overnight window runs until 16:30Z; until then launch only decision-free wor
 <li><b>When Travis is back (about 16:30Z):</b> lead with <b>D190</b> (the Z.AI recharge blocks acct-rerun and the Windows gate) and ask whether his Windows machine is up; then D182–D189.</li>
 <li><b>After D190:</b> relaunch acct-rerun with a RECOVERY NOTE pointing at its RESUME.md; when the Windows machine is up, launch <code>win-gate-pf84</code> from <code>$W/win-gate-pf84.md</code>
 (it needs a free slot and Z.AI).</li>
-<li><b>When each running worker finishes</b>, read its result and bring its decisions to Travis: sec-1261 (#1302), sec-1064 (#1332), sec-1309c (#1339), tui-qa2 (#1341, #1340) and fu-1323.
+<li><b>When each running worker finishes</b>, read its result and bring its decisions to Travis: sec-1261 (#1302), sec-1064 (#1332), sec-1309c (#1339) and fu-1323 (tui-qa2's result is in: #1341 merged, #1340 low priority).
 Don't merge a running worker's PR.</li>
 <li><b>Decision-free work as slots free:</b> a contributor sweep (SWEEP RULE: #1336, #1337, #1338, #1342 and #1344 first; #1330/#1329; #1277 after 10-23 02:03Z with credit; Task Node acknowledgement
 requests); the #636 nightly worker; the stale-worktree and local-branch cleanup (section 10).</li>
