@@ -676,10 +676,12 @@ impl<'a> LaterWords<'a> {
 /// them on, cannot spell it: a variable's value (`$g` for `git`), or a word
 /// the lexer marked (a brace expansion, `$IFS`, a substitution's output).
 fn hidden_words(simple: &SimpleCommand, words: &[String]) -> Vec<bool> {
+    // A variable hides a word when it changes the name the reading would see
+    // (`$g` for `git`, not `"$HOME/bin/git"`).
     let mut hidden: Vec<bool> = words
         .iter()
         .zip(&simple.words)
-        .map(|(word, raw)| word != raw)
+        .map(|(word, raw)| basename(&word.to_lowercase()) != basename(&raw.to_lowercase()))
         .collect();
     for at in &simple.hidden {
         work::step();
@@ -1207,6 +1209,7 @@ impl Classifier {
         // #1268: the word lexer drops braces, so a launcher's placeholders
         // (`{}`, `{.}`) are only seen in the text as written.
         let braces = command.iter().any(|arg| arg.contains('{'));
+        let mut loops = launched_git::PositionalLoops::default();
         for (index, simple) in lexed.commands.iter().enumerate() {
             work::step();
             let (words, unseen, skipped) =
@@ -1247,6 +1250,7 @@ impl Classifier {
                 braces,
                 &mut folders,
                 &mut variables,
+                &mut loops,
                 depth,
             );
         }
@@ -1297,10 +1301,13 @@ impl Classifier {
         braces: bool,
         folders: &mut Folders,
         variables: &mut HashMap<String, String>,
+        loops: &mut launched_git::PositionalLoops,
         depth: usize,
     ) {
         let lower: Vec<String> = words.iter().map(|word| word.to_lowercase()).collect();
         let hidden = hidden_words(simple, words);
+        loops.read(simple);
+        let looped = loops.marks(simple);
         let command = indirect::command_word(words);
         // Assignments (`A=x`, `export A=x`) feed later `$A` words.
         let comment = words.first().is_some_and(|word| word.starts_with('#'));
@@ -1338,21 +1345,6 @@ impl Classifier {
                 }
             }
         }
-        // #1276: `for k;` and `select k;` (no `in`) loop over the positional
-        // parameters, which the classifier never sees (`xargs sh -c 'for k;
-        // do git config "$k" sh; done' _`): `$k` holds one, and is unseen.
-        if lower
-            .first()
-            .is_some_and(|word| matches!(word.as_str(), "for" | "select"))
-            && let Some(name) = words.get(1)
-            && lower.get(2).is_none_or(|word| word == "do")
-            && !name.is_empty()
-            && name
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        {
-            variables.insert(name.clone(), format!("$@{}", shell::UNSEEN_OUTPUT));
-        }
         if let Some((index, name)) = &command {
             let args = &words[index + 1..];
             // Code named by a variable or substitution the classifier cannot
@@ -1374,8 +1366,16 @@ impl Classifier {
             self.change_folder(name, args, folders, variables);
         }
         let mut git_config = GitConfigWrites::new(&lower, &hidden);
-        let mut launched_git =
-            launched_git::LaunchedGit::new(words, &lower, braces, self.launched, &hidden);
+        let mut launched_git = launched_git::LaunchedGit::new(
+            words,
+            &lower,
+            braces,
+            self.launched,
+            launched_git::Marks {
+                hidden: &hidden,
+                looped: &looped,
+            },
+        );
         let mut later = LaterWords::new(&lower);
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.

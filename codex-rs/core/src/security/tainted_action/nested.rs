@@ -466,6 +466,22 @@ impl Classifier {
                 collect_seds(commands, command, &texts, folders, found);
             }
             if level >= MAX_QUOTED_LEVEL {
+                // #1283: git in text this reading does not reach is judged
+                // only by the word lexer, which splits quoted values.
+                let deeper = command
+                    .words
+                    .iter()
+                    .filter(|word| word.quoted)
+                    .chain(&command.input)
+                    .chain(&command.writes_to)
+                    .chain(&command.other_text)
+                    .any(|word| {
+                        work::step();
+                        word.text.to_lowercase().contains("git")
+                    });
+                if deeper && !found.git.contains(&ProtectedActionKind::UnseenCode) {
+                    found.git.push(ProtectedActionKind::UnseenCode);
+                }
                 continue;
             }
             // Also redirection files, comments and other text the shell
@@ -534,8 +550,13 @@ impl Classifier {
         }
         let lower: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
         let mut config = GitConfigWrites::new(&lower, &[]);
-        let mut launched =
-            launched_git::LaunchedGit::new(texts, &lower, found.braces, self.launched, &[]);
+        let mut launched = launched_git::LaunchedGit::new(
+            texts,
+            &lower,
+            found.braces,
+            self.launched,
+            launched_git::Marks::default(),
+        );
         for (index, word) in lower.iter().enumerate() {
             work::step();
             // #1276: or a finder's exec option with git attached.

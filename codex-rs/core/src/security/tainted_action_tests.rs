@@ -5154,6 +5154,20 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         kind(&["git", "config", "--comment", "x --get", "core.pager", "sh"]),
         Some(ProtectedActionKind::Persistence)
     );
+    // Review 1: git deeper than the quote-aware reading goes (five `eval
+    // "..."` levels) fails closed.
+    let mut line = "git config --comment \"x --get\" core.pager sh".to_string();
+    for _ in 0..5 {
+        let escaped: String = line
+            .chars()
+            .flat_map(|ch| {
+                let escape = matches!(ch, '\\' | '"' | '$' | '`');
+                escape.then_some('\\').into_iter().chain([ch])
+            })
+            .collect();
+        line = format!("eval \"{escaped}\"");
+    }
+    assert!(script(&line).is_some(), "{line}");
     for command in [
         "git config --get core.pager",
         "git config --file \"$f\" --get core.pager",
@@ -5166,6 +5180,7 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         "sh -c 'git config --get core.pager'",
         "echo 'git config --get core.pager'",
         "printf 'user.name' | xargs git config --get",
+        "GIT_DIR=x git config --get core.pager",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
@@ -5204,6 +5219,14 @@ fn issue_1276_more_launchers_ask() {
         ("xjobs git config", Persistence),
         ("rush 'git config {}'", UnseenCode),
         ("bfs . -exec git config {} \\;", UnseenCode),
+        // Review 1: a loop over no positional parameters keeps the value
+        // the variable had.
+        ("for HOME; do :; done; echo x >> $HOME/.zshrc", Persistence),
+        ("f=~/.bashrc; for f do :; done; cat p >> $f", Persistence),
+        (
+            "xargs sh -c 'for k; do :; done; for j; do git config \"$j\" sh; done' _",
+            Persistence,
+        ),
     ] {
         assert_eq!(script(command), Some(want), "{command}");
     }

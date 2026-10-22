@@ -62,10 +62,87 @@ pub(super) struct LaunchedGit<'a> {
     /// For each word (and the end): whether, as the words after `config`,
     /// they read, and whether one of them is a positional parameter.
     seen: Option<(Vec<bool>, Vec<bool>)>,
-    /// #1283: which words the quote-aware reading cannot spell (empty when
-    /// unknown), and whether a launcher met so far was one.
-    hidden: &'a [bool],
+    /// #1283/#1276: what else is known of the words.
+    marks: Marks<'a>,
+    /// #1283: a launcher met so far was hidden.
     hidden_launcher: bool,
+}
+
+/// What else is known of a command's words (each empty when unknown).
+#[derive(Clone, Copy, Default)]
+pub(super) struct Marks<'a> {
+    /// #1283: the quote-aware reading cannot spell it (`$g` for `git`,
+    /// `{git,config}`), so it cannot check what the word lexer makes of the
+    /// words.
+    pub(super) hidden: &'a [bool],
+    /// #1276: it holds a loop variable that iterates the positional
+    /// parameters (`for k; do git config "$k"`).
+    pub(super) looped: &'a [bool],
+}
+
+/// #1276: loop variables that iterate the positional parameters (`for k;`,
+/// `select k do`, no `in`), met so far in a script. Past
+/// `MAX_LOOP_NAMES`, any variable may be one.
+#[derive(Default)]
+pub(super) struct PositionalLoops {
+    names: Vec<String>,
+    any: bool,
+}
+
+const MAX_LOOP_NAMES: usize = 8;
+
+impl PositionalLoops {
+    /// Takes in a simple command's words as written.
+    pub(super) fn read(&mut self, simple: &super::shell::SimpleCommand) {
+        let words = &simple.words;
+        let keyword = words
+            .first()
+            .is_some_and(|word| matches!(word.to_lowercase().as_str(), "for" | "select"));
+        let Some(name) = words.get(1).filter(|_| keyword) else {
+            return;
+        };
+        let iterates_positional = words.get(2).is_none_or(|word| word.to_lowercase() == "do");
+        if !iterates_positional || !is_name(name) || self.names.contains(name) {
+            return;
+        }
+        if self.names.len() == MAX_LOOP_NAMES {
+            self.any = true;
+        } else {
+            self.names.push(name.clone());
+        }
+    }
+
+    /// For each of a simple command's words as written, whether it holds
+    /// one of the loop variables (`$k`, `${k}`).
+    pub(super) fn marks(&self, simple: &super::shell::SimpleCommand) -> Vec<bool> {
+        if self.names.is_empty() && !self.any {
+            return Vec::new();
+        }
+        simple
+            .words
+            .iter()
+            .map(|word| {
+                word.match_indices('$').any(|(at, _)| {
+                    work::step();
+                    let after = &word[at + 1..];
+                    let after = after.strip_prefix('{').unwrap_or(after);
+                    let end = after
+                        .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                        .unwrap_or(after.len());
+                    let name = &after[..end];
+                    !name.is_empty() && (self.any || self.names.iter().any(|known| known == name))
+                })
+            })
+            .collect()
+    }
+}
+
+fn is_name(word: &str) -> bool {
+    !word.is_empty()
+        && !word.starts_with(|ch: char| ch.is_ascii_digit())
+        && word
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 impl<'a> LaunchedGit<'a> {
@@ -77,7 +154,7 @@ impl<'a> LaunchedGit<'a> {
         lower: &'a [String],
         braces: bool,
         launched: Launch,
-        hidden: &'a [bool],
+        marks: Marks<'a>,
     ) -> Self {
         Self {
             words,
@@ -93,13 +170,13 @@ impl<'a> LaunchedGit<'a> {
             replacements: Vec::new(),
             any_replacement: launched.replaced,
             seen: None,
-            hidden,
+            marks,
             hidden_launcher: false,
         }
     }
 
     fn hidden(&self, index: usize) -> bool {
-        self.hidden.get(index).copied().unwrap_or(false)
+        self.marks.hidden.get(index).copied().unwrap_or(false)
     }
 
     /// Whether a launcher's input words may be put inside the words that
@@ -358,12 +435,15 @@ impl<'a> LaunchedGit<'a> {
 
     fn seen(&mut self) -> &(Vec<bool>, Vec<bool>) {
         let words = self.lower;
+        let looped = self.marks.looped;
         self.seen.get_or_insert_with(|| {
             let reads = outputs::git_config_reads_each(words);
             let mut positional = vec![false; words.len() + 1];
             for (at, word) in words.iter().enumerate().rev() {
                 work::step();
-                positional[at] = positional[at + 1] || holds_positional(word);
+                positional[at] = positional[at + 1]
+                    || holds_positional(word)
+                    || looped.get(at).copied().unwrap_or(false);
             }
             (reads, positional)
         })
@@ -402,7 +482,7 @@ fn holds_positional(word: &str) -> bool {
 /// with its input in the script these words are in.
 pub(super) fn launches(texts: &[String], braces: bool, inherited: Launch) -> Vec<Launch> {
     let lower: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
-    let mut launched = LaunchedGit::new(texts, &lower, braces, inherited, &[]);
+    let mut launched = LaunchedGit::new(texts, &lower, braces, inherited, Marks::default());
     let mut each = Vec::with_capacity(texts.len() + 1);
     for index in 0..=texts.len() {
         work::step();
