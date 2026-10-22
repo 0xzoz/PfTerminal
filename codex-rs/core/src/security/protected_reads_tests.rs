@@ -366,8 +366,7 @@ fn issue_554_recursive_listing_of_a_parent_is_attributed_to_the_home() {
 
 /// #442 (milestone AGG-09): under Aggressive a denied read of a protected
 /// file is explained where it failed, naming the level and /security; it is
-/// not explained under Permissive, for a command that succeeded, or for a
-/// failure that is not a denial.
+/// not explained under Permissive or for a failure that is not a denial.
 #[tokio::test]
 async fn issue_442_denied_protected_read_is_explained_under_aggressive() {
     let (session, turn) = crate::session::tests::make_session_and_context().await;
@@ -411,7 +410,9 @@ async fn issue_442_denied_protected_read_is_explained_under_aggressive() {
         explanation.contains("switch to Permissive in /security"),
         "{explanation}"
     );
-    assert_eq!(explain(0, denial).await, None);
+    // #1312: a denial is explained also when the command as a whole
+    // exited 0 (a later command on the line hid the failure).
+    assert_eq!(explain(0, denial).await, Some(explanation));
     assert_eq!(
         explain(1, "cat: auth.json: No such file or directory\n").await,
         None
@@ -1374,4 +1375,78 @@ async fn issue_997_unit_test_lookups_outlast_the_production_bound() {
         Some("found")
     });
     assert_eq!(slow.await, Some("found"));
+}
+
+/// #1312 (local-model run 3, AGG-20P-A): under Aggressive, a denied write
+/// outside the current folder is explained where it failed even when a
+/// later command on the same line makes the whole command exit 0, as it is
+/// when the denied write is the last command; and so is a start-up file. A
+/// command with no denial line, or no known exit, is left alone.
+#[cfg(unix)]
+#[tokio::test]
+async fn issue_1312_denial_hidden_by_a_later_command_is_explained() {
+    let (session, turn) = crate::session::tests::make_session_and_context().await;
+    #[allow(deprecated)]
+    let cwd = turn.cwd.clone();
+    let user_home = dirs::home_dir().expect("a home folder");
+    let explain = async |script: &str, exit_code: Option<i32>, output: &str| {
+        denial_explanation(
+            &session,
+            &turn,
+            &shell(script),
+            cwd.as_path(),
+            exit_code,
+            output,
+        )
+        .await
+    };
+    let outside = "echo x >> ../outside-notes.txt; echo \"exit=$?\"";
+    let outside_denied = "/bin/bash: ../outside-notes.txt: Operation not permitted\nexit=1\n";
+    let startup = "echo '# x' >> ~/.zshrc; echo \"exit=$?\"";
+    let startup_denied = format!(
+        "zsh:1: operation not permitted: {}\nexit=1\n",
+        user_home.join(".zshrc").display()
+    );
+    assert_eq!(
+        explain(outside, Some(0), outside_denied).await,
+        None,
+        "Permissive"
+    );
+
+    aggressive(&session);
+    for exit_code in [Some(1), Some(0)] {
+        assert_eq!(
+            explain(outside, exit_code, outside_denied).await,
+            Some(outside_folder_explanation("../outside-notes.txt")),
+            "{exit_code:?}"
+        );
+        assert_eq!(
+            explain(startup, exit_code, &startup_denied).await,
+            Some(startup_explanation("~/.zshrc")),
+            "{exit_code:?}"
+        );
+    }
+    assert_eq!(
+        explain(outside, Some(0), "exit=0\n").await,
+        None,
+        "no denial"
+    );
+    assert_eq!(
+        explain(outside, None, outside_denied).await,
+        None,
+        "no exit"
+    );
+    let denials = recent_denials(&session, &turn);
+    for reason in [
+        "writing outside the current folder",
+        "writing a start-up file outside the current folder",
+    ] {
+        assert!(
+            denials.contains(&(
+                reason,
+                "denied by the sandbox; never granted under Aggressive"
+            )),
+            "{denials:?}"
+        );
+    }
 }

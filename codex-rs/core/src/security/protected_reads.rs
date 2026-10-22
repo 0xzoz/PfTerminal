@@ -662,11 +662,16 @@ async fn off_thread<T: Send + 'static>(
         .ok()?
 }
 
-/// The explanation for a command that just failed with a known non-zero
-/// exit, when an output line reports a denial of a protected path the
-/// command names (or the command's folder is itself protected), or of a
-/// protected path the line itself reports (#621: a path the command built
-/// at run time, such as an interpreter's `os.listdir(...)`).
+/// The explanation for a command that just finished with a known exit,
+/// when an output line reports a denial of a protected path the command
+/// names (or the command's folder is itself protected), or of a protected
+/// path the line itself reports (#621: a path the command built at run
+/// time, such as an interpreter's `os.listdir(...)`).
+///
+/// #1312: also when the exit is 0: a later command on the same line
+/// (`echo x >> ../notes.txt; echo "exit=$?"`) can hide the denied one's
+/// failure, and the denial line still names what was refused. Only the
+/// keychain note, which has no denial line, needs a failed exit.
 ///
 /// #622: a denial explained here is also listed under the inspector's
 /// recent denials.
@@ -678,12 +683,11 @@ pub(crate) async fn denial_explanation(
     exit_code: Option<i32>,
     output: &str,
 ) -> Option<String> {
-    if !matches!(exit_code, Some(code) if code != 0) {
-        return None;
-    }
+    let failed = exit_code? != 0;
     // #736: a keychain command fails without a file denial: the keychain
     // service is out of reach of the sandbox.
-    if keychain_command(command)
+    if failed
+        && keychain_command(command)
         && ReadPolicyInputs::capture(session, turn).is_some_and(|inputs| inputs.keychain_closed)
     {
         super::inspection::record_sandbox_denial(
