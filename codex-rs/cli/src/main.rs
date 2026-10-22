@@ -2071,9 +2071,15 @@ fn secret_argument_error(err: &clap::Error, args: &[std::ffi::OsString]) -> Opti
     use clap::error::ContextKind;
     use clap::error::ContextValue;
     use clap::error::ErrorKind;
+    // A value attached to an on/off flag (`--with-api-key=<key>`) is a
+    // `TooManyValues` error; a rejected value names it as well.
     if !matches!(
         err.kind(),
-        ErrorKind::UnknownArgument | ErrorKind::InvalidSubcommand
+        ErrorKind::UnknownArgument
+            | ErrorKind::InvalidSubcommand
+            | ErrorKind::TooManyValues
+            | ErrorKind::InvalidValue
+            | ErrorKind::ValueValidation
     ) {
         return None;
     }
@@ -2083,19 +2089,16 @@ fn secret_argument_error(err: &clap::Error, args: &[std::ffi::OsString]) -> Opti
     {
         return None;
     }
-    let offending = [ContextKind::InvalidArg, ContextKind::InvalidSubcommand]
-        .into_iter()
-        .find_map(|kind| match err.get(kind) {
-            Some(ContextValue::String(value)) => Some(value.as_str()),
-            _ => None,
-        })
-        .unwrap_or_default();
     // An unknown flag without a value is safe to name.
-    if offending.starts_with('-') && !offending.contains('=') {
+    if matches!(err.kind(), ErrorKind::UnknownArgument)
+        && let Some(ContextValue::String(flag)) = err.get(ContextKind::InvalidArg)
+        && flag.starts_with('-')
+        && !flag.contains('=')
+    {
         return None;
     }
     Some(
-        "error: unexpected argument (not shown, in case it is a key or token)\n\n\
+        "error: unexpected or invalid argument (not shown, in case it is a key or token)\n\n\
          Keys and tokens are read from stdin, never from the command line, for example \
          `printenv OPENAI_API_KEY | corbanu login --with-api-key` or \
          `printenv ZAI_API_KEY | corbanu account add zai <name>`. If you typed a key, it may \

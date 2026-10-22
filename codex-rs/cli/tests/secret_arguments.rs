@@ -50,6 +50,16 @@ fn a_key_on_the_command_line_is_not_repeated_in_the_usage_error() -> Result<()> 
                     .and(contains(KEY_CANARY).not()),
             );
     }
+    // A value attached to an on/off flag is not shown either.
+    for flag in ["--with-api-key", "--with-access-token"] {
+        corbanu(home.path())?
+            .arg("login")
+            .arg(format!("{flag}={KEY_CANARY}"))
+            .write_stdin("")
+            .assert()
+            .code(2)
+            .stderr(contains("not shown").and(contains(KEY_CANARY).not()));
+    }
     // An unknown flag is named without the value assigned to it.
     corbanu(home.path())?
         .args(["account", "add", "zai", "work"])
