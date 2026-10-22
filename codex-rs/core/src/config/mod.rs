@@ -1263,7 +1263,9 @@ pub struct Config {
 
     /// #1038: this new conversation continues a saved one whose first
     /// message the person edited. Its warm-up is a reopen warm-up (#403),
-    /// as when a later message is edited. Set per thread, never from TOML.
+    /// as when a later message is edited. Set per thread, never from TOML;
+    /// read once at session start. Agents spawned from this config inherit
+    /// it to no effect: only a root session can be a reopen.
     pub reopened_by_prompt_edit: bool,
 
     /// The currently active project config, resolved by checking if cwd:
