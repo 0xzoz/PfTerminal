@@ -278,6 +278,15 @@ fingerprint.
   as Z.AI) can still sign in, select and use a named ChatGPT account.
 - A named account with no usable sign-in is refused with the reason and its
   recovery; a request is never sent without its credentials.
+- An account removed or signed out while a session runs on it (from any
+  terminal, for example `corbanu account remove openai work`) is not used
+  again: the session's next request is refused with "account `work` has no
+  sign-in (it may have been removed or signed out)" and the recovery
+  (`corbanu login --account work`, or another account in `/providers` or with
+  `--account`), never sent on the sign-in the session still held or on the
+  default login. `/status` then shows `account unavailable` on the provider
+  line and the recovery on the Account line; Account usage still lists what
+  the session used on `work`.
 - Signing the same ChatGPT user in under two accounts (or as `default` and a
   named account) is allowed with a warning: they share that user's limits,
   and signing out of one can end the other's session.
