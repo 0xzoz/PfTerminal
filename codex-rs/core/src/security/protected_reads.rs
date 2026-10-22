@@ -662,11 +662,18 @@ async fn off_thread<T: Send + 'static>(
         .ok()?
 }
 
-/// The explanation for a command that just failed with a known non-zero
-/// exit, when an output line reports a denial of a protected path the
-/// command names (or the command's folder is itself protected), or of a
-/// protected path the line itself reports (#621: a path the command built
-/// at run time, such as an interpreter's `os.listdir(...)`).
+/// The explanation for a command that just finished with a known exit,
+/// when an output line reports a denial of a protected path the command
+/// names (or the command's folder is itself protected), or of a protected
+/// path the line itself reports (#621: a path the command built at run
+/// time, such as an interpreter's `os.listdir(...)`).
+///
+/// #1312: also when the exit is 0: a later command on the same line
+/// (`echo x >> ../notes.txt; echo "exit=$?"`) can hide the denied one's
+/// failure. Then only a path the command itself names, and a denial line
+/// names too, is explained: output alone (a search printing old denial
+/// lines) proves nothing was denied. The keychain note, which has no denial
+/// line, needs a failed exit.
 ///
 /// #622: a denial explained here is also listed under the inspector's
 /// recent denials.
@@ -678,12 +685,11 @@ pub(crate) async fn denial_explanation(
     exit_code: Option<i32>,
     output: &str,
 ) -> Option<String> {
-    if !matches!(exit_code, Some(code) if code != 0) {
-        return None;
-    }
+    let failed = exit_code? != 0;
     // #736: a keychain command fails without a file denial: the keychain
     // service is out of reach of the sandbox.
-    if keychain_command(command)
+    if failed
+        && keychain_command(command)
         && ReadPolicyInputs::capture(session, turn).is_some_and(|inputs| inputs.keychain_closed)
     {
         super::inspection::record_sandbox_denial(
@@ -705,7 +711,7 @@ pub(crate) async fn denial_explanation(
         // #839: listed under the inspector's recent denials, as under
         // Aggressive (#622).
         let (denied, explanation) =
-            moderate::denial_explanation(inputs, command, cwd, denial_lines).await?;
+            moderate::denial_explanation(inputs, command, cwd, denial_lines, failed).await?;
         let (what, outcome) = denied.inspected();
         super::inspection::record_refusal(session.thread_id(), what, outcome);
         return Some(explanation);
@@ -714,7 +720,9 @@ pub(crate) async fn denial_explanation(
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
     let found = off_thread(move || {
         let matcher = inputs.matcher(&cwd)?;
-        if matcher.is_read_denied(&cwd) {
+        // #1312: the steps that go by the output or the folder alone, not
+        // by a path the command names, need a failed command.
+        if failed && matcher.is_read_denied(&cwd) {
             return Some(ProtectedNote::Read(cwd.display().to_string()));
         }
         let word = |denied: &dyn Fn(&Path) -> bool| {
@@ -744,7 +752,8 @@ pub(crate) async fn denial_explanation(
             // folder as `.` or by its name).
             .or_else(|| {
                 let name = cwd.file_name()?.to_str()?.to_string();
-                (matcher.is_listing_denied(&cwd)
+                (failed
+                    && matcher.is_listing_denied(&cwd)
                     && denial_lines.iter().any(|line| {
                         line.contains(&name) || line.contains(" .:") || line.contains("'.'")
                     }))
@@ -753,6 +762,9 @@ pub(crate) async fn denial_explanation(
             // #554: a folder above the home listed recursively (`find ~`,
             // `ls -aR ~`): the denial line names the home below it.
             .or_else(|| {
+                if !failed {
+                    return None;
+                }
                 unlistable_path_in_lines(
                     &command,
                     &cwd,
@@ -826,6 +838,9 @@ pub(crate) async fn denial_explanation(
             // of the command names (built at run time). Bounded: only the
             // first lines are looked at.
             .or_else(|| {
+                if !failed {
+                    return None;
+                }
                 let lines = &denial_lines[..denial_lines.len().min(MAX_REPORTED_LINES)];
                 in_lines(lines, &|path| matcher.is_read_denied(path)).map(ProtectedNote::Read)
             })

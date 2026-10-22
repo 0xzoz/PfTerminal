@@ -5815,6 +5815,87 @@ fn issue_988_989_checks_are_linear() {
     }
 }
 
+/// #1309: a `cd` the quote-aware reading follows may not happen (it fails,
+/// runs behind a condition, in a subshell or in a background job), so a
+/// later nested script is judged in every folder the line may be in; past
+/// `MAX_POSSIBLE_FOLDERS` the folder is unknown.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1309_changes_that_may_not_happen_ask() {
+    for command in [
+        "cd ~; cd /nonexistent; sh -c 'echo x >> .zshenv'",
+        "cd ~; false && cd /tmp; sh -c 'echo x >> .zshenv'",
+        "cd ~; true || cd /tmp; sh -c 'echo x >> .zshenv'",
+        "cd ~; if false; then cd /tmp; fi; sh -c 'echo x >> .zshenv'",
+        "cd ~; (cd /tmp); sh -c 'echo x >> .zshenv'",
+        "cd ~; (cd /tmp; make); sh -c 'echo x >> .zshenv'",
+        "cd ~; cd /tmp & sh -c 'echo x >> .zshenv'",
+        "cd ~; cd /tmp | cat; sh -c 'echo x >> .zshenv'",
+        "cd ~; pushd /nonexistent; sh -c 'echo x >> .zshenv'",
+        "pushd ~; cd /nonexistent; popd; sh -c 'echo x >> .zshenv'",
+        // A relative change from each folder the line may be in.
+        "cd ~/x; cd /nonexistent; cd ..; sh -c 'echo x >> .zshenv'",
+        // A launcher's script, and an output file.
+        "cd ~; cd /nonexistent; xargs sh -c 'echo x >> .zshenv'",
+        "cd ~; cd /nonexistent; sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+        // Past the cap the folder is unknown.
+        "cd /a; cd /b; cd /c; cd /d; sh -c 'echo x >> .zshenv'",
+        "cd a; cd b; cd c; sh -c 'echo x >> .zshenv'",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+    // Already asked on main; kept as regressions.
+    for command in [
+        "cd ~; sh -c 'cd /nonexistent; sh -c \"echo x >> .zshenv\"'",
+        "cd ~; cd /nonexistent; sh <<< 'echo x >> .zshenv'",
+    ] {
+        assert!(script(command).is_some(), "{command}");
+    }
+    for command in [
+        "cd sub && sh -c 'make > log'",
+        "cd /tmp; sh -c 'echo x > out.txt'",
+        "(cd sub && make); sh -c 'make > log'",
+        "cd a && cd b && sh -c 'make > log'",
+        "cd /a; cd /b; cd /c; sh -c 'echo x > out.txt'",
+        "cd /a; cd /b; cd /c; sh -c 'echo x >> .zshenv'",
+        "pushd /tmp; popd; sh -c 'echo x > out.txt'",
+        "cd ~; cd /tmp; sh -c 'echo x > /tmp/out.txt'",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1309: following every folder the line may be in stays linear.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1309_possible_folders_are_linear() {
+    for (label, unit) in [
+        ("absolute changes", "cd /b; sh -c 'echo x > a'; "),
+        (
+            "alternating changes",
+            "cd /a || cd /b; sh -c 'echo x > a'; ",
+        ),
+        ("subshell changes", "(cd /b); sh -c 'echo x > a'; "),
+        // Relative ones that do not grow the followed path (a chain that
+        // does is super-linear on main too, up to `MAX_FOLDER_BYTES`).
+        ("relative changes", "cd b; cd ..; sh -c 'echo x > a'; "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let _ = script(&unit.repeat(100 * scale));
+        });
+    }
+}
+
 /// #1064: other ways the shell runs text from a value or an operand: prompt
 /// variables, zsh `print -P`, namerefs, computed `${v@op}` transformations,
 /// and commands or options that run an operand as a command.

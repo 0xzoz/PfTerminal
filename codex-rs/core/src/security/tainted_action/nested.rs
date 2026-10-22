@@ -13,6 +13,7 @@ use super::Classifier;
 use super::FileText;
 use super::Folders;
 use super::GitConfigWrites;
+use super::MAX_FOLDER_BYTES;
 use super::ProtectedActionKind;
 use super::WRITERS;
 use super::git_helpers;
@@ -40,6 +41,11 @@ const MAX_QUOTED_LEVEL: usize = 4;
 
 /// Nested scripts judged for one action; more fail closed.
 const MAX_NESTED_SCRIPTS: usize = 256;
+
+/// #1309: folders a line may be in after changes that may not have
+/// happened, each judged for the scripts it runs; more and the folder is
+/// unknown.
+const MAX_POSSIBLE_FOLDERS: usize = 4;
 
 /// Scripts, sed calls and written files one reading collects (#1065);
 /// more fail closed.
@@ -201,6 +207,7 @@ impl Classifier {
             stack: std::rc::Rc::default(),
             unfollowed: false,
             unchecked: false,
+            others: Vec::new(),
         };
         let mut found = Found {
             braces: command.iter().any(|arg| arg.contains('{')),
@@ -311,7 +318,7 @@ impl Classifier {
             if !command.substituted
                 && let Some((index, name)) = &command_at
             {
-                self.change_folder(name, &texts[index + 1..], folders, &mut HashMap::new());
+                self.follow_change(name, &texts[index + 1..], folders);
                 // #1283: `cd "$d"` goes where this reading cannot follow.
                 folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
                     && texts[index + 1..].iter().any(|text| {
@@ -380,12 +387,7 @@ impl Classifier {
             let unknown = folders.unchecked || elsewhere;
             for (word, script) in replaced_shell_scripts(&texts, &launches, &mut found.unreadable) {
                 work::step();
-                found.scripts.push((
-                    script,
-                    folders.cwd.clone(),
-                    replaced(launches[word]),
-                    unknown,
-                ));
+                push_script(found, folders, script, replaced(launches[word]), unknown);
             }
             // #1309: an option the command-word reading does not know may
             // hide the shell such a command runs (`env -iC ~ sh -c`,
@@ -405,12 +407,13 @@ impl Classifier {
                     replaced_shell_scripts(&texts, &anywhere, &mut found.unreadable)
                 {
                     work::step();
-                    found.scripts.push((
+                    push_script(
+                        found,
+                        folders,
                         script,
-                        folders.cwd.clone(),
                         replaced(launches[word]),
-                        true,
-                    ));
+                        /*unknown*/ true,
+                    );
                 }
             }
             let (starts, overflow) = sed::command_starts(&texts);
@@ -451,12 +454,7 @@ impl Classifier {
                         roles[word] = Role::Script;
                         // Input words a launcher adds go to the wrapper's
                         // line (`xargs env -S'git config'`).
-                        found.scripts.push((
-                            script,
-                            folders.cwd.clone(),
-                            launches[wrapper],
-                            unknown,
-                        ));
+                        push_script(found, folders, script, launches[wrapper], unknown);
                         runners += 1;
                     }
                     // Too many shell strings in one command: fail closed.
@@ -520,9 +518,7 @@ impl Classifier {
                             fed: true,
                             replaced: launches[end].replaced,
                         };
-                        found
-                            .scripts
-                            .push((line, folders.cwd.clone(), launch, unknown));
+                        push_script(found, folders, line, launch, unknown);
                     }
                 }
                 if resolved_name == "eval" {
@@ -544,12 +540,7 @@ impl Classifier {
                             &mut joined_left,
                             &mut found.unreadable,
                         );
-                        found.scripts.push((
-                            line,
-                            folders.cwd.clone(),
-                            replaced(launches[at]),
-                            unknown,
-                        ));
+                        push_script(found, folders, line, replaced(launches[at]), unknown);
                     }
                     continue;
                 }
@@ -569,12 +560,13 @@ impl Classifier {
                         for candidate in candidates {
                             work::step();
                             roles[candidate] = Role::Script;
-                            found.scripts.push((
+                            push_script(
+                                found,
+                                folders,
                                 texts[candidate].clone(),
-                                folders.cwd.clone(),
                                 replaced(launches[at]),
                                 unknown,
-                            ));
+                            );
                         }
                     }
                     // A here-string or here-document the shell reads.
@@ -582,12 +574,13 @@ impl Classifier {
                         input_role = Role::Script;
                         for input in &command.input {
                             work::step();
-                            found.scripts.push((
+                            push_script(
+                                found,
+                                folders,
                                 input.text.clone(),
-                                folders.cwd.clone(),
                                 replaced(launches[at]),
                                 unknown,
-                            ));
+                            );
                         }
                     }
                     _ => {}
@@ -641,6 +634,7 @@ impl Classifier {
                     stack: folders.stack.clone(),
                     unfollowed: false,
                     unchecked: folders.unchecked,
+                    others: folders.others.clone(),
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;
@@ -865,6 +859,57 @@ impl Classifier {
         }
     }
 
+    /// #1309: follow a folder change and keep every folder the line may be
+    /// in after it: a `cd` may fail, or run behind a condition, in a
+    /// subshell or in a background job. Those are the folders before it and
+    /// its target from each of them; past `MAX_POSSIBLE_FOLDERS`, or one
+    /// too long, the folder is unknown.
+    fn follow_change(&self, name: &str, args: &[String], folders: &mut Folders) {
+        let before = folders.cwd.clone();
+        if !self.change_folder(name, args, folders, &mut HashMap::new()) {
+            return;
+        }
+        if folders.unchecked {
+            folders.others.clear();
+            return;
+        }
+        // A relative target is reached from each folder; any other
+        // (`cd`, `popd`, an absolute one) is the same from all.
+        let relative = matches!(name, "cd" | "pushd")
+            .then(|| {
+                args.iter()
+                    .find(|word| !word.starts_with('-') || *word == "-")
+            })
+            .flatten()
+            .filter(|target| *target != "-");
+        let mut possible = vec![before];
+        possible.append(&mut folders.others);
+        let mut reached = Vec::new();
+        for from in &possible {
+            work::step();
+            reached.push(match relative {
+                Some(target) => self.homes.resolve(target, from),
+                None => folders.cwd.clone(),
+            });
+        }
+        possible.extend(reached);
+        for folder in possible {
+            work::step();
+            if folder != folders.cwd && !folders.others.contains(&folder) {
+                folders.others.push(folder);
+            }
+        }
+        if folders.others.len() >= MAX_POSSIBLE_FOLDERS
+            || folders
+                .others
+                .iter()
+                .any(|folder| folder.len() > MAX_FOLDER_BYTES)
+        {
+            folders.unchecked = true;
+            folders.others.clear();
+        }
+    }
+
     /// Whether the action runs a script that may be `target` (by name;
     /// `None` is a file the classifier cannot name).
     fn may_run(&self, target: Option<&str>) -> bool {
@@ -879,6 +924,28 @@ impl Classifier {
             }
         }
     }
+}
+
+/// #1309: a script, judged in every folder the line may be in (once when
+/// its folder is unknown anyway).
+fn push_script(
+    found: &mut Found,
+    folders: &Folders,
+    script: String,
+    launch: launched_git::Launch,
+    unknown: bool,
+) {
+    if !unknown {
+        for other in &folders.others {
+            work::step();
+            found
+                .scripts
+                .push((script.clone(), other.clone(), launch, false));
+        }
+    }
+    found
+        .scripts
+        .push((script, folders.cwd.clone(), launch, unknown));
 }
 
 fn collect_seds(

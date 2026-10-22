@@ -341,6 +341,7 @@ fn issue_839_explained_denials_say_what_was_denied() {
             &command,
             &fixture.project,
             &lines,
+            /*failed*/ true,
         )
         .map(|(denied, _)| denied)
     };
@@ -354,6 +355,34 @@ fn issue_839_explained_denials_say_what_was_denied() {
             "denied by the sandbox under Moderate"
         )
     );
+}
+
+/// #1312: a command that exited 0 is explained only by a protected path it
+/// names itself (a later command hid the failure); a denial line in its
+/// output alone (a search printing old denial lines) explains nothing.
+#[test]
+fn issue_1312_exit_zero_needs_a_path_the_command_names() {
+    let fixture = Fixture::new();
+    let auth = format!("{}/auth.json", fixture.home.display());
+    let lines = [format!("notes.md:3:cat: {auth}: Operation not permitted")];
+    let denied = |script: String, failed: bool| {
+        explain_denied(
+            &fixture.inputs(Fixture::profile()),
+            /*contract*/ None,
+            &["/bin/bash".to_string(), "-c".to_string(), script],
+            &fixture.project,
+            &lines,
+            failed,
+        )
+        .map(|(denied, _)| denied)
+    };
+    let named = format!("cat '{auth}'; echo \"exit=$?\"");
+    assert_eq!(denied(named.clone(), /*failed*/ true), Some(Denied::Read));
+    assert_eq!(denied(named, /*failed*/ false), Some(Denied::Read));
+    // The output alone: explained only for a failed command (#621).
+    let search = "rg -n 'not permitted' notes.md".to_string();
+    assert_eq!(denied(search.clone(), /*failed*/ true), Some(Denied::Read));
+    assert_eq!(denied(search, /*failed*/ false), None);
 }
 
 /// #1087 (MOD-09 item 5): an in-process file tool's read (the image tool's)
