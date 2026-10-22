@@ -1,11 +1,19 @@
-//! The named-account device sign-in lives only as long as its waiting view.
+//! Dismissing named-account sign-in cancels pending authorization. Once saving
+//! starts, the task keeps ownership of persistence and delivers its final result.
 
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
+use std::sync::atomic::Ordering;
+use std::task::Context;
+use std::task::Poll;
+use std::task::Waker;
 use std::time::Duration;
 use std::time::Instant;
 
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
-use futures::FutureExt;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Stylize;
@@ -29,12 +37,52 @@ pub(crate) struct NamedAccountLoginCode {
     pub(crate) user_code: String,
 }
 
+const WAITING: u8 = 0;
+const PERSISTING: u8 = 1;
+const CANCELLED: u8 = 2;
+const FINISHED: u8 = 3;
+
+/// Arbitrates cancellation against the first non-abortable credential write.
+#[derive(Clone, Default)]
+pub(crate) struct NamedAccountLoginState(Arc<AtomicU8>);
+
+impl NamedAccountLoginState {
+    pub(crate) fn begin_persistence(&self) -> std::io::Result<()> {
+        self.0
+            .compare_exchange(WAITING, PERSISTING, Ordering::AcqRel, Ordering::Acquire)
+            .map(|_| ())
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::Interrupted, "Sign-in cancelled"))
+    }
+
+    fn cancel_pending(&self) -> bool {
+        self.0
+            .compare_exchange(WAITING, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn is_persisting(&self) -> bool {
+        self.0.load(Ordering::Acquire) == PERSISTING
+    }
+
+    pub(crate) fn finish(&self, sender: &AppEventSender, result: Result<String, String>) {
+        if matches!(
+            self.0.swap(FINISHED, Ordering::AcqRel),
+            WAITING | PERSISTING
+        ) {
+            sender.send(AppEvent::ProviderAccount(ProviderAccountEvent::Finished {
+                result,
+            }));
+        }
+    }
+}
+
 impl ChatWidget {
     pub(crate) fn open_named_account_login(
         &mut self,
         account_label: String,
         codes: UnboundedReceiver<NamedAccountLoginCode>,
-        task: JoinHandle<Result<String, String>>,
+        task: JoinHandle<()>,
+        state: NamedAccountLoginState,
     ) {
         self.bottom_pane.show_view(Box::new(NamedAccountLoginView {
             account_label,
@@ -42,6 +90,7 @@ impl ChatWidget {
             codes,
             code: None,
             task,
+            state,
             completion: None,
         }));
     }
@@ -52,7 +101,8 @@ struct NamedAccountLoginView {
     app_event_tx: AppEventSender,
     codes: UnboundedReceiver<NamedAccountLoginCode>,
     code: Option<NamedAccountLoginCode>,
-    task: JoinHandle<Result<String, String>>,
+    task: JoinHandle<()>,
+    state: NamedAccountLoginState,
     completion: Option<ViewCompletion>,
 }
 
@@ -66,19 +116,20 @@ impl NamedAccountLoginView {
             self.code = Some(code);
             changed = true;
         }
-        if let Some(result) = (&mut self.task).now_or_never() {
-            let result = result.unwrap_or_else(|_| {
-                Err(format!(
-                    "Sign-in of {} did not complete.",
-                    self.account_label
-                ))
-            });
+        if let Poll::Ready(result) =
+            Pin::new(&mut self.task).poll(&mut Context::from_waker(Waker::noop()))
+        {
+            if result.is_err() {
+                self.state.finish(
+                    &self.app_event_tx,
+                    Err(format!(
+                        "Sign-in of {} did not complete.",
+                        self.account_label
+                    )),
+                );
+            }
             self.completion = Some(ViewCompletion::Accepted);
             self.code = None;
-            self.app_event_tx
-                .send(AppEvent::ProviderAccount(ProviderAccountEvent::Finished {
-                    result,
-                }));
             changed = true;
         }
         changed
@@ -90,14 +141,16 @@ impl NamedAccountLoginView {
         if self.completion.is_some() {
             return;
         }
-        self.task.abort();
+        if self.state.cancel_pending() {
+            self.task.abort();
+            self.app_event_tx
+                .send(AppEvent::ProviderAccount(ProviderAccountEvent::Finished {
+                    result: Ok(format!("Cancelled sign-in of {}.", self.account_label)),
+                }));
+        }
         self.codes.close();
         self.code = None;
         self.completion = Some(ViewCompletion::Cancelled);
-        self.app_event_tx
-            .send(AppEvent::ProviderAccount(ProviderAccountEvent::Finished {
-                result: Ok(format!("Cancelled sign-in of {}.", self.account_label)),
-            }));
     }
 
     fn lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -108,7 +161,14 @@ impl NamedAccountLoginView {
             Line::from(format!("Sign in {}", self.account_label).bold()),
             Line::from(""),
         ];
-        if let Some(code) = &self.code {
+        if self.state.is_persisting() {
+            lines.push(Line::from("Finishing the sign-in…").dim());
+            lines.push(
+                Line::from("Esc or Ctrl-C closes this screen; the sign-in result will appear.")
+                    .dim(),
+            );
+            return crate::wrapping::word_wrap_lines(&lines, width.max(1) as usize);
+        } else if let Some(code) = &self.code {
             lines.extend([
                 Line::from("Open this link in your browser and sign in:"),
                 Line::from(code.verification_url.clone().cyan().underlined()),
@@ -130,8 +190,11 @@ impl NamedAccountLoginView {
 
 impl Drop for NamedAccountLoginView {
     fn drop(&mut self) {
-        // Closing the pane or application must not detach a pending sign-in.
-        self.task.abort();
+        // A pending request stops, but a started save and its real result must
+        // survive dismissal. The task delivers that result through the app.
+        if self.state.cancel_pending() {
+            self.task.abort();
+        }
     }
 }
 

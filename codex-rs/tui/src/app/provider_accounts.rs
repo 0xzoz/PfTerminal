@@ -248,44 +248,53 @@ impl App {
         let keyring_kind = self.config.auth_keyring_backend_kind();
         let account_label = format!("{provider_id} account `{name}`");
         let (code_tx, codes) = tokio::sync::mpsc::unbounded_channel();
+        let state = crate::chatwidget::named_account_login::NamedAccountLoginState::default();
+        let task_state = state.clone();
+        let tx = self.app_event_tx.clone();
         let task = tokio::spawn(async move {
-            let code = codex_login::request_device_code(&opts)
-                .await
-                .map_err(|error| {
-                    format!(
-                        "Could not start the sign-in of {provider_id} account `{name}`: {error}"
+            let result = async {
+                let code = codex_login::request_device_code(&opts)
+                    .await
+                    .map_err(|error| {
+                        format!(
+                            "Could not start the sign-in of {provider_id} account `{name}`: {error}"
+                        )
+                    })?;
+                code_tx
+                    .send(
+                        crate::chatwidget::named_account_login::NamedAccountLoginCode {
+                            verification_url: code.verification_url.clone(),
+                            user_code: code.user_code.clone(),
+                        },
                     )
-                })?;
-            code_tx
-                .send(
-                    crate::chatwidget::named_account_login::NamedAccountLoginCode {
-                        verification_url: code.verification_url.clone(),
-                        user_code: code.user_code.clone(),
-                    },
-                )
-                .map_err(|_| "The sign-in screen was closed.".to_string())?;
-            codex_login::complete_device_code_login(opts, code)
+                    .map_err(|_| "The sign-in screen was closed.".to_string())?;
+                codex_login::complete_device_code_login_with_persistence_guard(opts, code, || {
+                    task_state.begin_persistence()
+                })
                 .await
                 .map_err(|error| {
                     format!("Sign-in of {provider_id} account `{name}` failed: {error}")
                 })?;
-            // Vault and default-login reads block; keep them off the runtime.
-            let message = tokio::task::spawn_blocking(move || {
-                signed_in_message(
-                    &codex_home,
-                    &provider_id,
-                    &name,
-                    &account,
-                    store_mode,
-                    keyring_kind,
-                )
-            })
-            .await
-            .unwrap_or_else(|_| "Signed in.".to_string());
-            Ok(message)
+                // Vault and default-login reads block; keep them off the runtime.
+                let message = tokio::task::spawn_blocking(move || {
+                    signed_in_message(
+                        &codex_home,
+                        &provider_id,
+                        &name,
+                        &account,
+                        store_mode,
+                        keyring_kind,
+                    )
+                })
+                .await
+                .unwrap_or_else(|_| "Signed in.".to_string());
+                Ok(message)
+            }
+            .await;
+            task_state.finish(&tx, result);
         });
         self.chat_widget
-            .open_named_account_login(account_label, codes, task);
+            .open_named_account_login(account_label, codes, task, state);
     }
 
     fn run_provider_account_job(

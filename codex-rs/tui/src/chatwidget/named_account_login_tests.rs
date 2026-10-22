@@ -14,22 +14,34 @@ impl Drop for NotifyDrop {
     }
 }
 
-fn view_with_task(
-    task: JoinHandle<Result<String, String>>,
+fn view_with_task<F>(
+    sign_in: impl FnOnce(NamedAccountLoginState) -> F,
 ) -> (
     NamedAccountLoginView,
     UnboundedSender<NamedAccountLoginCode>,
     UnboundedReceiver<AppEvent>,
-) {
+)
+where
+    F: Future<Output = Result<String, String>> + Send + 'static,
+{
     let (events, rx) = tokio::sync::mpsc::unbounded_channel();
     let (codes, code_rx) = tokio::sync::mpsc::unbounded_channel();
+    let sender = AppEventSender::new(events);
+    let state = NamedAccountLoginState::default();
+    let future = sign_in(state.clone());
+    let task_state = state.clone();
+    let task_sender = sender.clone();
+    let task = tokio::spawn(async move {
+        task_state.finish(&task_sender, future.await);
+    });
     (
         NamedAccountLoginView {
             account_label: "openai account `work`".to_string(),
-            app_event_tx: AppEventSender::new(events),
+            app_event_tx: sender,
             codes: code_rx,
             code: None,
             task,
+            state,
             completion: None,
         },
         codes,
@@ -45,13 +57,12 @@ async fn pending_view() -> (
 ) {
     let (started, running) = oneshot::channel();
     let (dropped, stopped) = oneshot::channel();
-    let task = tokio::spawn(async move {
+    let (view, codes, events) = view_with_task(move |_state| async move {
         let _drop = NotifyDrop(Some(dropped));
         let _ = started.send(());
         std::future::pending().await
     });
     running.await.expect("sign-in task started");
-    let (view, codes, events) = view_with_task(task);
     (view, codes, events, stopped)
 }
 
@@ -98,6 +109,10 @@ async fn issue1290_escape_stops_both_requesting_and_waiting_tasks() {
             Ok("Cancelled sign-in of openai account `work`.".to_string())
         );
         assert!(codes.is_closed());
+        assert_eq!(
+            view.state.begin_persistence().unwrap_err().kind(),
+            std::io::ErrorKind::Interrupted
+        );
         view.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(!view.pre_draw_tick(Instant::now()));
         assert!(events.try_recv().is_err());
@@ -142,7 +157,12 @@ async fn issue1290_chatwidget_routes_escape_and_ctrl_c_to_the_named_login() {
         });
         running.await.expect("sign-in task started");
         let (codes, code_rx) = tokio::sync::mpsc::unbounded_channel();
-        chat.open_named_account_login("openai account `work`".to_string(), code_rx, task);
+        chat.open_named_account_login(
+            "openai account `work`".to_string(),
+            code_rx,
+            task,
+            NamedAccountLoginState::default(),
+        );
         send_code(&codes);
         chat.bottom_pane.pre_draw_tick();
         assert!(!chat.bottom_pane.no_modal_or_popup_active());
@@ -177,8 +197,7 @@ async fn issue1290_finished_success_and_failure_win_over_late_escape_once() {
         Err("The device code expired. Try signing in again.".to_string()),
     ] {
         let result = expected.clone();
-        let task = tokio::spawn(async move { result });
-        let (mut view, codes, mut events) = view_with_task(task);
+        let (mut view, codes, mut events) = view_with_task(move |_state| async move { result });
         send_code(&codes);
         tokio::time::timeout(Duration::from_secs(1), async {
             while !view.task.is_finished() {
@@ -193,6 +212,54 @@ async fn issue1290_finished_success_and_failure_win_over_late_escape_once() {
         assert!(view.lines(80).is_empty());
         assert!(!view.pre_draw_tick(Instant::now()));
         assert!(events.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn issue1290_persistence_error_survives_dismissal_without_closing_a_retry() {
+    for drop_view in [false, true] {
+        let (started, running) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        let (mut first, _codes, mut first_events) = view_with_task(move |state| async move {
+            state
+                .begin_persistence()
+                .expect("persistence won cancellation");
+            let _ = started.send(());
+            released.await.expect("release persistence error");
+            Err("The account could not be saved.".to_string())
+        });
+        running.await.expect("persistence started");
+        if !drop_view {
+            first.on_ctrl_c();
+        }
+        drop(first);
+        assert!(
+            first_events.try_recv().is_err(),
+            "dismissal must not claim cancellation"
+        );
+        let (mut retry, codes, mut events, stopped) = pending_view().await;
+        send_code(&codes);
+        retry.pre_draw_tick(Instant::now());
+        release
+            .send(())
+            .expect("persistence task still owns the result");
+        let event = tokio::time::timeout(Duration::from_secs(1), first_events.recv())
+            .await
+            .expect("failure delivered after dismissal")
+            .expect("result event");
+        match event {
+            AppEvent::ProviderAccount(ProviderAccountEvent::Finished { result }) => {
+                assert_eq!(result, Err("The account could not be saved.".to_string()));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        retry.pre_draw_tick(Instant::now());
+        assert!(!retry.is_complete());
+        assert_eq!(retry.code.as_ref().unwrap().user_code, "TEST-CODE");
+        assert!(events.try_recv().is_err());
+        assert!(first_events.try_recv().is_err());
+        retry.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_stopped(stopped).await;
     }
 }
 
@@ -266,17 +333,18 @@ async fn issue1290_escape_drops_real_device_request_and_token_poll_futures() {
             .mount(&server)
             .await;
         let (dropped, stopped) = oneshot::channel();
-        let task = tokio::spawn(async move {
+        let (mut view, _codes, mut events) = view_with_task(move |state| async move {
             let _drop = NotifyDrop(Some(dropped));
             let code = codex_login::request_device_code(&opts)
                 .await
                 .map_err(|error| error.to_string())?;
-            codex_login::complete_device_code_login(opts, code)
-                .await
-                .map_err(|error| error.to_string())?;
+            codex_login::complete_device_code_login_with_persistence_guard(opts, code, || {
+                state.begin_persistence()
+            })
+            .await
+            .map_err(|error| error.to_string())?;
             Ok("Unexpected sign-in".to_string())
         });
-        let (mut view, _codes, mut events) = view_with_task(task);
         let expected_path = if waiting_for_token {
             "/api/accounts/deviceauth/token"
         } else {
@@ -343,4 +411,15 @@ async fn issue1290_named_account_login_snapshots() {
     );
     view.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_stopped(stopped).await;
+}
+
+#[tokio::test]
+async fn issue1290_finishing_sign_in_snapshot() {
+    let (mut view, _codes, _events, stopped) = pending_view().await;
+    view.state.begin_persistence().expect("persistence won");
+    insta::assert_snapshot!("issue1290_finishing_sign_in", render(&view, 80));
+    // This renderer fixture has no save to finish; release its synthetic task.
+    view.task.abort();
+    assert_stopped(stopped).await;
+    view.pre_draw_tick(Instant::now());
 }
