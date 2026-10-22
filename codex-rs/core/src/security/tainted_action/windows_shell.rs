@@ -136,6 +136,9 @@ const RUN_KEY_READERS: &[&str] = &[
 /// Words that run the command after them, skipped (with their options) to
 /// find the command itself (`cmd /c reg add ...`).
 const LAUNCHERS: &[&str] = &["cmd", "powershell", "pwsh", "start", "call", "&"];
+/// .NET registry methods that write (`[Microsoft.Win32.Registry]::SetValue`,
+/// `.CreateSubKey(...)`).
+const REGISTRY_METHODS: &[&str] = &["setvalue", "createsubkey", "deletevalue", "deletesubkey"];
 /// `reg` operations that only read.
 const REG_READS: &[&str] = &["query", "export", "compare", "/?", "-?"];
 /// PowerShell commands (and aliases) that write registry values or keys,
@@ -315,8 +318,9 @@ pub(super) fn commands(text: &str, quotes: Quotes) -> Vec<Command> {
 /// writer among its words), or a registry import the classifier cannot read
 /// (`reg import`, `regedit`, `regini`), anywhere in the command. Words are
 /// read by their blank-separated parts too (`cmd /c "reg add ..."`).
-/// `lower` is the command's words, lowercase.
-fn windows_persistence(lower: &[String]) -> bool {
+/// `lower` is the command's words, lowercase; `piped`: the text holds a
+/// `|`, so a reader of a key may feed a writer.
+fn windows_persistence(lower: &[String], piped: bool) -> bool {
     let tokens: Vec<&str> = lower
         .iter()
         .flat_map(|word| {
@@ -350,10 +354,6 @@ fn windows_persistence(lower: &[String]) -> bool {
         })
     };
     let command_name_run = command.map_or("", name_at);
-    let helps = matches!(
-        command_name_run,
-        "get-help" | "help" | "get-command" | "gcm"
-    );
     let mut schtasks = false;
     let mut changes_a_task = false;
     let mut writes = false;
@@ -366,8 +366,15 @@ fn windows_persistence(lower: &[String]) -> bool {
         changes_a_task |=
             schtasks && matches!(*token, "/create" | "-create" | "/change" | "-change");
         schtasks |= name == "schtasks";
-        let scheduler = TASK_SCHEDULERS.contains(&name) && !helps;
-        let com_scheduler = token.trim_matches(['\'', '"']) == "schedule.service";
+        let scheduler = TASK_SCHEDULERS.contains(&name);
+        // `Schedule.Service` or `Schedule.Service.1`, also attached
+        // (`-ComObject:Schedule.Service`); not a file of that name.
+        let progid = token
+            .trim_matches(['\'', '"'])
+            .rsplit(':')
+            .next()
+            .unwrap_or_default();
+        let com_scheduler = matches!(progid, "schedule.service" | "schedule.service.1");
         let import = previous == "reg" && matches!(*token, "import" | "restore" | "load");
         let editor = matches!(name, "regedit" | "regini")
             && !following.is_empty()
@@ -381,37 +388,58 @@ fn windows_persistence(lower: &[String]) -> bool {
         writes |= REGISTRY_WRITERS.contains(&name)
             || WINDOWS_WRITERS.contains(&name)
             || WRITERS.contains(&name)
-            || (previous == "reg" && !REG_READS.contains(token));
+            || (previous == "reg" && !REG_READS.contains(token))
+            || REGISTRY_METHODS.iter().any(|method| token.contains(method))
+            || token.split("::").skip(1).any(|method| {
+                WRITING_METHODS
+                    .iter()
+                    .any(|prefix| method.starts_with(prefix))
+            });
         names_a_run_key = names_a_run_key || run_key(token);
     }
-    let reads = RUN_KEY_READERS.contains(&command_name_run) || command_name_run == "reg";
-    changes_a_task || (names_a_run_key && !(reads && !writes))
+    let reads = (RUN_KEY_READERS.contains(&command_name_run) || command_name_run == "reg")
+        && !writes
+        && !piped;
+    changes_a_task || (names_a_run_key && !reads)
 }
 
 /// Whether `word` (lowercase) names a registry Run key: `...\CurrentVersion\`
 /// and one of [`RUN_KEYS`], or `...\Policies\Explorer\Run`, with `\` or
-/// `/`. In a word that names a hive (`HKCU`, `HKEY_...`, `Registry::`) a
-/// wildcard name counts as any name it matches (`CurrentVer*\R*`).
+/// `/`, `.` and `..` resolved. Once a segment names a hive (`HKCU`,
+/// `HKEY_...`, `Registry::`) a wildcard name counts as any name it matches
+/// (`CurrentVer*\R*`).
 fn run_key(word: &str) -> bool {
-    let hive = ["hkcu", "hklm", "hku", "hkey_", "registry::"]
-        .iter()
-        .any(|hive| word.contains(hive));
-    let same = |segment: &str, name: &str| segment == name || (hive && glob_any(segment, name));
-    let mut previous: [&str; 2] = ["", ""];
+    let mut hive = false;
+    let mut segments: Vec<&str> = Vec::new();
     for segment in word.split(['/', '\\']) {
         work::step();
         let segment = segment.trim_matches(['\'', '"']);
-        if segment.is_empty() {
-            continue;
+        match segment {
+            "" | "." => continue,
+            ".." => {
+                segments.pop();
+                continue;
+            }
+            _ => {}
         }
+        hive |= ["hkcu", "hklm", "hku", "hkey_", "registry::"]
+            .iter()
+            .any(|name| segment.starts_with(name));
+        let same = |segment: &str, name: &str| segment == name || (hive && glob_any(segment, name));
+        let one = segments.last().copied().unwrap_or_default();
+        let two = segments
+            .len()
+            .checked_sub(2)
+            .and_then(|at| segments.get(at))
+            .copied()
+            .unwrap_or_default();
         let after_current_version =
-            same(previous[1], "currentversion") && RUN_KEYS.iter().any(|key| same(segment, key));
-        let policy =
-            same(previous[0], "policies") && same(previous[1], "explorer") && same(segment, "run");
+            same(one, "currentversion") && RUN_KEYS.iter().any(|key| same(segment, key));
+        let policy = same(two, "policies") && same(one, "explorer") && same(segment, "run");
         if after_current_version || policy {
             return true;
         }
-        previous = [previous[1], segment];
+        segments.push(segment);
     }
     false
 }
@@ -860,9 +888,12 @@ impl Classifier {
                     possible: vec![cwd_path.clone()],
                     history: vec![cwd_path.clone()],
                 };
+                // #1261 (D168): a reader of a Run key may pipe it into a
+                // writer (`Get-Item ...\Run | New-ItemProperty ...`).
+                let piped = text.contains('|');
                 for found in commands(&text, quotes) {
                     work::step();
-                    self.windows_command(&found, &mut folders, depth);
+                    self.windows_command(&found, &mut folders, depth, piped);
                 }
             }
         }
@@ -871,7 +902,14 @@ impl Classifier {
     /// One cmd or PowerShell command. Its words resolve against every
     /// folder the line has been in (a `cd` may not have run, `popd` may
     /// return) and its folder flags' values.
-    fn windows_command(&mut self, command: &Command, folders: &mut Folders, depth: usize) {
+    /// `piped`: the text holds a `|`.
+    fn windows_command(
+        &mut self,
+        command: &Command,
+        folders: &mut Folders,
+        depth: usize,
+        piped: bool,
+    ) {
         if self.windows_budget == 0 {
             self.note(ProtectedActionKind::UnseenCode);
             return;
@@ -1005,7 +1043,7 @@ impl Classifier {
                 || (index > 0 && writing_parameter(&lower[index - 1]))
         };
         // #1261 (D168): scheduled tasks, Run keys and registry imports.
-        if windows_persistence(&lower) {
+        if windows_persistence(&lower, piped) {
             self.note(ProtectedActionKind::Persistence);
         }
         let mut git_config = GitConfigWrites::new(&lower);

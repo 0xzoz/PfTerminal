@@ -5189,6 +5189,20 @@ fn issue_1261_windows_persistence_is_protected() {
     ] {
         assert_eq!(cmd(line), Some(Persistence), "cmd /c {line}");
     }
+    // Review 3: a reader piped into a writer, help around a call, .NET
+    // writers, attached ProgIDs, `.` and `..` in a key.
+    for line in [
+        r"Get-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' | New-ItemProperty -Name x -Value C:\x.exe",
+        r"gp HKCU:\Software\Microsoft\Windows\CurrentVersion\Run | ForEach-Object { Set-ItemProperty $_.PSPath -Name x -Value y }",
+        "Get-Help (Register-ScheduledTask -TaskName x -Action $a -Trigger $t)",
+        r"Write-Output ([Microsoft.Win32.Registry]::SetValue('HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run','x','y'))",
+        "$s = New-Object -ComObject:Schedule.Service",
+        "$s = New-Object -ComObject Schedule.Service.1",
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\.\Run -Name x -Value y",
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\x\..\Run -Name x -Value y",
+    ] {
+        assert_eq!(powershell(line), Some(Persistence), "{line}");
+    }
     // Review 2: a start-up place's variable is plain text in the other
     // shell, so the line is also judged as if it were (as on main).
     let in_home = |argv: &[&str]| windows_kind_with(WINDOWS_HOME, WINDOWS_USER_HOME, argv);
@@ -5256,7 +5270,7 @@ fn issue_1261_windows_persistence_reads_are_not_protected() {
         r"$r = Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
         r"powershell -ExecutionPolicy Bypass -c Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
         "cat deploy/schedule.service",
-        "Get-Help Register-ScheduledTask",
+        r"Remove-Item -Recurse build\chkupdate\*\*",
         r"Get-ChildItem C:\work\build\*\*",
     ] {
         assert_eq!(powershell(line), None, "{line}");
