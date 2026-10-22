@@ -9,13 +9,13 @@ VMs, GLM 5.3 Flash testers on Z.AI that see only the packet, and integrator chec
 
 | Case | Covers | Run | Tester | Final | Integrator checks |
 | --- | --- | --- | --- | --- | --- |
-| D136 | owner item: account removed while a session runs on it (D171) | S1 | passed | **passed** | See [D136](#d136). No `odefault` request (no `api.openai.com` request at all). No new `chatgpt.com` connection opened between the removal and `/quit`. `auth.json` and `config.toml` unchanged. |
-| NA-05 | AC3/AC4 in-app `/resume` (D172 (a)) | S2 | passed | **passed** | `rone`→`zpersonal` 09:05:37Z, `rtwo`→`zpersonal` 09:06:26Z, nothing on `zwork` after the removal. The `<gid>` file records `gzero` and `gaone` on `work`, and `rtwo` on `personal`. |
-| NA-06 | AC1 rows, add, rename (D174) | S3R | passed | **passed** | `nren`→`zadded` 09:38:35Z; nothing at `nold`. S3 is not counted (tester error, below). |
+| D136 | owner item: account removed while a session runs on it (D171) | S1 | passed | **passed** | See [D136](#d136). No `odefault` request (no `api.openai.com` request at all). No new ChatGPT connection opened from step 4 to `/quit`; the advisory no-traffic check stays inconclusive (two connections from before the removal stayed open). `auth.json` and `config.toml` unchanged. |
+| NA-05 | AC3/AC4 in-app `/resume` (D172 (a)) | S2 | passed | **passed** | `rone`→`zpersonal` 09:05:37Z, `rtwo`→`zpersonal` 09:06:26Z. Nothing carried `zenv` or `zwork` in the case, and nothing was keyless. The `<gid>` file records `gzero` and `gaone` on `work`, and `rtwo` on `personal`. |
+| NA-06 | AC1 rows, add, rename (D174) | S3R | passed | **passed** | `nren`→`zadded` 09:38:35Z; no Z.AI request at `nold` (only a refused `chatgpt.com` connection attempt at 09:38:44Z, which every product start makes). S3 is not counted (tester error, below). |
 
 Set-up cases in S2 ran with their amendment-v2 text and also passed, matching the first run's R2:
-- **PR-01:** relay `pzero` `zwork`, `pone` `zpersonal`, the re-anchor `zwork`, `ptwo` `zwork`, `pthree` `zpersonal`, `pfour` `zenv`. The file records `work, personal, work, work`.
-- **GH-02:** `resume <gid>` after removing `work` exits 1, naming `work` with `corbanu account add zai work`. As before, the `[advisory]` that it should mention `ghost` fails.
+- **PR-01:** relay `pzero` `zwork`, `pone` `zpersonal`, the re-anchor `zwork`, `ptwo` `zwork`, `pthree` `zpersonal`, `pfour` `zenv`. The file records `work, personal, work, work`. `[observe]` (v2-Q1), as in the first run: the no-flag `resume <id>` right after the `personal` turn opened on `personal` (pq), the conversation's most recent account, which D173 now documents.
+- **GH-02:** relay `gzero` and `gaone` `zwork` (09:03:38Z, 09:04:19Z); nothing during the refusals in steps 5 and 6. `resume <gid>` after removing `work` exits 1, naming `work` with `corbanu account add zai work`. As before, the `[advisory]` that it should mention `ghost` fails.
 
 Evidence for each group is under [runs/](runs/). That includes the tester's `result.md`, the action and screen logs, `relay-product-requests.txt` and `sessions-accounts.txt` (the account each conversation turn records).
 
@@ -26,7 +26,7 @@ Evidence for each group is under [runs/](runs/). That includes the tester's `res
   - **Signing:** `codesign --force --options runtime --timestamp --identifier com.corbanu.corbanu` with the Developer ID "Travis Good (K5N2T25C23)"; `codesign --verify --strict` passes.
   - **Digest:** SHA-256 `ba9feaa443ec18f29abc73a27137cc8f4696899ea4a1c3dada84c8d2df280006`. Every tester checked it against the package in its VM.
   - **Not installed:** it is copied only into the VMs. The installed binary was not changed.
-  - [harness/build.sh](harness/host/build.sh), [harness/package-files-run.txt](harness/package-files-run.txt).
+  - [harness/host/build.sh](harness/host/build.sh), [harness/package-files-run.txt](harness/package-files-run.txt); commit ancestry, build-log lines, the `postmerge-ci` result and the `codesign` output: [candidate/candidate-identity.txt](candidate/candidate-identity.txt). The build ran in this PR's worktree, detached at `f61397ca41` before the record was added.
 - **Sign-in tool, D136 VM only:** the installed signed build `0e2c02529d` (SHA-256 `3833f804…`). The owner's brief named it for the device-code sign-in, before the case build existed. Its package is listed in [harness/package-files-signin.txt](harness/package-files-signin.txt).
   - The `t1` sign-in and the home it lives in (`oai1`) were made with this build.
   - The case build then ran on that home.
@@ -52,14 +52,14 @@ The first run's frozen design and its amendment v2 stay in force. Amendment v3 r
     - S3: NA-06.
 
 The tester packet: the frozen design, amendments v2 and v3, both observation files, `tools.md`, `review-facts.md`,
-the reference screens and one prompt per group. File list: [harness/tester-packet/packet-files.sha256](harness/tester-packet/packet-files.sha256). The prompts are the first run's R-group prompts, changed only in the amendment-v3 sentence, the digests and the assignment: [harness/tester-packet/prompts/](harness/tester-packet/prompts/).
+the reference screens and one prompt per group. File list: [harness/tester-packet/packet-files.sha256](harness/tester-packet/packet-files.sha256). The prompts are the first run's R2 prompt, changed only in the amendment-v3 sentence, the digests and the assignment: [harness/tester-packet/prompts/](harness/tester-packet/prompts/). S1's assignment takes G9's `t1` sentence, reworded: it says the sign-in was "several hours before; the machine was paused in between", written before the run's timing was known (the actual gap was about 18 minutes), and drops G9's "and run the rest" (S1 has no other case). S3R's prompt differs from S3's only in its heading.
 
 ## Isolation and execution
 
 The same harness as the first run's last version (v4: `--stdin`, `C-c` keeps the terminal), with these changes ([harness/host-changes.diff](harness/host-changes.diff)):
 
 - **New paths:** new paths and lock holder.
-- **New mediation CA:** a new synthetic CA and leaf for the guest mediator, because the first run's leaf key was deleted with its work folder. Their digests are in [harness/guest-files-not-in-cb1-record.sha256](harness/guest-files-not-in-cb1-record.sha256), together with three guest files that the first record did not archive and that came from the same harness lineage (`agms-mcp-notes`, `product-config.toml`, `fixture.tar`).
+- **New mediation CA:** a new synthetic CA and leaf for the guest mediator, because the first run's leaf key was deleted with its work folder. The CA certificate's and the leaf certificate's digests are in [harness/guest-files-not-in-cb1-record.sha256](harness/guest-files-not-in-cb1-record.sha256) (the keys were not kept), together with three guest files that the first record did not archive and that came from the same harness lineage (`agms-mcp-notes`, `product-config.toml`, `fixture.tar`).
 - **Kept VM for D136:**
   - `signin`: prepares `oai1` and runs the coordinator's device-code sign-in in the clone that D136 later runs in.
   - `pause`: shuts the clone down from inside and stops it, without deleting it.
@@ -74,12 +74,12 @@ The same harness as the first run's last version (v4: `--stdin`, `C-c` keeps the
 
 Other facts of the run:
 
-- **One VM at a time:** each group ran in one Tart clone of `corbanu-qa-base`, with `workers-20261002/vm-tart.lock` held.
+- **One VM at a time:** each group ran in one Tart clone of `corbanu-qa-base`, with `workers-20261002/vm-tart.lock` held. Every clone has the same name, `pf84-rerun-d136` (fixed in `tart-run.sh`), so each `clone-vm-state-end.txt` says "deleted pf84-rerun-d136"; S2, S3 and S3R were still fresh clones (`up` clones the base each time). Times below are from the driver log, [harness/seq.log](harness/seq.log), and the clones' `vm-*` files.
   - The lock was taken at 08:15Z.
   - The D136 clone was kept, stopped, from 08:25 to 08:35Z. The lock stayed held and no other VM ran.
   - S2, S3 and S3R each got a fresh clone.
   - Every clone was deleted at the end, and the lock was released at 09:41Z.
-- **Memory:** 38–44 % free throughout.
+- **Memory:** the recorded files show 42–44 % free (`runs/*/memory-*.txt`); the lowest host check during the run, while the build ran next to the VM, was 38 %.
 - **No real key in any guest:** a host relay added the Z.AI key (vault label `zai_key_3`, fetched at relay start, never printed).
 - **ChatGPT traffic:** a blind pass-through carried the ChatGPT traffic (`chatgpt.com:443`, `auth.openai.com:443`), and only for the D136 VM. The test account's tokens existed only inside that guest.
 - **Sign-in (D181):**
@@ -97,7 +97,7 @@ Other facts of the run:
 Window A started on `t1` at 08:42:57Z with the case build. That was about 18 minutes after the sign-in, and the clone had been paused for 10 of them.
 
 - **Before the removal:** `beforeone` was answered at 08:43:11Z, and x0 showed `OpenAI · account t1`.
-- **Removal:** at 08:43:31Z another terminal ran `account remove openai t1`. It exited 0 with "Signed out and removed openai account `t1`." The relay shows the revoke exchange with `auth.openai.com` at 08:43:31–32Z. `account list` then showed no named accounts.
+- **Removal:** at 08:43:31Z another terminal ran `account remove openai t1`. It exited 0 with "Signed out and removed openai account `t1`." The pass-through shows an `auth.openai.com` connection open 08:43:31–32Z (contents not visible). `account list` then showed no named accounts.
 - **x1:** x1-1 (08:44:03Z) still showed `· account t1`, a stale reading that D124 allows. x1-2 (08:44:12Z) showed `OpenAI · account unavailable`, with the Account row "account `t1` has no sign-in: `corbanu login --account t1` or `/providers`".
 - **The two prompts after the removal:** `afterone` (08:44:28Z) and `aftertwo` (08:46:07Z) were both refused, with no reply:
 
@@ -111,14 +111,17 @@ Window A started on `t1` at 08:42:57Z with the case build. That was about 18 min
 - **Relay:**
   - There was no `api.openai.com` request in the group, so no fallback to the default login (`odefault`).
   - `chatgpt.com` traffic at `beforeone` (08:43:09–12Z).
-  - `[advisory]` no-use window: from step 4 (08:43:50Z) to `/quit` (08:48:31Z), **no new connection** to `chatgpt.com` or `auth.openai.com` was opened. The last one opened at 08:43:32Z, right after the removal command.
-  - Two connections opened at session start (08:42:58Z and 08:43:00Z) stayed open through the window. They closed at 08:45:59Z (idle, 15 KB up in total) and at `/quit` (45 KB up in total).
-  - The pass-through logs only total bytes per connection, so it cannot show that nothing at all crossed those two after the removal. The totals fit the pre-removal traffic, and the refusal text shows the product refused before sending.
-  - The first run, by contrast, opened new `chatgpt.com` connections at `afterone` and `aftertwo`, which were then answered.
+  - `[advisory]` no-use window, from step 4 (08:43:50Z) to `/quit` (08:48:31Z): **outcome inconclusive.** Every ChatGPT connection, with its open time, duration and byte totals, is in [runs/S1/passthrough-connections.txt](runs/S1/passthrough-connections.txt).
+    - No new connection to `chatgpt.com` or `auth.openai.com` opened in the window.
+    - The last ones opened at 08:43:32.86–.92Z: six short `chatgpt.com` connections, closed by 08:43:33Z, while the `account remove` command (08:43:31–33Z) was still running. Their sizes match the short connections every product start opens (as at 08:42:57–59Z). Which process opened them is not visible.
+    - Two connections opened before `beforeone` stayed open through the window. One opened at 08:42:58Z and closed at 08:45:59Z, after 180 s: 15,180 bytes up and 142,658 down in total. The other opened at 08:43:00Z and closed at `/quit`: 44,883 bytes up and 59,784 down in total.
+    - The short connections opened during `beforeone` (08:43:09–12Z) carried 1.7–5.5 KB up and 4.5–6.1 KB down each. The two long connections' totals are larger, so they cannot be split into before and after the removal.
+    - So the record cannot show that nothing crossed them after the removal. The tester-visible evidence stays the blocker evidence: no reply, and a refusal that says the account has no sign-in. That suggests, but does not prove, that the product refused before sending.
+  - The first run, by contrast, logged `chatgpt.com` traffic right after `afterone` (22:24:46Z → 22:24:48Z) and `aftertwo` (22:26:33Z → 22:26:35Z), and both were answered ([first run's integrator notes](../code-blind-20261021/harness/host/integrator-notes.md), G9).
 - **Files:**
   - `auth.json` SHA-256 `6b2807a4…` is the same right after prep and at the end.
-  - `config.toml` is unchanged (`9ee73afc…`) and has no `openai = "t1"` entry.
-  - The vault files at the end are `.vault.lock` and `local.age`.
+  - `config.toml` is unchanged: `9ee73afc…` right after prep ([runs/S1/homes-after-prep.txt](runs/S1/homes-after-prep.txt)) and after the case ([runs/S1/homes-manifest.txt](runs/S1/homes-manifest.txt)). It has no `openai = "t1"` entry ([runs/S1/oai1-saved/config.toml](runs/S1/oai1-saved/config.toml)).
+  - `[observe]` The files under `secrets/` at the end are `.vault.lock`, `local.age` and `keyring-fallback/<hash>.key` (the test home's file-based vault key: the keychain is refused in these homes).
   - `[observe]` The conversation file records a turn on `t1` for `beforeone`, and also for the refused `afterone` and `aftertwo` ([runs/S1/sessions-accounts.txt](runs/S1/sessions-accounts.txt)).
 
 ## NA-05
@@ -133,14 +136,16 @@ r2 then showed `<gid>` and `· account personal`. Its Account usage listed `pers
 ## NA-06
 
 - **S3 (not counted, tester error):** the tester opened `added`'s actions ([runs/S3/screens.jsonl](runs/S3/screens.jsonl), `n6-actions`) and took `n6-rename-hl` with the highlight still on "1. Start a new session on this account".
-  - It then pressed Enter in the same command. The action log ([runs/S3/actions.jsonl](runs/S3/actions.jsonl)) shows no `Down` key between the two screens.
+  - It then pressed Enter in the same shell command ([runs/S3/tester-commands-rename.txt](runs/S3/tester-commands-rename.txt), from the tester's `--json` events). The action log ([runs/S3/actions.jsonl](runs/S3/actions.jsonl)) shows no `Down` key between the two screens.
   - Its report says it pressed `Down` twice and that Rename was highlighted. Both the screen and the action log contradict that.
   - The product did what the highlighted action says: a new session on `added`.
   - As amendment v3's fail rules allow, the integrator classifies this as a tester error. S3 was replayed unchanged as S3R in a fresh clone, as G6R and G8R were in the first run.
 - **S3R (counted):**
+  - Step 1's "Open the Z.AI entry" first opened `personal`'s actions (only Rename and Remove). The tester pressed Escape, opened `Z.AI · default`, and took "Add another account" from there. Disclosed in its report; it does not affect the results.
   - The rows for `work` and `personal` show a kind and a fingerprint. `personal` carries "this session · default for new sessions".
   - The add, with a masked key, saved `added` with a fingerprint.
   - The actions read "Start a new session on this account", "Make default", "Rename" and "Remove" (D174).
+  - `[advisory]` Marker wording (not judged by the tester; integrator): `personal` reads "this session · default for new sessions" and the provider row "current (status of account `personal`)"; both say what they mean, no defect.
   - Two `Down` presses highlighted "3. Rename". Enter opened "Rename Z.AI account `added`", and `renamed` was saved: "Renamed zai account `added` to `renamed`".
   - `account list` shows `renamed` and no `added`. `exec --account renamed` printed `nren`, and `exec --account added` exited 1 with the not-configured text.
 - **`[observe]` survey:**
@@ -150,7 +155,7 @@ r2 then showed `<gid>` and `· account personal`. Its Account usage listed `pers
 
 ## Other observations
 
-- **Large downloads at TUI start (advisory, also in the first run).** At TUI start with the ChatGPT account, `chatgpt.com` sent about 38 MB four times in parallel (08:42:58–08:43:26Z), and about 24 MB once more (08:43:10–08:43:33Z). The home's remote plugin catalog cache is 41.5 MB. The first run's G9 shows the same four 38 MB transfers. Filed as #1324 (advisory); it does not affect PF-84's criteria.
+- **Large downloads at TUI start (advisory, also in the first run).** At TUI start with the ChatGPT account, four `chatgpt.com` connections opened at 08:42:58–59Z each received about 38 MB and closed at 08:43:24–26Z, and one opened at 08:43:10Z received about 24 MB ([runs/S1/passthrough-connections.txt](runs/S1/passthrough-connections.txt)). The home's remote plugin catalog cache is 41.5 MB ([runs/S1/oai1-saved/files-before-signout.txt](runs/S1/oai1-saved/files-before-signout.txt)). The first run's G9 relay table shows four transfers of about 38 MB closing at 22:18:24–30Z. Filed as #1324 (advisory); it does not affect PF-84's criteria.
 - `[observe]` Refused turns are still written to the conversation file as turns on the removed account (D136 above).
 
 ## Remaining
