@@ -134,6 +134,7 @@ impl ToolOrchestrator {
         let run_result = tool
             .run(req, &attempt_with_network_approval, &attempt_tool_ctx)
             .await;
+        warn_unlabelled_writable_roots(tool, req, tool_ctx, attempt).await;
 
         let Some(network_approval) = network_approval else {
             return (run_result, None);
@@ -1879,6 +1880,41 @@ where
         "post-taint protected action needs fresh human approval"
     );
     Some(crate::security::tainted_action::PostTaintAction { kind, state })
+}
+
+/// #734: after a run in the non-admin Windows sandbox, tells the person
+/// (once per thread) about a writable root of the run it couldn't label Low,
+/// so left read-only to its commands. Display only.
+async fn warn_unlabelled_writable_roots<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    tool_ctx: &ToolCtx,
+    attempt: &SandboxAttempt<'_>,
+) where
+    T: ToolRuntime<Rq, Out>,
+{
+    if attempt.sandbox != SandboxType::WindowsRestrictedToken {
+        return;
+    }
+    let unlabelled = codex_windows_sandbox::unlabelled_writable_roots();
+    if unlabelled.is_empty() {
+        return;
+    }
+    let Ok(cwd) = attempt.sandbox_cwd.to_abs_path() else {
+        return;
+    };
+    let effective = codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
+        &attempt.permissions.file_system_sandbox_policy(),
+        tool.additional_permissions(req),
+    );
+    for message in crate::tools::writable_root_notices::unlabelled_writable_root_warnings(
+        tool_ctx.session.thread_id(),
+        &effective,
+        cwd.as_path(),
+        &unlabelled,
+    ) {
+        warn(tool_ctx, &message).await;
+    }
 }
 
 /// #739: tells the person `message` (a warning in the transcript).

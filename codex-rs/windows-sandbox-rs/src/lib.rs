@@ -4,6 +4,7 @@
 
 #[cfg(any(target_os = "windows", test))]
 mod ssh_config_dependencies;
+mod unlabelled_roots;
 
 use std::fmt;
 use std::sync::Arc;
@@ -381,6 +382,8 @@ pub use unified_exec::spawn_windows_sandbox_session_elevated_for_permission_prof
 pub use unified_exec::spawn_windows_sandbox_session_for_level;
 #[cfg(target_os = "windows")]
 pub use unified_exec::spawn_windows_sandbox_session_legacy;
+pub use unlabelled_roots::unlabelled_writable_root_warning;
+pub use unlabelled_roots::unlabelled_writable_roots;
 #[cfg(target_os = "windows")]
 pub use wfp::install_wfp_filters_for_account;
 #[cfg(target_os = "windows")]

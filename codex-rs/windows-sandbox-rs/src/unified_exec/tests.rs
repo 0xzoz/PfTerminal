@@ -1451,6 +1451,37 @@ fn legacy_integrity_label_cost() {
     eprintln!("integrity label cost: {count} files, label {labelled:?}, put back {restored:?}");
 }
 
+/// #734: a root a lease can't label is listed for core's warning, and drops
+/// off the list once a later lease labels it. (A missing folder can't be
+/// labelled; the lease still starts, as #705 requires.)
+#[test]
+fn legacy_unlabelled_root_is_listed_until_labelled() {
+    let _guard = legacy_process_test_guard();
+    let test_root = user_owned_test_root();
+    let root = dunce::canonicalize(test_root.path())
+        .expect("canonical test root")
+        .join("not-yet");
+    drop(
+        crate::integrity_leases::acquire(std::slice::from_ref(&root), /*log_dir*/ None)
+            .expect("lease"),
+    );
+    assert!(
+        crate::unlabelled_writable_roots().contains(&root),
+        "{} is not listed",
+        root.display()
+    );
+    fs::create_dir_all(&root).expect("create root");
+    drop(
+        crate::integrity_leases::acquire(std::slice::from_ref(&root), /*log_dir*/ None)
+            .expect("lease"),
+    );
+    assert!(
+        !crate::unlabelled_writable_roots().contains(&root),
+        "{} is still listed",
+        root.display()
+    );
+}
+
 const CRASH_ROOTS_ENV: &str = "CODEX_158_CRASH_ROOTS";
 const CRASH_CHILD_TEST: &str = "unified_exec::tests::legacy_integrity_crash_child_entry";
 const CRASH_CHILD_READY: &str = "integrity-crash-child: leased";
