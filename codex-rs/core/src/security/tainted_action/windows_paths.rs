@@ -38,10 +38,10 @@ pub(super) const HOME_VARIABLES: &[&str] = &[
 const MAX_NAME: usize = 64;
 
 /// What a home variable stands for.
-pub(super) struct Values<'a> {
-    pub(super) codex_home: &'a str,
-    pub(super) user_home: Option<&'a str>,
-    pub(super) cwd: &'a str,
+pub(crate) struct Values<'a> {
+    pub(crate) codex_home: &'a str,
+    pub(crate) user_home: Option<&'a str>,
+    pub(crate) cwd: &'a str,
 }
 
 impl Values<'_> {
@@ -162,7 +162,7 @@ fn variable_at(chars: &[char], at: usize) -> Option<(String, usize)> {
 /// Expand the home variables in `word`, PowerShell (see [`cmd_spellings`])
 /// or cmd (`%USERPROFILE%`) spelled, in any letter case. Unknown names are
 /// kept as written.
-pub(super) fn expand(word: &str, values: &Values<'_>) -> String {
+pub(crate) fn expand(word: &str, values: &Values<'_>) -> String {
     let word = cmd_spellings(word);
     if !word.contains('%') {
         return word;

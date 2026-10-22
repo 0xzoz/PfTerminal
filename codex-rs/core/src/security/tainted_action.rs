@@ -44,7 +44,9 @@ mod quoted;
 mod sed;
 mod shadow;
 mod shell;
-mod windows_paths;
+/// #1296: also expands the Windows home spellings for protected-read
+/// explanations (`protected_reads`).
+pub(crate) mod windows_paths;
 mod windows_shell;
 mod work;
 

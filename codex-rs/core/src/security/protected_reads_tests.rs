@@ -616,6 +616,103 @@ fn issue_621_finds_the_denied_path_inside_interpreter_code() {
     }
 }
 
+/// #1296: Windows' denial texts, word splitting and home spellings are read
+/// only on Windows (`windows`); elsewhere nothing changes.
+#[test]
+fn issue_1296_windows_texts_are_read_only_on_windows() {
+    for line in [
+        r"Get-Content : Access to the path 'C:\Users\me\.corbanu\auth.json' is denied.",
+        r"Get-Content: Access to the path 'C:\Users\me\.corbanu\auth.json' is denied.",
+        "Access is denied.",
+        "access is denied",
+    ] {
+        assert!(is_denial_line(line, /*windows*/ true), "{line}");
+        assert!(!is_denial_line(line, /*windows*/ false), "{line}");
+    }
+    for line in [
+        "cat: .env: Operation not permitted",
+        "PermissionError: [Errno 13] Permission denied: 'auth.json'",
+    ] {
+        assert!(is_denial_line(line, /*windows*/ true), "{line}");
+        assert!(is_denial_line(line, /*windows*/ false), "{line}");
+    }
+    assert!(!is_denial_line(
+        r"Get-Content : Cannot find path 'C:\x' because it does not exist.",
+        /*windows*/ true
+    ));
+    assert!(names_no_path("Access is denied.\r", /*windows*/ true));
+    assert!(!names_no_path("Access is denied.", /*windows*/ false));
+    assert!(!names_no_path(
+        r"Access to the path 'C:\x' is denied.",
+        /*windows*/ true
+    ));
+
+    let words = |command: Vec<String>, windows| command_words(&command, windows);
+    assert_eq!(
+        words(
+            powershell(r#"Get-Content C:\Users\me\.env 'C:\a b\x' "$env:HOME\y""#),
+            /*windows*/ true
+        ),
+        vec![
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            "Get-Content",
+            r"C:\Users\me\.env",
+            r"C:\a b\x",
+            r"$env:HOME\y",
+        ]
+    );
+    // A POSIX shell, or any command off Windows, keeps POSIX quoting.
+    let bash = vec![
+        "C:\\Git\\bin\\bash.exe".to_string(),
+        "-lc".into(),
+        r"cat a\ b".into(),
+    ];
+    assert_eq!(words(bash, /*windows*/ true)[1..], ["-lc", "cat", "a b"]);
+    assert_eq!(
+        words(powershell(r"cat C:\x"), /*windows*/ false),
+        vec!["powershell.exe", "-NoProfile", "-Command", "cat", "C:x"]
+    );
+
+    let cwd = Path::new(r"C:\work");
+    let (user_home, codex_home) = (
+        Path::new(r"C:\Users\me"),
+        Path::new(r"C:\Users\me\.corbanu"),
+    );
+    let expand = |word: &str, windows| expand(word, cwd, Some(user_home), codex_home, windows);
+    for (word, expected) in [
+        (r"$env:USERPROFILE\.ssh", r"C:\Users\me\.ssh"),
+        (r"${env:userprofile}\.ssh", r"C:\Users\me\.ssh"),
+        (r"$HOME\.ssh", r"C:\Users\me\.ssh"),
+        (r"%UserProfile%\.ssh", r"C:\Users\me\.ssh"),
+        (r"%CODEX_HOME%\auth.json", r"C:\Users\me\.corbanu\auth.json"),
+        (
+            r"$env:CORBANU_HOME\auth.json",
+            r"C:\Users\me\.corbanu\auth.json",
+        ),
+        (r"$CODEX_HOME\auth.json", r"C:\Users\me\.corbanu\auth.json"),
+        (r"~\.ssh\config", r"C:\Users\me\.ssh\config"),
+        (r"$PWD\.env", r"C:\work\.env"),
+        (r".\.env", r".\.env"),
+    ] {
+        assert_eq!(
+            expand(word, /*windows*/ true),
+            Some(expected.to_string()),
+            "{word}"
+        );
+    }
+    assert_eq!(expand(r"$env:UNKNOWN\.env", /*windows*/ true), None);
+    assert_eq!(expand(r"~other\.ssh", /*windows*/ true), None);
+    // Off Windows, only the POSIX spellings.
+    assert_eq!(expand(r"$env:USERPROFILE\.ssh", /*windows*/ false), None);
+    assert_eq!(expand(r"~\.ssh", /*windows*/ false), None);
+    assert_eq!(
+        expand(r"%USERPROFILE%\.ssh", /*windows*/ false),
+        Some(r"%USERPROFILE%\.ssh".to_string())
+    );
+}
+
 /// #1296: the Windows spellings of a protected path a command names are
 /// found (so no grant is offered for it): unquoted backslash paths, `~\`,
 /// PowerShell's `$env:`, `${env:}` and `$HOME`, cmd's `%NAME%` (any letter
