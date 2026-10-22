@@ -173,6 +173,38 @@ async fn invalidation_stops_later_callers_joining_an_earlier_download() {
 }
 
 #[tokio::test]
+async fn a_download_started_before_invalidation_does_not_rewrite_the_cache() {
+    let fixture = Arc::new(Fixture::new().await);
+    let earlier = {
+        let fixture = Arc::clone(&fixture);
+        tokio::spawn(async move {
+            fixture
+                .list(RemotePluginCatalogCacheMode::PreferCache)
+                .await
+        })
+    };
+    fixture.wait_for_list_requests(1).await;
+
+    invalidate_cached_remote_plugin_catalog_scopes(
+        fixture.codex_home.path(),
+        &fixture.config,
+        Some(&fixture.auth),
+        &[RemotePluginScope::Global],
+    );
+    earlier.await.expect("earlier list task");
+
+    assert!(
+        catalog_cache::load_cached_directory_plugins(
+            fixture.codex_home.path(),
+            &fixture.config,
+            &fixture.auth,
+            RemotePluginScope::Global,
+        )
+        .is_none()
+    );
+}
+
+#[tokio::test]
 async fn joined_callers_fetch_for_themselves_when_the_shared_download_is_cancelled() {
     let fixture = Arc::new(Fixture::new().await);
     let leader = {

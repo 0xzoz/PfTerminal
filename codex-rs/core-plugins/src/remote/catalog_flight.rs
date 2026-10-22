@@ -135,7 +135,7 @@ pub(super) async fn fetch_directory_plugins_shared(
     reuse: CatalogFetchReuse,
 ) -> Result<SharedPlugins, RemotePluginCatalogError> {
     let Some(key) = flight_key(codex_home, config, auth, scope) else {
-        return fetch_and_write(codex_home, config, auth, scope).await;
+        return fetch_and_write(/*key*/ None, codex_home, config, auth, scope).await;
     };
 
     let plan = {
@@ -180,7 +180,7 @@ pub(super) async fn fetch_directory_plugins_shared(
                 return Ok(Arc::clone(plugins));
             }
             // The shared download failed or was cancelled; report this caller's own result.
-            fetch_and_write(codex_home, config, auth, scope).await
+            fetch_and_write(Some(&key), codex_home, config, auth, scope).await
         }
         Plan::ReuseDisk => {
             if let Some(codex_home) = codex_home
@@ -189,7 +189,7 @@ pub(super) async fn fetch_directory_plugins_shared(
             {
                 return Ok(Arc::new(cached.plugins));
             }
-            fetch_and_write(codex_home, config, auth, scope).await
+            fetch_and_write(Some(&key), codex_home, config, auth, scope).await
         }
         Plan::Lead(id, sender, started_at) => {
             let mut guard = LeaderGuard {
@@ -199,7 +199,8 @@ pub(super) async fn fetch_directory_plugins_shared(
                 sender,
                 succeeded: None,
             };
-            let plugins = fetch_and_write(codex_home, config, auth, scope).await?;
+            let plugins =
+                fetch_and_write(Some(&guard.key), codex_home, config, auth, scope).await?;
             guard.succeeded = Some(Arc::clone(&plugins));
             Ok(plugins)
         }
@@ -207,13 +208,23 @@ pub(super) async fn fetch_directory_plugins_shared(
 }
 
 async fn fetch_and_write(
+    key: Option<&FlightKey>,
     codex_home: Option<&Path>,
     config: &RemotePluginServiceConfig,
     auth: &CodexAuth,
     scope: RemotePluginScope,
 ) -> Result<SharedPlugins, RemotePluginCatalogError> {
+    let started_at = Instant::now();
     let plugins = super::fetch_directory_plugins_for_scope(config, auth, scope).await?;
-    if let Some(codex_home) = codex_home {
+    // A download that started before the cache was invalidated must not replace a newer one.
+    let invalidated = key.is_some_and(|key| {
+        lock_flights()
+            .entries
+            .get(key)
+            .and_then(|entry| entry.not_before)
+            .is_some_and(|not_before| started_at < not_before)
+    });
+    if !invalidated && let Some(codex_home) = codex_home {
         catalog_cache::write_cached_directory_plugins(codex_home, config, auth, scope, &plugins);
     }
     Ok(Arc::new(plugins))
