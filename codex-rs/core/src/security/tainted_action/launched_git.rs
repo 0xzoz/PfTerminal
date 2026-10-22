@@ -42,6 +42,9 @@ pub(super) struct LaunchedGit<'a> {
     placeholders: bool,
     /// The next word may be a replacement string (`xargs -I R`).
     replacement_next: bool,
+    /// In `parallel`'s options; the next word is an option's value.
+    parallel_options: bool,
+    parallel_value_next: bool,
     replacements: Vec<String>,
     /// More replacement strings than remembered.
     any_replacement: bool,
@@ -68,6 +71,8 @@ impl<'a> LaunchedGit<'a> {
             finder: false,
             placeholders: false,
             replacement_next: false,
+            parallel_options: false,
+            parallel_value_next: false,
             replacements: Vec::new(),
             any_replacement: launched.replaced,
             seen: None,
@@ -94,6 +99,9 @@ impl<'a> LaunchedGit<'a> {
         if self.fed {
             self.replacement_option(word);
         }
+        if self.parallel_options {
+            self.parallel_option(word);
+        }
         // `fd` takes `-x`/`-X` at the end of a group too (`-HX`).
         let finder_exec = self.finder
             && (matches!(
@@ -107,6 +115,99 @@ impl<'a> LaunchedGit<'a> {
             self.fed = true;
         }
         self.finder |= matches!(name, "find" | "gfind" | "fd" | "fdfind");
+        self.parallel_options |= name == "parallel";
+    }
+
+    /// One of `parallel`'s own options, before its command. It has many
+    /// that set replacement strings (`--er X`, `--rpl 'X …'`, `-I`) and
+    /// takes any unambiguous prefix of a long one, so any option not known
+    /// to set none may: any word may be input.
+    fn parallel_option(&mut self, word: &str) {
+        /// Options that take the next word as their value.
+        const VALUED: &[&str] = &[
+            "-j",
+            "--jobs",
+            "-P",
+            "--max-procs",
+            "-N",
+            "--max-replace-args",
+            "-n",
+            "--max-args",
+            "-a",
+            "--arg-file",
+            "-d",
+            "--delimiter",
+            "--colsep",
+            "-C",
+            "-S",
+            "--sshlogin",
+            "--timeout",
+            "--halt",
+            "--joblog",
+            "--results",
+            "--retries",
+            "--delay",
+            "--tmpdir",
+            "--workdir",
+            "--wd",
+            "--memfree",
+            "--load",
+            "--block",
+            "--shebang-wrap",
+        ];
+        /// Options that take no value.
+        const FLAGS: &[&str] = &[
+            "-k",
+            "--keep-order",
+            "-q",
+            "--quote",
+            "-0",
+            "--null",
+            "-v",
+            "--verbose",
+            "--dry-run",
+            "--dryrun",
+            "--bar",
+            "--progress",
+            "--eta",
+            "--lb",
+            "--line-buffer",
+            "--group",
+            "-u",
+            "--ungroup",
+            "--tag",
+            "--pipe",
+            "--pipepart",
+            "-r",
+            "--no-run-if-empty",
+            "-m",
+            "-X",
+            "--xargs",
+            "--will-cite",
+            "--citation",
+        ];
+        if std::mem::take(&mut self.parallel_value_next) {
+            return;
+        }
+        if word.starts_with(":::") || !word.starts_with('-') || word == "-" {
+            // `:::` arguments or the command: the options ended.
+            self.parallel_options = false;
+            return;
+        }
+        let (option, value) = word.split_once('=').unwrap_or((word, ""));
+        let counted = ["-j", "-P", "-N", "-n"].iter().any(|short| {
+            option.strip_prefix(short).is_some_and(|count| {
+                !count.is_empty()
+                    && count
+                        .chars()
+                        .all(|ch| ch.is_ascii_digit() || "+-%".contains(ch))
+            })
+        });
+        if VALUED.contains(&option) {
+            self.parallel_value_next = value.is_empty() && !word.contains('=');
+        } else if !(counted || FLAGS.contains(&option)) {
+            self.any_replacement = true;
+        }
     }
 
     /// A launcher's replacement-string option: `xargs -I R`, `-IR`, `-i`,

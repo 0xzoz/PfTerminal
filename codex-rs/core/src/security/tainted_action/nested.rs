@@ -814,20 +814,47 @@ fn replaced_shell_scripts(
             *cut = true;
             break;
         }
+        if shell == "fish" {
+            scripts.extend(fish_attached_code(texts, at).map(|code| (at, code.to_string())));
+        }
         match invocation::parse(&shell, &texts[at + 1..]).map(|invocation| invocation.code) {
             Some(Code::Inline(Some(inline))) => match script_candidates(texts, at, inline) {
-                Some(candidates) => scripts.extend(
+                Some(candidates) if !candidates.is_empty() => scripts.extend(
                     candidates
                         .into_iter()
                         .map(|candidate| (at, texts[candidate].clone())),
                 ),
-                None => *cut = true,
+                _ => *cut = true,
             },
             Some(Code::Inline(None)) => *cut = true,
             _ => {}
         }
     }
     scripts
+}
+
+/// Code fish runs from its options after `at` with the code attached:
+/// `-c'CODE'`, `-C'CODE'` (also in a group: `-lc'CODE'`), `--command=CODE`,
+/// `--init-command=CODE`, or an unambiguous prefix (`--comm=CODE`).
+fn fish_attached_code(texts: &[String], at: usize) -> impl Iterator<Item = &str> {
+    texts[at + 1..]
+        .iter()
+        .take_while(|word| word.starts_with('-'))
+        .filter_map(|word| {
+            work::step();
+            if let Some(long) = word.strip_prefix("--") {
+                let (option, code) = long.split_once('=')?;
+                let names = |full: &str, shortest: usize| {
+                    option.len() >= shortest && full.starts_with(option)
+                };
+                (names("command", 1) || names("init-command", 3)).then_some(code)
+            } else {
+                let group = word.strip_prefix('-')?;
+                let letter = group.find(['c', 'C'])?;
+                let code = &group[letter + 1..];
+                (!code.is_empty()).then_some(code)
+            }
+        })
 }
 
 /// What a launcher puts into a shell's script (`xargs -I% sh -c 'git %'`):

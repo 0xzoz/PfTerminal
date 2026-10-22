@@ -4363,6 +4363,20 @@ fn issue_1268_git_given_input_words_asks() {
         "fd -x bash -o pipefail -c 'cd . && git config {}'",
         "xargs --replace fish --command 'cd .; git config {}' < keys",
         "xargs -I% prlimit bash -O extglob -c 'cd . && git config %' < keys",
+        // Review round 4: parallel's other replacement options, fish's
+        // attached code, a shell with no script word.
+        "cat keys | parallel --er X git X core.pager /tmp/evil",
+        "parallel --er X git X core.pager /tmp/evil :::: keys",
+        "parallel --bnr X git X core.pager sh :::: keys",
+        "parallel --rpl 'X s/a//' git X k v :::: keys",
+        "parallel --extensionr X git X a b ::: config.x",
+        "parallel -j 4 --er X git X log ::: a",
+        "parallel --er X sh -c 'git config X'",
+        "xargs -I% fish -c'true; git config %' _ < keys",
+        "xargs -I% fish --command='true; git config %' _ < keys",
+        "xargs -I% fish --comm='true; git config %' _ < keys",
+        "xargs -I% fish -lC'git config %' < keys",
+        "xargs --replace sh -c -e -x",
     ] {
         assert!(script(command).is_some(), "{command}");
     }
@@ -4386,6 +4400,9 @@ fn issue_1268_git_given_input_words_asks() {
         "env -S'git log' --oneline",
         "xargs env -S'git log' --oneline",
         "parallel 'cd x && git log' ::: a",
+        "parallel -j4 git log ::: a b",
+        "parallel -j 4 -k --tag git log ::: a",
+        "parallel --jobs=4 git log ::: a",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
@@ -4412,6 +4429,8 @@ fn issue_1268_checks_are_linear() {
         ("parallel commands", "parallel git "),
         ("replaced shells", "-i sh -c x "),
         ("shell options", "sh -x -e "),
+        ("parallel options", "parallel -j 4 --tag "),
+        ("fish options", "-i fish -lc'x' "),
     ] {
         work::assert_linear(label, |scale| {
             let line = format!("xargs {} git log", unit.repeat(400 * scale));
