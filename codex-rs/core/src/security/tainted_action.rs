@@ -568,17 +568,116 @@ fn rank(kind: ProtectedActionKind) -> u8 {
 
 /// Commands that install something to run later outside the sandbox:
 /// cron, launchd and systemd user units (PF-23-S02; git config is judged by
-/// [`GitConfigWrites`]). `args` are lowercase.
-fn persistence_command(name: &str, args: &[String]) -> bool {
-    let has = |word: &str| args.iter().any(|arg| arg == word);
+/// [`GitConfigWrites`]), given the words after `name` (`later` from `from`).
+fn persistence_command(name: &str, later: &mut LaterWords, from: usize) -> bool {
     match name {
-        "crontab" => !has("-l"),
-        "launchctl" => ["load", "bootstrap", "submit", "enable"]
-            .iter()
-            .any(|verb| has(verb)),
-        "systemctl" => has("--user") && ["enable", "link", "edit"].iter().any(|verb| has(verb)),
+        "crontab" => !later.holds(from, &["-l"]),
+        "launchctl" => later.holds(from, &["load", "bootstrap", "submit", "enable"]),
+        "systemctl" => {
+            later.holds(from, &["--user"]) && later.holds(from, &["enable", "link", "edit"])
+        }
         _ => false,
     }
+}
+
+/// #1275: what the words after each word of a simple command hold, for the
+/// checks made on each command word (credential, persistence and Corbanu
+/// CLI commands). Each is worked out once, on its first use, so judging
+/// every copy of a command word (`gh gh gh …`) stays linear.
+struct LaterWords<'a> {
+    /// The command's words, lowercase.
+    words: &'a [String],
+    /// For a set of words, whether each word or one after it is in it.
+    holding: Vec<(&'static [&'static str], Vec<bool>)>,
+    /// Whether each word or one after it widens a Corbanu CLI run's policy.
+    policy_flags: Option<Vec<bool>>,
+    /// The CLI subcommand of the words from each word on.
+    subcommands: Option<Vec<Option<usize>>>,
+}
+
+impl<'a> LaterWords<'a> {
+    fn new(words: &'a [String]) -> Self {
+        Self {
+            words,
+            holding: Vec::new(),
+            policy_flags: None,
+            subcommands: None,
+        }
+    }
+
+    /// Whether `words[from..]` holds one of `set`.
+    fn holds(&mut self, from: usize, set: &'static [&'static str]) -> bool {
+        let words = self.words;
+        // Sets are constants: there are a few of them.
+        let at = match self.holding.iter().position(|(known, _)| {
+            work::step();
+            *known == set
+        }) {
+            Some(at) => at,
+            None => {
+                let held = suffix_any(words.len(), |at| set.contains(&words[at].as_str()));
+                self.holding.push((set, held));
+                self.holding.len() - 1
+            }
+        };
+        self.holding[at].1.get(from).copied().unwrap_or(false)
+    }
+
+    /// Whether a Corbanu CLI run given `words[from..]` has its policy
+    /// widened by a flag or a `-c` override.
+    fn policy_flag(&mut self, from: usize) -> bool {
+        let words = self.words;
+        let flags = self.policy_flags.get_or_insert_with(|| {
+            let policy_key =
+                |value: &str| POLICY_CONFIG_KEYS.iter().any(|key| value.starts_with(key));
+            suffix_any(words.len(), |at| {
+                let word = &words[at];
+                CLI_POLICY_FLAGS.iter().any(|flag| word.contains(flag))
+                    || word.starts_with("--dangerously")
+                    || word.strip_prefix("--config=").is_some_and(policy_key)
+                    || (word.len() > 2 && word.strip_prefix("-c").is_some_and(policy_key))
+                    || (matches!(word.as_str(), "-c" | "--config")
+                        && words.get(at + 1).is_some_and(|value| policy_key(value)))
+            })
+        });
+        flags.get(from).copied().unwrap_or(false)
+    }
+
+    /// The CLI subcommand of `words[from..]`: the first word that is neither
+    /// a flag nor a flag's value.
+    fn subcommand(&mut self, from: usize) -> Option<&'a str> {
+        let words = self.words;
+        let subcommands = self.subcommands.get_or_insert_with(|| {
+            let mut subcommands = vec![None; words.len() + 2];
+            for (at, word) in words.iter().enumerate().rev() {
+                work::step();
+                subcommands[at] = if !word.starts_with('-') {
+                    Some(at)
+                } else if !word.contains('=') && CLI_VALUE_FLAGS.contains(&word.as_str()) {
+                    subcommands[at + 2]
+                } else {
+                    subcommands[at + 1]
+                };
+            }
+            subcommands
+        });
+        subcommands
+            .get(from)
+            .copied()
+            .flatten()
+            .map(|at| words[at].as_str())
+    }
+}
+
+/// For each of `len` words and the end, whether `check` holds for it or a
+/// word after it.
+fn suffix_any(len: usize, check: impl Fn(usize) -> bool) -> Vec<bool> {
+    let mut held = vec![false; len + 1];
+    for at in (0..len).rev() {
+        work::step();
+        held[at] = held[at + 1] || check(at);
+    }
+    held
 }
 
 /// #1159: whether `git config` writes global config or a git key that runs
@@ -677,37 +776,22 @@ fn folder_bases(folder: &str, chained: &[String], cwd: &str) -> Vec<String> {
     bases
 }
 
-/// The CLI subcommand: the first word that is neither a flag nor a flag's value.
-fn subcommand(args: &[String]) -> Option<&str> {
-    const VALUE_FLAGS: &[&str] = &[
-        "-c",
-        "--config",
-        "-p",
-        "--profile",
-        "-m",
-        "--model",
-        "--cd",
-        "-s",
-        "--sandbox",
-        "-a",
-        "--ask-for-approval",
-        "-i",
-        "--image",
-    ];
-    let mut skip = false;
-    for word in args {
-        work::step();
-        if std::mem::take(&mut skip) {
-            continue;
-        }
-        if word.starts_with('-') {
-            skip = !word.contains('=') && VALUE_FLAGS.contains(&word.as_str());
-            continue;
-        }
-        return Some(word.as_str());
-    }
-    None
-}
+/// Corbanu CLI flags that take the next word as their value.
+const CLI_VALUE_FLAGS: &[&str] = &[
+    "-c",
+    "--config",
+    "-p",
+    "--profile",
+    "-m",
+    "--model",
+    "--cd",
+    "-s",
+    "--sandbox",
+    "-a",
+    "--ask-for-approval",
+    "-i",
+    "--image",
+];
 
 /// Whether `word` sets `flag`: exactly for long flags, and inside a group of
 /// short flags (`-rn` sets `-r`).
@@ -1230,21 +1314,21 @@ impl Classifier {
             self.change_folder(name, args, folders, variables);
         }
         let mut git_config = GitConfigWrites::new(&lower);
+        let mut later = LaterWords::new(&lower);
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.
         for (index, word) in lower.iter().enumerate() {
             work::step();
             let name = basename(word);
-            let args = &lower[index + 1..];
             let imported = index > 0 && matches!(lower[index - 1].as_str(), "from" | "import");
             if CLI_NAMES.contains(&name) && !imported {
-                self.cli(args);
+                self.cli(&mut later, index + 1);
             }
             // #1159: git under another name (`git.exe`), or a dashed helper
             // (`/usr/lib/git-core/git-config`) that runs `git <subcommand>`.
             let helper = git_helpers::git_name(word);
             let subcommand = helper.as_ref().and_then(Option::as_deref);
-            if persistence_command(name, args)
+            if persistence_command(name, &mut later, index + 1)
                 || ((name == "git" || helper.is_some())
                     && git_config.persists(index + 1, subcommand))
             {
@@ -1275,9 +1359,7 @@ impl Classifier {
             }
             for (credential_command, verbs) in CREDENTIAL_COMMANDS {
                 work::step();
-                if name == *credential_command
-                    && args.iter().any(|word| verbs.contains(&word.as_str()))
-                {
+                if name == *credential_command && later.holds(index + 1, verbs) {
                     self.note(ProtectedActionKind::Credentials);
                 }
             }
@@ -1561,23 +1643,19 @@ impl Classifier {
         }
     }
 
-    fn cli(&mut self, args: &[String]) {
-        let policy_key = |value: &str| POLICY_CONFIG_KEYS.iter().any(|key| value.starts_with(key));
-        if args.iter().any(|word| word == "vault") {
+    /// The checks on a Corbanu CLI word, given the words after it (`later`
+    /// from `from`).
+    fn cli(&mut self, later: &mut LaterWords, from: usize) {
+        if later.holds(from, &["vault"]) {
             self.note(ProtectedActionKind::Vault);
         }
-        if subcommand(args).is_some_and(|sub| CLI_POLICY_WORDS.contains(&sub)) {
+        if later
+            .subcommand(from)
+            .is_some_and(|sub| CLI_POLICY_WORDS.contains(&sub))
+        {
             self.note(ProtectedActionKind::SecurityPolicy);
         }
-        let policy_flag = args.iter().enumerate().any(|(index, word)| {
-            CLI_POLICY_FLAGS.iter().any(|flag| word.contains(flag))
-                || word.starts_with("--dangerously")
-                || word.strip_prefix("--config=").is_some_and(policy_key)
-                || (word.len() > 2 && word.strip_prefix("-c").is_some_and(policy_key))
-                || (matches!(word.as_str(), "-c" | "--config")
-                    && args.get(index + 1).is_some_and(|value| policy_key(value)))
-        });
-        if policy_flag {
+        if later.policy_flag(from) {
             self.note(ProtectedActionKind::SecurityPolicy);
         }
     }

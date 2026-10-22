@@ -3461,18 +3461,15 @@ fn issue_1065_substituted_values_are_capped() {
 
 /// #1065 review 1: the budget holds for the whole classification, a line
 /// past it still names what it reaches, and folders and nested text are
-/// bounded too. Inputs stay small (at most about 6 MB of words).
+/// bounded too. Inputs stay small (at most about 6 MB of words). Split in
+/// three so each runs in a few seconds in a debug build (#1275).
 #[test]
 fn issue_1065_review_1_limits() {
     use ProtectedActionKind::*;
-    use base64::Engine as _;
     let exhaust = format!("p=x;{}", " p=$p$p;".repeat(20));
     let long = format!("{USER_HOME}/.codex/{}/../auth.json", "k".repeat(80));
     let pushes = |count: usize| format!("pushd /tmp;{} echo ok", " pushd .;".repeat(count));
-    let decoded = " ZWNobyBoZWxsbyB3b3JsZA=="; // "echo hello world"
-    let payload = base64::engine::general_purpose::STANDARD
-        .encode(format!("echo {}", "a".repeat(600 * 1024)));
-    let cases = [
+    assert_review_1_limits(vec![
         // Small values are still substituted past the budget, and a large
         // one is judged on its own.
         (format!("v=vault; {exhaust} corbanu $v get k"), Some(Vault)),
@@ -3491,6 +3488,15 @@ fn issue_1065_review_1_limits() {
         ),
         ("cd /tmp/x && pushd /tmp && popd; echo ok".to_string(), None),
         (format!("cd /{}; echo ok", "a".repeat(1000)), None),
+    ]);
+}
+
+/// #1065 review 1, continued: sed calls, pipelines and decoded payloads.
+#[test]
+fn issue_1065_review_1_command_limits() {
+    use ProtectedActionKind::*;
+    let decoded = " ZWNobyBoZWxsbyB3b3JsZA=="; // "echo hello world"
+    assert_review_1_limits(vec![
         // Review r3: sed calls one reading collects.
         (
             format!("cd /tmp;{} echo ok", " sed -n p f;".repeat(5000)),
@@ -3505,10 +3511,23 @@ fn issue_1065_review_1_limits() {
         // Command lines lexed in all: decoded payloads.
         (format!("echo{}", decoded.repeat(5000)), Some(UnseenCode)),
         (format!("echo{}", decoded.repeat(50)), None),
-        // Bytes lexed in all: seven copies of a 600 KiB payload through
-        // braces.
-        (format!("echo {payload}{{,,,,,,}}"), Some(UnseenCode)),
-    ];
+    ]);
+}
+
+/// #1065 review 1, continued: bytes lexed in all.
+#[test]
+fn issue_1065_review_1_lexed_bytes_limit() {
+    use base64::Engine as _;
+    let payload = base64::engine::general_purpose::STANDARD
+        .encode(format!("echo {}", "a".repeat(600 * 1024)));
+    // Seven copies of a 600 KiB payload through braces.
+    assert_review_1_limits(vec![(
+        format!("echo {payload}{{,,,,,,}}"),
+        Some(ProtectedActionKind::UnseenCode),
+    )]);
+}
+
+fn assert_review_1_limits(cases: Vec<(String, Option<ProtectedActionKind>)>) {
     let mut wrong = Vec::new();
     for (line, expected) in cases {
         let found = script(&line);
@@ -4591,6 +4610,67 @@ fn d153_checks_are_linear() {
             let _ = script(&line);
         });
     }
+}
+
+/// #1275: the checks run on each command word of a line (`gh`, `crontab`,
+/// `launchctl`, `systemctl`, the Corbanu CLI) look at the words after it
+/// once per line, not once per copy of the word.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1275_command_word_checks_are_linear() {
+    for (label, unit) in [
+        ("gh", "gh "),
+        ("security", "security "),
+        ("crontab", "crontab "),
+        ("launchctl", "launchctl "),
+        ("systemctl", "systemctl --user "),
+        ("corbanu", "corbanu "),
+        ("codex values", "codex -c "),
+        ("pfterminal flags", "pfterminal --x "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let _ = script(&format!("echo {}", unit.repeat(100 * scale)));
+        });
+    }
+}
+
+/// #1275: a glob pattern stops at its first difference from the name
+/// before its first glob character, so a long word compared with short
+/// names is not read in full each time; matches are unchanged.
+#[test]
+fn issue_1275_glob_stops_at_first_difference() {
+    use super::paths::glob_any;
+    for (pattern, name, expected) in [
+        ("", "", true),
+        ("", "a", false),
+        ("a", "", false),
+        ("gh", "gh", true),
+        ("gh", "ghx", false),
+        ("ghx", "gh", false),
+        ("g*", "gh", true),
+        ("h*", "gh", false),
+        ("gh*", "g", false),
+        ("g?", "gh", true),
+        ("g[a-z]", "gh", true),
+        ("[", "[", true),
+        ("x[", "x[", true),
+        ("*h", "gh", true),
+        ("é*", "éa", true),
+        ("é*", "ea", false),
+        ("ab*cd", "abxxcd", true),
+        ("ab*cd", "abxxce", false),
+    ] {
+        assert_eq!(glob_any(pattern, name), expected, "{pattern:?} {name:?}");
+    }
+    let long = "a".repeat(100_000);
+    let counted = work::measure(|| {
+        assert!(!glob_any(&long, "auth.json"));
+        assert!(!glob_any(&format!("{long}*"), "abc"));
+    });
+    assert!(counted.steps < 100, "{counted:?}");
 }
 
 /// #1255: `git config` opens the config file in an editor (`-e`, `--edit`,

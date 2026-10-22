@@ -16,6 +16,7 @@ use super::CREDENTIAL_COMMANDS;
 use super::Classifier;
 use super::FOLDER_FLAGS;
 use super::GitConfigWrites;
+use super::LaterWords;
 use super::MAX_FOLDER_BYTES;
 use super::ProtectedActionKind;
 use super::RECURSIVE_READERS;
@@ -820,11 +821,11 @@ impl Classifier {
                 || (index > 0 && writing_parameter(&lower[index - 1]))
         };
         let mut git_config = GitConfigWrites::new(&lower);
+        let mut later = LaterWords::new(&lower);
         let mut named_programs = 0;
         for (index, word) in words.iter().enumerate() {
             work::step();
             let name = names[index];
-            let args = &lower[index + 1..];
             // The checks the POSIX pass makes by command name, for names
             // only this reading sees (`C:\Tools\corbanu.exe vault list`).
             let named = CLI_NAMES.contains(&name)
@@ -841,9 +842,9 @@ impl Classifier {
             } else if named {
                 let imported = index > 0 && matches!(lower[index - 1].as_str(), "from" | "import");
                 if CLI_NAMES.contains(&name) && !imported {
-                    self.cli(args);
+                    self.cli(&mut later, index + 1);
                 }
-                if persistence_command(name, args)
+                if persistence_command(name, &mut later, index + 1)
                     || (name == "git" && git_config.persists(index + 1, /*subcommand*/ None))
                 {
                     self.note(ProtectedActionKind::Persistence);
@@ -858,9 +859,7 @@ impl Classifier {
                 }
                 for (credential_command, verbs) in CREDENTIAL_COMMANDS {
                     work::step();
-                    if name == *credential_command
-                        && args.iter().any(|arg| verbs.contains(&arg.as_str()))
-                    {
+                    if name == *credential_command && later.holds(index + 1, verbs) {
                         self.note(ProtectedActionKind::Credentials);
                     }
                 }

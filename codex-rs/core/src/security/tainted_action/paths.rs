@@ -587,13 +587,22 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 /// The glob match itself, leading wildcards included. Iterative with one
 /// backtrack point, so it is linear-times-linear whatever the pattern.
 pub(super) fn glob_any(pattern: &str, name: &str) -> bool {
-    // Without glob characters the match below is equality: skip its two
-    // allocations, which every word's path checks pay many times over.
-    if !pattern
-        .bytes()
-        .any(|byte| matches!(byte, b'*' | b'?' | b'['))
-    {
-        return pattern == name;
+    // The pattern's text before its first glob character must start the
+    // name, and without glob characters the match below is equality. Checked
+    // first, byte by byte, this skips the match's two allocations and stops
+    // at the first difference: every word's path checks compare it with many
+    // short names, and a long word otherwise is read in full for each
+    // (#1275).
+    let (pattern_bytes, name_bytes) = (pattern.as_bytes(), name.as_bytes());
+    let mut at = 0;
+    loop {
+        work::step();
+        match pattern_bytes.get(at) {
+            None => return at == name_bytes.len(),
+            Some(b'*' | b'?' | b'[') => break,
+            Some(byte) if name_bytes.get(at) != Some(byte) => return false,
+            Some(_) => at += 1,
+        }
     }
     let pattern: Vec<char> = pattern.chars().collect();
     let name: Vec<char> = name.chars().collect();
