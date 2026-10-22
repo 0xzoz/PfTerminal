@@ -33,6 +33,25 @@ pub(super) const HOME_VARIABLES: &[&str] = &[
     "SYSTEMDRIVE",
     "APPDATA",
     "LOCALAPPDATA",
+    // #1261 (D168): folders that hold machine-wide sign-in places.
+    "PROGRAMDATA",
+    "ALLUSERSPROFILE",
+    "WINDIR",
+    "SYSTEMROOT",
+    "PROGRAMFILES",
+    "PROGRAMW6432",
+    "PROGRAMFILES(X86)",
+];
+/// #1261 (D168): PowerShell's own variables for places that run code at
+/// start-up, as the home variables spell them (`$PROFILE` is Windows
+/// PowerShell's; PowerShell 7's profile and `$PSHOME` are in places
+/// protected alike). cmd has no such variables: `%PROFILE%` stays unknown.
+const POWERSHELL_PLACES: &[(&str, &str)] = &[
+    (
+        "PROFILE",
+        r"%USERPROFILE%\Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1",
+    ),
+    ("PSHOME", r"%SYSTEMROOT%\System32\WindowsPowerShell\v1.0"),
 ];
 /// Longest variable name read in a spelling; past it the text is left alone.
 const MAX_NAME: usize = 64;
@@ -45,6 +64,12 @@ pub(super) struct Values<'a> {
 }
 
 impl Values<'_> {
+    /// `folder` at the root of the home's drive.
+    fn system_folder(&self, folder: &str) -> Option<String> {
+        let home = self.user_home?;
+        drive(&home.replace('\\', "/")).map(|_| format!("{}\\{folder}", &home[..2]))
+    }
+
     fn get(&self, name: &str) -> Option<String> {
         match name {
             "USERPROFILE" | "HOME" => self.user_home.map(str::to_string),
@@ -76,21 +101,23 @@ impl Values<'_> {
                 .user_home
                 .map(|home| format!("{home}\\AppData\\Roaming")),
             "LOCALAPPDATA" => self.user_home.map(|home| format!("{home}\\AppData\\Local")),
-            // #1261 (D168): PowerShell's `$PROFILE` (Windows PowerShell's
-            // spelling; PowerShell 7's is in a folder protected alike).
-            "PROFILE" => self.user_home.map(|home| {
-                format!("{home}\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1")
-            }),
+            // #1261 (D168): machine-wide folders, on the system drive (the
+            // home's, as for `SYSTEMDRIVE`).
+            "PROGRAMDATA" | "ALLUSERSPROFILE" => self.system_folder("ProgramData"),
+            "WINDIR" | "SYSTEMROOT" => self.system_folder("Windows"),
+            "PROGRAMFILES" | "PROGRAMW6432" => self.system_folder("Program Files"),
+            "PROGRAMFILES(X86)" => self.system_folder("Program Files (x86)"),
             _ => None,
         }
     }
 }
 
 /// The text with PowerShell spellings of the home variables rewritten as
-/// cmd's (`$env:USERPROFILE`, `${env:HOME}`, `$($env:X)`, `$HOME`, `$PWD`,
-/// `$PROFILE` become `%USERPROFILE%`, `%HOME%`, `%X%`, `%HOME%`, `%PWD%`,
-/// `%PROFILE%`), in any letter
-/// case. Other text is kept. Linear: each `$` reads at most a name's length.
+/// cmd's (`$env:USERPROFILE`, `${env:HOME}`, `$($env:X)`, `$HOME`, `$PWD`
+/// become `%USERPROFILE%`, `%HOME%`, `%X%`, `%HOME%`, `%PWD%`; #1261:
+/// `$PROFILE` and `$PSHOME` become their places, see [`POWERSHELL_PLACES`]),
+/// in any letter case. Other text is kept. Linear: each `$` reads at most a
+/// name's length.
 pub(super) fn cmd_spellings(text: &str) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::with_capacity(text.len());
@@ -103,12 +130,12 @@ pub(super) fn cmd_spellings(text: &str) -> String {
                 && let Some((name, end)) = variable_at(&chars, at + 2)
                 && chars.get(end) == Some(&')')
             {
-                out.push_str(&format!("%{name}%"));
+                out.push_str(&spelled(&name));
                 at = end + 1;
                 continue;
             }
             if let Some((name, end)) = variable_at(&chars, at) {
-                out.push_str(&format!("%{name}%"));
+                out.push_str(&spelled(&name));
                 at = end;
                 continue;
             }
@@ -117,6 +144,14 @@ pub(super) fn cmd_spellings(text: &str) -> String {
         at += 1;
     }
     out
+}
+
+/// How [`cmd_spellings`] spells the PowerShell variable `name`.
+fn spelled(name: &str) -> String {
+    POWERSHELL_PLACES
+        .iter()
+        .find(|(place, _)| *place == name)
+        .map_or_else(|| format!("%{name}%"), |(_, value)| (*value).to_string())
 }
 
 /// A PowerShell home variable starting at `chars[at]` (a `$`): its name in
@@ -160,7 +195,8 @@ fn variable_at(chars: &[char], at: usize) -> Option<(String, usize)> {
     let known = if env {
         HOME_VARIABLES.contains(&name.as_str())
     } else {
-        matches!(name.as_str(), "HOME" | "PWD" | "PROFILE")
+        matches!(name.as_str(), "HOME" | "PWD")
+            || POWERSHELL_PLACES.iter().any(|(place, _)| *place == name)
     };
     known.then_some((name, index))
 }

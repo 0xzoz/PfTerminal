@@ -23,6 +23,7 @@ use super::RECURSIVE_READERS;
 use super::WRITERS;
 use super::code_variables;
 use super::has_flag;
+use super::paths::glob_any;
 use super::persistence_command;
 use super::windows_paths;
 use super::work;
@@ -101,12 +102,16 @@ const WRITING_PARAMETERS: &[&str] = &[
 ];
 /// Commands that copy or archive a whole folder tree.
 const WINDOWS_TREE_COPIERS: &[&str] = &["xcopy", "robocopy", "compress-archive"];
-/// #1261 (D168): registry keys whose values Windows runs at sign-in (`Run`,
-/// `RunOnce`, `RunOnceEx`, `RunServices`, and the policy key
-/// `Policies\Explorer\Run`), as text in a word.
-const RUN_KEYS: &[&str] = &[r"currentversion\run", r"explorer\run"];
-/// Commands that only read a Run key they name, or whose code is read as
-/// commands of its own (`cmd`, `powershell`).
+/// #1261 (D168): the names after `CurrentVersion` of the registry keys whose
+/// values Windows runs at sign-in (the policy key is `Policies\Explorer\Run`).
+const RUN_KEYS: &[&str] = &[
+    "run",
+    "runonce",
+    "runonceex",
+    "runservices",
+    "runservicesonce",
+];
+/// Commands that only read a Run key they name.
 const RUN_KEY_READERS: &[&str] = &[
     "get-itemproperty",
     "gp",
@@ -127,16 +132,17 @@ const RUN_KEY_READERS: &[&str] = &[
     "rg",
     "grep",
     "git",
-    "cmd",
-    "powershell",
-    "pwsh",
 ];
+/// Words that run the command after them, skipped (with their options) to
+/// find the command itself (`cmd /c reg add ...`).
+const LAUNCHERS: &[&str] = &["cmd", "powershell", "pwsh", "start", "call", "&"];
 /// `reg` operations that only read.
 const REG_READS: &[&str] = &["query", "export", "compare", "/?", "-?"];
 /// PowerShell commands that register or change a scheduled task or job.
 const TASK_SCHEDULERS: &[&str] = &[
     "register-scheduledtask",
     "set-scheduledtask",
+    "enable-scheduledtask",
     "register-scheduledjob",
     "set-scheduledjob",
 ];
@@ -288,49 +294,76 @@ pub(super) fn commands(text: &str, quotes: Quotes) -> Vec<Command> {
 /// `Register-ScheduledTask`, the task scheduler's COM object), a value of a
 /// registry Run key (any command naming one but a reader), or a registry
 /// import the classifier cannot read (`reg import`, `regedit`, `regini`).
-/// `names` and `lower` are the command's words' names and lowercase words.
+/// The command is the first word past launchers and their options (`cmd
+/// /c`, `powershell -Command`, `&`); a word holding blanks (`cmd /c "reg add
+/// ..."`) is read by its own words. `names` and `lower` are the command's
+/// words' names and lowercase words.
 fn windows_persistence(names: &[&str], lower: &[String]) -> bool {
-    let Some(first) = names.first() else {
-        return false;
-    };
     let mut schtasks = false;
-    // The operation after the first `reg` word (`reg add`).
-    let mut reg_operation: Option<&str> = None;
     let mut changes_a_task = false;
     let mut names_a_run_key = false;
-    for (index, (name, word)) in names.iter().zip(lower).enumerate() {
+    for (name, word) in names.iter().zip(lower) {
         work::step();
         changes_a_task |=
             schtasks && matches!(word.as_str(), "/create" | "-create" | "/change" | "-change");
         schtasks |= *name == "schtasks";
-        if reg_operation.is_none() && index > 0 && names[index - 1] == "reg" {
-            reg_operation = Some(word.as_str());
-        }
-        if TASK_SCHEDULERS.contains(name)
-            || word.contains("schedule.service")
-            || (matches!(*name, "regedit" | "regini") && index + 1 < names.len())
-        {
+        if TASK_SCHEDULERS.contains(name) || word.contains("schedule.service") {
             return true;
         }
-        if !names_a_run_key && word.contains("run") {
-            let mut key = String::with_capacity(word.len());
-            for ch in word.chars() {
-                work::step();
-                let ch = if ch == '/' { '\\' } else { ch };
-                if !(ch == '\\' && key.ends_with('\\')) {
-                    key.push(ch);
-                }
+        names_a_run_key = names_a_run_key || run_key(word);
+    }
+    // The command run and its first argument.
+    let mut run: Vec<&str> = Vec::new();
+    'words: for word in lower {
+        work::step();
+        for token in word.split_whitespace() {
+            work::step();
+            let launching = run.is_empty()
+                && (LAUNCHERS.contains(&command_name(token)) || token.starts_with(['/', '-']));
+            if !launching {
+                run.push(token);
             }
-            names_a_run_key = RUN_KEYS.iter().any(|run_key| key.contains(run_key));
+            if run.len() == 2 {
+                break 'words;
+            }
         }
     }
-    if reg_operation.is_some_and(|operation| matches!(operation, "import" | "restore" | "load")) {
+    let name = run.first().map_or("", |token| command_name(token));
+    let operation = run.get(1).copied().unwrap_or_default();
+    let reg = name == "reg";
+    if (reg && matches!(operation, "import" | "restore" | "load"))
+        || (matches!(name, "regedit" | "regini") && !operation.is_empty())
+    {
         return true;
     }
-    let reads = RUN_KEY_READERS.contains(first)
-        || (*first == "reg"
-            && reg_operation.is_some_and(|operation| REG_READS.contains(&operation)));
+    let reads = RUN_KEY_READERS.contains(&name) || (reg && REG_READS.contains(&operation));
     changes_a_task || (names_a_run_key && !reads)
+}
+
+/// Whether `word` (lowercase) names a registry Run key: `...\CurrentVersion\`
+/// and one of [`RUN_KEYS`] (a wildcard name counts), or
+/// `...\Policies\Explorer\Run`, with `\` or `/`.
+fn run_key(word: &str) -> bool {
+    if !word.contains("currentversion") && !word.contains("explorer") {
+        return false;
+    }
+    let segments: Vec<&str> = word
+        .split(['/', '\\'])
+        .map(|segment| segment.trim_matches(['\'', '"']))
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let mut previous: [&str; 2] = ["", ""];
+    for segment in segments {
+        work::step();
+        let after_current_version =
+            previous[1] == "currentversion" && RUN_KEYS.iter().any(|key| glob_any(segment, key));
+        let policy = previous == ["policies", "explorer"] && glob_any(segment, "run");
+        if after_current_version || policy {
+            return true;
+        }
+        previous = [previous[1], segment];
+    }
+    false
 }
 
 /// A command word's name: lowercase, without its folder or a Windows

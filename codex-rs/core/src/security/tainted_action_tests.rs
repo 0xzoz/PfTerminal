@@ -5151,9 +5151,34 @@ fn issue_1261_windows_persistence_is_protected() {
         r"Remove-Item -Recurse $HOME\Documents\WindowsPowerShell",
         r"Copy-Item x.ps1 C:\Windows\System32\WindowsPowerShell\v1.0\profile.ps1",
         r"Copy-Item x.ps1 'C:\Program Files\PowerShell\7\Microsoft.PowerShell_profile.ps1'",
+        // Review 1: launchers before the command, wildcard key names, the
+        // places' variables.
+        r"cmd /c reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d C:\x.exe",
+        r#"pwsh -c "Set-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value y""#,
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\R* -Name x -Value y",
+        "Enable-ScheduledTask -TaskName x",
+        r"Copy-Item p.ps1 $PSHOME\profile.ps1",
+        r#"Copy-Item x.lnk "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\x.lnk""#,
     ] {
         assert_eq!(powershell(line), Some(Persistence), "{line}");
     }
+    for line in [
+        r#"cmd /c "reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d y""#,
+        r#"copy x.lnk "%ProgramData%\Microsoft\Windows\Start Menu\Programs\Startup\x.lnk""#,
+        r#"copy x.lnk "%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Startup\x.lnk""#,
+        r"copy t.xml %windir%\System32\Tasks\x",
+        r"copy t.xml %SystemRoot%\System32\Tasks\x",
+        r#"copy p.ps1 "%ProgramFiles%\PowerShell\7\profile.ps1""#,
+    ] {
+        assert_eq!(cmd(line), Some(Persistence), "cmd /c {line}");
+    }
+    // Review 1: cmd has no `%PROFILE%`: climbing out of it stays unknown.
+    assert_eq!(
+        cmd(
+            r#"copy x.bat "%PROFILE%\..\..\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\x.bat""#
+        ),
+        Some(ProtectedActionKind::UnseenCode)
+    );
 }
 
 /// #1261 (D168): reading those places, and ordinary work near them, is not
@@ -5181,7 +5206,18 @@ fn issue_1261_windows_persistence_reads_are_not_protected() {
         r"Write-Output 'see CurrentVersion\Run'",
         r"Set-Content -Path $HOME\Documents\notes.txt -Value x",
         "cargo run --release",
+        // Review 1.
+        r#"powershell -NoProfile -Command "Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run""#,
+        "node src/FileExplorer/RunButton.js",
+        "cargo test --manifest-path crates/explorer/runtime/Cargo.toml",
+        r"Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Runtime",
     ] {
         assert_eq!(powershell(line), None, "{line}");
+    }
+    for line in [
+        r#"cmd /c "reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run""#,
+        "taskkill /im regedit.exe /f",
+    ] {
+        assert_eq!(cmd(line), None, "cmd /c {line}");
     }
 }
