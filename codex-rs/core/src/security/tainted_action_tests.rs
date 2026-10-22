@@ -5093,11 +5093,10 @@ fn issue_1261_folders_reached_through_a_share_are_not_read() {
 }
 
 /// #1261: on Windows a script is read through a plain local folder, but
-/// never through a junction, a `subst` drive or a drive letter not in use:
-/// those are not followed or looked up, and the line asks.
+/// never through a junction: it is not followed, and the line asks.
 #[cfg(windows)]
 #[test]
-fn issue_1261_windows_reads_stop_at_links_and_unproven_drives() {
+fn issue_1261_windows_reads_stop_at_links() {
     use ProtectedActionKind::*;
     let root = tempfile::tempdir().expect("tempdir");
     let work = root.path();
@@ -5131,9 +5130,23 @@ fn issue_1261_windows_reads_stop_at_links_and_unproven_drives() {
         !touched.iter().any(|path| path.ends_with("run.sh")),
         "{touched:?}"
     );
+}
 
-    // A `subst` drive is not proven local, and neither is a free letter:
-    // only the drive itself is queried.
+/// #1261: on Windows a `subst` drive is not proven local, and neither is a
+/// drive letter not in use: only the drive itself is queried, and the line
+/// asks.
+#[cfg(windows)]
+#[test]
+fn issue_1261_windows_reads_need_a_proven_local_drive() {
+    use ProtectedActionKind::*;
+    let root = tempfile::tempdir().expect("tempdir");
+    let work = root.path();
+    std::fs::create_dir(work.join("real")).expect("folder");
+    std::fs::write(work.join("real").join("run.sh"), "corbanu vault list\n").expect("script");
+    let cwd = work.to_string_lossy().into_owned();
+    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-lc", line]));
+    assert_eq!(kind("bash real/run.sh"), Some(Vault));
+    let _ = windows_reads::take_touched();
     struct Unsubst(char);
     impl Drop for Unsubst {
         fn drop(&mut self) {
