@@ -936,20 +936,23 @@ fn persist_agent_identity_record(
     let mut guard = auth_dot_json
         .lock()
         .map_err(|_| std::io::Error::other("failed to lock auth state"))?;
-    // D171 (#1311): a named account's record is written only onto the stored
-    // sign-in of the ChatGPT account it was made for, in one vault step, and
-    // never brings back an account another process removed.
+    // D171 (#1311): a named account's record (and its private key) is written
+    // only onto the stored sign-in of the ChatGPT account and user it was made
+    // for, in one vault step, and never brings back an account another process
+    // removed.
     let named = storage.is_named_account();
-    let held_account_id = guard
-        .as_ref()
-        .and_then(|auth| auth.tokens.as_ref())
-        .and_then(|tokens| tokens.account_id.clone());
     let updated = storage.update(&mut |auth| {
-        let stored_account_id = auth
-            .tokens
-            .as_ref()
-            .and_then(|tokens| tokens.account_id.as_deref());
-        if named && stored_account_id != held_account_id.as_deref() {
+        let stored_binding = auth.tokens.as_ref().map(|tokens| {
+            (
+                tokens.account_id.as_deref(),
+                tokens.id_token.chatgpt_user_id.as_deref(),
+            )
+        });
+        let record_binding = (
+            Some(record.account_id.as_str()),
+            Some(record.chatgpt_user_id.as_str()),
+        );
+        if named && stored_binding != Some(record_binding) {
             return Err(std::io::Error::other(
                 "the named account's sign-in changed; its agent identity was not saved",
             ));

@@ -6855,18 +6855,24 @@ async fn handle_unauthorized(
     session_telemetry: &SessionTelemetry,
     provider: &SharedModelProvider,
 ) -> Result<UnauthorizedRecoveryExecution> {
-    try_unauthorized_recovery(transport, auth_recovery, session_telemetry, provider)
-        .await
-        .map_err(|error| named_sign_in_revoked(provider).unwrap_or(error))
+    match try_unauthorized_recovery(transport, auth_recovery, session_telemetry, provider).await {
+        Err(error) => Err(named_sign_in_revoked(provider).await.unwrap_or(error)),
+        recovered => recovered,
+    }
 }
 
 /// D171 (#1311): a named ChatGPT account removed or signed out while a
 /// request on it was in flight (its tokens were revoked, so the request got a
 /// 401) is reported with the account's recovery, as the next request would
-/// be, instead of a generic unauthorized error.
-fn named_sign_in_revoked(provider: &SharedModelProvider) -> Option<CodexErr> {
+/// be, instead of a generic unauthorized error. The vault is read off the
+/// async workers.
+async fn named_sign_in_revoked(provider: &SharedModelProvider) -> Option<CodexErr> {
     codex_model_provider::named_sign_in_account(provider.info())?;
-    let reason = provider.auth_manager()?.named_sign_in_unavailable()?;
+    let manager = provider.auth_manager()?;
+    let reason = tokio::task::spawn_blocking(move || manager.named_sign_in_unavailable())
+        .await
+        .ok()
+        .flatten()?;
     Some(CodexErr::Fatal(format!(
         "{}: {reason}",
         provider.info().name

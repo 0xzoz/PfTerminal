@@ -73,10 +73,14 @@ async fn an_unreadable_sign_in_is_still_removed() {
 }
 
 fn chatgpt_sign_in(access_token: &str) -> crate::auth::storage::AuthDotJson {
+    chatgpt_sign_in_of(access_token, "chatgpt-work")
+}
+
+fn chatgpt_sign_in_of(access_token: &str, user: &str) -> crate::auth::storage::AuthDotJson {
     let claims = serde_json::json!({
         "email": "work@example.com",
         "https://api.openai.com/auth": {
-            "chatgpt_user_id": "chatgpt-work",
+            "chatgpt_user_id": user,
             "chatgpt_account_id": "ws-work",
             "chatgpt_plan_type": "plus",
         },
@@ -399,8 +403,8 @@ fn agent_identity_record(account_id: &str) -> crate::auth::storage::AgentIdentit
 
 /// #1311 (D171): saving an agent identity for a named account another
 /// process removed meanwhile is refused; the sign-in held in memory is never
-/// written back. One for another ChatGPT account's sign-in, saved under the
-/// name meanwhile, is refused too.
+/// written back. One for another ChatGPT account's or user's sign-in, saved
+/// under the name meanwhile, is refused too.
 #[test]
 fn an_agent_identity_save_never_brings_a_removed_account_back() {
     let home = tempfile::tempdir().expect("home");
@@ -447,6 +451,50 @@ fn an_agent_identity_save_never_brings_a_removed_account_back() {
     );
     assert!(saved.is_err());
     assert_eq!(stored_sign_in(home.path()), Some(other));
+
+    // Another user of the same workspace: the removed account's key is not
+    // written onto that sign-in either.
+    let colleague = chatgpt_sign_in_of("access-colleague", "chatgpt-colleague");
+    assert!(
+        vault(home.path())
+            .remove_provider_account("openai", &work_name())
+            .expect("remove")
+    );
+    crate::auth::named_chatgpt::save_named_account_auth(
+        home.path(),
+        &account("work"),
+        &colleague,
+        /*must_be_new*/ true,
+    )
+    .expect("a colleague's sign-in");
+    let saved = super::super::persist_agent_identity_record(
+        &held,
+        &storage,
+        agent_identity_record("ws-work"),
+    );
+    assert!(saved.is_err());
+    assert_eq!(stored_sign_in(home.path()), Some(colleague));
+
+    // The account's own sign-in takes it.
+    assert!(
+        vault(home.path())
+            .remove_provider_account("openai", &work_name())
+            .expect("remove")
+    );
+    crate::auth::named_chatgpt::save_named_account_auth(
+        home.path(),
+        &account("work"),
+        &chatgpt_sign_in("access-held"),
+        /*must_be_new*/ true,
+    )
+    .expect("sign in again");
+    super::super::persist_agent_identity_record(&held, &storage, agent_identity_record("ws-work"))
+        .expect("saved");
+    assert!(
+        stored_sign_in(home.path())
+            .and_then(|auth| auth.agent_identity)
+            .is_some()
+    );
 }
 
 /// #1311: the stored sign-in is read with `seen` released (other callers
