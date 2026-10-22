@@ -16,7 +16,7 @@ th{background:#f5f5f7}.warn{background:#fff4e5;border-left:4px solid #f0a020;pad
 <body>
 <h1>Corbanu Terminal — management handoff</h1>
 <p><small>Kept by the coordinating agent (Claude, running in Corbanu Terminal as “coordinator”) for its successor; this update written by the coordinator's handoff-doc11 worker.
-State as of <b>2026-10-22 12:45 UTC (05:45 America/Phoenix)</b>, with <code>todo.md</code> read through its 12:59Z lines and GitHub re-checked at about 13:00Z. Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
+State as of <b>2026-10-22 12:45 UTC (05:45 America/Phoenix)</b>, with <code>todo.md</code> read through its 12:59Z lines (including the install of <code>d88d018ab2</code>) and GitHub re-checked at about 13:03Z. Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
 <code>2cee3b5984</code>, the merge of #1333 at 12:29Z; main moved to <code>e2ddef8698</code> with tui-qa2's record #1341 at 12:51Z).
 Coordinator since 2026-10-13 04:30Z: a Claude coordinator, resumed from the 2026-10-12 pause handoff when Travis said resume; it runs in Travis's TUI. It stopped with every
 worker during the 429 outage (10-16 13:55Z) and resumed on 2026-10-19 18:30Z (box below).
@@ -46,12 +46,13 @@ tester deviations (D182); AGG-20P-B passed and AGG-20P-A failed on the literal w
 <li><b>Reel:</b> the classifier reel is published (#1297; section 8.1). <b>Incident:</b> reel-cls ran a test launcher under <code>bash -x</code>, which printed the then-valid key behind
 <code>provider/zai_api_key</code> into its own transcript. The coordinator redacted both copies found, Travis revoked that key at 08:20Z, and the <b>NO TRACING RULE</b> followed (section 3).</li>
 <li><b>Contributors:</b> merges under D152 (#1271, #1282, #1272) and D159 (#1222), #1215 after a security review; first replies on #1152/#1147 (security-approved, waiting on their
-author to merge main), #1305 and #1318 (D187, D188); Task Node acknowledgement on #1118; filed #1334 and #1335 with credit. New ready contributor PRs since: bradsbots' #1337, #1338, #1342 and
-#1344 and citadelculture's #1336 (not yet assessed).</li>
+author to merge main), #1305 and #1318 (D187, D188); Task Node acknowledgement on #1118; filed #1334 and #1335 with credit. New ready contributor PRs since: bradsbots' #1337, #1338, #1342, #1344 and
+#1346 and citadelculture's #1336 (not yet assessed).</li>
 <li><b>CI:</b> every postmerge run from #1310 (09:17Z) to #1321 (11:47Z) shows <b>cancelled</b> only because <code>v8-canary / metadata</code> was cancelled in the concurrency queue behind #1306's
 roughly 3-hour V8-from-source build (its Bazel lockfile change), which also fails the aggregate “Postmerge CI results” job; every real job is green (checked on <code>b0fa02105f</code>,
 run 39767693423). The queue has cleared: #1319's run (<code>d88d018ab2</code>) was fully green at 12:49Z. The 10-21 scheduled nightly failed (seventh in a row, #636).</li>
-<li><b>Installed build:</b> main <b><code>b0fa02105f</code></b> (#1322; installed 12:23Z, Rust 1.99.1; section 7).</li>
+<li><b>Installed build:</b> main <b><code>d88d018ab2</code></b> (#1319, postmerge fully green; installed 12:59Z, just after the snapshot, replacing <code>b0fa02105f</code> (#1322) from
+12:23Z; Rust 1.99.1; section 7).</li>
 <li><b>Blocker: Z.AI balance.</b> Since 12:28Z every Z.AI request on <code>zai_key_3</code> returns 429 code 1113 (“Insufficient balance”). acct-rerun paused cleanly with
 <code>.codex-work/acct-rerun-20261022/RESUME.md</code>; the Windows gate's GLM testers need Z.AI too. Recharging is <b>D190</b>.</li>
 <li><b>New coordinator rules</b> (section 3): MODEL-DECLINE, CONTRIBUTOR COMMUNICATION, Z.AI KEY, SWEEP, TASK NODE CREDIT, NO TRACING, TEST HOME, the SETTLED reel-voice note, and
@@ -734,8 +735,8 @@ whose targets and temp folders are on CorbanuDrive. Travis was told. At handoff-
 It execs <code>.codex-work/corbanu-terminal/bin/corbanu</code>, a <b>symlink</b> to the real binary
 <code>.codex-work/integration-build-20260922a/integration-package-dev/bin/corbanu</code>. <b>Install over the real binary, never over the launcher</b>: at 10:53–10:56Z the
 coordinator briefly copied a binary over the launcher by mistake and restored it; sessions started in those three minutes ran without <code>activate.sh</code>'s environment.</li>
-<li>Last install: main <code>b0fa02105f</code> (installed 2026-10-22 12:23Z per <code>todo.md</code>; <code>INSTALL.json</code> says built 12:22Z; the merge of #1322; every real
-postmerge job green, only <code>v8-canary</code> queue-cancelled, section 4; sha256 begins <code>b185a0a32dee20af</code>), built with Rust 1.99.1. It is a dev build with
+<li>Last install: main <code>d88d018ab2</code> (installed 2026-10-22 12:59Z per <code>todo.md</code>, just after this update's snapshot; <code>INSTALL.json</code>'s
+<code>built_at</code> reads 13:05Z; the merge of #1319, postmerge fully green; sha256 begins <code>69a609b614de1baa</code>), built with Rust 1.99.1. It is a dev build with
 developer-accounting, signed with Travis's Developer ID (“Developer ID Application: Travis Good”; <code>codesign --force -s DB43D928… -i com.corbanu.corbanu -o runtime</code>), swapped atomically, and the smoke
 <code>exec</code> passed through the launcher. <code>.codex-work/integration-build-20260922a/INSTALL.json</code> is authoritative (commit, time, toolchain, checksum, previous binary). Build target dir:
 <code>.codex-work/corbanu-terminal/target-dev-active</code>. Build script: <code>.codex-work/integration-build-20260922a/dev-build-online.sh</code> (repo checkout at
@@ -755,20 +756,21 @@ developer-accounting, signed with Travis's Developer ID (“Developer ID Applica
 <li><code>11443dc2b5</code> (10-22 04:50Z; the merge of #1292; adds #1278, #1279, #1271, #1282, #1272, #1281 (docs), #1273 and #1292).</li>
 <li><code>0e2c02529d</code> (07:15Z; the merge of #1294, postmerge green; adds #1285, #1222, #1295, #1215, #1297 and #1294).</li>
 <li><code>b0fa02105f</code> (12:23Z; the merge of #1322; adds #1307, #1299–#1301, #1304, #1314, #1306, #1310, #1308, #1317, #1320, #1315, #1325, #1327 and #1322).</li>
+<li><code>d88d018ab2</code> (12:59Z; the merge of #1319; adds #1328, #1321 and #1319).</li>
 </ul>
-Next to the real binary in <code>integration-package-dev/bin/</code>: <code>corbanu.prev-0e2c02529d</code> (the previous install), <code>corbanu.prev-11443dc2b5</code> and
-<code>corbanu.prev-333f0b8db7</code>. Moved to <code>.codex-work/integration-build-20260922a/old-binaries/</code> since #1281: <code>corbanu.31b9f3ca</code> (pf84-cb1's separately signed copy
+Next to the real binary in <code>integration-package-dev/bin/</code>: <code>corbanu.prev-b0fa02105f</code> (the previous install), <code>corbanu.prev-0e2c02529d</code> and
+<code>corbanu.prev-11443dc2b5</code>; <code>corbanu.prev-333f0b8db7</code> is no longer there. Moved to <code>.codex-work/integration-build-20260922a/old-binaries/</code> since #1281: <code>corbanu.31b9f3ca</code> (pf84-cb1's separately signed copy
 of main <code>31b9f3cad8</code>, no longer needed) and <code>2f9d05c51e</code> at 04:50Z, <code>8c73c8ea80</code> at 07:15Z (it was kept for parity runs until D161 was answered), <code>9750861c2a</code> at 12:23Z.
 Workers that need a fixed candidate build and sign their own private copy and never install it: pf84-rerun used main <code>f61397ca41</code>, acct-rerun keeps <code>63c9daca26</code>
 (sha256 begins <code>e942b095</code>) for its resume.</li>
-<li><b>Not in it:</b> #1328 (11:25Z, Windows legacy-sandbox warning), #1321 (11:47Z), #1319 (11:50Z) and #1333 (12:29Z). <code>INSTALL.json</code>'s <code>what_is_new</code> also names
-#1328, but <code>git merge-base</code> shows it isn't an ancestor of <code>b0fa02105f</code>.
+<li><b>Not in it:</b> #1333 (12:29Z, plugin catalog once) and #1341 (12:51Z, a QA record). (The previous install, <code>b0fa02105f</code>, didn't contain #1328 although its
+<code>INSTALL.json</code> <code>what_is_new</code> named it; <code>d88d018ab2</code> does.)
 <ul>
 <li>Running workers keep the inode they started with; new launches get the new binary. tui-qa2 checked #1327, #1322, #1320 and #1319 in the real TUI (#1319 on a later main, as
-its record #1341 says); the coordinator's 12:59Z call: rebuild at a green main at or after <code>d88d018ab2</code> at the next opportunity.</li>
+its record #1341 says); the coordinator then rebuilt at <code>d88d018ab2</code> (12:59Z).</li>
 <li>The rollback test to <code>45bfa7d938</code> stays held: #616 has had no episode since 10-15 21:01Z.</li>
-<li>Next install: main was fully green at <code>d88d018ab2</code> (#1319) at 12:49Z; install the newest head whose postmerge run is green in every real job (it would add #1328, #1321,
-#1319, #1333 and whatever running workers merge). Don't swap under a worker whose brief pins the installed build.</li>
+<li>Next install: the newest head whose postmerge run is green in every real job (it would add #1333 and whatever running workers merge). Don't swap under a worker whose brief pins
+the installed build.</li>
 </ul></li>
 <li>The Apps shortcut (<code>/Applications/Corbanu Terminal Launcher.app</code>) launches the same binary with
 <code>--yolo</code>.</li>
@@ -1608,7 +1610,7 @@ citadelculture's drafts #1330, ready to merge as is, and #1329, which needs a re
 both accounts) and <b>NA-06 passed</b> on a replay, rename included. The advisory “no ChatGPT traffic after removal” check stays inconclusive (two connections opened before the removal stayed
 open); the coordinator decided no timing re-run. First-run cases now: <b>26 passed, 2 in part</b>. Filed #1324 (plugin catalog fetched about four times; fixed by #1333) and #1331 (low: a
 refused prompt is saved as a turn on the removed account, bradsbots' #1338; <code>/providers</code> local rows varied by VM).</li>
-<li>Contributors on the D176 items (TUI lane, after the flag removal): bradsbots' #1337 (#1289) and citadelculture's draft #1316 (#1290); #1288 has no PR.</li>
+<li>Contributors on the D176 items (TUI lane, after the flag removal): bradsbots' #1337 (#1289) and #1346 (#1288, opened 12:53Z) and citadelculture's draft #1316 (#1290).</li>
 </ul>
 <b>Before #1080 can merge:</b> the <b>Windows gate</b> (#694; brief <code>$W/win-gate-pf84.md</code>: build #1080's head on Travis's Windows machine and run the Windows PF-84 cases with named
 accounts on, including D171's removal refusal, the one-time vault-index write and #694's held-lock canary; its GLM testers need Z.AI, so D190 first; launch when Travis says the machine is up),
@@ -2152,11 +2154,13 @@ code-setting variables, output files and git programs ask after untrusted conten
 merged main (<code>c861c9b971</code>), and the coordinator's grant (12:59Z) lets that merge commit merge on green without a re-review (the PR's lines are identical).</td></tr>
 <tr><td>sec-1309c</td><td>10-22 11:51</td><td>#1309 item 2A (coordinator call 12:02Z): the line's own relative writes, redirections, seds and <code>--output=</code> files after a <code>cd</code> that may not
 happen are judged in every folder the line may be in, like #1321 does for nested scripts.</td><td><b>#1339</b> (head <code>abc65bc18e</code>, checks running).</td></tr>
-<tr><td>tui-qa2</td><td>10-22 12:03</td><td>Interactive true-TUI checks of #1327, #1322, #1320 and #1319 on the installed <code>b0fa02105f</code> in a throwaway home, GLM 5.3 Flash on Z.AI.</td><td>Record
+<tr><td>tui-qa2</td><td>10-22 12:03</td><td>Interactive true-TUI checks of #1327, #1322, #1320 and #1319 in a throwaway home, GLM 5.3 Flash on Z.AI (the installed <code>b0fa02105f</code>;
+#1319's “after” check on a dev build of <code>d88d018ab2</code>).</td><td>Record
 <b>#1341</b> merged 12:51Z (<code>e2ddef8698</code>); filed #1340 (#1327 follow-up). <b>Finished 12:59Z</b> (EXIT 0): #1327, #1322, #1320 and #1319 all pass in the real TUI; no declined
 model step. Coordinator call: #1340 is low priority, for the next TUI batch.</td></tr>
 <tr><td>fu-1323</td><td>10-22 12:38</td><td>Explanation-only follow-ups: #1323 (a search pattern naming a protected file gets a false after-run note) and #1331 item 2 (<code>/providers</code> local-provider
-rows vary by VM). Z.AI is out of balance, so it uses unit tests and mock servers.</td><td>No PR yet (worktrees <code>fu-1323-a</code>, <code>fu-1331-b</code>).</td></tr>
+rows vary by VM). Z.AI is out of balance, so it uses unit tests and mock servers.</td><td>No PR at the snapshot; <b>#1347</b> (#1323) opened 12:55Z (worktrees <code>fu-1323-a</code>,
+<code>fu-1331-b</code>).</td></tr>
 <tr><td>handoff-doc11</td><td>10-22 12:39</td><td>This update (docs-only PR).</td><td>—</td></tr>
 </table>
 <div>Finished since the last update (results in <code>$HOME/.corbanu-workers/</code>): handoff-doc10, sec-1268b, contrib-watch3, sec-1268c, flake-7, pf84-cb1, contrib-4, win-691b, reel-cls,
@@ -2185,12 +2189,13 @@ couldn't delete without forcing (merged on GitHub): <code>sec-1268-xargs-git</co
 <table><tr><th>PR</th><th>Draft</th><th>Author</th><th>Updated</th><th>Title</th></tr><tr><td>1344</td><td>no</td><td>bradsbots</td><td>2026-10-22</td><td>tests: forked children exit cleanly off Linux (#1252)</td></tr><tr><td>1342</td><td>no</td><td>bradsbots</td><td>2026-10-22</td><td>state: legacy mail retries match a missing label (#1335)</td></tr><tr><td>1341</td><td>no</td><td>IridiumMaster</td><td>2026-10-22</td><td>qa: post-merge true-TUI checks of #1327, #1322, #1320, #1319</td></tr><tr><td>1339</td><td>no</td><td>IridiumMaster</td><td>2026-10-22</td><td>security (#1309): the line&#x27;s own relative writes after a cd that may not happen are judged in every folder it may be in</td></tr><tr><td>1338</td><td>no</td><td>bradsbots</td><td>2026-10-22</td><td>core: a refused removed-account prompt is not a turn (#1331)</td></tr><tr><td>1337</td><td>no</td><td>bradsbots</td><td>2026-10-22</td><td>tui: Enter always submits the add-account name field (#1289)</td></tr><tr><td>1336</td><td>no</td><td>citadelculture</td><td>2026-10-22</td><td>docs(exec): explain JSON token-usage reporting limits</td></tr><tr><td>1332</td><td>no</td><td>IridiumMaster</td><td>2026-10-22</td><td>security (#1064, #1159): more ways a value runs, code variables, output files and git programs ask after untrusted content</td></tr><tr><td>1330</td><td>yes</td><td>citadelculture</td><td>2026-10-22</td><td>fix(core): refresh API-only websocket identity after credential rotation</td></tr><tr><td>1329</td><td>yes</td><td>citadelculture</td><td>2026-10-22</td><td>fix(login): preserve replacement sign-ins after stale removal checks</td></tr><tr><td>1318</td><td>no</td><td>citadelculture</td><td>2026-10-22</td><td>fix(ci): preserve quoted paths in changed-crate lint selection</td></tr><tr><td>1316</td><td>yes</td><td>citadelculture</td><td>2026-10-22</td><td>fix(tui): cancel pending named-account device sign-in</td></tr><tr><td>1313</td><td>yes</td><td>citadelculture</td><td>2026-10-22</td><td>test(core): report unexpected pre-cancelled delegate spawn outcomes</td></tr><tr><td>1305</td><td>no</td><td>citadelculture</td><td>2026-10-22</td><td>ci: trigger schema checks for API macros and lockfile changes</td></tr><tr><td>1302</td><td>no</td><td>IridiumMaster</td><td>2026-10-22</td><td>security (#1261): Windows first judgment reads scripts through plain local paths; homes by Windows segments</td></tr><tr><td>1284</td><td>yes</td><td>citadelculture</td><td>2026-10-22</td><td>fix(tui): suppress unavailable revocation restart in remote windows</td></tr><tr><td>1277</td><td>no</td><td>llmontgo</td><td>2026-10-22</td><td>message-history: move lookup_batch lock-release coverage into lock_lifetime_tests (#1003)</td></tr><tr><td>1270</td><td>yes</td><td>citadelculture</td><td>2026-10-21</td><td>fix(core): preserve GLM Standard reasoning selected in Spawn</td></tr><tr><td>1246</td><td>yes</td><td>citadelculture</td><td>2026-10-22</td><td>Use statx DONT_SYNC for Linux process-root identity</td></tr><tr><td>1166</td><td>yes</td><td>citadelculture</td><td>2026-10-22</td><td>fix(core): defer namespace allowance notes until the first attempt</td></tr><tr><td>1161</td><td>no</td><td>citadelculture</td><td>2026-10-22</td><td>fix(core): classify executable local Git configuration writes</td></tr><tr><td>1152</td><td>no</td><td>citadelculture</td><td>2026-10-22</td><td>fix: avoid repeated argument copies in arithmetic flags</td></tr><tr><td>1147</td><td>no</td><td>citadelculture</td><td>2026-10-22</td><td>fix: avoid repeated shared-target copies in sed judgments</td></tr><tr><td>1117</td><td>no</td><td>app/dependabot</td><td>2026-10-20</td><td>build(deps): bump opentelemetry_sdk from 0.31.0 to 0.33.1 in /codex-rs</td></tr><tr><td>1113</td><td>no</td><td>app/dependabot</td><td>2026-10-20</td><td>build(deps): bump actions/setup-node from 6.3.0 to 7.1.0</td></tr><tr><td>1080</td><td>yes</td><td>IridiumMaster</td><td>2026-10-22</td><td>PF-84: turn named accounts on by default (flag removal) — draft, needs Travis&#x27;s sign-off</td></tr><tr><td>1073</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>test(login): invoke provider-auth fixtures through sh</td></tr><tr><td>1063</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>test(transport): synchronize request timeout phases</td></tr><tr><td>1055</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>perf(core): cache shell substitution feed membership</td></tr><tr><td>1029</td><td>yes</td><td>citadelculture</td><td>2026-10-21</td><td>test(core): cover custom native spawn provider routes</td></tr><tr><td>998</td><td>yes</td><td>citadelculture</td><td>2026-10-21</td><td>fix: complete ZIP archive migration follow-ups</td></tr><tr><td>995</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>fix(cli): release Claude refresh locks with their owner</td></tr><tr><td>994</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>fix(arg0): release owned file locks when guards drop</td></tr><tr><td>990</td><td>yes</td><td>citadelculture</td><td>2026-10-19</td><td>fix(ci): use compiler response files for argument-comment lint</td></tr><tr><td>983</td><td>yes</td><td>citadelculture</td><td>2026-10-19</td><td>fix(core): avoid duplicate omitted-tool warnings across concurrent builds</td></tr><tr><td>979</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>fix(tui): name the enrolled account behind shared provider status</td></tr><tr><td>632</td><td>yes</td><td>IridiumMaster</td><td>2026-10-12</td><td>WIP (preserved): facilities — route Breeze to Bossa Nova</td></tr><tr><td>630</td><td>yes</td><td>IridiumMaster</td><td>2026-10-12</td><td>WIP (preserved): canary proxy-injection flake work (#222, likely superseded by #500)</td></tr><tr><td>252</td><td>no</td><td>grapemarketer</td><td>2026-10-21</td><td>Fix Task Node artifact URL parsing and GitHub type inference</td></tr><tr><td>161</td><td>no</td><td>meechmeechmeech</td><td>2026-10-21</td><td>Cap OpenRouter GLM 5.3 Flash output at Z.AI&#x27;s 128K (#129)</td></tr><tr><td>141</td><td>no</td><td>citadelculture</td><td>2026-10-21</td><td>test(models): protect six retained IDs across discovery and requests</td></tr><tr><td>139</td><td>no</td><td>wizbubba1</td><td>2026-10-21</td><td>docs: specify first-task wallet linkage proof</td></tr><tr><td>135</td><td>yes</td><td>citadelculture</td><td>2026-10-21</td><td>fix(models): make Grok 4.7 explicit-choice until tier pricing is supported</td></tr><tr><td>126</td><td>no</td><td>goodalexander</td><td>2026-10-02</td><td>fix(core): Vercel continuations, fake Continue. turns, and exec calls from Chat Completions providers</td></tr><tr><td>124</td><td>no</td><td>goodalexander</td><td>2026-10-02</td><td>fix(core): keep chat prompt-cache breakpoints on the newest turn (P0 cost)</td></tr><tr><td>113</td><td>no</td><td>goodalexander</td><td>2026-08-22</td><td>Add OpenRouter Ox Alpha model</td></tr><tr><td>112</td><td>no</td><td>goodalexander</td><td>2026-08-19</td><td>Fix noisy startup from stale global config and expired MCP auth</td></tr><tr><td>105</td><td>no</td><td>app/dependabot</td><td>2026-09-12</td><td>Bump hmac from 0.12.1 to 0.13.0 in /codex-rs</td></tr><tr><td>104</td><td>no</td><td>app/dependabot</td><td>2026-09-24</td><td>build(deps): bump time from 0.3.47 to 0.3.55 in /codex-rs</td></tr><tr><td>103</td><td>no</td><td>app/dependabot</td><td>2026-10-20</td><td>build(deps): bump insta from 1.46.3 to 1.48.0 in /codex-rs</td></tr><tr><td>101</td><td>no</td><td>app/dependabot</td><td>2026-09-12</td><td>Bump semver from 1.0.27 to 1.0.28 in /codex-rs</td></tr><tr><td>100</td><td>no</td><td>app/dependabot</td><td>2026-10-04</td><td>Bump actions/github-script from 8.0.0 to 9.0.0</td></tr><tr><td>99</td><td>no</td><td>app/dependabot</td><td>2026-10-04</td><td>Bump pnpm/action-setup from a8198c4bff370c8506180b035930dea56dbd5288 to fc06bc1257f339d1d5d8b3a19a8cae5388b55320</td></tr><tr><td>98</td><td>no</td><td>app/dependabot</td><td>2026-10-04</td><td>Bump actions/setup-python from 6.2.0 to 7.0.0</td></tr><tr><td>96</td><td>no</td><td>app/dependabot</td><td>2026-10-04</td><td>Bump peter-evans/create-pull-request from 8.1.0 to 8.1.1</td></tr><tr><td>94</td><td>no</td><td>goodalexander</td><td>2026-09-06</td><td>Sync PFTerminal with OpenAI Codex 0.147.0</td></tr><tr><td>88</td><td>yes</td><td>goodalexander</td><td>2026-08-09</td><td>wip: anthropic payload handling and Claude OAuth</td></tr><tr><td>28</td><td>yes</td><td>goodalexander</td><td>2026-08-09</td><td>Billing WS-A: token buckets + provider-reported cost</td></tr></table>
 <div>58 open PRs, snapshot from <code>gh pr list</code> at 12:45Z (48 at the last update).
 <ul>
-<li><b>Ours:</b> #1302 (sec-1261), #1332 (sec-1064), #1339 (sec-1309c), #1341 (tui-qa2; merged 12:51Z, after the snapshot), #1080 (draft, PF-84, green; Windows gate and sign-off) and the preserved WIPs #632 and #630.</li>
+<li><b>Ours:</b> #1302 (sec-1261), #1332 (sec-1064), #1339 (sec-1309c), #1347 (fu-1323, opened 12:55Z after the snapshot), #1341 (tui-qa2; merged 12:51Z, after the snapshot), #1080 (draft, PF-84, green; Windows gate and sign-off) and the preserved WIPs #632 and #630.</li>
 <li><b>Outside contributors</b> (an independent review each; every decline gets a written, warm explanation under the DECLINE RULE; CONTRIBUTOR-FIRST before we write overlapping code):
 <ul>
 <li><b>Ready, no maintainer comment yet (answer first, SWEEP RULE):</b> citadelculture's #1336 (docs: JSON token-usage limits, #290) and bradsbots' #1337 (#1289, Enter always submits the
 add-account name field), #1338 (#1331, a refused removed-account prompt isn't a turn), #1342 (#1335, legacy mail retries) and #1344 (#1252, forked test children exit cleanly off
-Linux). #1337 and #1338 touch PF-84 behaviour (D176 put #1289 after the
+Linux). Opened after the snapshot: bradsbots' ready #1346 (#1288, provider lists show how many rows are below) and citadelculture's draft #1348 (#1334, colon-space paths in denial
+explanations). #1337 and #1338 (and #1346, below) touch PF-84 behaviour (D176 put #1288–#1290 after the
 flag removal), so check how they interact with #1080.</li>
 <li>Waiting on Travis: #1305 (D187) and #1318 (D188), both reviewed APPROVE and green.</li>
 <li>Reviewed, waiting on the author: #1161 (D158), #1152 and #1147 (merge main), #998 (D118, D146/D151), #1029 (D130), #139 (D132), #161 and #252 (D133), #141 and #135 (retarget asked);
@@ -2260,11 +2265,11 @@ acct-rerun's five cases as blocked.</td><td>(a) Recharge: acct-rerun needs about
 </table>
 <p><b>Travis's own actions:</b> <b>D178b</b> (10-22 08:30Z): in <code>/vault</code>, point <code>provider/zai_api_key</code> at the new key (it still holds the revoked one; workers use
 <code>zai_key_3</code>, so this doesn't block anything). <b>D18</b> (10-16): delete the vault label <code>kimi_api</code>; it holds error text, and <code>kimi_api3</code> holds the key. Neither has a
-command-line path, and neither is confirmed done. Also (Travis, 08:20Z): he boots a Windows machine and an agent runs the PF-84 Windows gate; ask
-him whether it is up.</p>
+command-line path, and neither is confirmed done. Travis said at 08:20Z he would boot a Windows machine for the PF-84 Windows gate; ask whether it is
+up.</p>
 <div><b>Coming next</b> (raise when ready; not yet numbered):
 <ul>
-<li><b>New contributor PRs</b> #1336, #1337, #1338, #1342 and #1344: first replies and reviews (SWEEP RULE). Merges under D152 if they qualify; #1337/#1338 touch PF-84, so check them against #1080
+<li><b>New contributor PRs</b> #1336, #1337, #1338, #1342, #1344 and #1346 (and draft #1348): first replies and reviews (SWEEP RULE). Merges under D152 if they qualify; #1337/#1338 touch PF-84, so check them against #1080
 and D176.</li>
 <li><b>#1330</b>: merge under D152 once its author marks it ready; <b>#1329</b>: the suggested re-check, then merge.</li>
 <li><b>#1277</b>: close with credit at or after 10-23 02:03Z (D169).</li>
@@ -2303,10 +2308,10 @@ The overnight window runs until 16:30Z; until then launch only decision-free wor
 (it needs a free slot and Z.AI).</li>
 <li><b>When each running worker finishes</b>, read its result and bring its decisions to Travis: sec-1261 (#1302), sec-1064 (#1332), sec-1309c (#1339) and fu-1323 (tui-qa2's result is in: #1341 merged, #1340 low priority).
 Don't merge a running worker's PR.</li>
-<li><b>Decision-free work as slots free:</b> a contributor sweep (SWEEP RULE: #1336, #1337, #1338, #1342 and #1344 first; #1330/#1329; #1277 after 10-23 02:03Z with credit; Task Node acknowledgement
+<li><b>Decision-free work as slots free:</b> a contributor sweep (SWEEP RULE: #1336, #1337, #1338, #1342, #1344 and #1346 first; #1330/#1329; #1277 after 10-23 02:03Z with credit; Task Node acknowledgement
 requests); the #636 nightly worker; the stale-worktree and local-branch cleanup (section 10).</li>
-<li><b>Main CI and the next install:</b> #1319's postmerge run (<code>d88d018ab2</code>) was fully green at 12:49Z; confirm #1333's and #1341's, then build, sign and install the newest
-green main (it would add #1328, #1321, #1319, #1333 and the running workers' merges), keeping <code>corbanu.prev-b0fa02105f</code>.</li>
+<li><b>Main CI and the next install:</b> <code>d88d018ab2</code> (#1319, fully green) is installed since 12:59Z; confirm #1333's and #1341's postmerge runs, then install the next green
+main when the running workers' merges land, keeping <code>corbanu.prev-d88d018ab2</code>.</li>
 <li><b>As Travis answers:</b>
 <ul>
 <li>D182–D185: record them in the <code>localmodel-run3-20261022/</code> dispositions, the Aggressive and Moderate milestone counts and the P1 plan (an amendment to L2's rule for D183,
@@ -2314,7 +2319,7 @@ as amendment 7 did for D110); add the tester checklist to <code>tester-packet-ru
 <li>D186: note it on #992. D187/D188: merge #1305 and #1318 with their literal head SHAs (re-check that the heads haven't moved). D189: record the scope of D152.</li>
 </ul></li>
 <li><b>PF-84 named accounts — finish and remove the flag</b> (D67, D84, D177): the Windows gate (#694), Travis's sign-off, merge #1080, then #1251 (D155 (a)) and D176's TUI items
-(#1288, #1289/#1337, #1290/#1316). Activate <code>docs/plans/proposed/named-accounts-flag-removal.md</code> in free slot 2 if a plan slot is still needed. #979 merges with credit around 10-27
+(#1288/#1346, #1289/#1337, #1290/#1316). Activate <code>docs/plans/proposed/named-accounts-flag-removal.md</code> in free slot 2 if a plan slot is still needed. #979 merges with credit around 10-27
 if still a draft (D83).</li>
 <li><b>Accounting:</b> finish acct-rerun's record and bring the accounting sign-off to Travis if all five pass; #314 (carried), #889, #1045, #824 (WebRTC), #814 and #368 (Sol re-read before
 11-21; DeepSeek 2027 dates before 12-01).</li>
