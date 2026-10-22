@@ -107,11 +107,21 @@ async fn actual_call_arguments_do_not_leak_into_tool_only_approval() {
         /*idempotent_hint*/ None,
         /*open_world_hint*/ Some(false),
     ));
+    // Use slash spelling in this fixture so MCP's path collector sees it on
+    // every host; retain the actual Windows drive and configured home.
+    let protected_path = step
+        .turn
+        .config
+        .codex_home
+        .as_path()
+        .join("config.toml")
+        .to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/");
     let invocation = McpInvocation {
         server: "fixture".to_string(),
         tool: "read_file".to_string(),
         arguments: Some(json!({
-            "path": step.turn.config.codex_home.as_path().join("config.toml"),
+            "path": protected_path,
         })),
     };
     let context = McpCallContext::new(&step, &metadata);
