@@ -102,6 +102,35 @@ fn ctrl_d_submit_mode_uses_enter_for_newline() {
     assert!(view.is_complete());
 }
 
+/// #1289: in a one-line field, Enter right after fast typing submits; it is
+/// never taken into the field as a newline.
+#[test]
+fn single_line_mode_enter_inside_paste_burst_window_submits() {
+    let (submitted, submitted_rx) = std::sync::mpsc::channel();
+    let mut view = CustomPromptView::new(
+        "Add a Z.AI account".to_string(),
+        "Account name".to_string(),
+        String::new(),
+        /*context_label*/ None,
+        Box::new(move |text| {
+            submitted.send(text).expect("send submitted text");
+        }),
+    )
+    .with_submit_mode(CustomPromptSubmitMode::EnterSingleLine);
+    let now = Instant::now();
+    let mut ms = 0;
+
+    for ch in "work".chars() {
+        view.handle_key_event_at(KeyEvent::from(KeyCode::Char(ch)), now + elapsed(ms));
+        ms += 1;
+    }
+    // Within the burst window, where the multi-line mode inserts a newline.
+    view.handle_key_event_at(KeyEvent::from(KeyCode::Enter), now + elapsed(ms));
+
+    assert_eq!(submitted_rx.try_recv(), Ok("work".to_string()));
+    assert!(view.is_complete());
+}
+
 fn custom_prompt_view() -> (CustomPromptView, Receiver<String>) {
     let (submitted, submitted_rx) = std::sync::mpsc::channel();
     let view = CustomPromptView::new(

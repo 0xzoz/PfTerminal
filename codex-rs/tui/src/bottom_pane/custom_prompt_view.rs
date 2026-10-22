@@ -33,6 +33,9 @@ pub(crate) type PromptSubmitted = Box<dyn Fn(String) + Send + Sync>;
 pub(crate) enum CustomPromptSubmitMode {
     Enter,
     CtrlD,
+    /// A one-line field (a name): Enter always submits, also right after
+    /// fast typing or a paste-like burst, so it never becomes a newline.
+    EnterSingleLine,
 }
 
 /// Minimal multi-line text input view to collect custom review instructions.
@@ -101,6 +104,12 @@ impl CustomPromptView {
                 if self.submit_mode == CustomPromptSubmitMode::CtrlD
                     && key_hint::ctrl(KeyCode::Char('d')).is_press(event) =>
             {
+                self.submit_current_text();
+            }
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } if self.submit_mode == CustomPromptSubmitMode::EnterSingleLine => {
                 self.submit_current_text();
             }
             KeyEvent {
@@ -323,7 +332,9 @@ impl CustomPromptView {
 
     fn footer_hint_line(&self) -> Line<'static> {
         match self.submit_mode {
-            CustomPromptSubmitMode::Enter => standard_popup_hint_line(),
+            CustomPromptSubmitMode::Enter | CustomPromptSubmitMode::EnterSingleLine => {
+                standard_popup_hint_line()
+            }
             CustomPromptSubmitMode::CtrlD => Line::from(vec![
                 "Press ".into(),
                 key_hint::ctrl(KeyCode::Char('d')).into(),
