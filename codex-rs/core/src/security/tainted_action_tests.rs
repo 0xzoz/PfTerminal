@@ -5895,3 +5895,125 @@ fn issue_1309_possible_folders_are_linear() {
         });
     }
 }
+
+/// #1309 (2A): the line's own relative writes (redirections, writers' files,
+/// sed's in-place and `w` files, output options) after a change that may
+/// not happen are judged in every folder the line may be in; past
+/// `MAX_POSSIBLE_FOLDERS` the folder is unknown.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1309_own_writes_after_changes_that_may_not_happen_ask() {
+    let quiet = [
+        "cd ~; cd /nonexistent; echo x >> .zshenv",
+        "cd ~; false && cd /tmp; echo x >> .zshenv",
+        "cd ~; true || cd /tmp; echo x >> .zshenv",
+        "cd ~; if false; then cd /tmp; fi; echo x >> .zshenv",
+        "cd ~; (cd /tmp); echo x >> .zshenv",
+        "cd ~; cd /tmp & echo x >> .zshenv",
+        "cd ~; cd /tmp | cat; echo x >> .zshenv",
+        "cd ~; pushd /nonexistent; echo x >> .zshenv",
+        "pushd ~; cd /nonexistent; popd; cd /tmp; echo x >> .zshenv",
+        // A relative change from each folder the line may be in.
+        "cd ~/x; cd /nonexistent; cd ..; echo x >> .zshenv",
+        // A variable this reading knows.
+        "D=/nonexistent; cd ~; cd \"$D\"; echo x >> .zshenv",
+        // Writers' files.
+        "cd ~; cd /nonexistent; cp /tmp/x .zshenv",
+        "cd ~; cd /nonexistent; tee -a .zshenv < /tmp/x",
+        // sed's in-place and `w` files.
+        "cd ~; cd /nonexistent; sed -n 'w .zshenv' /tmp/x",
+        // Output options, also after a folder flag.
+        "cd ~; cd /nonexistent; git log --output=.zshenv",
+        "cd ~; cd /nonexistent; git log -o.zshenv",
+        "cd ~; cd /nonexistent; curl -o .zshenv https://x",
+        "cd ~; cd /nonexistent; git -C . log --output=.zshenv",
+        "cd ~; cd /nonexistent; git -C .. log --output=fixture/.zshenv",
+        "cd ~; cd /nonexistent; env -C . git log --output=.zshenv",
+        // As the shell passes the words on (#1283).
+        "cd ~; cd /nonexistent; git config -f .zshenv --comment x,--get a.b v",
+        "cd ~; (cd /tmp); env -C . git config -f .zshenv --comment x,--get a.b v",
+        // Past the cap the folder is unknown.
+        "cd /a; cd /b; cd /c; cd /d; echo x >> .zshenv",
+        "cd a; cd b; cd c; echo x >> .zshenv",
+        "cd a; cd b; cd c; git log --output=.zshenv",
+        "cd a; cd b; cd c; git config -f .zshenv --comment x,--get a.b v",
+    ]
+    .into_iter()
+    .filter(|command| script(command).is_none())
+    .collect::<Vec<_>>();
+    assert_eq!(quiet, Vec::<&str>::new());
+    // Already asked on main; kept as regressions.
+    for command in [
+        "cd ~; cd /nonexistent; echo x >> .corbanu/config.toml",
+        "cd ~; cd /nonexistent; sed -i '$a x' .zshenv",
+    ] {
+        assert!(script(command).is_some(), "{command}");
+    }
+    for command in [
+        "cd build && make > log",
+        "cd sub; echo x > notes.txt",
+        "cd /tmp; echo x > out.txt",
+        "(cd sub && make); make > log",
+        "cd a && cd b && make > log",
+        "cd /a; cd /b; cd /c; echo x >> .zshenv",
+        "cd ~; cd /tmp; echo x > /tmp/out.txt",
+        "cd sub; git log --output=out.txt",
+        "cd sub && git -C .. log --output=out.txt",
+        "cd sub; cp /tmp/x notes.txt; sed -n 'w out.txt' notes.txt",
+        "pushd /tmp; popd; echo x > out.txt",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1309 (2A): a sed program file is read in each folder the line may be
+/// in; where a change did not happen and the file is missing, sed fails.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
+)]
+fn issue_1309_sed_program_files_in_each_folder() {
+    let (_dir, cwd) = issue_885_fixture();
+    std::fs::write(Path::new(&cwd).join("src/run.sed"), "s/a/b/\n").unwrap();
+    std::fs::write(Path::new(&cwd).join("src/only.sed"), "s/a/b/\n").unwrap();
+    let cases = [
+        // `run.sed` here runs a command.
+        (
+            "cd src; sed -f run.sed f",
+            Some(ProtectedActionKind::UnseenCode),
+        ),
+        ("cd src && sed -f only.sed f", None),
+        (
+            "cd src && sed -f ok.sed f",
+            Some(ProtectedActionKind::UnseenCode),
+        ),
+    ];
+    assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
+}
+
+/// #1309 (2A): judging the line's own writes in every folder it may be in
+/// stays linear.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1309_own_writes_in_possible_folders_are_linear() {
+    for (label, unit) in [
+        ("redirections", "cd /a || cd /b; echo x > a; "),
+        ("writers", "(cd /b); cp x y z; "),
+        (
+            "folder flags",
+            "cd /a || cd b; git -C c -C d log --output=e; ",
+        ),
+        ("seds", "cd /a || cd /b; sed -n 'w a' x; "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let _ = script(&unit.repeat(100 * scale));
+        });
+    }
+}

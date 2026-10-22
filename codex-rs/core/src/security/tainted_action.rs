@@ -862,10 +862,14 @@ struct Folders {
     /// #1283: a `cd`/`pushd` took a word the quote-aware reading cannot
     /// know (`D=~; cd "$D"`), so that reading's folder may be wrong.
     unchecked: bool,
-    /// #1309: other folders the quote-aware reading's line may be in: a
-    /// change it followed may not have happened (`cd /nonexistent`,
-    /// `false && cd x`, `(cd x)`, `cd x &`). Only that reading keeps them.
+    /// #1309: other folders the line may be in: a change it followed may
+    /// not have happened (`cd /nonexistent`, `false && cd x`, `(cd x)`,
+    /// `cd x &`).
     others: Vec<String>,
+    /// #1309: past `MAX_POSSIBLE_FOLDERS` the line may be in too many
+    /// folders to follow, so a file it names relative to its folder may
+    /// be anywhere.
+    lost: bool,
 }
 
 struct Classifier {
@@ -1197,6 +1201,7 @@ impl Classifier {
             unfollowed: false,
             unchecked: self.unknown_folder > 0,
             others: Vec::new(),
+            lost: false,
         };
         let mut variables: HashMap<String, String> = HashMap::new();
         for (name, value) in [
@@ -1389,7 +1394,10 @@ impl Classifier {
             }
             folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
                 && unchecked[index + 1..].iter().any(|word| *word);
-            self.change_folder(name, args, folders, variables);
+            // #1309: this reading knows the words of `cd "$d"`; it loses
+            // its folder only past the possible folders.
+            let unknown = folders.lost;
+            self.follow_change(name, args, folders, variables, unknown);
         }
         let mut git_config = GitConfigWrites::new(&lower, &hidden, &unchecked);
         let mut launched_git = launched_git::LaunchedGit::new(
@@ -1522,6 +1530,10 @@ impl Classifier {
         let mut chained: Vec<String> = Vec::new();
         let mut previous: Option<&str> = None;
         let mut bases = vec![cwd.clone()];
+        // #1309: the folders written words resolve against from each other
+        // folder the line may be in, after the folder flags given so far.
+        let mut flags: Vec<&str> = Vec::new();
+        let mut other_bases = std::borrow::Cow::Borrowed(folders.others.as_slice());
         for (position, word) in words.iter().enumerate() {
             work::step();
             let written = simple.writes_to.contains(&position)
@@ -1534,15 +1546,20 @@ impl Classifier {
                 folder = self.homes.resolve(word, &cwd);
                 self.chain_folder(&mut chained, word, &cwd);
                 folder_value = true;
+                flags.push(word);
             } else if let Some((flag, value)) = word.split_once('=')
                 && FOLDER_FLAGS.contains(&flag)
             {
                 folder = self.homes.resolve(value, &cwd);
                 self.chain_folder(&mut chained, value, &cwd);
                 folder_value = true;
+                flags.push(value);
             }
             if folder_value {
                 bases = folder_bases(&folder, &chained, &cwd);
+                if flags.len() <= MAX_CHAINED_FOLDERS {
+                    other_bases = self.other_bases(&folders.others, &flags, &bases).into();
+                }
             }
             previous = Some(word.as_str());
             // Attached, assigned and volume forms (`-o/path`, `f=@/path`,
@@ -1568,12 +1585,22 @@ impl Classifier {
                     let resolved = self.homes.resolve(candidate, base);
                     self.word_path(&resolved, candidate, depth);
                     if written
-                        && (self.homes.is_persistence(&resolved) || self.unknown_place(candidate))
+                        && (self.homes.is_persistence(&resolved)
+                            || self.unknown_place(folders, candidate))
                     {
                         self.note(ProtectedActionKind::Persistence);
                     }
                     if recursive && !folder_value && self.homes.holds_a_home(&resolved) {
                         self.note(ProtectedActionKind::Credentials);
+                    }
+                }
+                // #1309: a file written in each other folder the line may be in.
+                for base in other_bases.iter().filter(|_| written) {
+                    work::step();
+                    let resolved = self.homes.resolve(candidate, base);
+                    self.word_path(&resolved, candidate, depth);
+                    if self.homes.is_persistence(&resolved) {
+                        self.note(ProtectedActionKind::Persistence);
                     }
                 }
             }
@@ -1583,7 +1610,7 @@ impl Classifier {
         }
         for file in outputs.iter().flatten() {
             work::step();
-            for base in &bases {
+            for base in bases.iter().chain(other_bases.iter()) {
                 work::step();
                 let resolved = self.homes.resolve(file, base);
                 self.word_path(&resolved, file, depth);
@@ -1591,7 +1618,7 @@ impl Classifier {
                 // ~`, `--output-directory ~/`) may be the home's.
                 if self.homes.is_persistence(&resolved)
                     || (file.ends_with('/') && self.homes.holds_a_home(&resolved))
-                    || self.unknown_place(file)
+                    || self.unknown_place(folders, file)
                 {
                     self.note(ProtectedActionKind::Persistence);
                 }
@@ -1767,10 +1794,14 @@ impl Classifier {
 
     /// #1283: in a folder the classifier cannot know, a file named relative
     /// to it (`.zshenv`, `../x`, `$d/x`) may be any file.
-    fn unknown_place(&self, word: &str) -> bool {
-        self.unknown_folder > 0
-            && (word.contains("..")
-                || self.homes.resolve(word, "/a") != self.homes.resolve(word, "/b"))
+    /// #1309: so too past `MAX_POSSIBLE_FOLDERS`.
+    fn unknown_place(&self, folders: &Folders, word: &str) -> bool {
+        (self.unknown_folder > 0 || folders.lost) && self.relative_place(word)
+    }
+
+    /// Whether `word` names a file relative to the folder it is used in.
+    fn relative_place(&self, word: &str) -> bool {
+        word.contains("..") || self.homes.resolve(word, "/a") != self.homes.resolve(word, "/b")
     }
 
     /// Follow `cd`, `pushd` and `popd` (also behind `builtin`/`command`).
