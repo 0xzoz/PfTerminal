@@ -234,16 +234,18 @@ fn followed(words: &[PlainWord], depth: usize) -> bool {
     if index > 0 {
         return false;
     }
+    // A program run by its path (`./x`) is judged by its bare name, so
+    // `./cd` or `./python3 x.py` would read as the builtin or interpreter:
+    // only a path whose name is neither is followed.
+    if name.contains('/') {
+        return !matches!(command.as_str(), "cd" | "pushd" | "popd")
+            && super::invocation::parse(&command, &texts[1..]).is_none();
+    }
     match super::invocation::parse(&command, &texts[1..]) {
-        // A script run by its path (`./x`, `sub/x`), or a command that runs
-        // nothing and changes no folder or mount (not `cd`: a `cd` that
+        // A command that runs nothing and changes no folder or mount (not `cd`: a `cd` that
         // `&&`, `||`, `&` or a pipeline skips, or `pushd -n`, would leave
         // the shell elsewhere than the classifier follows).
-        None => {
-            name.contains('/')
-                || (command != "cd"
-                    && (data_only(words) || FOLLOWED_TOOLS.contains(&command.as_str())))
-        }
+        None => command != "cd" && (data_only(words) || FOLLOWED_TOOLS.contains(&command.as_str())),
         Some(invocation) => {
             matches!(invocation.code, super::invocation::Code::File(_))
                 && invocation.preloads.is_empty()

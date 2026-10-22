@@ -5466,6 +5466,12 @@ fn issue_1261_windows_reads_follow_only_plain_posix_scripts() {
         ],
         vec!["bash", "-c", "zsh -c ./run.sh"],
         vec!["zsh", "-c", "./run.sh"],
+        // A program run by its path named like a builtin or interpreter
+        // (review 8).
+        vec!["bash", "-c", "./cd sub; bash run.sh"],
+        vec!["bash", "-c", "./python3 ok.py"],
+        vec!["bash", "-c", "./source x.sh"],
+        vec!["bash", "-c", "sub/bash x.sh"],
         // Login shells (an MSYS2 or Cygwin profile may `cd` to the home).
         vec!["bash", "-lc", "bash run.sh"],
         vec!["bash", "-c", "bash -l run.sh"],
