@@ -480,18 +480,28 @@ where
     /// at the top of the screen (a full-screen popup, history inserted under it, a viewport that
     /// grew to the top) left a stale copy of the composer or popup in history.
     pub(crate) fn clear_after_position(&mut self, position: Position) -> io::Result<()> {
+        // Exactly the rows `ED 0` would erase: the screen as it is now.
         let screen_height = self
             .backend
             .size()
-            .map_or(self.last_known_screen_size.height, |size| {
-                size.height.max(self.last_known_screen_size.height)
-            });
-        self.backend.set_cursor_position(position)?;
-        self.backend.clear_region(ClearType::UntilNewLine)?;
+            .map_or(self.last_known_screen_size.height, |size| size.height);
+        use crossterm::terminal::ClearType as CrosstermClearType;
+        queue!(
+            self.backend,
+            MoveTo(position.x, position.y),
+            Clear(CrosstermClearType::UntilNewLine)
+        )?;
         for y in position.y.saturating_add(1)..screen_height {
-            self.backend.set_cursor_position(Position { x: 0, y })?;
-            self.backend.clear_region(ClearType::CurrentLine)?;
+            queue!(
+                self.backend,
+                MoveTo(/*x*/ 0, y),
+                Clear(CrosstermClearType::CurrentLine)
+            )?;
         }
+        // Like `ED 0`, leave the cursor at `position`: callers (exit, fatal-error output) print
+        // from there.
+        queue!(self.backend, MoveTo(position.x, position.y))?;
+        Write::flush(&mut self.backend)?;
         // Reset the back buffer to make sure the next update will redraw everything.
         self.previous_buffer_mut().reset();
         Ok(())
@@ -849,6 +859,10 @@ mod tests {
             .rows(/*start*/ 0, width)
             .collect();
         assert_eq!(rows, vec![String::new(); usize::from(height)]);
+        assert_eq!(
+            terminal.backend().vt100().screen().cursor_position(),
+            (0, 0)
+        );
     }
 
     /// Like `ED 0`, a clear from a column keeps the cells before it on that row and the rows
@@ -878,6 +892,11 @@ mod tests {
             .map(|row| row.trim_end().to_string())
             .collect();
         assert_eq!(rows, vec!["history", "keep", "", ""]);
+        assert_eq!(
+            terminal.backend().vt100().screen().cursor_position(),
+            (1, 4),
+            "like ED 0, the cursor stays at the position"
+        );
         assert_eq!(terminal.backend().scroll_on_clear_saves(), &[] as &[String]);
     }
 
