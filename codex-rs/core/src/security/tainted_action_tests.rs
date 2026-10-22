@@ -5390,6 +5390,14 @@ fn issue_1309_unknown_folders_ask() {
         "pushd ~; pushd /tmp; cd ~1; sh -c 'echo x >> .zshenv'",
         "cd ~; pushd -n /tmp; sh -c 'echo x >> .zshenv'",
         "cd -; sh -c 'echo x >> .zshenv'",
+        // Review 2: a `cd -` after a change that may not have happened;
+        // carrier text the shell matches or expands again.
+        "false && cd /tmp; cd -; sh -c 'echo x >> .zshenv'",
+        "(cd /tmp); cd -; sh -c 'echo x >> .zshenv'",
+        "touch cd; eval 'c?'; sh -c 'echo x >> .zshenv'",
+        "eval '[c]d'; sh -c 'echo x >> .zshenv'",
+        "ln -s ~ d; eval '{c,}d'; sh -c 'echo x >> .zshenv'",
+        "alias go='c?'; go; sh -c 'echo x >> .zshenv'",
         r#"nsenter --wdns="$HOME" sh -c 'echo x >> .zshenv'"#,
         r#"nsenter -W"$HOME" sh -c 'echo x >> .zshenv'"#,
         // An output file too.

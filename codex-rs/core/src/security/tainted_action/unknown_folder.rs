@@ -160,15 +160,19 @@ pub(super) fn searches(text: &str) -> bool {
 
 /// Whether `name` (a command word) runs text that may change the folder of
 /// the line: a sourced file, or `eval`/`alias`/`trap` text with a `cd`, or
-/// with quoting or expansions the shell removes when it reads the text
-/// again (`eval 'c\d ~'`, `alias go='c""d ~'`).
+/// with any character the shell may quote, expand or match when it reads
+/// the text again (`eval 'c\d ~'`, `alias go='c""d ~'`, `eval 'c?'`,
+/// `eval '{c,}d'`).
 pub(super) fn carries_change(name: &str, args: &[String]) -> bool {
     matches!(name, "source" | ".")
         || (CARRIERS.contains(&name)
             && args.iter().any(|arg| {
                 work::step();
-                arg.contains(['\'', '"', '\\', '$', '`'])
-                    || tokens(arg).any(|token| CHANGERS.contains(&token))
+                !arg.chars().all(|ch| {
+                    work::step();
+                    ch.is_ascii_alphanumeric()
+                        || matches!(ch, '_' | '-' | '.' | '/' | '=' | ':' | '@' | '%' | ' ')
+                }) || tokens(arg).any(|token| CHANGERS.contains(&token))
             }))
 }
 
@@ -176,9 +180,10 @@ pub(super) fn carries_change(name: &str, args: &[String]) -> bool {
 /// `chdir`, a place on the folder stack (`cd -2`, `pushd +1`, `popd +1`, a
 /// bare `pushd`, `cd ~1`), `cd ~-`/`~+` and other tilde forms (a named
 /// folder, `cd ~h`), `pushd -n`, zsh's two-word `cd old new`, operands
-/// after `--`, or the first `cd -` of a line (`fresh`: no change followed
-/// yet), which goes to the inherited `OLDPWD`.
-pub(super) fn odd_change(name: &str, args: &[String], fresh: bool) -> bool {
+/// after `--`, or `cd -`: a change the walk followed may not have
+/// happened (`false && cd x`, `(cd x)`), so it may go to the inherited
+/// `OLDPWD`.
+pub(super) fn odd_change(name: &str, args: &[String]) -> bool {
     if name == "chdir" {
         return true;
     }
@@ -188,7 +193,7 @@ pub(super) fn odd_change(name: &str, args: &[String], fresh: bool) -> bool {
         if arg == "--" || arg.starts_with('+') {
             return true;
         }
-        if arg == "-" && name == "cd" && fresh {
+        if arg == "-" && name == "cd" {
             return true;
         }
         if arg.starts_with('-') && arg != "-" {
