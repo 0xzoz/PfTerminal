@@ -2946,7 +2946,12 @@ impl AuthManager {
     #[instrument(level = "trace", skip_all)]
     pub async fn auth(&self) -> Option<CodexAuth> {
         // A named account loads lazily, and picks up a sign-in added later.
-        if self.named_account.is_some() && self.auth_cached().is_none() {
+        // D171 (#1286): a sign-in held in memory is dropped once the account
+        // was removed or signed out (by any process), so the next request is
+        // refused with its recovery instead of running on it.
+        if self.named_account.is_some()
+            && (self.auth_cached().is_none() || !self.named_sign_in_still_stored())
+        {
             self.reload().await;
         }
         if self.has_external_auth() {

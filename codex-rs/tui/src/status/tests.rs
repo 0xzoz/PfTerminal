@@ -2840,3 +2840,90 @@ async fn default_openai_status_is_unchanged_without_named_accounts() {
     assert!(!on.contains("Model provider"), "{on}");
     assert_eq!(on, render(/*named_accounts*/ false).await);
 }
+
+/// D171 (#1286): `/status` of an OpenAI session on the named ChatGPT account
+/// `work`, signed in when `signed_in`.
+async fn named_sign_in_status(signed_in: bool) -> String {
+    let temp_home = TempDir::new().expect("temp home");
+    if signed_in {
+        app_test_support::write_named_chatgpt_auth(
+            temp_home.path(),
+            "openai",
+            "work",
+            ChatGptAuthFixture::new("work-access-not-a-secret")
+                .account_id("acct-work")
+                .plan_type("plus"),
+        )
+        .expect("named sign-in");
+    }
+    let mut config = test_config(&temp_home).await;
+    config.model_provider_id = "openai".to_string();
+    config.model_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    config.model_provider.account = Some(codex_model_provider_info::NamedProviderAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    });
+    config
+        .features
+        .enable(codex_features::Feature::NamedAccounts)
+        .expect("enable named accounts");
+    set_workspace_cwd(&mut config, test_path_buf("/workspace/tests").abs());
+    let usage = account_tokens(
+        /*input*/ 1_000, /*cached*/ 0, /*output*/ 20, /*reasoning*/ 0,
+    );
+    let account_usage = super::StatusAccountUsage {
+        named_account_in_home: Some(true),
+        rows: vec![("work".to_string(), usage.clone())],
+    };
+    let now = chrono::Local
+        .with_ymd_and_hms(2026, 10, 22, 4, 5, 6)
+        .single()
+        .expect("timestamp");
+    let (composite, _) = new_status_output_with_rate_limits_handle(
+        &config,
+        /*runtime_model_provider_base_url*/ None,
+        /*remote_connection*/ None,
+        /*account_display*/ None,
+        /*token_info*/ None,
+        &usage,
+        &None,
+        /*thread_name*/ None,
+        /*forked_from*/ None,
+        &[],
+        /*plan_type*/ None,
+        now,
+        "gpt-5.5",
+        /*collaboration_mode*/ None,
+        /*reasoning_effort_override*/ None,
+        "<none>".to_string(),
+        /*refreshing_rate_limits*/ false,
+        Some(account_usage),
+    );
+    render_lines(&composite.display_lines(/*width*/ 200)).join("\n")
+}
+
+/// D171 (#1286): once the session's ChatGPT account is removed or signed
+/// out, `/status` no longer presents the session as running on it: the
+/// provider line says the account is unavailable and the Account line names
+/// it with its recovery.
+#[tokio::test]
+async fn status_does_not_present_a_removed_sign_in_account_as_the_sessions() {
+    let signed_in = named_sign_in_status(/*signed_in*/ true).await;
+    assert!(signed_in.contains("OpenAI · account work"), "{signed_in}");
+    assert!(!signed_in.contains("unavailable"), "{signed_in}");
+
+    let removed = named_sign_in_status(/*signed_in*/ false).await;
+    assert!(!removed.contains("· account work"), "{removed}");
+    assert!(
+        removed.contains("OpenAI · account unavailable"),
+        "{removed}"
+    );
+    assert!(
+        removed.contains(
+            "account work has no sign-in (it was removed or signed out); its requests are \
+             refused. Sign in with `corbanu login --account work` or pick another account in \
+             `/providers`"
+        ),
+        "{removed}"
+    );
+}

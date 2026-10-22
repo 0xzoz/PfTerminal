@@ -84,6 +84,26 @@ impl AuthManager {
         self.named_account.as_ref()
     }
 
+    /// D171 (#1286): whether the vault index still lists this named
+    /// account's sign-in. Reads the index only, never the sign-in. `false`
+    /// when it was removed or signed out (by any process) or the index
+    /// cannot be read; `true` for the default login's manager.
+    pub(super) fn named_sign_in_still_stored(&self) -> bool {
+        let Some(account) = self.named_account.as_ref() else {
+            return true;
+        };
+        crate::provider_account_holds(
+            &self.codex_home,
+            &account.provider_id,
+            &account.name,
+            codex_vault::ProviderAccountKind::ChatgptAuth,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%account, %error, "named account index unavailable");
+            false
+        })
+    }
+
     /// PF-84-S06 (#571): why this named account's manager has no usable
     /// sign-in: none is stored, it cannot be read, or the login restrictions
     /// refuse it. `None` for the default login's manager or when a sign-in
@@ -93,10 +113,14 @@ impl AuthManager {
         let account = self.named_account.as_ref()?;
         match self.named_account_auth_dot_json() {
             Ok(Some(_)) => None,
+            // D171 (#1286): also a session whose account was removed or
+            // signed out while it ran.
             Ok(None) => Some(format!(
-                "account `{}` has no sign-in; sign in with `corbanu login --account {}` \
-                 (add `--with-api-key` for an API key)",
-                account.name, account.name
+                "account `{name}` has no sign-in (it was removed or signed out); sign in \
+                 with `corbanu login --account {name}` (add `--with-api-key` for an API key), \
+                 or pick another account (`/providers` in the TUI, `--account` on the \
+                 command line)",
+                name = account.name
             )),
             Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
                 Some(error.to_string())
