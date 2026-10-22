@@ -36,7 +36,7 @@ async fn build(home: &Path, cwd: &Path, user_config: &str, aggressive_level: boo
 }
 
 /// #691: on Windows workspace-write needs the Windows sandbox; without it the
-/// session falls back to read-only (`codex_core::config::permissions`). These
+/// session falls back to read-only (Core's `config/permissions.rs`). These
 /// configs then select the default (elevated) Windows sandbox, as on a machine
 /// where it is set up. Unchanged elsewhere.
 fn with_windows_sandbox(user_config: &str) -> String {

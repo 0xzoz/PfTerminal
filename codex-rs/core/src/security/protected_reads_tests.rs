@@ -81,7 +81,7 @@ fn issue_442_finds_the_denied_path_the_command_names() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "POSIX paths and BSD/GNU denial lines; Windows denials and path spellings are not attributed yet (#1296)"
 )]
 fn issue_506_listing_denial_is_attributed_through_variables_and_dot_dot() {
     let cwd = Path::new("/work/project");
@@ -135,7 +135,7 @@ fn issue_506_listing_denial_is_attributed_through_variables_and_dot_dot() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "POSIX paths and BSD/GNU denial lines; Windows denials and path spellings are not attributed yet (#1296)"
 )]
 fn issue_554_recursive_listing_of_a_parent_is_attributed_to_the_home() {
     let cwd = Path::new("/work/project");
@@ -374,7 +374,7 @@ async fn issue_1194_a_split_denial_line_is_still_explained() {
 #[test]
 #[cfg_attr(
     windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+    ignore = "POSIX paths and BSD/GNU denial lines; Windows denials and path spellings are not attributed yet (#1296)"
 )]
 fn issue_621_finds_the_denied_path_inside_interpreter_code() {
     let cwd = Path::new("/work/project");
