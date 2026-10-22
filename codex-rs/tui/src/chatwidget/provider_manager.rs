@@ -1120,6 +1120,57 @@ mod tests {
         assert_eq!(chat.provider_manager_selected_index(), Some(0));
     }
 
+    /// #1288: /providers shows eight rows at a time; when there are more, the
+    /// popup says which row is selected out of how many.
+    #[tokio::test]
+    async fn provider_manager_shows_position_when_rows_exceed_the_window() {
+        let (mut chat, _tx, _rx, _op_rx) =
+            crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+        let catalog = ProviderCatalog::from_runtime_providers(&chat.config_ref().model_providers);
+        let statuses = catalog
+            .entries()
+            .iter()
+            .map(|entry| ProviderStatusSnapshot {
+                id: entry.id.clone(),
+                methods: Vec::new(),
+                configuration: ProviderConfigurationState::Configured,
+                eligibility: ProviderEligibilityState::Active,
+                current: ProviderCurrentState::NotCurrent,
+                availability: ProviderAvailabilityState::Ready,
+            })
+            .collect::<Vec<_>>();
+        let total = provider_manager_rows(&catalog, &statuses, /*accounts*/ None).len();
+        assert!(
+            total > crate::bottom_pane::popup_consts::MAX_POPUP_ROWS,
+            "{total} rows"
+        );
+
+        chat.open_provider_manager(
+            &catalog, &statuses, /*focused_provider*/ None, /*accounts*/ None,
+        );
+        let rendered =
+            crate::chatwidget::tests::helpers::render_bottom_popup(&chat, /*width*/ 80);
+        assert!(rendered.contains(&format!("1 / {total}")), "{rendered}");
+
+        chat.handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Down,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        let rendered =
+            crate::chatwidget::tests::helpers::render_bottom_popup(&chat, /*width*/ 80);
+        assert!(rendered.contains(&format!("2 / {total}")), "{rendered}");
+
+        chat.open_provider_manager(
+            &catalog,
+            &statuses[..3],
+            /*focused_provider*/ None,
+            /*accounts*/ None,
+        );
+        let rendered =
+            crate::chatwidget::tests::helpers::render_bottom_popup(&chat, /*width*/ 80);
+        assert!(!rendered.contains(" / 3"), "{rendered}");
+    }
+
     #[test]
     fn external_credential_copy_never_claims_deletion() {
         let status = ProviderStatusSnapshot {

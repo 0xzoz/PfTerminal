@@ -64,6 +64,7 @@ use crate::onboarding::provider_setup::ProviderSetupAction;
 use crate::onboarding::provider_setup::ProviderSetupPhase;
 use crate::onboarding::provider_setup::ProviderSetupSession;
 use crate::provider_status_host::ProviderStatusHost;
+use crate::selection_list::list_position_label;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::mark_buffer_hyperlinks;
 use crate::terminal_hyperlinks::visible_lines;
@@ -1230,6 +1231,7 @@ impl AuthModeWidget {
             );
             footer_lines.push("".into());
         }
+        let instructions_line = footer_lines.len();
         footer_lines.push(Line::from(vec![
             "  Use ↑/↓ to choose · Press ".dim(),
             self.confirm_binding().into(),
@@ -1265,6 +1267,19 @@ impl AuthModeWidget {
         let option_scroll = selected_end_line
             .saturating_sub(options_height.saturating_sub(1) as usize)
             .min(u16::MAX as usize) as u16;
+        // #1288: rows exist beyond the visible window.
+        if option_lines.len() > options_height as usize
+            && let Some(line) = footer_lines.get_mut(instructions_line)
+        {
+            let position = format!(
+                " · {}",
+                list_position_label(Some(selected_option_index), displayed_options.len())
+            )
+            .dim();
+            if line.width() + position.width() <= area.width as usize {
+                line.push_span(position);
+            }
+        }
         Paragraph::new(option_lines)
             .wrap(Wrap { trim: false })
             .scroll((option_scroll, 0))
@@ -2674,6 +2689,55 @@ pub(crate) mod tests {
         assert!(
             rendered.contains("Use ↑/↓ to choose"),
             "navigation instructions must remain visible:\n{rendered}"
+        );
+    }
+
+    /// #1288: when the providers do not fit, the footer says which row is
+    /// selected out of how many, and follows the selection.
+    #[tokio::test]
+    async fn provider_picker_shows_position_when_rows_exceed_the_window() {
+        let (mut widget, _tmp) = widget_forced_chatgpt().await;
+        widget.forced_login_method = None;
+        widget.highlighted_mode = SignInOption::ProviderApiKey(0);
+        widget.api_key_provider_options = vec![
+            api_key_option("openai", "OpenAI", "OPENAI_API_KEY"),
+            api_key_option("ambient", "Ambient", "AMBIENT_API_KEY"),
+            api_key_option("zai", "Z.AI", "ZAI_API_KEY"),
+            api_key_option("openrouter", "OpenRouter", "OPENROUTER_API_KEY"),
+            api_key_option("baseten", "Baseten", "BASETEN_API_KEY"),
+            api_key_option("vercel", "Vercel", "AI_GATEWAY_API_KEY"),
+        ];
+        let total = widget.displayed_sign_in_options().len();
+        let render = |widget: &AuthModeWidget, height: u16| {
+            let area = Rect::new(0, 0, 80, height);
+            let mut buf = Buffer::empty(area);
+            widget.render_pick_mode(area, &mut buf);
+            buffer_text(&buf, area)
+        };
+
+        let rendered = render(&widget, /*height*/ 32);
+        assert!(
+            rendered.contains(&format!(
+                "Use ↑/↓ to choose · Press enter to continue · 2 / {total}"
+            )),
+            "rendered:\n{rendered}"
+        );
+
+        widget.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        let rendered = render(&widget, /*height*/ 32);
+        assert!(
+            rendered.contains(&format!("· 3 / {total}")),
+            "rendered:\n{rendered}"
+        );
+
+        let rendered = render(&widget, /*height*/ 60);
+        assert!(
+            rendered.contains("Provider: Amazon Bedrock") && rendered.contains("Done"),
+            "every row fits:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains(&format!(" / {total}")),
+            "no position when every row fits:\n{rendered}"
         );
     }
 
