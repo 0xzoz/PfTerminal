@@ -194,7 +194,12 @@ impl Classifier {
             braces: command.iter().any(|arg| arg.contains('{')),
             ..Found::default()
         };
+        // The words around the scripts start no launcher's input: under an
+        // inherited launch they are the synthetic `sh -c` of `script`, whose
+        // script is walked below with that launch (#1273 review 7).
+        let inherited = std::mem::take(&mut self.launched);
         self.walk(&[argv], &mut folders, /*level*/ 0, &mut found);
+        self.launched = inherited;
         // Shell text a shell would refuse may split differently from this
         // reading (text of other languages is read loosely).
         let strict = self.not_shell == 0 && self.rebuilt == 0;

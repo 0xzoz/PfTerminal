@@ -5023,6 +5023,12 @@ fn issue_1268_git_given_input_words_asks() {
         "parallel -j4 git log ::: a b",
         "parallel -j 4 -k --tag git log ::: a",
         "parallel --jobs=4 git log ::: a",
+        // Review round 7: a replaced script without git stays quiet.
+        "printf 'a\\n' | xargs -I% sh -c 'echo %'",
+        "find . -name '*.log' -exec sh -c 'gzip \"$1\"' _ {} \\;",
+        "parallel 'echo {}' ::: a b",
+        "xargs -I% env -S'echo %'",
+        "xargs -I% sh -c \"sh -c 'echo %'\" < keys",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
