@@ -4666,11 +4666,13 @@ fn issue_1275_glob_stops_at_first_difference() {
         assert_eq!(glob_any(pattern, name), expected, "{pattern:?} {name:?}");
     }
     let long = "a".repeat(100_000);
+    let long_glob = format!("{long}*");
     let counted = work::measure(|| {
         assert!(!glob_any(&long, "auth.json"));
-        assert!(!glob_any(&format!("{long}*"), "abc"));
+        assert!(!glob_any(&long_glob, "abc"));
     });
-    assert!(counted.steps < 100, "{counted:?}");
+    // Neither reads the long word nor copies it for the full match.
+    assert!(counted.steps < 100 && counted.bytes == 0, "{counted:?}");
 }
 
 /// #1255: `git config` opens the config file in an editor (`-e`, `--edit`,
