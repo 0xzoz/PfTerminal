@@ -92,10 +92,12 @@ pub(super) struct Homes {
     /// #1240: the Windows view (cmd and PowerShell readings; it opens no
     /// file).
     view: bool,
-    /// #1261: folders (lowercase, as resolved) reached through a network
-    /// share or device path, which the Windows rules spell as a drive
-    /// (`\\host\c$` and `\\?\C:` are `/c:`): no file below one is opened.
-    share_folders: RefCell<HashSet<String>>,
+    /// #1261: folders (lowercase, as resolved) reached through a spelling
+    /// the first judgment may not resolve as the shell does: a network share
+    /// or device path (the Windows rules spell `\\host\c$` and `\\?\C:` as
+    /// `/c:`), a name Windows changes (`sub.`, `sub `, `sub:x`), the drive's
+    /// root (`/x`), a variable or `~`. No file below one is opened.
+    unread_folders: RefCell<HashSet<String>>,
     /// Original spellings, used to expand `$CODEX_HOME`, `$HOME` and `~`.
     codex_home_raw: String,
     user_home_raw: Option<String>,
@@ -166,7 +168,7 @@ impl Homes {
         let homes = Self {
             windows,
             view,
-            share_folders: RefCell::new(HashSet::new()),
+            unread_folders: RefCell::new(HashSet::new()),
             codex_home_raw,
             user_home_raw,
             codex_homes: Vec::new(),
@@ -251,10 +253,10 @@ impl Homes {
 
     /// #1261: the plain local path (see `windows_reads`) that `word` names
     /// run in `cwd` under Windows rules, as a drive letter and the names
-    /// below its root: `None` when it is not one or the folder was reached
-    /// through a share.
+    /// below its root: `None` when it is not one, is spelled with a variable
+    /// or `~`, or the folder is one of `unread_folders`.
     pub(super) fn windows_read_path(&self, word: &str, cwd: &str) -> Option<(char, Vec<String>)> {
-        if self.below_a_share(cwd) {
+        if windows_reads::expanded_spelling(word) || self.unread_folder(cwd) {
             return None;
         }
         windows_reads::plain_path(&self.expand_windows(word, cwd), cwd)
@@ -305,25 +307,25 @@ impl Homes {
     /// [`Self::resolve`] under Windows rules: the same spellings, the Windows
     /// ones too (`%USERPROFILE%`, `$env:CODEX_HOME`, `~\`), and Windows roots.
     fn resolve_windows(&self, word: &str, cwd: &str) -> String {
-        let word = self.expand_windows(word, cwd);
-        let resolved = windows_paths::join(cwd, &word);
-        // #1261: a folder reached through a share is remembered as one,
-        // and so is everything below it.
-        let through_a_share = windows_reads::starts_at_a_share(&word)
+        let expanded = self.expand_windows(word, cwd);
+        let resolved = windows_paths::join(cwd, &expanded);
+        // #1261: see `unread_folders`; everything below one is one too.
+        let unread = windows_reads::expanded_spelling(word)
+            || !windows_reads::plain_spelling(&expanded)
             || windows_reads::starts_at_a_share(cwd)
-            || self.below_a_share(cwd);
-        if through_a_share {
-            self.share_folders
+            || self.unread_folder(cwd);
+        if unread {
+            self.unread_folders
                 .borrow_mut()
                 .insert(resolved.to_lowercase());
         }
         resolved
     }
 
-    /// #1261: whether `folder` (as resolved) was reached through a share.
-    fn below_a_share(&self, folder: &str) -> bool {
-        let shares = self.share_folders.borrow();
-        !shares.is_empty() && shares.contains(&folder.to_lowercase())
+    /// #1261: whether `folder` (as resolved) is one of `unread_folders`.
+    fn unread_folder(&self, folder: &str) -> bool {
+        let folders = self.unread_folders.borrow();
+        !folders.is_empty() && folders.contains(&folder.to_lowercase())
     }
 
     /// The home spellings of `word` expanded under Windows rules.

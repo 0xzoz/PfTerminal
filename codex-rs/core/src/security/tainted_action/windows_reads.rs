@@ -71,6 +71,28 @@ fn folder(cwd: &str) -> Option<(char, &str)> {
     (rest.is_empty() || rest.starts_with('/')).then_some((letter, rest))
 }
 
+/// Whether `word` (home spellings expanded) is a plain spelling of a place:
+/// not a share or device path, not from the current drive's root (`\x`,
+/// `/x`: Git Bash and WSL read it otherwise), and only plain names, `.` and
+/// `..` after an optional drive (`C:`).
+pub(super) fn plain_spelling(word: &str) -> bool {
+    if word.starts_with(separator) {
+        return false;
+    }
+    let rest = drive(word).map_or(word, |(_, rest)| rest);
+    rest.split(separator).all(|name| {
+        work::step();
+        matches!(name, "" | "." | "..") || plain_name(name)
+    })
+}
+
+/// Whether a word read as a file is spelled with something the first
+/// judgment expands but a POSIX shell may not, or reads otherwise: a
+/// variable (`$HOME`, `%USERPROFILE%`) or `~` (WSL's home is not Windows').
+pub(super) fn expanded_spelling(word: &str) -> bool {
+    word.starts_with('~') || word.contains(['$', '%'])
+}
+
 /// Whether Windows could open `name` as an ordinary file or folder name.
 fn plain_name(name: &str) -> bool {
     name != ".."
@@ -115,7 +137,8 @@ pub(super) fn plain_path(word: &str, cwd: &str) -> Option<(char, Vec<String>)> {
         Some((letter, rest)) if rest.starts_with(separator) => (letter, rest.to_string()),
         Some((letter, rest)) if letter == cwd_drive => (letter, format!("{cwd_rest}\\{rest}")),
         Some(_) => return None,
-        None if word.starts_with(separator) => (cwd_drive, word.to_string()),
+        // From the current drive's root: Git Bash and WSL read it otherwise.
+        None if word.starts_with(separator) => return None,
         None => (cwd_drive, format!("{cwd_rest}\\{word}")),
     };
     let mut names = Vec::new();
@@ -231,12 +254,6 @@ mod tests {
             ("./run.sh", "/C:/work/sub", r"C:\work\sub\run.sh"),
             (r"D:\x\run.sh", r"C:\work", r"D:\x\run.sh"),
             ("d:/x/run.sh", r"C:\work", r"D:\x\run.sh"),
-            (r"\x\run.sh", r"C:\work", r"C:\x\run.sh"),
-            (
-                "/home/fixture/run.sh",
-                r"C:\work",
-                r"C:\home\fixture\run.sh",
-            ),
             ("C:run.sh", r"C:\work", r"C:\work\run.sh"),
             ("run.sh", r"C:\", r"C:\run.sh"),
             ("run.sh", "/C:", r"C:\run.sh"),
@@ -277,6 +294,9 @@ mod tests {
             ("run.sh", "work"),
             ("run.sh", ""),
             ("run.sh", "/work"),
+            // From the current drive's root.
+            (r"\x\run.sh", r"C:\work"),
+            ("/home/fixture/run.sh", r"C:\work"),
             // Another drive's working folder is not known.
             ("D:run.sh", r"C:\work"),
             // Names Windows reads differently.

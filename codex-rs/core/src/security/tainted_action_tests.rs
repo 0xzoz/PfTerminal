@@ -5244,3 +5244,73 @@ fn issue_1261_windows_backslash_lines_open_no_file() {
     assert_eq!(kind("bash sub/run.sh"), Some(Vault));
     assert_eq!(kind("bash subrun.sh"), None);
 }
+
+/// #1261 review 1: a folder or file spelled so the first judgment may not
+/// resolve it as the shell does (a name Windows changes, the drive's root,
+/// a variable, `~`) is not read, nor is anything below such a folder.
+#[test]
+fn issue_1261_spellings_the_shell_may_read_otherwise_are_not_read() {
+    let homes = Homes::windows_first(Path::new(WINDOWS_HOME), Some(Path::new(WINDOWS_USER_HOME)));
+    let cwd = r"C:\other";
+    for folder in [
+        "sub.",
+        "sub ",
+        "sub:x",
+        "sub/x.",
+        "/x",
+        r"\x",
+        "~",
+        "~/x",
+        "$HOME",
+        "%USERPROFILE%",
+        "nul",
+    ] {
+        let reached = homes.resolve(folder, cwd);
+        assert_eq!(
+            homes.windows_read_path("run.sh", &reached),
+            None,
+            "{folder}"
+        );
+        let below = homes.resolve("sub", &reached);
+        assert_eq!(homes.windows_read_path("run.sh", &below), None, "{folder}");
+    }
+    for word in [
+        "~/run.sh",
+        "$HOME/run.sh",
+        "%USERPROFILE%/run.sh",
+        "/x/run.sh",
+    ] {
+        assert_eq!(homes.windows_read_path(word, cwd), None, "{word}");
+    }
+    // (A folder resolved like one reached otherwise, `sub` for `sub.`, is
+    // not read either.)
+    let plain = homes.resolve("plain/y", cwd);
+    assert!(homes.windows_read_path("run.sh", &plain).is_some());
+    let up = homes.resolve("..", &plain);
+    assert!(homes.windows_read_path("run.sh", &up).is_some());
+}
+
+/// #1261 review 1: a script file the first judgment reads on Windows is
+/// also read as cmd and PowerShell read text, as a command line is: the
+/// POSIX lexer alone misreads `type C:\...\auth.json`.
+#[cfg(windows)]
+#[test]
+fn issue_1261_windows_script_files_are_read_as_windows_code_too() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let work = root.path();
+    let auth = fixture(HOME).join("auth.json");
+    std::fs::write(work.join("run.bat"), format!("type {}\r\n", auth.display())).expect("bat");
+    std::fs::write(
+        work.join("run.ps1"),
+        format!("Get-Content {}\r\n", auth.display()),
+    )
+    .expect("ps1");
+    let cwd = work.to_string_lossy().into_owned();
+    for line in ["bash run.bat", "bash run.ps1"] {
+        assert_eq!(
+            classify_fixture(&shell_in(&cwd, &["bash", "-lc", line])),
+            Some(ProtectedActionKind::Credentials),
+            "{line}"
+        );
+    }
+}

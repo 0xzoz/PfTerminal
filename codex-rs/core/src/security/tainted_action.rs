@@ -1719,7 +1719,16 @@ impl Classifier {
             FileText::Missing => unreadable(self, /*missing*/ true),
             FileText::Unreadable => unreadable(self, /*missing*/ false),
             FileText::Binary => {}
-            FileText::Text(text) => self.script(&text, cwd, depth + 1),
+            FileText::Text(text) => {
+                // #1261: under Windows path rules a file may be cmd or
+                // PowerShell code (`run.ps1`, `run.bat`), which the POSIX
+                // lexer misreads (it drops backslashes): it is also read as
+                // the Windows view reads a line.
+                if self.homes.windows_paths() {
+                    self.windows_text(std::slice::from_ref(&text), cwd, depth + 1);
+                }
+                self.script(&text, cwd, depth + 1);
+            }
         }
     }
 
