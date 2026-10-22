@@ -298,7 +298,7 @@ pub(crate) fn resume_account_error(
 /// conversation on another account of its provider than the one it ran on:
 /// an account selected for this session (`--account`, or a new session
 /// started from `/providers`) wins over the recorded one, also when that one
-/// is gone. `resumed_account` is the `<provider>:<name>` the app server
+/// is gone (or cannot be read). `resumed_account` is the `<provider>:<name>` the app server
 /// reported for the resumed thread. `None` when it runs on the recorded
 /// account or on another provider.
 pub(crate) fn resume_account_notice(
@@ -334,7 +334,17 @@ pub(crate) fn resume_account_notice(
             )
             .is_some()
         });
-    let selected_by = if config.provider_account_override.is_some() {
+    // `--account <name>` selects the session provider's account; another
+    // provider's needs `<provider>:<name>`.
+    let selected_for_provider =
+        config
+            .provider_account_override
+            .as_deref()
+            .is_some_and(|selection| match selection.split_once(':') {
+                Some((provider_id, _)) => provider_id == recorded.provider_id,
+                None => config.model_provider_id == recorded.provider_id,
+            });
+    let selected_by = if selected_for_provider {
         ", the account selected for this session (with `--account` or in `/providers`)"
     } else {
         ""
@@ -344,7 +354,7 @@ pub(crate) fn resume_account_notice(
          `{current}`{selected_by}.",
         recorded_name = recorded.account,
         gone = if gone {
-            ", which is no longer configured"
+            ", which is no longer available"
         } else {
             ""
         },
@@ -551,7 +561,7 @@ mod tests {
         assert_eq!(
             notice("work", Some("zai:personal")).as_deref(),
             Some(
-                "This conversation ran on zai account `work`, which is no longer configured; it \
+                "This conversation ran on zai account `work`, which is no longer available; it \
                  resumes on `personal`, the account selected for this session (with `--account` \
                  or in `/providers`)."
             )
@@ -570,6 +580,13 @@ mod tests {
                 notice("work", /*resumed*/ None),
             ],
             [None, None, None]
+        );
+        // An account selected for another provider is not named as the cause.
+        let other = zai_config(&home, Some("kimi-code:personal"), "zai:work").await?;
+        assert_eq!(
+            resume_account_notice(&other, &recorded("zai", "default"), Some("zai:personal"))
+                .as_deref(),
+            Some("This conversation ran on zai account `default`; it resumes on `personal`.")
         );
         let name = codex_vault::ProviderAccountName::parse("work").expect("name");
         codex_vault::Vault::new(home.path().to_path_buf())

@@ -101,13 +101,14 @@ A conversation that ran on more than one account (for example its first
 turns on `work`, a later one on `personal` after `--account personal`)
 resumes on the account of its most recent turn.
 
-An explicit `--account` of the same provider still wins, also for `/resume`
-inside a TUI started with it (or after _Start a new session on this
-account_ in `/providers`), and also when the recorded account is gone: the
-conversation opens on the selected account with a one-line notice naming
+An explicit `--account` of the same provider still wins, also when the
+recorded account is gone. Inside a TUI started with it (or after _Start a
+new session on this account_ in `/providers`), `/resume` opens the
+conversation on the selected account and shows a one-line notice naming
 both, such as "This conversation ran on zai account `work`, which is no
-longer configured; it resumes on `personal`, the account selected for this
-session (with `--account` or in `/providers`)." With the feature off,
+longer available; it resumes on `personal`, the account selected for this
+session (with `--account` or in `/providers`)." `corbanu resume --account`
+and forks switch without a notice. With the feature off,
 the resume is refused and names the recorded account (`--account
 <provider>:default` resumes on the default credentials). A fork of a saved
 conversation follows the same rule, decided by the fork's own configuration
