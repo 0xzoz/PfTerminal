@@ -2,5 +2,5 @@
    https://auth.openai.com/codex/device
    <CODE>
 Signed in OpenAI account `t1` (ChatGPT sign-in · <email-hint> · Free).
-SI<CODE>=0
+SIGNIN-EXIT=0
 2026-10-21T22:14:54Z signed in
