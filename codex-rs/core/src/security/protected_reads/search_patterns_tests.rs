@@ -1,0 +1,68 @@
+use super::search_pattern_indices;
+use pretty_assertions::assert_eq;
+
+/// The pattern words of `script` run by `bash -c`, split as
+/// `command_words` splits it.
+fn patterns(script: &str) -> Vec<String> {
+    let command = [
+        "/bin/bash".to_string(),
+        "-c".to_string(),
+        script.to_string(),
+    ];
+    let words = super::super::command_words(&command, /*windows*/ false);
+    let mut indices: Vec<usize> = search_pattern_indices(&words).into_iter().collect();
+    indices.sort_unstable();
+    indices
+        .into_iter()
+        .map(|index| words[index].clone())
+        .collect()
+}
+
+#[test]
+fn the_first_operand_of_a_search_is_its_pattern() {
+    assert_eq!(patterns(r#"rg ".env" logs/"#), [".env"]);
+    assert_eq!(patterns("rg -n -i .env logs/"), [".env"]);
+    assert_eq!(patterns("grep -rn .env logs/ 2>/dev/null"), [".env"]);
+    assert_eq!(patterns("grep -A 3 -m 1 .env logs/x.log"), [".env"]);
+    assert_eq!(patterns("rg -g '*.log' --max-depth 2 .env logs/"), [".env"]);
+    assert_eq!(patterns("rg -n -- .env logs/"), [".env"]);
+    assert_eq!(patterns("cat logs/x.log | grep .env"), [".env"]);
+    assert_eq!(patterns("cd logs && egrep .env x.log; echo done"), [".env"]);
+    assert_eq!(patterns("git grep -n .env -- logs/"), [".env"]);
+    assert_eq!(patterns("/usr/bin/grep .env x.log"), [".env"]);
+}
+
+#[test]
+fn a_pattern_option_gives_the_patterns() {
+    assert_eq!(
+        patterns("grep -e .env -e .npmrc logs/x.log"),
+        [".env", ".npmrc"]
+    );
+    assert_eq!(patterns("grep -ie .env logs/x.log"), [".env"]);
+    assert_eq!(patterns("rg --regexp .env logs/"), [".env"]);
+    assert_eq!(patterns("rg --regexp=.env logs/"), ["--regexp=.env"]);
+    // The patterns come from a file: every operand is a path.
+    assert!(patterns("grep -f patterns.txt .env").is_empty());
+    assert!(patterns("rg --file=patterns.txt .env").is_empty());
+    // `-e` after the operands (GNU grep permutes).
+    assert_eq!(patterns("grep secret .env -e token"), ["token"]);
+}
+
+/// The paths a search reads stay paths: no false negative.
+#[test]
+fn searched_paths_are_not_patterns() {
+    assert_eq!(patterns("grep secret .env; echo \"exit=$?\""), ["secret"]);
+    assert_eq!(patterns("rg -n token ~/.npmrc"), ["token"]);
+    assert!(patterns("rg --files .env").is_empty());
+    assert!(patterns("cat .env; echo \"exit=$?\"").is_empty());
+    assert!(patterns("echo grep .env").is_empty());
+    // An option this does not know is taken as a flag: at worst its value
+    // is taken for the pattern, never a path after the pattern.
+    assert_eq!(patterns("grep --unknown 3 secret .env"), ["3"]);
+    // A count is taken only when it is one (BSD `grep -C` has an optional
+    // count).
+    assert_eq!(patterns("grep -C token .env"), ["token"]);
+    assert_eq!(patterns("grep --context token .env"), ["token"]);
+    assert_eq!(patterns("grep &>> log token .env"), ["token"]);
+    assert_eq!(patterns("grep 2>&1 token .env"), ["token"]);
+}
