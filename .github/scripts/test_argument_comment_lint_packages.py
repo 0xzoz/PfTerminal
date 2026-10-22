@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from argument_comment_lint_packages import CANARY_PACKAGE
+from argument_comment_lint_packages import changed_files
 from argument_comment_lint_packages import lint_packages
 from argument_comment_lint_packages import workspace_packages
 
@@ -17,6 +21,53 @@ PACKAGES = {
 
 
 class ArgumentCommentLintPackagesTest(unittest.TestCase):
+    def test_changed_files_preserves_git_quoted_paths(self) -> None:
+        paths = [
+            f"codex-rs/core/tests/{name}.rs"
+            for name in (
+                "ordinary",
+                "with space",
+                'with"quote',
+                "with\\slash",
+                "with\ttab",
+                "with\nnewline",
+                "with\rcarriage",
+                "café",
+            )
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.run_git(root, "init")
+            self.run_git(root, "config", "user.name", "Test User")
+            self.run_git(root, "config", "user.email", "test@example.com")
+            tree = self.run_git(root, "write-tree")
+            base = self.run_git(root, "commit-tree", tree, "-m", "base")
+            blob = self.run_git(root, "hash-object", "-w", "--stdin", input="fixture\n")
+            # Build the index directly: these Git paths need not be valid host filenames.
+            for path in paths:
+                self.run_git(
+                    root, "update-index", "--add", "--cacheinfo", "100644", blob, path
+                )
+            tree = self.run_git(root, "write-tree")
+            head = self.run_git(root, "commit-tree", tree, "-p", base, "-m", "head")
+            with mock.patch("argument_comment_lint_packages.ROOT", root):
+                actual = changed_files(base, head)
+                self.assertEqual(changed_files(head, head), [])
+            self.assertCountEqual(actual, paths)
+            for path in actual:
+                with self.subTest(path=path):
+                    self.assertEqual(lint_packages([path], PACKAGES), ["codex-core"])
+
+    def run_git(self, root: Path, *args: str, input: str | None = None) -> str:
+        return subprocess.run(
+            ["git", *args],
+            input=input,
+            cwd=root,
+            capture_output=True,
+            check=True,
+            text=True,
+        ).stdout.strip()
+
     def test_changed_rust_sources_select_their_crates(self) -> None:
         self.assertEqual(
             lint_packages(
