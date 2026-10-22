@@ -120,7 +120,7 @@ async fn issue1290_dismissal_during_save_or_summary_keeps_the_committed_result()
                 drop(chat);
             } else {
                 chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-                assert!(chat.bottom_pane.no_modal_or_popup_active());
+                assert!(chat.no_modal_or_popup_active());
             }
             assert!(events.try_recv().is_err(), "no false Cancelled result");
             release.send(()).expect("save still owned");
