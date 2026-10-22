@@ -44,6 +44,7 @@ mod quoted;
 mod sed;
 mod shadow;
 mod shell;
+mod unknown_folder;
 /// #1296: also expands the Windows home spellings for protected-read
 /// explanations (`protected_reads`).
 pub(crate) mod windows_paths;
