@@ -63,8 +63,8 @@ const PURE_FILTERS: &[&str] = &[
 #[derive(Default)]
 struct Found {
     /// Scripts that nested shells run, with the folder they run in, and
-    /// whether a launcher puts its input into them (#1268).
-    scripts: Vec<(String, String, bool)>,
+    /// what a launcher does with its input there (#1268).
+    scripts: Vec<(String, String, launched_git::Launch)>,
     /// The line as written holds a brace: a launcher's placeholder (`{}`)
     /// may be in it.
     braces: bool,
@@ -227,9 +227,13 @@ impl Classifier {
                 self.note(ProtectedActionKind::UnseenCode);
                 break;
             }
-            self.launched_scripts += usize::from(launched);
+            let outer = self.launched;
+            self.launched = launched_git::Launch {
+                fed: outer.fed || launched.fed,
+                replaced: outer.replaced || launched.replaced,
+            };
             self.script(&script, &cwd, depth + 1);
-            self.launched_scripts -= usize::from(launched);
+            self.launched = outer;
         }
         for sed in std::mem::take(&mut found.seds) {
             work::step();
@@ -285,8 +289,16 @@ impl Classifier {
             found.written.extend(targets);
             // D153: a git setting whose quoted text names git.
             found.unreadable |= git_helpers::setting_holds_git_name(&command.words);
-            // #1268: where a launcher's input reaches the words.
+            // #1268: where a launcher's input reaches the words, and the
+            // scripts of shells it puts input into, wherever the command
+            // word is read to be (`xargs --replace sh -c '... {}'`).
             let launches = launched_git::launches(&texts, found.braces);
+            for (word, script) in replaced_shell_scripts(&texts, &launches, &mut found.unreadable) {
+                work::step();
+                found
+                    .scripts
+                    .push((script, folders.cwd.clone(), replaced(launches[word])));
+            }
             let (starts, overflow) = sed::command_starts(&texts);
             found.unreadable |= overflow;
             let mut roles = vec![Role::Code; texts.len()];
@@ -299,10 +311,10 @@ impl Classifier {
             let mut sed_command = false;
             for start in starts {
                 work::step();
-                let launched = indirect::command_word(&texts[start..]);
+                let command_at = indirect::command_word(&texts[start..]);
                 // #1268: with no command word, the line may be in an
                 // option (`env -S'git config k v'`, `--split-string=...`).
-                let last = match &launched {
+                let last = match &command_at {
                     Some((index, _)) => start + index,
                     None if texts[start].starts_with('#') => continue,
                     None => texts.len() - 1,
@@ -322,8 +334,9 @@ impl Classifier {
                         roles[word] = Role::Script;
                         // Input words a launcher adds go to the wrapper's
                         // line (`xargs env -S'git config'`).
-                        let launched = launches[wrapper].fed;
-                        found.scripts.push((script, folders.cwd.clone(), launched));
+                        found
+                            .scripts
+                            .push((script, folders.cwd.clone(), launches[wrapper]));
                         runners += 1;
                     }
                     // Too many shell strings in one command: fail closed.
@@ -332,7 +345,7 @@ impl Classifier {
                         break;
                     }
                 }
-                let Some((index, resolved_name)) = launched else {
+                let Some((index, resolved_name)) = command_at else {
                     continue;
                 };
                 let at = start + index;
@@ -358,6 +371,24 @@ impl Classifier {
                         found
                             .written
                             .extend(outputs.into_iter().flatten().map(|file| target(Some(file))));
+                    }
+                }
+                // #1268: GNU parallel joins its command words, adds its
+                // input and runs the line with a shell (`parallel 'cd x &&
+                // git config'`).
+                if resolved_name == "parallel" {
+                    let end = texts[at + 1..]
+                        .iter()
+                        .position(|word| word.starts_with(":::"))
+                        .map_or(texts.len(), |offset| at + 1 + offset);
+                    if end > at + 1 {
+                        let line =
+                            joined(String::new(), &texts[at + 1..end], &mut found.unreadable);
+                        let launch = launched_git::Launch {
+                            fed: true,
+                            replaced: launches[end].replaced,
+                        };
+                        found.scripts.push((line, folders.cwd.clone(), launch));
                     }
                 }
                 if resolved_name == "eval" {
@@ -393,7 +424,7 @@ impl Classifier {
                             found.scripts.push((
                                 texts[candidate].clone(),
                                 folders.cwd.clone(),
-                                launches[at].replaced,
+                                replaced(launches[at]),
                             ));
                         }
                     }
@@ -405,7 +436,7 @@ impl Classifier {
                             found.scripts.push((
                                 input.text.clone(),
                                 folders.cwd.clone(),
-                                launches[at].replaced,
+                                replaced(launches[at]),
                             ));
                         }
                     }
@@ -724,6 +755,75 @@ fn file_operand(word: &str) -> &str {
     word.rsplit_once('=').map_or(word, |(_, file)| file)
 }
 
+/// Bytes of words joined into one line (`env -S'git config' k v`).
+const MAX_JOINED_BYTES: usize = 64 * 1024;
+
+/// `line` with `words` after it, each after a space, as a shell would run
+/// them: at most `MAX_JUDGED_POSITIONS` words and `MAX_JOINED_BYTES`
+/// bytes. `cut`: some were left out, so the line is not seen in full.
+fn joined(mut line: String, words: &[String], cut: &mut bool) -> String {
+    *cut |= words.len() > outbound::MAX_JUDGED_POSITIONS;
+    for word in words.iter().take(outbound::MAX_JUDGED_POSITIONS) {
+        work::step();
+        if line.len() + 1 + word.len() > MAX_JOINED_BYTES {
+            *cut = true;
+            break;
+        }
+        if !line.is_empty() {
+            line.push(' ');
+        }
+        line.push_str(word);
+    }
+    line
+}
+
+/// #1268: the `-c` scripts of shells after a launcher that puts its input
+/// into their words, with each shell's word: the word after the first
+/// option group holding `c`. At most `MAX_JUDGED_POSITIONS` shells are
+/// read; more set `cut`.
+fn replaced_shell_scripts(
+    texts: &[String],
+    launches: &[launched_git::Launch],
+    cut: &mut bool,
+) -> Vec<(usize, String)> {
+    let mut scripts = Vec::new();
+    let mut shells = 0;
+    for (at, text) in texts.iter().enumerate() {
+        work::step();
+        if !launches[at].replaced || !SHELLS.contains(&name(text).as_str()) {
+            continue;
+        }
+        shells += 1;
+        if shells > outbound::MAX_JUDGED_POSITIONS {
+            *cut = true;
+            break;
+        }
+        let mut next = at + 1;
+        while let Some(option) = texts.get(next)
+            && option.starts_with(['-', '+'])
+        {
+            work::step();
+            next += 1;
+            if !option.starts_with("--") && option.contains('c') {
+                if let Some(script) = texts.get(next) {
+                    scripts.push((at, script.clone()));
+                }
+                break;
+            }
+        }
+    }
+    scripts
+}
+
+/// What a launcher puts into a shell's script (`xargs -I% sh -c 'git %'`):
+/// its added words go to the shell's own arguments, not the script.
+fn replaced(launch: launched_git::Launch) -> launched_git::Launch {
+    launched_git::Launch {
+        fed: false,
+        replaced: launch.replaced,
+    }
+}
+
 /// Scripts a wrapper at `at` runs as a shell line, with the word that
 /// holds each: `watch CMD...`, `su -c CMD`, `runuser -c`, `flock F -c`,
 /// `script -c`, `env -S STRING`, also in a group of short options
@@ -787,17 +887,9 @@ fn runner_scripts(texts: &[String], at: usize, cut: &mut bool) -> Vec<(usize, St
                 for (index, script) in &scripts {
                     work::step();
                     let later = &texts[*index + 1..];
-                    if later.is_empty() {
-                        continue;
+                    if !later.is_empty() {
+                        with_later.push((*index, joined(script.clone(), later, cut)));
                     }
-                    *cut |= later.len() > outbound::MAX_JUDGED_POSITIONS;
-                    let mut line = script.clone();
-                    for word in later.iter().take(outbound::MAX_JUDGED_POSITIONS) {
-                        work::step();
-                        line.push(' ');
-                        line.push_str(word);
-                    }
-                    with_later.push((*index, line));
                 }
                 scripts.extend(with_later);
             }

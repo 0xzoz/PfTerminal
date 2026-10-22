@@ -4257,7 +4257,7 @@ fn issue_1268_git_given_input_words_asks() {
         ("xargs -I % git % log", UnseenCode),
         ("xargs -0I% git % log", UnseenCode),
         ("xargs --replace=R git R log", UnseenCode),
-        ("xargs --repl R git R log", UnseenCode),
+        ("xargs --repl=R git R log", UnseenCode),
         ("xargs -J % git % log", UnseenCode),
         ("xargs -i git {} log", UnseenCode),
         ("xargs git -C repo", UnseenCode),
@@ -4301,7 +4301,7 @@ fn issue_1268_git_given_input_words_asks() {
         // A launcher's input after `env -S` (review of #1273).
         (
             "printf 'core.pager sh' | xargs env -S'git config'",
-            UnseenCode,
+            Persistence,
         ),
         (
             "printf -- '-c core.pager=sh log' | xargs env -Sgit",
@@ -4317,11 +4317,32 @@ fn issue_1268_git_given_input_words_asks() {
         ),
         ("xargs -a keys -I% sh -c 'true; git config %'", UnseenCode),
         ("xargs -I% sh -c 'git % log'", UnseenCode),
-        ("xargs env -S'git log' --oneline", UnseenCode),
         ("find . -exec sh -c 'cd . && git config {}' \\;", UnseenCode),
         ("xargs -I% sh -c 'sh -c \"git config %\"'", Persistence),
         ("xargs sh -c 'git config \"${!#}\" x' _", UnseenCode),
         ("xargs zsh -c 'git config $argv'", Persistence),
+        // Review round 2: `-i` and bare `--replace` mean `-I {}`; parallel
+        // runs its command words as a shell line; fd groups.
+        (
+            "printf 'core.pager sh\\n' | xargs -i sh -c 'cd . && git config {}'",
+            UnseenCode,
+        ),
+        ("xargs -i sh -c 'cd . && git config {}' < keys", UnseenCode),
+        (
+            "xargs --replace sh -c 'cd . && git config {}' < keys",
+            UnseenCode,
+        ),
+        (
+            "printf 'core.pager\\nsh\\n' | parallel -N2 'cd . && git config'",
+            Persistence,
+        ),
+        ("parallel -N2 'cd . && git config' :::: keys", Persistence),
+        (
+            "printf -- '-c\\ncore.pager=sh\\nlog\\n' | parallel -N3 'true; git'",
+            UnseenCode,
+        ),
+        ("parallel -N2 sh -c 'cd . && git config'", Persistence),
+        ("fd -HX git config", Persistence),
         ("gxargs git config", Persistence),
         ("gfind . -exec git {} +", UnseenCode),
         // Wrappers that take no input words were already judged.
@@ -4352,6 +4373,8 @@ fn issue_1268_git_given_input_words_asks() {
         "xargs sh -c 'git log --oneline'",
         "find . -type d -name .git -execdir sh -c 'git pull' \\;",
         "env -S'git log' --oneline",
+        "xargs env -S'git log' --oneline",
+        "parallel 'cd x && git log' ::: a",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
@@ -4375,6 +4398,9 @@ fn issue_1268_checks_are_linear() {
         ("positional parameters", "\"$@\" "),
         ("finders", "find -exec "),
         ("split strings", "env -S'git config' "),
+        ("parallel commands", "parallel git "),
+        ("replaced shells", "-i sh -c x "),
+        ("shell options", "sh -x -e "),
     ] {
         work::assert_linear(label, |scale| {
             let line = format!("xargs {} git log", unit.repeat(400 * scale));

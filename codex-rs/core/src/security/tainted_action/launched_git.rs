@@ -1,6 +1,7 @@
 //! #1268: git run by a launcher that adds words from its input: `xargs`,
 //! `parallel` (also its `:::` arguments), `find -exec`/`-execdir`/`-ok`/
-//! `-okdir`, `fd -x`/`-X`. Those words are unseen, and may be git's own
+//! `-okdir`, `fd -x`/`-X` (also in a group: `-HX`). Those words are unseen,
+//! and may be git's own
 //! options (`printf -- '-c core.pager=sh log' | xargs git`) or what `git
 //! config` writes (`printf 'filter.a.clean /tmp/x' | xargs git config`).
 //! So is a positional parameter (`xargs sh -c 'git config "$@"' _`).
@@ -50,24 +51,25 @@ pub(super) struct LaunchedGit<'a> {
 }
 
 impl<'a> LaunchedGit<'a> {
-    /// `launched`: the words are in a script a launcher puts its input in
-    /// (`xargs -I% sh -c 'cd x && git config %'`), so any may be input.
+    /// `launched`: the words are in a script a launcher adds its input to
+    /// (`xargs env -S'git config'`), or puts it in, so that any word may be
+    /// input (`xargs -I% sh -c 'cd x && git config %'`).
     pub(super) fn new(
         words: &'a [String],
         lower: &'a [String],
         braces: bool,
-        launched: bool,
+        launched: Launch,
     ) -> Self {
         Self {
             words,
             lower,
             braces,
-            fed: launched,
+            fed: launched.fed || launched.replaced,
             finder: false,
             placeholders: false,
             replacement_next: false,
             replacements: Vec::new(),
-            any_replacement: launched,
+            any_replacement: launched.replaced,
             seen: None,
         }
     }
@@ -77,6 +79,7 @@ impl<'a> LaunchedGit<'a> {
     fn replaces(&self) -> bool {
         self.fed
             && (self.any_replacement
+                || self.replacement_next
                 || !self.replacements.is_empty()
                 || (self.braces && self.placeholders))
     }
@@ -91,11 +94,14 @@ impl<'a> LaunchedGit<'a> {
         if self.fed {
             self.replacement_option(word);
         }
+        // `fd` takes `-x`/`-X` at the end of a group too (`-HX`).
         let finder_exec = self.finder
-            && matches!(
+            && (matches!(
                 word,
-                "-exec" | "-execdir" | "-ok" | "-okdir" | "-x" | "-X" | "--exec" | "--exec-batch"
-            );
+                "-exec" | "-execdir" | "-ok" | "-okdir" | "--exec" | "--exec-batch"
+            ) || (word.starts_with('-')
+                && !word.starts_with("--")
+                && word.ends_with(['x', 'X'])));
         self.placeholders |= finder_exec || name == "parallel";
         if matches!(name, "xargs" | "gxargs" | "parallel") || finder_exec {
             self.fed = true;
@@ -111,15 +117,24 @@ impl<'a> LaunchedGit<'a> {
         if let Some(long) = word.strip_prefix("--") {
             let (option, value) = long.split_once('=').unwrap_or((long, ""));
             if !option.is_empty() && "replace".starts_with(option) && option.starts_with('r') {
-                self.replace_with(value);
-                self.replacement_next = value.is_empty();
+                self.replace_option(value);
             }
         } else if let Some(group) = word.strip_prefix('-')
             && let Some(at) = group.find(['I', 'J', 'i'])
         {
-            let value = &group[at + 1..];
+            self.replace_option(&group[at + 1..]);
+        }
+    }
+
+    /// A replacement option's value. Without one, the string may be the
+    /// default (`xargs -i`, bare `--replace`: `{}`) or the next word (`-I
+    /// R`): both.
+    fn replace_option(&mut self, value: &str) {
+        if value.is_empty() {
+            self.replace_with("{}");
+            self.replacement_next = true;
+        } else {
             self.replace_with(value);
-            self.replacement_next = value.is_empty();
         }
     }
 
@@ -221,24 +236,29 @@ fn holds_positional(word: &str) -> bool {
 /// whether a launcher before it adds input words to the line it runs, and
 /// whether it puts them inside that line's words (`xargs -I%`, `find -exec`
 /// with a `{}`). `braces`: the line as written holds a brace.
+/// And the same after the last word.
 pub(super) fn launches(texts: &[String], braces: bool) -> Vec<Launch> {
     let lower: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
-    let mut launched = LaunchedGit::new(texts, &lower, braces, /*launched*/ false);
-    let mut each = Vec::with_capacity(texts.len());
-    for index in 0..texts.len() {
+    let mut launched = LaunchedGit::new(texts, &lower, braces, Launch::default());
+    let mut each = Vec::with_capacity(texts.len() + 1);
+    for index in 0..=texts.len() {
         work::step();
         each.push(Launch {
             fed: launched.fed,
             replaced: launched.replaces(),
         });
-        launched.step(index);
+        if index < texts.len() {
+            launched.step(index);
+        }
     }
     each
 }
 
-/// What a launcher does with its input at one word.
-#[derive(Clone, Copy)]
+/// What a launcher does with its input at one word, or in a script it runs.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub(super) struct Launch {
+    /// It adds input words (after the line it runs).
     pub(super) fed: bool,
+    /// It may put them inside its words.
     pub(super) replaced: bool,
 }

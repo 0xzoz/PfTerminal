@@ -441,7 +441,7 @@ fn classified(
         ran_unknown: false,
         written: Vec::new(),
         nested_scripts: 0,
-        launched_scripts: 0,
+        launched: launched_git::Launch::default(),
         substitution_budget: Budget {
             left: MAX_SUBSTITUTED_BYTES,
             small_left: MAX_SUBSTITUTED_BYTES,
@@ -710,10 +710,10 @@ struct Classifier {
     written: Vec<Option<String>>,
     /// #885: nested shell scripts judged so far.
     nested_scripts: usize,
-    /// #1268: inside a script a launcher runs with its input put into the
-    /// script's text (`xargs -I% sh -c 'git config %'`) or after it (`xargs
-    /// env -S'git config'`): any word may be input.
-    launched_scripts: usize,
+    /// #1268: inside a script a launcher runs with its input added after
+    /// it (`xargs env -S'git config'`) or put into its text (`xargs -I% sh
+    /// -c 'git config %'`, where any word may be input).
+    launched: launched_git::Launch,
     /// #1065: bytes of variable values left to substitute.
     substitution_budget: Budget,
     /// #1065: bytes of command text, and command lines, lexed so far.
@@ -1177,8 +1177,7 @@ impl Classifier {
             self.change_folder(name, args, folders, variables);
         }
         let mut git_config = GitConfigWrites::new(&lower);
-        let mut launched_git =
-            launched_git::LaunchedGit::new(words, &lower, braces, self.launched_scripts > 0);
+        let mut launched_git = launched_git::LaunchedGit::new(words, &lower, braces, self.launched);
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.
         for (index, word) in lower.iter().enumerate() {
