@@ -158,6 +158,7 @@ mod tests {
         ("sed.rs", include_str!("sed.rs")),
         ("shadow.rs", include_str!("shadow.rs")),
         ("shell.rs", include_str!("shell.rs")),
+        ("unknown_folder.rs", include_str!("unknown_folder.rs")),
         ("windows_paths.rs", include_str!("windows_paths.rs")),
         ("windows_shell.rs", include_str!("windows_shell.rs")),
     ];
