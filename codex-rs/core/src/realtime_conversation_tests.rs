@@ -686,6 +686,55 @@ fn pf_889_ambient_realtime_key_under_a_named_account_is_not_attributed() {
     ));
 }
 
+/// D171 (#1286, #1311 item 5): a realtime WebSocket session on a named
+/// OpenAI account whose sign-in was removed is refused with the account's
+/// recovery, as its other requests are. Before, it fell back to the ambient
+/// `OPENAI_API_KEY` (or failed asking for an API key when none was set).
+/// While the account is signed in, its own key is used as before.
+#[tokio::test]
+async fn pf_889_realtime_on_a_removed_named_account_is_refused_not_sent_the_ambient_key()
+-> anyhow::Result<()> {
+    let endpoint = realtime_stand_in(StandInEnd::ClientCloses).await?;
+    let home = tempfile::tempdir()?;
+    let test_cwd = tempfile::tempdir()?;
+    let work = codex_login::NamedChatgptAccount {
+        provider_id: "openai".into(),
+        name: "work".into(),
+    };
+    codex_login::login_named_account_with_api_key(home.path(), &work, "sk-work-canary")?;
+    let (owner, _db) = realtime_ledger_session_with(
+        home.path(),
+        test_cwd.path(),
+        &endpoint,
+        crate::config::AccountingMode::Disabled,
+        |config| config.model_provider.account = Some(named_openai_account()),
+    )
+    .await?;
+
+    let signed_in = super::prepare_realtime_start(&owner, realtime_websocket_params()).await?;
+    assert!(matches!(
+        signed_in.websocket_credential,
+        super::RealtimeRecordKey::Sent(_)
+    ));
+
+    let name = codex_vault::ProviderAccountName::parse("work")?;
+    assert!(
+        codex_vault::Vault::new(home.path().to_path_buf())
+            .remove_provider_account("openai", &name)?
+    );
+    let refused = match super::prepare_realtime_start(&owner, realtime_websocket_params()).await {
+        Ok(_) => panic!("a removed named account must not start a realtime session"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        refused.contains("account `work` has no sign-in (it may have been removed or signed out)")
+            && refused.contains("corbanu login --account work"),
+        "{refused}"
+    );
+    assert!(!refused.contains("sk-"), "{refused}");
+    Ok(())
+}
+
 /// How the stand-in realtime server ends a session it accepted.
 #[derive(Clone, Copy)]
 enum StandInEnd {
