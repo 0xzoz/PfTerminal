@@ -172,9 +172,15 @@ pub(super) fn carries_change(name: &str, args: &[String]) -> bool {
                     work::step();
                     ch.is_ascii_alphanumeric()
                         || matches!(ch, '_' | '-' | '.' | '/' | '=' | ':' | '@' | '%' | ' ')
-                }) || tokens(arg).any(|token| CHANGERS.contains(&token))
+                }) || tokens(arg)
+                    .any(|token| CHANGERS.contains(&token) || CARRIED_LOADERS.contains(&token))
+                    || arg.split([' ', '=']).any(|piece| piece == ".")
             }))
 }
+
+/// Commands that, run from carrier text, load more text into the current
+/// shell (`eval . ./f`, `eval source f`, `alias go=eval`).
+const CARRIED_LOADERS: &[&str] = &["source", "eval", "alias", "autoload"];
 
 /// Whether a folder change goes where the walk does not follow: zsh
 /// `chdir`, a place on the folder stack (`cd -2`, `pushd +1`, `popd +1`, a
@@ -193,7 +199,8 @@ pub(super) fn odd_change(name: &str, args: &[String]) -> bool {
         if arg == "--" || arg.starts_with('+') {
             return true;
         }
-        if arg == "-" && name == "cd" {
+        // `pushd -` passes `-` on to `cd`.
+        if arg == "-" && matches!(name, "cd" | "pushd") {
             return true;
         }
         if arg.starts_with('-') && arg != "-" {

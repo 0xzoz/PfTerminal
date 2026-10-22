@@ -5398,6 +5398,15 @@ fn issue_1309_unknown_folders_ask() {
         "eval '[c]d'; sh -c 'echo x >> .zshenv'",
         "ln -s ~ d; eval '{c,}d'; sh -c 'echo x >> .zshenv'",
         "alias go='c?'; go; sh -c 'echo x >> .zshenv'",
+        // Review 3: `pushd -`; carrier text that loads more text.
+        "pushd -; sh -c 'echo x >> .zshenv'",
+        "(cd /tmp); pushd -; sh -c 'echo x >> .zshenv'",
+        "eval . ./f; sh -c 'echo x >> .zshenv'",
+        "eval source f; sh -c 'echo x >> .zshenv'",
+        "eval '. ./f'; sh -c 'echo x >> .zshenv'",
+        "trap '. ./f' DEBUG; sh -c 'echo x >> .zshenv'",
+        "alias go=.; go ./f; sh -c 'echo x >> .zshenv'",
+        "alias go=eval; go cd; sh -c 'echo x >> .zshenv'",
         r#"nsenter --wdns="$HOME" sh -c 'echo x >> .zshenv'"#,
         r#"nsenter -W"$HOME" sh -c 'echo x >> .zshenv'"#,
         // An output file too.
