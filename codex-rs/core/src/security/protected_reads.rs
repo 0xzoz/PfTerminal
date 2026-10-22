@@ -670,8 +670,10 @@ async fn off_thread<T: Send + 'static>(
 ///
 /// #1312: also when the exit is 0: a later command on the same line
 /// (`echo x >> ../notes.txt; echo "exit=$?"`) can hide the denied one's
-/// failure, and the denial line still names what was refused. Only the
-/// keychain note, which has no denial line, needs a failed exit.
+/// failure. Then only a path the command itself names, and a denial line
+/// names too, is explained: output alone (a search printing old denial
+/// lines) proves nothing was denied. The keychain note, which has no denial
+/// line, needs a failed exit.
 ///
 /// #622: a denial explained here is also listed under the inspector's
 /// recent denials.
@@ -709,7 +711,7 @@ pub(crate) async fn denial_explanation(
         // #839: listed under the inspector's recent denials, as under
         // Aggressive (#622).
         let (denied, explanation) =
-            moderate::denial_explanation(inputs, command, cwd, denial_lines).await?;
+            moderate::denial_explanation(inputs, command, cwd, denial_lines, failed).await?;
         let (what, outcome) = denied.inspected();
         super::inspection::record_refusal(session.thread_id(), what, outcome);
         return Some(explanation);
@@ -718,7 +720,9 @@ pub(crate) async fn denial_explanation(
     let (command, cwd) = (command.to_vec(), cwd.to_path_buf());
     let found = off_thread(move || {
         let matcher = inputs.matcher(&cwd)?;
-        if matcher.is_read_denied(&cwd) {
+        // #1312: the steps that go by the output or the folder alone, not
+        // by a path the command names, need a failed command.
+        if failed && matcher.is_read_denied(&cwd) {
             return Some(ProtectedNote::Read(cwd.display().to_string()));
         }
         let word = |denied: &dyn Fn(&Path) -> bool| {
@@ -748,7 +752,8 @@ pub(crate) async fn denial_explanation(
             // folder as `.` or by its name).
             .or_else(|| {
                 let name = cwd.file_name()?.to_str()?.to_string();
-                (matcher.is_listing_denied(&cwd)
+                (failed
+                    && matcher.is_listing_denied(&cwd)
                     && denial_lines.iter().any(|line| {
                         line.contains(&name) || line.contains(" .:") || line.contains("'.'")
                     }))
@@ -757,6 +762,9 @@ pub(crate) async fn denial_explanation(
             // #554: a folder above the home listed recursively (`find ~`,
             // `ls -aR ~`): the denial line names the home below it.
             .or_else(|| {
+                if !failed {
+                    return None;
+                }
                 unlistable_path_in_lines(
                     &command,
                     &cwd,
@@ -830,6 +838,9 @@ pub(crate) async fn denial_explanation(
             // of the command names (built at run time). Bounded: only the
             // first lines are looked at.
             .or_else(|| {
+                if !failed {
+                    return None;
+                }
                 let lines = &denial_lines[..denial_lines.len().min(MAX_REPORTED_LINES)];
                 in_lines(lines, &|path| matcher.is_read_denied(path)).map(ProtectedNote::Read)
             })

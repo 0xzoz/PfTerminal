@@ -1381,7 +1381,8 @@ async fn issue_997_unit_test_lookups_outlast_the_production_bound() {
 /// outside the current folder is explained where it failed even when a
 /// later command on the same line makes the whole command exit 0, as it is
 /// when the denied write is the last command; and so is a start-up file. A
-/// command with no denial line, or no known exit, is left alone.
+/// command with no denial line, or no known exit, is left alone, and so is
+/// one that exited 0 whose output alone reports a denial.
 #[cfg(unix)]
 #[tokio::test]
 async fn issue_1312_denial_hidden_by_a_later_command_is_explained() {
@@ -1435,6 +1436,32 @@ async fn issue_1312_denial_hidden_by_a_later_command_is_explained() {
         explain(outside, None, outside_denied).await,
         None,
         "no exit"
+    );
+    // A denial line in the output alone, which the command does not name (a
+    // search printing old denial lines), explains nothing when it exited 0;
+    // a failed command is still explained by it (#621).
+    let auth = turn.config.codex_home.join("auth.json");
+    std::fs::create_dir_all(turn.config.codex_home.as_path()).unwrap();
+    std::fs::write(&auth, "x").unwrap();
+    let search = "rg -n 'not permitted' notes.md";
+    let printed = format!(
+        "notes.md:3:cat: {}: Operation not permitted\n",
+        auth.display()
+    );
+    let before = recent_denials(&session, &turn).len();
+    assert_eq!(
+        explain(search, Some(0), &printed).await,
+        None,
+        "output alone"
+    );
+    assert_eq!(
+        recent_denials(&session, &turn).len(),
+        before,
+        "nothing listed"
+    );
+    assert_eq!(
+        explain(search, Some(1), &printed).await,
+        Some(explanation(&auth.display().to_string()))
     );
     let denials = recent_denials(&session, &turn);
     for reason in [
