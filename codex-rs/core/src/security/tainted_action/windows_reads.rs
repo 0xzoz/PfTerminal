@@ -215,7 +215,10 @@ pub(super) fn locate(drive: char, names: &[String], lookup: &dyn Fn() -> bool) -
             return Located::Refused;
         }
         if at + 1 == names.len() {
-            return if metadata.is_file() {
+            // A system file may be a Cygwin link (see `local_drive`).
+            return if metadata.is_file()
+                && metadata.file_attributes() & local_drive::SYSTEM_FILE == 0
+            {
                 Located::File(handle)
             } else {
                 Located::Refused

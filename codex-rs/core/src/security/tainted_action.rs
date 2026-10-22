@@ -1947,7 +1947,15 @@ impl Classifier {
         if self.scripts_read > MAX_SCRIPT_FILES {
             return FileText::Unreadable;
         }
-        Self::read_text(handle)
+        match Self::read_text(handle) {
+            // A Cygwin or Interix link, which Git Bash follows.
+            FileText::Text(text)
+                if text.starts_with("!<symlink>") || text.starts_with("IntxLNK") =>
+            {
+                FileText::Unreadable
+            }
+            read => read,
+        }
     }
 
     /// The text of an opened file, within the file limits.

@@ -128,8 +128,9 @@ const SCRIPT_INTERPRETERS: &[&str] = &["python", "python3", "node", "ruby", "per
 /// splits inside quoted words and follows only POSIX `cd`, so a file named
 /// in text that cmd, PowerShell or an interpreter's inline code runs may
 /// not be the one that runs (`cmd /c "cd sub & bash run.sh"`). So only: a
-/// POSIX shell (`bash`, `sh`, `dash`, `zsh`, by name) given `-c` or `-lc`
-/// and a script the bash grammar reads as plain commands of literal words
+/// POSIX shell (`bash`, `sh`, `dash`, `zsh`, by name) given `-c` (not a
+/// login shell: an MSYS2 or Cygwin profile may `cd` to the home first) and
+/// a script the bash grammar reads as plain commands of literal words
 /// with no shell syntax in them, each a script run by file (`bash x.sh`,
 /// `sh -x x.sh`, `./x`, `source x`, `python3 x.py`), `cd`/`pushd`/`popd`,
 /// `sed`, a program that never runs its words, or such a shell's `-c`
@@ -144,7 +145,9 @@ fn follows(command: &[String], depth: usize) -> bool {
     };
     if depth > MAX_FOLLOWED_DEPTH
         || !posix_shell(shell)
-        || !matches!(flag.as_str(), "-c" | "-lc")
+        // Not `-lc`: an MSYS2 or Cygwin login shell's profile may `cd` to
+        // the home before the script runs.
+        || flag != "-c"
         || script.len() > MAX_SCRIPT_BYTES
         || splits_differently(script)
     {
@@ -174,12 +177,19 @@ fn followed(words: &[PlainWord], depth: usize) -> bool {
     let Some(name) = texts.first() else {
         return false;
     };
-    if posix_shell(name)
-        && texts[1..]
-            .iter()
-            .any(|word| word.starts_with('-') && !word.starts_with("--") && word.contains('c'))
-    {
-        return follows(&texts, depth + 1);
+    if posix_shell(name) {
+        let short = |letter: char| {
+            texts[1..].iter().any(|word| {
+                word.starts_with('-') && !word.starts_with("--") && word.contains(letter)
+            })
+        };
+        // A login shell may start in the home (see `follows`).
+        if short('l') || texts.iter().any(|word| word == "--login") {
+            return false;
+        }
+        if short('c') {
+            return follows(&texts, depth + 1);
+        }
     }
     let plain = texts.iter().all(|word| {
         !word.is_empty()

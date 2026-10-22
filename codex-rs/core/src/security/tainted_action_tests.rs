@@ -52,6 +52,10 @@ fn unfollowed(expected: Option<ProtectedActionKind>) -> Option<ProtectedActionKi
     }
 }
 
+/// #1261: the shell flag of tests that read script files: not a login
+/// shell on Windows, where one opens no file.
+const SCRIPT_FLAG: &str = if cfg!(windows) { "-c" } else { "-lc" };
+
 fn kind(command: &[&str]) -> Option<ProtectedActionKind> {
     classify_fixture(&shell_in("/work", command))
 }
@@ -478,7 +482,9 @@ fn pf_30_s03_script_files_and_patched_scripts_are_read() {
         ("bash plain.sh", None),
     ] {
         assert_eq!(
-            classify_fixture(&shell_in(&cwd, &["bash", "-lc", command])),
+            // #1261: on Windows a login shell opens no file (an MSYS2 or
+            // Cygwin profile may start it in the home).
+            classify_fixture(&shell_in(&cwd, &["bash", SCRIPT_FLAG, command])),
             expected,
             "{command}"
         );
@@ -1603,7 +1609,7 @@ fn issue_841_sed_edits_are_not_unseen_code() {
     let mut wrong = Vec::new();
     // #1261: on Windows a line holding a backslash opens no file (the
     // lexer drops backslashes), so the script it runs asks.
-    let mod06_kind = unfollowed(None);
+    let mod06_kind = unfollowed(/*expected*/ None);
     for (script, expected) in [
         (mod06, mod06_kind),
         ("sed -i '' 's/a/b/' src/notes.py", None),
@@ -1892,9 +1898,12 @@ fn issue_885_nested_shell_scripts_are_judged() {
         // #1261: not followed exactly on Windows (see `unfollowed`).
         (
             "d=$(cd src && pwd); bash -c './present.sh'",
-            unfollowed(None),
+            unfollowed(/*expected*/ None),
         ),
-        ("d=$(cd / && pwd); bash -c './present.sh'", unfollowed(None)),
+        (
+            "d=$(cd / && pwd); bash -c './present.sh'",
+            unfollowed(/*expected*/ None),
+        ),
         ("docker run img sh -c './entrypoint.sh'", None),
         // Quoted text is judged like code wherever it is (as the word
         // lexer does), so printed text naming a missing script asks.
@@ -1928,7 +1937,10 @@ fn issue_885_sed_writing_a_file_the_line_runs_is_unseen_code() {
         ("sed -n '/x/w r.sh' f; bash r.sh", unseen),
         ("sed -i '1r f' r.sh; source r.sh", unseen),
         // In place, adding text the line shows, or not run in the line.
-        ("sed -i '1a echo hi' r.sh && bash r.sh", unfollowed(None)),
+        (
+            "sed -i '1a echo hi' r.sh && bash r.sh",
+            unfollowed(/*expected*/ None),
+        ),
         ("sed -i '/x/d' r.sh && bash r.sh", None),
         ("sed -i 's/a/b/' f && bash present.sh", None),
         ("sed -n '1a ./p.sh' r.sh", None),
@@ -1997,7 +2009,7 @@ fn issue_885_review_1_routes_and_limits() {
         let nested = format!("uv {envs}bash -c \"uv {envs}bash -c './present.sh'\"");
         assert_eq!(
             classify_fixture(&shell_in(&cwd, &["/bin/bash", "-c", &nested])),
-            unfollowed(None)
+            unfollowed(/*expected*/ None)
         );
     });
     work::assert_linear("wide wrappers", |scale| {
@@ -2155,7 +2167,10 @@ fn issue_885_review_3_routes() {
         ("sed -n 1,5p f # show the first lines", None),
         ("echo 'sed p'; git log -n 1 # sed -n p", None),
         ("echo a; git log -n 1 # sed -n p", None),
-        ("echo \"bash -c ./present.sh\"", unfollowed(None)),
+        (
+            "echo \"bash -c ./present.sh\"",
+            unfollowed(/*expected*/ None),
+        ),
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
 }
@@ -5086,7 +5101,7 @@ fn issue_1261_windows_reads_never_reach_a_share() {
         "bash 'run.sh '",
         "bash nul.sh",
     ] {
-        assert_eq!(windows_kind(&["bash", "-lc", line]), unseen, "{line}");
+        assert_eq!(windows_kind(&["bash", "-c", line]), unseen, "{line}");
         assert_eq!(
             windows_reads::take_touched(),
             Vec::<String>::new(),
@@ -5141,7 +5156,7 @@ fn issue_1261_windows_reads_stop_at_links() {
         .expect("mklink");
     assert!(made.status.success(), "mklink: {made:?}");
     let cwd = work.to_string_lossy().into_owned();
-    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-lc", line]));
+    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-c", line]));
     let _ = windows_reads::take_touched();
 
     assert_eq!(kind("bash real/run.sh"), Some(Vault));
@@ -5175,7 +5190,7 @@ fn issue_1261_windows_reads_need_a_proven_local_drive() {
     std::fs::create_dir(work.join("real")).expect("folder");
     std::fs::write(work.join("real").join("run.sh"), "corbanu vault list\n").expect("script");
     let cwd = work.to_string_lossy().into_owned();
-    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-lc", line]));
+    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-c", line]));
     assert_eq!(kind("bash real/run.sh"), Some(Vault));
     let _ = windows_reads::take_touched();
     struct Unsubst(char);
@@ -5200,7 +5215,7 @@ fn issue_1261_windows_reads_need_a_proven_local_drive() {
     let unsubst = Unsubst(letter);
     // Run from the drive's root: only the drive is queried.
     let root = format!("{letter}:\\");
-    let on_drive = || classify_fixture(&shell_in(&root, &["bash", "-lc", "bash run.sh"]));
+    let on_drive = || classify_fixture(&shell_in(&root, &["bash", "-c", "bash run.sh"]));
     assert_eq!(on_drive(), Some(UnseenCode), "{root}");
     assert_eq!(windows_reads::take_touched(), vec![format!("{letter}:")]);
     // Named with its drive, it is not looked up at all.
@@ -5252,7 +5267,7 @@ fn issue_1261_windows_backslash_lines_open_no_file() {
     std::fs::write(work.join("sub").join("run.sh"), "corbanu vault list\n").expect("script");
     std::fs::write(work.join("subrun.sh"), "true\n").expect("decoy");
     let cwd = work.to_string_lossy().into_owned();
-    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-lc", line]));
+    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-c", line]));
     let _ = windows_reads::take_touched();
     for line in [
         r"bash 'sub\run.sh'",
@@ -5336,7 +5351,7 @@ fn issue_1261_windows_script_files_are_read_as_windows_code_too() {
     let cwd = work.to_string_lossy().into_owned();
     for line in ["bash run.bat", "bash run.ps1"] {
         assert_eq!(
-            classify_fixture(&shell_in(&cwd, &["bash", "-lc", line])),
+            classify_fixture(&shell_in(&cwd, &["bash", "-c", line])),
             Some(ProtectedActionKind::Credentials),
             "{line}"
         );
@@ -5370,7 +5385,7 @@ fn issue_1261_windows_files_named_by_read_files_are_not_opened() {
     )
     .expect("bat");
     let cwd = work.to_string_lossy().into_owned();
-    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-lc", line]));
+    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-c", line]));
     assert_eq!(kind("./run.bat"), Some(UnseenCode));
     assert_eq!(kind("./enc.bat"), Some(Credentials));
     // Read from the line itself, the same scripts are read.
@@ -5395,7 +5410,7 @@ fn issue_1261_home_and_drive_spellings_are_not_read() {
         "bash r[u]n.sh",
     ] {
         assert_eq!(
-            windows_kind(&["bash", "-lc", line]),
+            windows_kind(&["bash", "-c", line]),
             Some(ProtectedActionKind::UnseenCode),
             "{line}"
         );
@@ -5427,9 +5442,14 @@ fn issue_1261_windows_reads_follow_only_plain_posix_scripts() {
         "bash -c \"sh -c './present.sh'\"",
         "sed -n 1p f && bash present.sh",
     ] {
-        assert!(follows(&["bash", "-lc", line]), "{line}");
+        assert!(follows(&["bash", "-c", line]), "{line}");
     }
     for argv in [
+        // Login shells (an MSYS2 or Cygwin profile may `cd` to the home).
+        vec!["bash", "-lc", "bash run.sh"],
+        vec!["bash", "-c", "bash -l run.sh"],
+        vec!["bash", "-c", "bash --login run.sh"],
+        vec!["bash", "-c", "sh -lc ./run.sh"],
         vec![
             "powershell.exe",
             "-NoProfile",
@@ -5438,26 +5458,26 @@ fn issue_1261_windows_reads_follow_only_plain_posix_scripts() {
         ],
         vec!["cmd.exe", "/c", "bash run.sh"],
         vec!["bash", "run.sh"],
-        vec!["bash", "-lc", "cmd /c \"cd sub & bash run2.sh\""],
+        vec!["bash", "-c", "cmd /c \"cd sub & bash run2.sh\""],
         vec![
             "bash",
-            "-lc",
+            "-c",
             "powershell -Command \"Set-Location sub; bash run2.sh\"",
         ],
         vec![
             "bash",
-            "-lc",
+            "-c",
             "python3 -c \"import os; os.system('chdir sub && bash run2.sh')\"",
         ],
-        vec!["bash", "-lc", "env -C sub bash run2.sh"],
-        vec!["bash", "-lc", "sudo -D sub bash run2.sh"],
-        vec!["bash", "-lc", "timeout 5 bash run.sh"],
-        vec!["bash", "-lc", "echo 'x; cd sub'; bash run2.sh"],
-        vec!["bash", "-lc", "d=$(cd sub); bash run2.sh"],
-        vec!["bash", "-lc", "node -r ./p.js app.js"],
-        vec!["bash", "-lc", "bash 'sub\\run.sh'"],
-        vec!["bash", "-lc", "CDPATH=x cd sub && bash run.sh"],
-        vec!["bash", "-lc", "bash r[u]n.sh"],
+        vec!["bash", "-c", "env -C sub bash run2.sh"],
+        vec!["bash", "-c", "sudo -D sub bash run2.sh"],
+        vec!["bash", "-c", "timeout 5 bash run.sh"],
+        vec!["bash", "-c", "echo 'x; cd sub'; bash run2.sh"],
+        vec!["bash", "-c", "d=$(cd sub); bash run2.sh"],
+        vec!["bash", "-c", "node -r ./p.js app.js"],
+        vec!["bash", "-c", "bash 'sub\\run.sh'"],
+        vec!["bash", "-c", "CDPATH=x cd sub && bash run.sh"],
+        vec!["bash", "-c", "bash r[u]n.sh"],
     ] {
         assert!(!follows(&argv), "{argv:?}");
     }
@@ -5683,5 +5703,36 @@ fn issue_1283_1276_checks_are_linear() {
             );
             let _ = script(&line);
         });
+    }
+}
+
+/// #1261 review 4: on Windows a login shell opens no file (an MSYS2 or
+/// Cygwin profile may `cd` to the home before the script runs), and a
+/// Cygwin symlink (a system file starting `!<symlink>`) is not read as text.
+#[cfg(windows)]
+#[test]
+fn issue_1261_windows_login_shells_and_cygwin_links_are_not_read() {
+    use ProtectedActionKind::*;
+    let root = tempfile::tempdir().expect("tempdir");
+    let work = root.path();
+    std::fs::write(work.join("run.sh"), "true\n").expect("script");
+    std::fs::write(work.join("link.sh"), b"!<symlink>evil.txt\0").expect("link");
+    std::fs::write(work.join("plain_link.sh"), b"!<symlink>evil.txt\0").expect("link");
+    let made = std::process::Command::new("attrib")
+        .arg("+S")
+        .arg(work.join("link.sh"))
+        .output()
+        .expect("attrib");
+    assert!(made.status.success(), "attrib: {made:?}");
+    let cwd = work.to_string_lossy().into_owned();
+    let classify = |argv: &[&str]| classify_fixture(&shell_in(&cwd, argv));
+    assert_eq!(classify(&["bash", "-c", "bash run.sh"]), None);
+    for argv in [
+        ["bash", "-lc", "bash run.sh"],
+        ["bash", "-c", "bash -l run.sh"],
+        ["bash", "-c", "bash link.sh"],
+        ["bash", "-c", "bash plain_link.sh"],
+    ] {
+        assert_eq!(classify(&argv), Some(UnseenCode), "{argv:?}");
     }
 }

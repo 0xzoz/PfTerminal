@@ -16,6 +16,11 @@ pub const REMOTE_OR_LINK_ATTRIBUTES: u32 = {
         | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
 };
 
+/// A system file: Cygwin, MSYS2 and Git Bash read one starting `!<symlink>`
+/// (and Interix one starting `IntxLNK`) as a link to follow.
+#[cfg(target_os = "windows")]
+pub const SYSTEM_FILE: u32 = windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SYSTEM;
+
 /// `CreateFileW` flags: open a link itself, never what it points to, and
 /// open a folder as well as a file.
 #[cfg(target_os = "windows")]
