@@ -103,15 +103,18 @@ fn command_words(command: &[String], windows: bool) -> Vec<String> {
     let posix = !windows || command.first().is_some_and(|program| posix_shell(program));
     command
         .iter()
-        .flat_map(|argument| {
-            if posix {
-                shlex::split(argument)
-                    .unwrap_or_else(|| argument.split_whitespace().map(str::to_string).collect())
-            } else {
-                windows_words(argument)
-            }
-        })
+        .flat_map(|argument| argument_words(argument, posix))
         .collect()
+}
+
+/// The words of one argument of a command (see [`command_words`]).
+fn argument_words(argument: &str, posix: bool) -> Vec<String> {
+    if posix {
+        shlex::split(argument)
+            .unwrap_or_else(|| argument.split_whitespace().map(str::to_string).collect())
+    } else {
+        windows_words(argument)
+    }
 }
 
 /// #1296: whether `program` is a POSIX shell (Git for Windows' `bash.exe`).
@@ -1363,7 +1366,7 @@ pub(super) fn denied_word(
 ) -> Option<String> {
     let words = command_words(command, WINDOWS);
     let patterns = if skip_patterns {
-        search_patterns::search_pattern_indices(&words)
+        search_patterns::search_pattern_indices(command, &words, WINDOWS)
     } else {
         Default::default()
     };

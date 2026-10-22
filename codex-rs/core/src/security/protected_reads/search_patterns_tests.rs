@@ -10,7 +10,9 @@ fn patterns(script: &str) -> Vec<String> {
         script.to_string(),
     ];
     let words = super::super::command_words(&command, /*windows*/ false);
-    let mut indices: Vec<usize> = search_pattern_indices(&words).into_iter().collect();
+    let mut indices: Vec<usize> = search_pattern_indices(&command, &words, /*windows*/ false)
+        .into_iter()
+        .collect();
     indices.sort_unstable();
     indices
         .into_iter()
@@ -62,7 +64,8 @@ fn searched_paths_are_not_patterns() {
     // A count is taken only when it is one (BSD `grep -C` has an optional
     // count).
     assert_eq!(patterns("grep -C token .env"), ["token"]);
-    assert_eq!(patterns("grep --context token .env"), ["token"]);
+    // BSD grep's `--context` takes an optional count.
+    assert_eq!(patterns("grep --context 2 .env"), ["2"]);
     assert_eq!(patterns("grep &>> log token .env"), ["token"]);
     assert_eq!(patterns("grep 2>&1 token .env"), ["token"]);
     // GNU grep's abbreviations of `--regexp`.
@@ -74,4 +77,36 @@ fn searched_paths_are_not_patterns() {
     // A keyword or wrapper only starts a program where it is one itself.
     assert!(patterns("cat do grep .env").is_empty());
     assert_eq!(patterns("sudo grep .env x.log"), [".env"]);
+}
+
+/// A search ends at a separator, also one after an option's value, and at a
+/// new line of the script: a later command's words are not its patterns.
+#[test]
+fn a_search_ends_with_its_command() {
+    assert_eq!(
+        patterns("grep -e token; cat -e .env; echo done"),
+        ["token;"]
+    );
+    assert_eq!(patterns("rg -g '*.md'; cat .env"), Vec::<String>::new());
+    assert_eq!(
+        patterns("rg -n DATABASE_URL src/\nnode -e \"require('fs').readFileSync('.env')\" || true"),
+        ["DATABASE_URL"]
+    );
+    assert_eq!(
+        patterns("rg token logs/\ncat -e .env\necho done"),
+        ["token"]
+    );
+    assert_eq!(patterns("rg -e\ncat .env"), Vec::<String>::new());
+    // A new line in quotes, or after `\\`, does not end it.
+    assert_eq!(patterns("rg 'a\nb' logs/"), ["a\nb"]);
+    assert_eq!(patterns("grep \\\n  -e .env logs/"), [".env"]);
+    // A comment's quote does not hide the next line.
+    assert_eq!(patterns("# don't\ngrep .env x.log"), [".env"]);
+}
+
+/// Where the operands are unclear, nothing is marked.
+#[test]
+fn unclear_operands_are_not_patterns() {
+    assert!(patterns("grep <(cat .env) logs").is_empty());
+    assert_eq!(patterns("rg --pre cat token .env"), ["token"]);
 }
