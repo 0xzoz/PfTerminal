@@ -135,7 +135,7 @@ async fn force_refetch_does_not_join_a_download_that_started_earlier() {
                 .await
         })
     };
-    fixture.wait_for_list_requests(1).await;
+    fixture.wait_for_list_requests(/*expected*/ 1).await;
 
     fixture
         .list(RemotePluginCatalogCacheMode::ForceRefetch)
@@ -156,7 +156,7 @@ async fn invalidation_stops_later_callers_joining_an_earlier_download() {
                 .await
         })
     };
-    fixture.wait_for_list_requests(1).await;
+    fixture.wait_for_list_requests(/*expected*/ 1).await;
 
     invalidate_cached_remote_plugin_catalog_scopes(
         fixture.codex_home.path(),
@@ -183,7 +183,7 @@ async fn a_download_started_before_invalidation_does_not_rewrite_the_cache() {
                 .await
         })
     };
-    fixture.wait_for_list_requests(1).await;
+    fixture.wait_for_list_requests(/*expected*/ 1).await;
 
     invalidate_cached_remote_plugin_catalog_scopes(
         fixture.codex_home.path(),
@@ -215,7 +215,7 @@ async fn joined_callers_fetch_for_themselves_when_the_shared_download_is_cancell
                 .await
         })
     };
-    fixture.wait_for_list_requests(1).await;
+    fixture.wait_for_list_requests(/*expected*/ 1).await;
     let follower = {
         let fixture = Arc::clone(&fixture);
         tokio::spawn(async move {
