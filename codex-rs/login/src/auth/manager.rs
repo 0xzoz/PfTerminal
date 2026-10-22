@@ -3297,9 +3297,10 @@ impl AuthManager {
         }
         tracing::info!("Reloaded auth, changed: {changed}");
         cached.auth = new_auth;
-        // D171: what the store was last seen holding was about the
-        // sign-in held before.
-        if changed && let Some(store) = self.named_store.as_ref() {
+        // #1326: every cache installation invalidates earlier observations,
+        // including a reinstall of the same credentials after removal.
+        // Equality still controls the return value and refresh notifications.
+        if let Some(store) = self.named_store.as_ref() {
             store.forget();
         }
         if auth_changed_for_refresh {

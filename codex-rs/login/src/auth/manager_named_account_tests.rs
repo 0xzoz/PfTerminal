@@ -572,11 +572,12 @@ fn a_read_from_before_the_held_sign_in_changed_is_not_recorded() {
 }
 
 /// #1326: pause at the real check/clear boundary, install a later sign-in,
-/// then apply the old answer. Both a different sign-in and an A -> B -> A
-/// replacement keep their cache and do not emit a spurious auth-change event.
+/// then apply the old answer. Reinstalling A, replacing A with B, and an
+/// A -> B -> A replacement all keep the new cache without a spurious event.
 #[test]
 fn a_stale_gone_answer_never_clears_a_replacement_sign_in() {
     for replacements in [
+        &["sk-canary-original"][..],
         &["sk-canary-replacement"][..],
         &["sk-canary-intermediate", "sk-canary-original"][..],
     ] {
@@ -604,15 +605,17 @@ fn a_stale_gone_answer_never_clears_a_replacement_sign_in() {
                 .expect("replacement sign-in");
             work.reload_named_sign_in_sync();
         }
-        let expected = Some(CodexAuth::from_api_key(
-            replacements.last().expect("replacement"),
-        ));
+        let expected = Some(replacements.last().expect("replacement").to_string());
         let revision = *work.auth_change_receiver().borrow();
 
         work.clear_named_sign_in_if_unchanged(epoch);
 
         assert_eq!(
-            (work.auth_cached(), *work.auth_change_receiver().borrow()),
+            (
+                work.auth_cached()
+                    .and_then(|auth| auth.api_key().map(str::to_string)),
+                *work.auth_change_receiver().borrow()
+            ),
             (expected, revision)
         );
     }

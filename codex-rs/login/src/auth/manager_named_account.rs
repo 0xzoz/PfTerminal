@@ -42,8 +42,8 @@ pub(super) struct NamedAccountStore {
     reads: Mutex<Vec<bool>>,
 }
 
-/// What the store was seen holding, and how often the held sign-in changed
-/// (an answer read before a change is not recorded after it).
+/// What the store was seen holding, and the cache installation generation
+/// (an answer read before an installation is not recorded after it).
 struct Seen {
     state: StoreSeen,
     epoch: u64,
@@ -68,14 +68,15 @@ impl NamedAccountStore {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Drops what the store was last seen holding (the held sign-in changed).
+    /// Drops what the store was last seen holding (cached auth was installed,
+    /// even if it has the same credentials as before).
     pub(super) fn forget(&self) {
         let mut seen = self.seen();
         seen.state = StoreSeen::Unknown;
         seen.epoch = seen.epoch.wrapping_add(1);
     }
 
-    /// Records what a read found, unless the held sign-in changed since it
+    /// Records what a read found, unless cached auth was installed since it
     /// started.
     fn record(&self, epoch: u64, state: StoreSeen) {
         let mut seen = self.seen();
@@ -206,8 +207,8 @@ impl AuthManager {
         else {
             return HeldSignIn::Current;
         };
-        // Taken before the held sign-in is read: once the held sign-in
-        // changes, what was seen (and this answer) no longer applies.
+        // Taken before the held sign-in is read: once cached auth is
+        // installed, what was seen (and this answer) no longer applies.
         let epoch = store.seen().epoch;
         let Some(held) = self.auth_cached_unchecked() else {
             return HeldSignIn::Current;
