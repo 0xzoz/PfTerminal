@@ -862,6 +862,10 @@ struct Folders {
     /// #1283: a `cd`/`pushd` took a word the quote-aware reading cannot
     /// know (`D=~; cd "$D"`), so that reading's folder may be wrong.
     unchecked: bool,
+    /// #1309: other folders the quote-aware reading's line may be in: a
+    /// change it followed may not have happened (`cd /nonexistent`,
+    /// `false && cd x`, `(cd x)`, `cd x &`). Only that reading keeps them.
+    others: Vec<String>,
 }
 
 struct Classifier {
@@ -1192,6 +1196,7 @@ impl Classifier {
             stack: std::rc::Rc::default(),
             unfollowed: false,
             unchecked: self.unknown_folder > 0,
+            others: Vec::new(),
         };
         let mut variables: HashMap<String, String> = HashMap::new();
         for (name, value) in [
@@ -1769,13 +1774,14 @@ impl Classifier {
     }
 
     /// Follow `cd`, `pushd` and `popd` (also behind `builtin`/`command`).
+    /// Returns whether the followed folder changed.
     fn change_folder(
         &self,
         name: &str,
         args: &[String],
         folders: &mut Folders,
         variables: &mut HashMap<String, String>,
-    ) {
+    ) -> bool {
         let target = args
             .iter()
             .find(|word| !word.starts_with('-') || *word == "-");
@@ -1791,7 +1797,7 @@ impl Classifier {
                 || (name == "pushd" && folders.stack.len() >= MAX_FOLDER_STACK)
             {
                 folders.unfollowed = true;
-                return;
+                return false;
             }
             if name == "pushd" {
                 std::rc::Rc::make_mut(&mut folders.stack).push(folders.cwd.clone());
@@ -1799,7 +1805,9 @@ impl Classifier {
             folders.previous = std::mem::replace(&mut folders.cwd, next);
             variables.insert("PWD".to_string(), folders.cwd.clone());
             variables.insert("OLDPWD".to_string(), folders.previous.clone());
+            return true;
         }
+        false
     }
 
     /// The checks on a Corbanu CLI word, given the words after it (`later`
