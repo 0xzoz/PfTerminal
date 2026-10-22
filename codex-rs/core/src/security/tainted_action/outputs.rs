@@ -221,13 +221,15 @@ fn reads_by_subcommand(words: &[String]) -> bool {
 /// the first other word counts, past the values of the options that take
 /// one. An option that is neither a known flag nor a known value option
 /// may be either (git takes any unambiguous prefix: `--fil F -e`, `--typ
-/// bool -e`). Worked out in one pass from the end.
+/// bool -e`). #1269: in a short group, the letters after `f` or `t` are
+/// their value (`-fpager.log`, `-zfe`), not options. Worked out in one pass
+/// from the end.
 pub(super) fn git_config_edits_each(words: &[String]) -> Vec<bool> {
     let opens_editor = |word: &str| {
         if word.starts_with("--") {
             word.len() >= "--ed".len() && "--edit".starts_with(word)
         } else {
-            word.contains('e')
+            word.split(['f', 't']).next().unwrap_or(word).contains('e')
         }
     };
     // Whether the words from the next word on, and from the one after it,
@@ -244,7 +246,11 @@ pub(super) fn git_config_edits_each(words: &[String]) -> Vec<bool> {
         } else if GIT_CONFIG_VALUES.contains(&word.as_str())
             || (!word.starts_with("--") && word.ends_with('f'))
         {
-            after_next
+            // #1269: an `f` or `t` before the last letter takes the rest
+            // of the group (`-ff` is the file `f`), so the next word may
+            // be an option too.
+            let attached = !word.starts_with("--") && word[1..word.len() - 1].contains(['f', 't']);
+            after_next || (attached && next)
         } else if word.contains('=') || GIT_CONFIG_FLAGS.contains(&word.as_str()) {
             next
         } else {

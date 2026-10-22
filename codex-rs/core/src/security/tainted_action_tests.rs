@@ -4837,3 +4837,270 @@ fn issue_1255_checks_are_linear() {
         });
     }
 }
+
+/// #1268: git run by a launcher that adds words from its input (`xargs`,
+/// `parallel`, `find -exec`, `fd -x`), or given positional parameters, may
+/// get its options or what `git config` writes from words the classifier
+/// never sees: it asks unless git has read its subcommand first and that
+/// is not a `git config` write.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1268_git_given_input_words_asks() {
+    use ProtectedActionKind::*;
+    for (command, want) in [
+        (
+            "printf 'filter.a.clean /tmp/x' | xargs git config",
+            Persistence,
+        ),
+        ("printf -- '-c core.pager=sh log' | xargs git", UnseenCode),
+        ("xargs git config < f", Persistence),
+        ("xargs -a f git config", Persistence),
+        ("xargs -n 2 -0 git config", Persistence),
+        ("xargs git config user.name", Persistence),
+        ("xargs git config -f f", Persistence),
+        ("xargs -I{} git config {}", UnseenCode),
+        ("xargs -I{} git {} log", UnseenCode),
+        ("xargs -I % git % log", UnseenCode),
+        ("xargs -0I% git % log", UnseenCode),
+        ("xargs --replace=R git R log", UnseenCode),
+        ("xargs --repl=R git R log", UnseenCode),
+        ("xargs -J % git % log", UnseenCode),
+        ("xargs -i git {} log", UnseenCode),
+        ("xargs git -C repo", UnseenCode),
+        ("xargs git -C repo log", UnseenCode),
+        ("xargs git.exe", UnseenCode),
+        ("xargs git.exe config", Persistence),
+        ("xargs git-config", Persistence),
+        ("xargs -I{} git-{}", UnseenCode),
+        ("xargs -I{} git-{} core.pager sh", UnseenCode),
+        ("xargs -I{} git-{}.exe", UnseenCode),
+        // The word lexer drops braces: with one in the line, any word may
+        // have held a placeholder.
+        ("xargs -I{} git log {}", UnseenCode),
+        ("find . -name '*.rs' -exec git l{}og \\;", UnseenCode),
+        ("xargs -I@ git-@", UnseenCode),
+        ("sudo xargs git config", Persistence),
+        ("nice xargs -r git config", Persistence),
+        ("XARGS git config", Persistence),
+        ("find . -exec git {} +", UnseenCode),
+        ("find . -exec git config {} \\;", UnseenCode),
+        ("find . -execdir git config {} +", UnseenCode),
+        ("find . -ok git config {} \\;", UnseenCode),
+        ("fd -X git config", Persistence),
+        ("fd . -x git {}", UnseenCode),
+        ("parallel git config", Persistence),
+        ("ls | parallel git", UnseenCode),
+        ("parallel git ::: config", UnseenCode),
+        ("parallel git config ::: user.name ::: x", Persistence),
+        ("parallel -j4 git {} ::: log", UnseenCode),
+        ("xargs sh -c 'git config \"$@\"' _", Persistence),
+        (
+            "find . -exec sh -c 'git config \"$1\" \"$2\"' _ {} \\;",
+            UnseenCode,
+        ),
+        ("sh -c 'git config $1 $2'", Persistence),
+        ("git config \"${@}\"", Persistence),
+        ("git-config \"$*\"", Persistence),
+        ("env -S'git config core.pager sh'", Persistence),
+        ("env --split-string='git config core.pager sh'", Persistence),
+        ("env -iS'git -c core.pager=sh log'", UnseenCode),
+        // A launcher's input after `env -S` (review of #1273).
+        (
+            "printf 'core.pager sh' | xargs env -S'git config'",
+            Persistence,
+        ),
+        (
+            "printf -- '-c core.pager=sh log' | xargs env -Sgit",
+            UnseenCode,
+        ),
+        ("xargs env --split-string=git", UnseenCode),
+        ("env -S'git config' core.pager sh", Persistence),
+        ("env -S 'git config' core.pager sh", Persistence),
+        // Input put into a shell's script, after a separator there too.
+        (
+            "printf 'core.pager sh\\n' | xargs -I% sh -c 'cd . && git config %'",
+            UnseenCode,
+        ),
+        ("xargs -a keys -I% sh -c 'true; git config %'", UnseenCode),
+        ("xargs -I% sh -c 'git % log'", UnseenCode),
+        ("find . -exec sh -c 'cd . && git config {}' \\;", UnseenCode),
+        ("xargs -I% sh -c 'sh -c \"git config %\"'", Persistence),
+        ("xargs sh -c 'git config \"${!#}\" x' _", UnseenCode),
+        ("xargs zsh -c 'git config $argv'", Persistence),
+        // Review round 2: `-i` and bare `--replace` mean `-I {}`; parallel
+        // runs its command words as a shell line; fd groups.
+        (
+            "printf 'core.pager sh\\n' | xargs -i sh -c 'cd . && git config {}'",
+            UnseenCode,
+        ),
+        ("xargs -i sh -c 'cd . && git config {}' < keys", UnseenCode),
+        (
+            "xargs --replace sh -c 'cd . && git config {}' < keys",
+            UnseenCode,
+        ),
+        (
+            "printf 'core.pager\\nsh\\n' | parallel -N2 'cd . && git config'",
+            Persistence,
+        ),
+        ("parallel -N2 'cd . && git config' :::: keys", Persistence),
+        (
+            "printf -- '-c\\ncore.pager=sh\\nlog\\n' | parallel -N3 'true; git'",
+            UnseenCode,
+        ),
+        ("parallel -N2 sh -c 'cd . && git config'", Persistence),
+        ("fd -HX git config", Persistence),
+        ("gxargs git config", Persistence),
+        ("gfind . -exec git {} +", UnseenCode),
+        // Wrappers that take no input words were already judged.
+        ("nice -n 5 git config core.pager sh", Persistence),
+        ("nohup git config -e", Persistence),
+        ("timeout 5 git -c core.pager=sh log", UnseenCode),
+        ("stdbuf -o0 git config --global user.name x", Persistence),
+        ("sudo -u x git -c core.pager=sh log", UnseenCode),
+        ("env -S 'git config core.pager sh'", Persistence),
+    ] {
+        assert_eq!(script(command), Some(want), "{command}");
+    }
+    // Review round 3: a replaced shell's script after options the command
+    // word reading does not follow (any kind asks).
+    for command in [
+        "printf 'core.pager sh\\n' | xargs --replace bash -o pipefail -c 'cd . && git config {}'",
+        "xargs --replace sh -c -e 'cd . && git config {}' < keys",
+        "fd -x bash -o pipefail -c 'cd . && git config {}'",
+        "xargs --replace fish --command 'cd .; git config {}' < keys",
+        "xargs -I% prlimit bash -O extglob -c 'cd . && git config %' < keys",
+        // Review round 4: parallel's other replacement options, fish's
+        // attached code, a shell with no script word.
+        "cat keys | parallel --er X git X core.pager /tmp/evil",
+        "parallel --er X git X core.pager /tmp/evil :::: keys",
+        "parallel --bnr X git X core.pager sh :::: keys",
+        "parallel --rpl 'X s/a//' git X k v :::: keys",
+        "parallel --extensionr X git X a b ::: config.x",
+        "parallel -j 4 --er X git X log ::: a",
+        "parallel --er X sh -c 'git config X'",
+        "xargs -I% fish -c'true; git config %' _ < keys",
+        "xargs -I% fish --command='true; git config %' _ < keys",
+        "xargs -I% fish --comm='true; git config %' _ < keys",
+        "xargs -I% fish -lC'git config %' < keys",
+        "xargs --replace sh -c -e -x",
+        // Review round 5: fish's code after other options' values.
+        "printf 'core.pager sh\\n' | xargs -I% fish -c true -C 'cd .; git config %'",
+        "printf 'core.pager sh\\n' | xargs -I% fish -c true -C'cd .; git config %'",
+        "printf 'core.pager sh\\n' | xargs -I% fish -c true -c 'cd .; git config %'",
+        "xargs -I% fish --init-command 'cd .; git config %' < keys",
+        "xargs -I% fish -d 1 --comm 'cd .; git config %' < keys",
+        // Review round 6: shells one level down in a replaced script.
+        "printf 'core.pager sh\\n' | xargs -I% sh -c \"fish -c true -C 'git config %'\"",
+        "xargs -I% sh -c \"fish -C 'git config %'\" < keys",
+        "parallel \"fish -c true -C 'git config {1} {2}'\" ::: core.pager ::: sh",
+        "xargs -I% sh -c 'prlimit bash -O extglob -c \"git config %\"' < keys",
+    ] {
+        assert!(script(command).is_some(), "{command}");
+    }
+    for command in [
+        "printf x | xargs git log --oneline",
+        "printf x | xargs git config --get user.name",
+        "xargs git config get user.name",
+        "xargs git-config --list",
+        "xargs git-log --oneline",
+        "xargs git status",
+        "xargs -I % git log %",
+        "find . -type d -name .git -execdir git pull \\;",
+        "parallel git log ::: a b",
+        "git config user.name x",
+        "git log \"$@\"",
+        "git config --get \"$1\"",
+        "git config get \"$@\"",
+        "sh -c 'git log \"$1\"' _ x",
+        "xargs sh -c 'git log --oneline'",
+        "find . -type d -name .git -execdir sh -c 'git pull' \\;",
+        "env -S'git log' --oneline",
+        "xargs env -S'git log' --oneline",
+        "parallel 'cd x && git log' ::: a",
+        "parallel -j4 git log ::: a b",
+        "parallel -j 4 -k --tag git log ::: a",
+        "parallel --jobs=4 git log ::: a",
+        // Review round 7: a replaced script without git stays quiet.
+        "printf 'a\\n' | xargs -I% sh -c 'echo %'",
+        "find . -name '*.log' -exec sh -c 'gzip \"$1\"' _ {} \\;",
+        "parallel 'echo {}' ::: a b",
+        "xargs -I% env -S'echo %'",
+        "xargs -I% sh -c \"sh -c 'echo %'\" < keys",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1268: the launcher checks stay linear when launchers, replacement
+/// strings, git words and positional parameters repeat.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1268_checks_are_linear() {
+    for (label, unit) in [
+        ("launchers", "xargs "),
+        ("replacement strings", "-I% "),
+        ("separate replacement strings", "-J x "),
+        ("git words", "git "),
+        ("git config words", "git config "),
+        ("dashed helpers", "git-config "),
+        ("positional parameters", "\"$@\" "),
+        ("finders", "find -exec "),
+        ("split strings", "env -S'git config' "),
+        ("parallel commands", "parallel git "),
+        ("replaced shells", "-i sh -c x "),
+        ("shell options", "sh -x -e "),
+        ("parallel options", "parallel -j 4 --tag "),
+        ("fish options", "-i fish -lc'x' "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("xargs {} git log", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!("xargs git config {} --get", unit.repeat(400 * scale));
+            let _ = script(&line);
+        });
+    }
+}
+
+/// #1269: in a short group of `git config` options, the letters after `f`
+/// (`--file`) or `t` (`--type`) are that option's value, so an `e` among
+/// them opens no editor; one before them still does.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1269_git_config_attached_values_are_not_editor_options() {
+    for command in [
+        "git config -fpager.log user.name marker",
+        "git config -zfe user.name marker",
+        "git config -tbe user.name marker",
+        "git config -lfe",
+        "git-config -fe user.name marker",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+    for command in [
+        "git config -ef x",
+        "git config -zef x",
+        "git config -tbool -e",
+        "git config -ztbool -e",
+        "git config -fx --edit",
+        "git config -fpager.log -e",
+        "git config -ff -e",
+        "git config -zfoof -e",
+        "git config -tf -e",
+        "git config -ze",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+}

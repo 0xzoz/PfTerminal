@@ -34,6 +34,7 @@ mod git_helpers;
 mod grammar;
 mod indirect;
 mod invocation;
+mod launched_git;
 mod named_shell;
 mod nested;
 mod outbound;
@@ -526,6 +527,7 @@ impl Classifier {
             ran_unknown: false,
             written: Vec::new(),
             nested_scripts: 0,
+            launched: launched_git::Launch::default(),
             substitution_budget: Budget {
                 left: MAX_SUBSTITUTED_BYTES,
                 small_left: MAX_SUBSTITUTED_BYTES,
@@ -846,6 +848,10 @@ struct Classifier {
     written: Vec<Option<String>>,
     /// #885: nested shell scripts judged so far.
     nested_scripts: usize,
+    /// #1268: inside a script a launcher runs with its input added after
+    /// it (`xargs env -S'git config'`) or put into its text (`xargs -I% sh
+    /// -c 'git config %'`, where any word may be input).
+    launched: launched_git::Launch,
     /// #1065: bytes of variable values left to substitute.
     substitution_budget: Budget,
     /// #1065: bytes of command text, and command lines, lexed so far.
@@ -1165,6 +1171,9 @@ impl Classifier {
         // Values too large to substitute, judged once each (by name and
         // length) while the lexing limits allow.
         let mut judged: HashSet<(String, usize)> = HashSet::new();
+        // #1268: the word lexer drops braces, so a launcher's placeholders
+        // (`{}`, `{.}`) are only seen in the text as written.
+        let braces = command.iter().any(|arg| arg.contains('{'));
         for (index, simple) in lexed.commands.iter().enumerate() {
             work::step();
             let (words, unseen, skipped) =
@@ -1202,6 +1211,7 @@ impl Classifier {
                 &words,
                 &unseen,
                 feeds_pipe,
+                braces,
                 &mut folders,
                 &mut variables,
                 depth,
@@ -1251,6 +1261,7 @@ impl Classifier {
         words: &[String],
         unseen: &[bool],
         feeds_pipe: bool,
+        braces: bool,
         folders: &mut Folders,
         variables: &mut HashMap<String, String>,
         depth: usize,
@@ -1314,6 +1325,7 @@ impl Classifier {
             self.change_folder(name, args, folders, variables);
         }
         let mut git_config = GitConfigWrites::new(&lower);
+        let mut launched_git = launched_git::LaunchedGit::new(words, &lower, braces, self.launched);
         let mut later = LaterWords::new(&lower);
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.
@@ -1334,6 +1346,11 @@ impl Classifier {
             {
                 self.note(ProtectedActionKind::Persistence);
             }
+            // #1268: git given words from a launcher's input (`xargs git`).
+            if let Some(kind) = launched_git.judge(index, helper.as_ref()) {
+                self.note(kind);
+            }
+            launched_git.step(index);
             // A helper named by text the classifier cannot see may be any
             // subcommand (`git-$x`, `git-conf*`), like `git $x`.
             if subcommand.is_some_and(|subcommand| {
