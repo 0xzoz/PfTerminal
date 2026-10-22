@@ -45,6 +45,11 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   from the automatic approval reviewer still show `no price available` (no
   estimate, never $0), and the next step now adds "OpenAI doesn't publish a
   price for Codex Auto Review." (#913).
+- **Editing the first message counts as a reopen.** Editing the first message
+  of a saved conversation (Esc Esc) now sends its warm-up as a reopen warm-up,
+  as editing a later message already did: `/cost` lists it as "Reopen
+  warm-up", Corbanu says once it has been sent, and `skip_reopen_warmup = true`
+  skips it (#1038).
 
 ## `/security` wording
 
@@ -82,6 +87,11 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   account or `[provider_accounts]` selects one. A server started without one
   starts holding them from the first conversation on an account added while it
   runs, and never goes back to the default login (#1085).
+- **`/status` names the account only where named accounts exist.** With named
+  accounts on, the provider line read "OpenAI · account default" (or
+  "Z.AI · account default") in every home. It now names the account only when
+  that provider has a named account in the home, or the session is on or used
+  one; otherwise the line is what it was without the feature (D86).
 
 ## `corbanu login status`
 

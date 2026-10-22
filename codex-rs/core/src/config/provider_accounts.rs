@@ -97,6 +97,24 @@ pub(crate) fn apply_explicit_provider_account(
         };
         return Err(invalid(message));
     }
+    // #1144: a conversation that ran on an account borrowed from another
+    // provider (same API key, see `with_account_from`) recorded it as
+    // `<owner>:<name>`. It is refused, named, rather than read as an invalid
+    // name or moved to another account.
+    if recorded && let Some((owner_id, owner_name)) = name.split_once(':') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "This conversation ran on `{provider_id}` with account `{owner_name}` of \
+                 `{owner_id}` (borrowed because both use the same API key), and a resumed or \
+                 forked conversation restores only an account of the provider it runs on. It \
+                 is not moved to another account: resume or fork it with `--account \
+                 {provider_id}:default` for the default credentials of `{provider_id}`, or \
+                 with `--account {provider_id}:<name>` for one of its own accounts (see \
+                 `corbanu account list`)."
+            ),
+        ));
+    }
     let provider = model_providers
         .get_mut(provider_id)
         .ok_or_else(|| invalid(format!("unknown provider `{provider_id}`")))?;
@@ -342,7 +360,7 @@ fn provider_sign_in_restriction_error(
 /// restrictions it was built with rule it out (it is left unchanged). Only
 /// in a process that left the default login in place at startup (see
 /// `codex_login::leave_default_login_unenforced`): a new session on the
-/// default account (`/providers` → *Use default account for this session*),
+/// default account (`/providers` → *Start a new session on the default account*),
 /// a spawned agent on it, or a resumed or forked default-login thread. A
 /// mid-session provider switch to it is refused at the first request with
 /// the same reason (the provider's `api_auth`).

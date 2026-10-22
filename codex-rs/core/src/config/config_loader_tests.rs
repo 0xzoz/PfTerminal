@@ -3012,6 +3012,7 @@ async fn inline_instructions_set_base_instructions() -> std::io::Result<()> {
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home)
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .build()
         .await?;
 
@@ -4290,6 +4291,7 @@ async fn recorded_account_of_another_provider_is_applied_to_that_provider() -> s
         ConfigBuilder::default()
             .codex_home(codex_home.path().to_path_buf())
             .harness_overrides(ConfigOverrides {
+                cwd: Some(crate::session::tests::kept_test_cwd()),
                 provider_account: explicit.map(str::to_string),
                 ..Default::default()
             })
@@ -4352,6 +4354,7 @@ async fn inherited_account_is_replaced_only_by_an_explicit_account_of_its_provid
             )]
         };
         let overrides = ConfigOverrides {
+            cwd: Some(crate::session::tests::kept_test_cwd()),
             provider_account: explicit.map(str::to_string),
             inherited_provider_account: inherited.map(str::to_string),
             ..Default::default()
@@ -4417,6 +4420,7 @@ async fn recorded_agent_account_is_restored_or_refused() -> std::io::Result<()> 
         .expect("write config");
         ConfigBuilder::default()
             .codex_home(codex_home.path().to_path_buf())
+            .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
             .build()
     };
     codex_vault::Vault::new(codex_home.path().to_path_buf())
@@ -4459,5 +4463,50 @@ async fn recorded_agent_account_is_restored_or_refused() -> std::io::Result<()> 
         restore(&off, "ghost"),
         refusal("named accounts need the `named_accounts` feature, which is off now")
     );
+    Ok(())
+}
+
+/// #1144: a conversation that ran on an account borrowed from another
+/// provider (recorded as `<owner>:<name>`) is refused on resume, with the
+/// account and the reason named, whether the loader or a client applies it.
+#[tokio::test]
+async fn recorded_borrowed_account_is_refused_with_its_name() -> std::io::Result<()> {
+    let codex_home = tempdir().expect("tempdir");
+    let build = |model_provider: &str, inherited: Option<&str>| {
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            format!(
+                "model = \"glm-5.3-flash\"\nmodel_provider = \"{model_provider}\"\n\n\
+                 [features]\nnamed_accounts = true\n"
+            ),
+        )
+        .expect("write config");
+        ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(crate::session::tests::kept_test_cwd()),
+                inherited_provider_account: inherited.map(str::to_string),
+                ..Default::default()
+            })
+            .build()
+    };
+    let expected = "This conversation ran on `zai-anthropic` with account `work` of `zai` \
+         (borrowed because both use the same API key), and a resumed or forked conversation \
+         restores only an account of the provider it runs on. It is not moved to another \
+         account: resume or fork it with `--account zai-anthropic:default` for the default \
+         credentials of `zai-anthropic`, or with `--account zai-anthropic:<name>` for one of \
+         its own accounts (see `corbanu account list`).";
+
+    let error = build("zai-anthropic", Some("zai-anthropic:zai:work"))
+        .await
+        .expect_err("a borrowed recorded account is refused");
+    assert_eq!(error.to_string(), expected);
+
+    let mut config = build("zai", /*inherited*/ None).await?;
+    let error =
+        crate::config::apply_recorded_provider_account(&mut config, "zai-anthropic:zai:work")
+            .expect_err("a borrowed recorded account is refused");
+    assert_eq!(error.to_string(), expected);
+    assert_eq!(config.model_providers["zai-anthropic"].account, None);
     Ok(())
 }

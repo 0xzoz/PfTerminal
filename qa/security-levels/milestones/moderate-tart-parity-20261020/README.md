@@ -177,3 +177,10 @@ path, MOD-29's profile reset) and MOD-22's missing inspector step; they cost rep
 ## Review budget
 
 See [review-ledger.md](review-ledger.md): packet review rounds 1-2 (both CHANGES, applied), evidence checks rounds 3-5 (all CHANGES on written claims and three dispositions in round 3; corrections applied). The budget is spent; round 5's corrections are applied but not re-checked.
+
+## Follow-up (2026-10-20, owner decisions D94-D97)
+
+- D97: future parity runs use the same build on both machines ([../vm-parity-method.md](../vm-parity-method.md));
+  this run's predeclared method above stays as frozen. D97 also fixes the tester wording of MOD-12, MOD-23 and MOD-29
+  ([amendment v7](../moderate-amendment-v7-20261020/README.md)); D96 adds MOD-22's inspector step after the relaunch
+  (amendment v6, its own record). D94 (#1139) and D95 (#1146) are product fixes. Nothing in this record changes.
