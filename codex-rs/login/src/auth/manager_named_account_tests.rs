@@ -178,3 +178,63 @@ async fn a_removed_accounts_sign_in_is_dropped_from_memory() {
         Some("access-after".to_string())
     );
 }
+
+/// D171 (#1286): an account removed and signed in again (here with other
+/// tokens) by another process before the session's next request is not
+/// served from the old sign-in: synchronous readers never see it again and
+/// `auth()` returns the new one.
+#[tokio::test]
+async fn a_replaced_accounts_old_sign_in_is_not_used() {
+    let home = tempfile::tempdir().expect("home");
+    let save = |access: &str| {
+        crate::auth::named_chatgpt::save_named_account_auth(
+            home.path(),
+            &account("work"),
+            &chatgpt_sign_in(access),
+            /*must_be_new*/ true,
+        )
+        .expect("sign-in");
+    };
+    save("access-old");
+    let base = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("sk-default-canary"),
+        home.path().to_path_buf(),
+    );
+    let work = base.for_named_account(account("work"));
+    assert_eq!(
+        access_token(work.auth().await),
+        Some("access-old".to_string())
+    );
+
+    let name = codex_vault::ProviderAccountName::parse("work").expect("name");
+    assert!(
+        codex_vault::Vault::new(home.path().to_path_buf())
+            .remove_provider_account("openai", &name)
+            .expect("remove")
+    );
+    let mut replacement = chatgpt_sign_in("access-new");
+    if let Some(tokens) = replacement.tokens.as_mut() {
+        tokens.refresh_token = "refresh-new".to_string();
+    }
+    crate::auth::named_chatgpt::save_named_account_auth(
+        home.path(),
+        &account("work"),
+        &replacement,
+        /*must_be_new*/ true,
+    )
+    .expect("sign in again");
+
+    assert_ne!(
+        access_token(work.auth_cached()),
+        Some("access-old".to_string())
+    );
+    assert_eq!(
+        access_token(work.auth().await),
+        Some("access-new".to_string())
+    );
+    // Unchanged store: the same sign-in stays.
+    assert_eq!(
+        access_token(work.auth_cached()),
+        Some("access-new".to_string())
+    );
+}

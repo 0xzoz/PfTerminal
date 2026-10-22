@@ -381,6 +381,9 @@ named_accounts = true
     let session = command(&[
         "exec",
         "--skip-git-repo-check",
+        // The only command it runs is the test's own wait loop above; the
+        // sandbox is not what this test is about, and is not available on
+        // every CI runner.
         "--dangerously-bypass-approvals-and-sandbox",
         "--account",
         "work",

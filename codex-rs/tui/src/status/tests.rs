@@ -2843,7 +2843,7 @@ async fn default_openai_status_is_unchanged_without_named_accounts() {
 
 /// D171 (#1286): `/status` of an OpenAI session on the named ChatGPT account
 /// `work`, signed in when `signed_in`.
-async fn named_sign_in_status(signed_in: bool) -> String {
+async fn named_sign_in_status(signed_in: bool, remote: bool) -> String {
     let temp_home = TempDir::new().expect("temp home");
     if signed_in {
         app_test_support::write_named_chatgpt_auth(
@@ -2879,10 +2879,14 @@ async fn named_sign_in_status(signed_in: bool) -> String {
         .with_ymd_and_hms(2026, 10, 22, 4, 5, 6)
         .single()
         .expect("timestamp");
+    let remote_connection = remote.then(|| RemoteConnectionStatus {
+        address: "wss://remote.example".to_string(),
+        version: "0.0.0".to_string(),
+    });
     let (composite, _) = new_status_output_with_rate_limits_handle(
         &config,
         /*runtime_model_provider_base_url*/ None,
-        /*remote_connection*/ None,
+        remote_connection.as_ref(),
         /*account_display*/ None,
         /*token_info*/ None,
         &usage,
@@ -2908,11 +2912,16 @@ async fn named_sign_in_status(signed_in: bool) -> String {
 /// it with its recovery.
 #[tokio::test]
 async fn status_does_not_present_a_removed_sign_in_account_as_the_sessions() {
-    let signed_in = named_sign_in_status(/*signed_in*/ true).await;
+    let signed_in = named_sign_in_status(/*signed_in*/ true, /*remote*/ false).await;
     assert!(signed_in.contains("OpenAI · account work"), "{signed_in}");
     assert!(!signed_in.contains("unavailable"), "{signed_in}");
 
-    let removed = named_sign_in_status(/*signed_in*/ false).await;
+    // A remote app server's account lives on its host: this vault cannot tell.
+    let remote = named_sign_in_status(/*signed_in*/ false, /*remote*/ true).await;
+    assert!(remote.contains("OpenAI · account work"), "{remote}");
+    assert!(!remote.contains("unavailable"), "{remote}");
+
+    let removed = named_sign_in_status(/*signed_in*/ false, /*remote*/ false).await;
     assert!(!removed.contains("· account work"), "{removed}");
     assert!(
         removed.contains("OpenAI · account unavailable"),
