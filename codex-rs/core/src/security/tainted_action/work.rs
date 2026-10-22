@@ -159,6 +159,7 @@ mod tests {
         ("shadow.rs", include_str!("shadow.rs")),
         ("shell.rs", include_str!("shell.rs")),
         ("windows_paths.rs", include_str!("windows_paths.rs")),
+        ("windows_reads.rs", include_str!("windows_reads.rs")),
         ("windows_shell.rs", include_str!("windows_shell.rs")),
     ];
 

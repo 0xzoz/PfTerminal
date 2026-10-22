@@ -102,6 +102,7 @@ mod workspace_acl;
 pub mod credential_watch;
 mod deny_read_resolver;
 mod deny_read_targets;
+pub mod local_drive;
 
 #[cfg(target_os = "windows")]
 mod conpty;

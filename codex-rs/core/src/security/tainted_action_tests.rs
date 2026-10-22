@@ -176,10 +176,6 @@ fn pf_30_s03_vault_credential_and_policy_commands_are_protected() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
-)]
 fn pf_30_s03_ordinary_commands_are_not_protected() {
     for command in [
         "cargo test -p codex-core",
@@ -454,10 +450,6 @@ fn pf_30_s03_symlinks_and_canonical_spellings_reach_the_home() {
 /// written by an earlier patch; binaries are not read as scripts, and a
 /// patch that writes a protected command into a runnable file is protected.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
-)]
 fn pf_30_s03_script_files_and_patched_scripts_are_read() {
     let root = tempfile::tempdir().expect("tempdir");
     let work = root.path();
@@ -511,10 +503,6 @@ fn pf_30_s03_script_files_and_patched_scripts_are_read() {
 /// PF-26 input: a research workflow after untrusted content prompts only on
 /// the protected steps, and classification stays cheap.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
-)]
 #[allow(clippy::print_stderr)]
 fn pf_30_s03_research_workflow_prompt_count_and_latency() {
     let research = [
@@ -1585,10 +1573,6 @@ fn issue_442_aggressive_credential_reads_say_they_are_never_granted() {
 /// the edited script; literal text naming a protected path, a decode-and-run
 /// pipeline and a script that is missing outside literal text still count.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
-)]
 fn issue_841_sed_edits_are_not_unseen_code() {
     let dir = tempfile::tempdir().unwrap();
     let work = dir.path().canonicalize().unwrap();
@@ -1789,10 +1773,6 @@ fn issue_885_wrong(cwd: &str, cases: &[(&str, Option<ProtectedActionKind>)]) -> 
 /// in any spelling the shell and sed accept, or one the classifier cannot
 /// read, is code the host cannot read. Ordinary programs are not.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
-)]
 fn issue_885_sed_that_runs_commands_is_unseen_code() {
     let (_dir, cwd) = issue_885_fixture();
     let unseen = Some(ProtectedActionKind::UnseenCode);
@@ -1862,10 +1842,6 @@ fn issue_885_sed_that_runs_commands_is_unseen_code() {
 /// #885 (2): a nested shell's script is judged like the command line itself,
 /// so a missing script it runs fails closed as `bash ./missing.sh` does.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
-)]
 fn issue_885_nested_shell_scripts_are_judged() {
     let (_dir, cwd) = issue_885_fixture();
     let unseen = Some(ProtectedActionKind::UnseenCode);
@@ -1917,10 +1893,6 @@ fn issue_885_nested_shell_scripts_are_judged() {
 /// lines, whose added text is judged as a command line (#841's sed-data
 /// exception no longer covers it).
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
-)]
 fn issue_885_sed_writing_a_file_the_line_runs_is_unseen_code() {
     let (_dir, cwd) = issue_885_fixture();
     let unseen = Some(ProtectedActionKind::UnseenCode);
@@ -1949,10 +1921,6 @@ fn issue_885_sed_writing_a_file_the_line_runs_is_unseen_code() {
 /// #885 review round 1: more spellings of items 1–3, text that is only
 /// data, and limits on nesting and repeated work.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
-)]
 fn issue_885_review_1_routes_and_limits() {
     let (_dir, cwd) = issue_885_fixture();
     let unseen = Some(ProtectedActionKind::UnseenCode);
@@ -2022,10 +1990,6 @@ fn issue_885_review_1_routes_and_limits() {
 /// #885 review round 2: a reading kept in step with bash, routes of items
 /// 1–3 found in round 2, and a bound on nested scripts.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
-)]
 fn issue_885_review_2_routes_and_limits() {
     let (_dir, cwd) = issue_885_fixture();
     let unseen = Some(ProtectedActionKind::UnseenCode);
@@ -2092,10 +2056,6 @@ fn issue_885_review_2_routes_and_limits() {
 /// count check, and pipeline stages that save their input (`sort -o`, `uniq
 /// IN OUT`, `less -o`) or run a program (`sort --co`).
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows the first judgment cannot open script or sed files (each run fails closed)"
-)]
 fn issue_885_review_3_routes() {
     let (_dir, cwd) = issue_885_fixture();
     let unseen = Some(ProtectedActionKind::UnseenCode);
@@ -2307,10 +2267,6 @@ fn issue_937_counters_and_plain_uses_are_not_unseen_code() {
 /// by default, lists in parentheses, `${a:=...}`, missed arithmetic
 /// regions, lookup output, variable command names and sourced files.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
-)]
 fn issue_937_review_1_routes() {
     use ProtectedActionKind::UnseenCode;
     let both = [
@@ -2407,10 +2363,6 @@ fn issue_937_review_1_everyday_lines_still_run() {
 /// #937 review 2: built names, integer specials, `for x;`, more fill
 /// sources and decoding `printf`, end to end.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
-)]
 fn issue_937_review_2_routes() {
     use ProtectedActionKind::UnseenCode;
     let both = [
@@ -2490,10 +2442,6 @@ fn issue_937_review_2_routes() {
 
 /// #937 review 2: everyday lines near the new routes still run.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
-)]
 fn issue_937_review_2_everyday_lines_still_run() {
     let mut wrong = Vec::new();
     for shell in ["bash", "zsh"] {
@@ -2526,10 +2474,6 @@ fn issue_937_review_2_everyday_lines_still_run() {
 /// a number or an arithmetic result, and `eval`/alias text is unseen. Each
 /// bypass ran its payload in that real shell.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
-)]
 fn issue_937_review_6_fallback_routes() {
     use ProtectedActionKind::UnseenCode;
     let mut wrong = Vec::new();
@@ -2785,10 +2729,6 @@ fn issue_1012_prompt_transformation_is_unseen_code() {
 /// so after untrusted content glob substitution asks, with or without
 /// command output on the line.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
-)]
 fn issue_1084_glob_substitution_is_unseen_code() {
     use ProtectedActionKind::*;
     let mut wrong = Vec::new();
@@ -3071,10 +3011,6 @@ fn issue_932_zsh_lines_of_proven_data_skip_the_zsh_only_checks() {
 /// as plain commands of programs that never hand their words to a shell,
 /// when the host runs the argv as named. Anything else asks as before.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
-)]
 fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
     use ProtectedActionKind::*;
     let named = |command: &[&str]| {
@@ -3264,10 +3200,6 @@ fn d85_zsh_only_checks_ask_only_where_zsh_may_run() {
 /// read as commands, so after untrusted content they ask, with or without
 /// command output on the line.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
-)]
 fn issue_1028_glob_qualifiers_that_run_code_are_unseen_code() {
     use ProtectedActionKind::*;
     let mut wrong = Vec::new();
@@ -3625,10 +3557,6 @@ fn issue_1141_output_files_are_written() {
 }
 
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1261: on Windows a lone `*` matches the whole home in the first judgment (SecurityPolicy)"
-)]
 fn issue_1142_git_code_settings_are_unseen_code() {
     let unseen = Some(ProtectedActionKind::UnseenCode);
     for command in [
@@ -5103,4 +5031,152 @@ fn issue_1269_git_config_attached_values_are_not_editor_options() {
             "{command}"
         );
     }
+}
+
+/// #1261: the first judgment's Windows reads never reach a network share,
+/// a device path or a name Windows reads differently: those script and sed
+/// program files are not looked up (nothing is touched) and the line asks.
+/// Runs on every platform; elsewhere no Windows file is ever looked up.
+#[test]
+fn issue_1261_windows_reads_never_reach_a_share() {
+    let unseen = Some(ProtectedActionKind::UnseenCode);
+    let _ = windows_reads::take_touched();
+    for line in [
+        r"bash '\\server\share\run.sh'",
+        "bash //server/share/run.sh",
+        r"bash '\\?\UNC\server\share\run.sh'",
+        r"bash '\\localhost\c$\work\run.sh'",
+        r"bash '\\?\C:\work\run.sh'",
+        r"bash '\\.\C:\work\run.sh'",
+        r"cd '\\localhost\c$\work' && bash run.sh",
+        r"cd '\\localhost\c$\work' && cd sub && ./run.sh",
+        "pushd //server/share/work && bash run.sh",
+        r"sed -f '\\server\share\prog.sed' notes.txt",
+        r"cd '\\localhost\c$\work' && sed -f prog.sed notes.txt",
+        r"python3 '\\server\share\tool.py'",
+        "bash run.sh:hidden",
+        "bash 'run.sh '",
+        "bash nul.sh",
+    ] {
+        assert_eq!(windows_kind(&["bash", "-lc", line]), unseen, "{line}");
+        assert_eq!(
+            windows_reads::take_touched(),
+            Vec::<String>::new(),
+            "{line}"
+        );
+    }
+}
+
+/// #1261: a folder reached through a share keeps that mark below it, though
+/// the Windows rules spell an administrative share as a drive (`/c:`).
+#[test]
+fn issue_1261_folders_reached_through_a_share_are_not_read() {
+    let homes = Homes::windows_first(Path::new(WINDOWS_HOME), Some(Path::new(WINDOWS_USER_HOME)));
+    for share in [
+        r"\\localhost\c$\work",
+        r"\\?\C:\work",
+        r"\\.\C:\work",
+        "//server/share/work",
+    ] {
+        let folder = homes.resolve(share, r"C:\other");
+        assert_eq!(homes.windows_read_path("run.sh", &folder), None, "{share}");
+        let below = homes.resolve("sub", &folder);
+        assert_eq!(homes.windows_read_path("run.sh", &below), None, "{share}");
+        let parent = homes.resolve("..", &below);
+        assert_eq!(homes.windows_read_path("run.sh", &parent), None, "{share}");
+    }
+    let plain = homes.resolve(r"D:\work\sub", r"C:\other");
+    assert_eq!(
+        homes.windows_read_path("run.sh", &plain),
+        Some(('D', vec!["work".into(), "sub".into(), "run.sh".into()]))
+    );
+}
+
+/// #1261: on Windows a script is read through a plain local folder, but
+/// never through a junction, a `subst` drive or a drive letter not in use:
+/// those are not followed or looked up, and the line asks.
+#[cfg(windows)]
+#[test]
+fn issue_1261_windows_reads_stop_at_links_and_unproven_drives() {
+    use ProtectedActionKind::*;
+    let root = tempfile::tempdir().expect("tempdir");
+    let work = root.path();
+    std::fs::create_dir(work.join("real")).expect("folder");
+    std::fs::write(work.join("real").join("run.sh"), "corbanu vault list\n").expect("script");
+    let made = std::process::Command::new("cmd")
+        .args(["/c", "mklink", "/J"])
+        .arg(work.join("link"))
+        .arg(work.join("real"))
+        .output()
+        .expect("mklink");
+    assert!(made.status.success(), "mklink: {made:?}");
+    let cwd = work.to_string_lossy().into_owned();
+    let kind = |line: &str| classify_fixture(&shell_in(&cwd, &["bash", "-lc", line]));
+    let _ = windows_reads::take_touched();
+
+    assert_eq!(kind("bash real/run.sh"), Some(Vault));
+    let touched = windows_reads::take_touched();
+    assert!(
+        touched.iter().any(|path| path.ends_with("run.sh")),
+        "{touched:?}"
+    );
+
+    assert_eq!(kind("bash link/run.sh"), Some(UnseenCode));
+    let touched = windows_reads::take_touched();
+    assert!(
+        touched.last().is_some_and(|path| path.ends_with("link")),
+        "{touched:?}"
+    );
+    assert!(
+        !touched.iter().any(|path| path.ends_with("run.sh")),
+        "{touched:?}"
+    );
+
+    // A `subst` drive is not proven local, and neither is a free letter:
+    // only the drive itself is queried.
+    struct Unsubst(char);
+    impl Drop for Unsubst {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("subst")
+                .arg(format!("{}:", self.0))
+                .arg("/D")
+                .output();
+        }
+    }
+    let letter = ['Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y']
+        .into_iter()
+        .find(|letter| {
+            std::process::Command::new("subst")
+                .arg(format!("{letter}:"))
+                .arg(work.join("real"))
+                .output()
+                .is_ok_and(|output| output.status.success())
+        })
+        .expect("a free drive letter for subst");
+    let unsubst = Unsubst(letter);
+    let line = format!(r"bash '{letter}:\run.sh'");
+    assert_eq!(kind(&line), Some(UnseenCode), "{line}");
+    assert_eq!(windows_reads::take_touched(), vec![format!("{letter}:")]);
+    drop(unsubst);
+    assert_eq!(kind(&line), Some(UnseenCode), "{line}");
+    assert_eq!(windows_reads::take_touched(), vec![format!("{letter}:")]);
+}
+
+/// #1261: the test temp folder is a plain local folder on Windows (the
+/// unskipped script tests depend on it); the message names the step that
+/// refused if not.
+#[cfg(windows)]
+#[test]
+fn issue_1261_windows_temp_folder_is_plainly_local() {
+    let root = tempfile::tempdir().expect("tempdir");
+    std::fs::write(root.path().join("run.sh"), "true\n").expect("script");
+    let cwd = root.path().to_string_lossy().into_owned();
+    let (drive, names) = windows_reads::plain_path("run.sh", &cwd).expect("plain");
+    let _ = windows_reads::take_touched();
+    let located = windows_reads::locate(drive, &names, &|| true);
+    let touched = windows_reads::take_touched();
+    assert!(
+        matches!(located, windows_reads::Located::File(_)),
+        "{located:?} after {touched:?}"
+    );
 }

@@ -208,7 +208,7 @@ impl Classifier {
             let reading = quoted::commands(script);
             // #932 phase 2: compared and logged; decides nothing. Once per
             // action: not again in the Windows view (#1240).
-            if !self.homes.is_windows() {
+            if !self.homes.is_windows_view() {
                 shadow::shadow(script, &reading, &mut self.compared);
             }
             found.unreadable |=
@@ -514,7 +514,7 @@ impl Classifier {
     fn judge_sed(&mut self, sed: Sed, line: &Found, depth: usize) {
         // #1240: judged once, by the first judgment (it reads program
         // files; the Windows view does not open files).
-        if self.homes.is_windows() {
+        if self.homes.is_windows_view() {
             return;
         }
         let call = &sed.call;
@@ -547,7 +547,7 @@ impl Classifier {
                         .is_none_or(|written| name(written) == name(&file.text))
                 });
             let path = self.homes.resolve(&file.text, &sed.cwd);
-            match (rewritten, self.read_file(&path)) {
+            match (rewritten, self.read_file(&path, &file.text, &sed.cwd)) {
                 (false, FileText::Text(text)) => chunks.push(text),
                 _ => {
                     self.note(ProtectedActionKind::UnseenCode);

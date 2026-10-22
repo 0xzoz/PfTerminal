@@ -45,6 +45,7 @@ mod sed;
 mod shadow;
 mod shell;
 mod windows_paths;
+mod windows_reads;
 mod windows_shell;
 mod work;
 
@@ -440,7 +441,8 @@ fn classified(
 
 /// #1240: [`classify_with`] of a command run in `cwd` as on Windows, on any
 /// platform (an action cannot hold a Windows folder elsewhere). Filesystem
-/// lookups under Windows rules happen only on Windows.
+/// lookups under Windows rules happen only on Windows (#1261: the first
+/// judgment opens files there through `windows_reads`).
 #[cfg(test)]
 pub(super) fn classify_as_windows(
     command: &[String],
@@ -448,8 +450,10 @@ pub(super) fn classify_as_windows(
     codex_home: &Path,
     user_home: Option<&Path>,
 ) -> Option<ProtectedActionKind> {
-    let mut classifier =
-        Classifier::new(Homes::new(codex_home, user_home), /*avoids_zsh*/ false);
+    let mut classifier = Classifier::new(
+        Homes::windows_first(codex_home, user_home),
+        /*avoids_zsh*/ false,
+    );
     classifier.judge_command(command, cwd);
     let mut windows = Classifier::new(
         Homes::windows(codex_home, user_home),
@@ -1123,7 +1127,7 @@ impl Classifier {
             return;
         }
         // #1240: the same text as cmd and PowerShell read it.
-        if self.homes.is_windows() {
+        if self.homes.is_windows_view() {
             self.windows_text(command, cwd, depth);
         }
         // #841: this line's own sed programs (nested lines have theirs).
@@ -1564,7 +1568,7 @@ impl Classifier {
                     } else {
                         Script::Required
                     };
-                    self.script_file(&file, cwd, depth, need);
+                    self.script_file(&file, word, cwd, depth, need);
                 }
             }
             return;
@@ -1582,7 +1586,7 @@ impl Classifier {
                     work::step();
                     let file = self.homes.resolve(&candidate, cwd);
                     self.not_shell += 1;
-                    self.script_file(&file, cwd, depth, Script::IfPresent);
+                    self.script_file(&file, &candidate, cwd, depth, Script::IfPresent);
                     self.not_shell -= 1;
                 }
             }
@@ -1603,7 +1607,7 @@ impl Classifier {
             } else {
                 let file = self.homes.resolve(preload, cwd);
                 self.not_shell += 1;
-                self.script_file(&file, cwd, depth, Script::IfPresent);
+                self.script_file(&file, preload, cwd, depth, Script::IfPresent);
                 self.not_shell -= 1;
             }
         }
@@ -1616,11 +1620,11 @@ impl Classifier {
             self.note(ProtectedActionKind::UnseenCode);
             return;
         }
-        let file = self.homes.resolve(file, cwd);
+        let resolved = self.homes.resolve(file, cwd);
         if !shell {
             self.not_shell += 1;
         }
-        self.script_file(&file, cwd, depth, Script::Required);
+        self.script_file(&resolved, file, cwd, depth, Script::Required);
         if !shell {
             self.not_shell -= 1;
         }
@@ -1682,12 +1686,13 @@ impl Classifier {
     /// magic number and skipped. A required script the classifier cannot read
     /// in full (missing, written by the same command, not a regular file, too
     /// large, past the file limit, or where lookups are not allowed) fails
-    /// closed; an optional one is skipped when it is not there.
-    fn script_file(&mut self, file: &str, cwd: &str, depth: usize, need: Script) {
+    /// closed; an optional one is skipped when it is not there. `file` is
+    /// `word` resolved in `cwd`.
+    fn script_file(&mut self, file: &str, word: &str, cwd: &str, depth: usize, need: Script) {
         // #1240: the first judgment reads script files; the Windows view's
         // paths are not ones to open (and where it may not look a missing
         // optional script would read as unreadable).
-        if self.homes.is_windows() {
+        if self.homes.is_windows_view() {
             return;
         }
         self.ran.push(file.to_string());
@@ -1696,7 +1701,7 @@ impl Classifier {
                 classifier.note(ProtectedActionKind::UnseenCode);
             }
         };
-        match self.read_file(file) {
+        match self.read_file(file, word, cwd) {
             FileText::Missing => unreadable(self, /*missing*/ true),
             FileText::Unreadable => unreadable(self, /*missing*/ false),
             FileText::Binary => {}
@@ -1705,9 +1710,12 @@ impl Classifier {
     }
 
     /// Read a file the action runs or uses as code, within the lookup and
-    /// file limits.
-    fn read_file(&mut self, file: &str) -> FileText {
-        use std::io::Read;
+    /// file limits. `file` is `word` resolved in `cwd`.
+    fn read_file(&mut self, file: &str, word: &str, cwd: &str) -> FileText {
+        // #1261: under Windows path rules only through `windows_reads`.
+        if self.homes.windows_paths() {
+            return self.read_windows_file(word, cwd);
+        }
         if !self.homes.lookups_allowed(file) {
             return FileText::Unreadable;
         }
@@ -1733,6 +1741,34 @@ impl Classifier {
         let Ok(handle) = options.open(file) else {
             return FileText::Unreadable;
         };
+        Self::read_text(handle)
+    }
+
+    /// #1261: [`Self::read_file`] under Windows path rules: only a plain path
+    /// on a local fixed drive, never through a link or share.
+    fn read_windows_file(&mut self, word: &str, cwd: &str) -> FileText {
+        let Some((drive, names)) = self.homes.windows_read_path(word, cwd) else {
+            return FileText::Unreadable;
+        };
+        let homes = &self.homes;
+        let file = match windows_reads::locate(drive, &names, &|| homes.take_lookup()) {
+            windows_reads::Located::File(file) => file,
+            windows_reads::Located::Missing => return FileText::Missing,
+            windows_reads::Located::Refused => return FileText::Unreadable,
+        };
+        self.scripts_read += 1;
+        if self.scripts_read > MAX_SCRIPT_FILES {
+            return FileText::Unreadable;
+        }
+        match windows_reads::open(&file) {
+            Some(handle) => Self::read_text(handle),
+            None => FileText::Unreadable,
+        }
+    }
+
+    /// The text of an opened file, within the file limits.
+    fn read_text(handle: std::fs::File) -> FileText {
+        use std::io::Read;
         if !handle.metadata().is_ok_and(|metadata| metadata.is_file()) {
             return FileText::Unreadable;
         }

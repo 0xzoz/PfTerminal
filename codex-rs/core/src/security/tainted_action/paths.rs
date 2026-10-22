@@ -5,10 +5,12 @@
 
 use super::ProtectedActionKind;
 use super::windows_paths;
+use super::windows_reads;
 use super::work;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -85,7 +87,15 @@ const PRIVACY_FOLDERS: &[&str] = &[
 
 pub(super) struct Homes {
     /// #1240: Windows path rules (see `windows_paths`) instead of POSIX ones.
+    /// #1261: on Windows both judgments use them.
     windows: bool,
+    /// #1240: the Windows view (cmd and PowerShell readings; it opens no
+    /// file).
+    view: bool,
+    /// #1261: folders (lowercase, as resolved) reached through a network
+    /// share or device path, which the Windows rules spell as a drive
+    /// (`\\host\c$` and `\\?\C:` are `/c:`): no file below one is opened.
+    share_folders: RefCell<HashSet<String>>,
     /// Original spellings, used to expand `$CODEX_HOME`, `$HOME` and `~`.
     codex_home_raw: String,
     user_home_raw: Option<String>,
@@ -101,17 +111,35 @@ pub(super) struct Homes {
 }
 
 impl Homes {
+    /// The homes for the first judgment: under POSIX path rules, or (#1261)
+    /// on Windows under Windows path rules.
     pub(super) fn new(codex_home: &Path, user_home: Option<&Path>) -> Self {
-        Self::with_rules(codex_home, user_home, /*windows*/ false)
+        Self::with_rules(
+            codex_home,
+            user_home,
+            /*windows*/ cfg!(windows),
+            /*view*/ false,
+        )
+    }
+
+    /// #1261: the first judgment's homes as on Windows, on any platform
+    /// (files are opened only on Windows).
+    #[cfg(test)]
+    pub(super) fn windows_first(codex_home: &Path, user_home: Option<&Path>) -> Self {
+        Self::with_rules(
+            codex_home, user_home, /*windows*/ true, /*view*/ false,
+        )
     }
 
     /// #1240: the homes under Windows path rules, for the classifier's
     /// Windows view.
     pub(super) fn windows(codex_home: &Path, user_home: Option<&Path>) -> Self {
-        Self::with_rules(codex_home, user_home, /*windows*/ true)
+        Self::with_rules(
+            codex_home, user_home, /*windows*/ true, /*view*/ true,
+        )
     }
 
-    fn with_rules(codex_home: &Path, user_home: Option<&Path>, windows: bool) -> Self {
+    fn with_rules(codex_home: &Path, user_home: Option<&Path>, windows: bool, view: bool) -> Self {
         let separators: &[char] = if windows { &['/', '\\'] } else { &['/'] };
         let raw = |path: &Path| {
             path.to_string_lossy()
@@ -137,6 +165,8 @@ impl Homes {
         }
         let homes = Self {
             windows,
+            view,
+            share_folders: RefCell::new(HashSet::new()),
             codex_home_raw,
             user_home_raw,
             codex_homes: Vec::new(),
@@ -199,8 +229,35 @@ impl Homes {
     }
 
     /// Whether these are the Windows path rules.
-    pub(super) fn is_windows(&self) -> bool {
+    pub(super) fn windows_paths(&self) -> bool {
         self.windows
+    }
+
+    /// Whether this is the Windows view (#1240).
+    pub(super) fn is_windows_view(&self) -> bool {
+        self.view
+    }
+
+    /// Count one filesystem lookup. False, and the classification marked
+    /// incomplete, once the budget is spent.
+    pub(super) fn take_lookup(&self) -> bool {
+        if self.lookups.get() >= FS_LOOKUP_BUDGET {
+            self.exhausted.set(true);
+            return false;
+        }
+        self.lookups.set(self.lookups.get() + 1);
+        true
+    }
+
+    /// #1261: the plain local path (see `windows_reads`) that `word` names
+    /// run in `cwd` under Windows rules, as a drive letter and the names
+    /// below its root: `None` when it is not one or the folder was reached
+    /// through a share.
+    pub(super) fn windows_read_path(&self, word: &str, cwd: &str) -> Option<(char, Vec<String>)> {
+        if self.below_a_share(cwd) {
+            return None;
+        }
+        windows_reads::plain_path(&self.expand_windows(word, cwd), cwd)
     }
 
     /// `normalize_path`, or its Windows counterpart.
@@ -248,6 +305,29 @@ impl Homes {
     /// [`Self::resolve`] under Windows rules: the same spellings, the Windows
     /// ones too (`%USERPROFILE%`, `$env:CODEX_HOME`, `~\`), and Windows roots.
     fn resolve_windows(&self, word: &str, cwd: &str) -> String {
+        let word = self.expand_windows(word, cwd);
+        let resolved = windows_paths::join(cwd, &word);
+        // #1261: a folder reached through a share is remembered as one,
+        // and so is everything below it.
+        let through_a_share = windows_reads::starts_at_a_share(&word)
+            || windows_reads::starts_at_a_share(cwd)
+            || self.below_a_share(cwd);
+        if through_a_share {
+            self.share_folders
+                .borrow_mut()
+                .insert(resolved.to_lowercase());
+        }
+        resolved
+    }
+
+    /// #1261: whether `folder` (as resolved) was reached through a share.
+    fn below_a_share(&self, folder: &str) -> bool {
+        let shares = self.share_folders.borrow();
+        !shares.is_empty() && shares.contains(&folder.to_lowercase())
+    }
+
+    /// The home spellings of `word` expanded under Windows rules.
+    fn expand_windows(&self, word: &str, cwd: &str) -> String {
         let mut word = word.to_string();
         for (name, value) in [
             ("CODEX_HOME", Some(&self.codex_home_raw)),
@@ -279,7 +359,7 @@ impl Homes {
                 word = format!("{}/{user}{tail}", windows_paths::parent(home));
             }
         }
-        windows_paths::join(cwd, &word)
+        word
     }
 
     /// Classify a resolved path, also through its canonical form (symlinks,
@@ -364,7 +444,8 @@ impl Homes {
     /// Whether filesystem lookups may touch `path`.
     pub(super) fn lookups_allowed(&self, path: &str) -> bool {
         // #1240: Windows rules never look up (a lookup can follow a link or
-        // a mapped drive to a network share).
+        // a mapped drive to a network share); #1261: script and sed program
+        // files are opened only through `windows_reads`.
         if self.windows {
             return false;
         }
@@ -403,11 +484,9 @@ impl Homes {
             let found = match cached {
                 Some(found) => found,
                 None => {
-                    if self.lookups.get() >= FS_LOOKUP_BUDGET {
-                        self.exhausted.set(true);
+                    if !self.take_lookup() {
                         return None;
                     }
-                    self.lookups.set(self.lookups.get() + 1);
                     let found = std::fs::canonicalize(&existing)
                         .ok()
                         .map(|canonical| canonical.to_string_lossy().into_owned());
@@ -578,6 +657,10 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
     // A leading wildcard never expands to a dot-name in the shell (no
     // `dotglob`), and treating `*` or `*.json` as protected would block
     // ordinary work: only an explicit prefix can name a protected file.
+    // #1261 (D167, Travis 2026-10-22): cmd and PowerShell wildcards do match
+    // dot-names (`type *rc` reads `.netrc`); this assumption is kept for them
+    // too, knowingly, because matching dot-names would make `*.json` and the
+    // like ask everywhere.
     if pattern.starts_with(['*', '?', '[']) {
         return pattern == name;
     }
