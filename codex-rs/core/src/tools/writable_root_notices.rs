@@ -53,31 +53,19 @@ pub(crate) fn excluded_writable_link_warning(exclusion: &WritableLinkIntoReadOnl
 static WARNED_UNLABELLED: LazyLock<Mutex<HashSet<(ThreadId, PathBuf)>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
-/// #734: the warnings for those of `unlabelled` (canonical roots the
-/// non-admin Windows sandbox couldn't label Low) that are writable roots of
-/// `policy` and this thread has not been warned about yet.
+/// #734: the warnings for those of `failed` (canonical roots the non-admin
+/// Windows sandbox couldn't label Low during a run) that are among the run's
+/// own `writable` roots (canonical, as the sandbox labels them) and this
+/// thread has not been warned about yet.
 pub(crate) fn unlabelled_writable_root_warnings(
     thread_id: ThreadId,
-    policy: &FileSystemSandboxPolicy,
-    cwd: &Path,
-    unlabelled: &[PathBuf],
+    failed: &[PathBuf],
+    writable: &[PathBuf],
 ) -> Vec<String> {
-    if unlabelled.is_empty() {
-        return Vec::new();
-    }
-    // Canonical like the sandbox's own list.
-    let writable: HashSet<PathBuf> = policy
-        .get_writable_roots_with_cwd(cwd)
-        .into_iter()
-        .map(|root| {
-            let root = root.root.to_path_buf();
-            dunce::canonicalize(&root).unwrap_or(root)
-        })
-        .collect();
     let mut warned = WARNED_UNLABELLED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    unlabelled
+    failed
         .iter()
         .filter(|root| writable.contains(*root) && warned.insert((thread_id, (*root).clone())))
         .map(|root| codex_windows_sandbox::unlabelled_writable_root_warning(root))

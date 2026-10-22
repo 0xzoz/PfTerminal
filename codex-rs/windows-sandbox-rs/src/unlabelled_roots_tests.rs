@@ -2,19 +2,26 @@ use super::*;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn a_failed_root_is_listed_until_it_is_labelled() {
+fn a_failed_root_is_reported_after_an_earlier_mark_until_labelled() {
     let root = PathBuf::from(r"Z:\unlabelled_roots_tests\a");
+    let before = unlabelled_roots_mark();
     record(&root, /*labelled*/ false);
-    assert!(unlabelled_writable_roots().contains(&root));
+    let after = unlabelled_roots_mark();
+    assert!(unlabelled_roots_since(before).contains(&root));
+    // Not failed again since: a later run doesn't report it.
+    assert!(!unlabelled_roots_since(after).contains(&root));
+    record(&root, /*labelled*/ false);
+    assert!(unlabelled_roots_since(after).contains(&root));
     record(&root, /*labelled*/ true);
-    assert!(!unlabelled_writable_roots().contains(&root));
+    assert!(!unlabelled_roots_since(before).contains(&root));
 }
 
 #[test]
-fn labelling_an_unknown_root_lists_nothing() {
+fn labelling_an_unknown_root_reports_nothing() {
     let root = PathBuf::from(r"Z:\unlabelled_roots_tests\b");
+    let before = unlabelled_roots_mark();
     record(&root, /*labelled*/ true);
-    assert!(!unlabelled_writable_roots().contains(&root));
+    assert!(!unlabelled_roots_since(before).contains(&root));
 }
 
 #[test]

@@ -1,21 +1,33 @@
 //! #734: writable roots the legacy (unelevated) sandbox couldn't label Low
 //! (#158). Such a root stays as it is, so sandboxed commands can't write
 //! there; the reason was only in the sandbox log, so the user saw a plain
-//! "access denied". Core reads this list after a sandboxed run and warns once
-//! per thread. Display only: it never changes how commands run.
+//! "access denied". Core takes a [`unlabelled_roots_mark`] before a run,
+//! asks for the roots that failed during it ([`unlabelled_roots_since`])
+//! among the run's own ([`legacy_writable_roots`]), and warns once per
+//! thread. Display only: it never changes how commands run.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 
-/// Roots whose latest labelling in this process failed.
-static UNLABELLED: LazyLock<Mutex<BTreeSet<PathBuf>>> = LazyLock::new(Default::default);
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_utils_absolute_path::AbsolutePathBuf;
 
-fn unlabelled() -> MutexGuard<'static, BTreeSet<PathBuf>> {
-    UNLABELLED
+#[derive(Default)]
+struct Failures {
+    /// Counts failed labellings in this process.
+    seq: u64,
+    /// Each root whose latest labelling failed, with that failure's number.
+    latest: BTreeMap<PathBuf, u64>,
+}
+
+static FAILURES: LazyLock<Mutex<Failures>> = LazyLock::new(Default::default);
+
+fn failures() -> MutexGuard<'static, Failures> {
+    FAILURES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -24,18 +36,64 @@ fn unlabelled() -> MutexGuard<'static, BTreeSet<PathBuf>> {
 /// fixed since (its owner changed, say) stops being reported.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub(crate) fn record(root: &Path, labelled: bool) {
-    let mut unlabelled = unlabelled();
+    let mut failures = failures();
     if labelled {
-        unlabelled.remove(root);
+        failures.latest.remove(root);
     } else {
-        unlabelled.insert(root.to_path_buf());
+        failures.seq += 1;
+        let seq = failures.seq;
+        failures.latest.insert(root.to_path_buf(), seq);
     }
 }
 
-/// The canonical writable roots that the legacy sandbox couldn't label Low
-/// the last time it tried in this process (always empty off Windows).
-pub fn unlabelled_writable_roots() -> Vec<PathBuf> {
-    unlabelled().iter().cloned().collect()
+/// Marks now, for [`unlabelled_roots_since`].
+pub fn unlabelled_roots_mark() -> u64 {
+    failures().seq
+}
+
+/// The canonical roots whose labelling failed after `mark` and hasn't
+/// succeeded since (always none off Windows).
+pub fn unlabelled_roots_since(mark: u64) -> Vec<PathBuf> {
+    failures()
+        .latest
+        .iter()
+        .filter(|(_, seq)| **seq > mark)
+        .map(|(root, _)| root.clone())
+        .collect()
+}
+
+/// The canonical writable roots the legacy sandbox labels for a run under
+/// `policy` in `cwd` (`%TEMP%`/`%TMP%` as this process has them); empty off
+/// Windows.
+#[cfg(target_os = "windows")]
+pub fn legacy_writable_roots(
+    policy: &FileSystemSandboxPolicy,
+    workspace_roots: &[AbsolutePathBuf],
+    cwd: &Path,
+) -> Vec<PathBuf> {
+    let permissions =
+        crate::resolved_permissions::ResolvedWindowsSandboxPermissions::from_file_system_policy(
+            policy.clone(),
+            workspace_roots,
+        );
+    crate::allow::compute_allow_paths_for_permissions(
+        &permissions,
+        cwd,
+        &std::collections::HashMap::new(),
+    )
+    .allow
+    .into_iter()
+    .collect()
+}
+
+/// The canonical writable roots the legacy sandbox labels; empty off Windows.
+#[cfg(not(target_os = "windows"))]
+pub fn legacy_writable_roots(
+    _policy: &FileSystemSandboxPolicy,
+    _workspace_roots: &[AbsolutePathBuf],
+    _cwd: &Path,
+) -> Vec<PathBuf> {
+    Vec::new()
 }
 
 /// What to tell the person about such a `root`.
