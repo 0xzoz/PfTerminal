@@ -4882,7 +4882,9 @@ fn issue_1268_git_given_input_words_asks() {
         ("xargs -I% sh -c 'git % log'", UnseenCode),
         ("find . -exec sh -c 'cd . && git config {}' \\;", UnseenCode),
         ("xargs -I% sh -c 'sh -c \"git config %\"'", Persistence),
-        ("xargs sh -c 'git config \"${!#}\" x' _", UnseenCode),
+        // #1283: with its braces kept, `${!#}` reads as the positional
+        // parameter it is: a `git config` write.
+        ("xargs sh -c 'git config \"${!#}\" x' _", Persistence),
         ("xargs zsh -c 'git config $argv'", Persistence),
         // Review round 2: `-i` and bare `--replace` mean `-I {}`; parallel
         // runs its command words as a shell line; fd groups.
@@ -5458,5 +5460,228 @@ fn issue_1261_windows_reads_follow_only_plain_posix_scripts() {
         vec!["bash", "-lc", "bash r[u]n.sh"],
     ] {
         assert!(!follows(&argv), "{argv:?}");
+    }
+}
+
+/// #1283: the word lexer splits quoted text (and unquoted commas), so a
+/// value's text could read as a `git config` option: `--comment 'x --get'`
+/// made a write read as a read, and a quoted `-f` value hid `-e`. git is
+/// also judged on the words as the shell passes them on, and git spelled by
+/// text that reading cannot see fails closed.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1283_quoted_git_config_values_stay_whole() {
+    for command in [
+        "git config --comment 'x --get' core.pager sh",
+        "git config --comment x,--get core.pager sh",
+        "git config --comment \"x --get\" core.pager sh",
+        "git config --comment x\\ --get core.pager sh",
+        "git config --comm '-x --get' core.pager sh",
+        "git config --comment='x --get' core.pager sh",
+        "git config --comment 'x --get' --global user.name x",
+        "git config -f ~/.zshenv --comment x,--null,--get k v",
+        "git config -f ~/.bashrc --comment 'x --get' k v",
+        "git config -f 'l --null user.name' -e",
+        "git config --comment x >--get core.pager sh",
+        "git config 2>/dev/null -e",
+        "git -C 'x config --get' config core.pager sh",
+        "sh -c 'git config --comment \"x --get\" core.pager sh'",
+        "sh -c \"git config --comment 'x --get' core.pager sh\"",
+        "python3 -c \"import os; os.system('git config --comment \\\"x --get\\\" core.pager sh')\"",
+        "printf 'core.pager sh' | xargs git config --comment 'x --get'",
+        // Git spelled by text the quote-aware reading cannot see.
+        "g=git; $g config --comment 'x --get' core.pager sh",
+        "{git,config} --comment 'x --get' core.pager sh",
+        "git${IFS}config --comment 'x --get' core.pager sh",
+        "$(echo git) config --comment 'x --get' core.pager sh",
+        "x=xargs; printf 'core.pager sh' | $x git config --comment 'x --get'",
+        "{git,config} -f ~/.zshenv --comment x,--get k v",
+        // Review 2: a value held in a variable, which the quote-aware
+        // reading cannot know.
+        "k=core.pager; git config --comment 'x --get' \"$k\" sh",
+        "g=--global; git config $g --comment 'x --get' user.name x",
+        "d=~; git config -f \"$d/.zshenv\" --comment x,--get k v",
+        "f=~/.bashrc; git config --file \"$f\" --comment 'x --get' k v",
+        "o=-e; git config -f 'a b' $o",
+        "x=core.pager; git config --comment 'a b' $(echo $x) sh",
+        // Review 2: a loop over the positional parameters, with the value
+        // quoted.
+        "set -- core.pager; for k; do git config --comment 'x --get' \"$k\" sh; done",
+        "sh -c 'for k; do git config --comment \"x --get\" \"$k\" sh; done' _ core.pager",
+        // Review 3: `eval` parses its joined words again; a loop variable
+        // keeps its meaning where the value's quoting takes effect.
+        r"eval git config --comment \'x --get \' core.pager sh",
+        r#"eval git config --comment "'x" --get "'" core.pager sh"#,
+        r#"sh -c 'for k; do eval "git config --comment \"x --get\" \"\$k\" sh"; done' _ core.pager"#,
+        r#"set -- core.pager; for k; do sh -c "git config --comment 'x --get' $k sh"; done"#,
+        // Review 4: a wrapper's folder holds the output file.
+        "env -C ~ git config -f .zshenv --comment x,--get a.b v",
+        "env --chdir \"$HOME\" git config -f .zshenv --comment x,--get a.b v",
+        "D=~; env -C \"$D\" git config -f .zshenv --comment x,--get a.b v",
+        "cd ~ && git config -f .zshenv --comment x,--get a.b v",
+        "pushd ~; git config -f .zshenv --comment x,--get a.b v",
+        "(cd; git config -f .zshenv --comment x,--get a.b v)",
+        "git --git-dir=x -C ~ config -f .zshenv --comment x,--get a.b v",
+        // Review 5: a folder changed through a variable.
+        "D=~; cd \"$D\"; git config -f .zshenv --comment x,--get a.b v",
+        "D=$HOME; pushd \"$D\"; git config -f .zshenv --comment x,--get a.b v",
+        // Review 6: a nested script run in a folder changed through a
+        // variable, or a wrapper's folder, does not know its folder.
+        "D=~; cd \"$D\"; sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+        "D=~; pushd \"$D\"; bash -c 'git config -f .zshenv --comment x,--get a.b v'",
+        "D=~; cd \"$D\"; eval \"git config -f .zshenv --comment 'x --get' a.b v\"",
+        "D=~; cd \"$D\"; parallel 'git config -f .zshenv --comment x,--get a.b v' ::: 1",
+        "D=~; env -C \"$D\" sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+        "env -C ~ sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+        "D=~; cd \"$D\"; sh -c 'echo x >> .zshenv'",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+    assert_eq!(
+        kind(&["git", "config", "--comment", "x --get", "core.pager", "sh"]),
+        Some(ProtectedActionKind::Persistence)
+    );
+    // Reviews 1 and 2: git deeper than the quote-aware reading goes (five
+    // `eval "..."` levels) fails closed, however it is spelled.
+    for inner in [
+        "git config --comment \"x --get\" core.pager sh",
+        "g''it config --comment \"x --get\" core.pager sh",
+        "g\\it config --comment \"x --get\" core.pager sh",
+        "\"g\"it config --comment \"x --get\" core.pager sh",
+        "$'\\x67'it config --comment \"x --get\" core.pager sh",
+    ] {
+        let mut line = inner.to_string();
+        for _ in 0..5 {
+            let escaped: String = line
+                .chars()
+                .flat_map(|ch| {
+                    let escape = matches!(ch, '\\' | '"' | '$' | '`');
+                    escape.then_some('\\').into_iter().chain([ch])
+                })
+                .collect();
+            line = format!("eval \"{escaped}\"");
+        }
+        assert!(script(&line).is_some(), "{line}");
+    }
+    for command in [
+        "git config --get core.pager",
+        "git config --file \"$f\" --get core.pager",
+        "git config --comment 'x' --get core.pager",
+        "git config -f 'a b' -l",
+        "git config --get core.pager 2>/dev/null",
+        "git -C /tmp config --get core.pager",
+        "v=me; git config user.name \"$v\"",
+        "eval git config --get core.pager",
+        "D=/tmp; cd \"$D\"; git config -f x --get core.pager",
+        "D=/tmp; cd \"$D\"; sh -c 'git config --get core.pager'",
+        "cd /tmp; sh -c 'git config -f x a.b v'",
+        "env -C /tmp sh -c 'git config --get core.pager'",
+        "eval \"echo hi\"",
+        "v=me; git config --get user.name; echo \"$v\"",
+        "cp a{,.bak} && git config --get core.pager",
+        "sh -c 'git config --get core.pager'",
+        "echo 'git config --get core.pager'",
+        "printf 'user.name' | xargs git config --get",
+        "GIT_DIR=x git config --get core.pager",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1276: launcher spellings and loops over input words the #1268 checks
+/// did not know: `fd --exec=CMD`, `for k;`, `$_`, more shells, and
+/// `env_parallel`, `xjobs`, `rush`, `bfs`.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1276_more_launchers_ask() {
+    use ProtectedActionKind::*;
+    for (command, want) in [
+        ("fd --exec=git config", Persistence),
+        ("fd . --exec=git config", Persistence),
+        ("fd --exec-batch=git config", Persistence),
+        ("fd -xgit config", Persistence),
+        ("fd -Hxgit config", Persistence),
+        ("fd -x=git config", Persistence),
+        ("fd --exec=git config core.pager sh", Persistence),
+        (
+            "xargs sh -c 'for k; do git config \"$k\" sh; done' _",
+            Persistence,
+        ),
+        (
+            "xargs sh -c 'select k; do git config \"$k\" sh; done' _",
+            Persistence,
+        ),
+        ("xargs sh -c 'true; git config $_ sh' _", Persistence),
+        ("xargs sh -c ': \"$@\"; git config ${_} sh' _", Persistence),
+        ("xargs -I% rbash -c 'true && git config %'", UnseenCode),
+        ("xargs -I% oksh -c 'true && git config %'", UnseenCode),
+        ("env_parallel git config", Persistence),
+        ("xjobs git config", Persistence),
+        ("rush 'git config {}'", UnseenCode),
+        ("bfs . -exec git config {} \\;", UnseenCode),
+        // Review 1: a loop over no positional parameters keeps the value
+        // the variable had.
+        ("for HOME; do :; done; echo x >> $HOME/.zshrc", Persistence),
+        ("f=~/.bashrc; for f do :; done; cat p >> $f", Persistence),
+        (
+            "xargs sh -c 'for k; do :; done; for j; do git config \"$j\" sh; done' _",
+            Persistence,
+        ),
+    ] {
+        assert_eq!(script(command), Some(want), "{command}");
+    }
+    for command in [
+        "fd --exec=rustfmt",
+        "fd -e rs -x rustfmt",
+        "fd -e rs --exec=git log",
+        "xargs sh -c 'for k in a b; do echo $k; done' _",
+        "xargs sh -c 'for k; do echo \"$k\"; done' _",
+        "env_parallel echo ::: a",
+        "rbash -c 'echo hi'",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1283/#1276: the new checks stay linear when the words they read repeat.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1283_1276_checks_are_linear() {
+    for (label, unit) in [
+        ("quoted values", "--comment 'x --get' "),
+        ("git config words", "git config "),
+        ("hidden git words", "{git,config} "),
+        ("attached execs", "fd --exec=git "),
+        ("folder flags", "-C a "),
+        ("output files", "-f ~/.x "),
+        ("loops", "for k; "),
+        ("underscores", "$_ "),
+        ("evals", "eval "),
+        ("requoted evals", r"eval \' "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("git config {} core.pager sh", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!("xargs git {} config --get", unit.repeat(400 * scale));
+            let _ = script(&line);
+            let line = format!(
+                "{}git config --comment \\'x --get \\' sh",
+                unit.repeat(400 * scale)
+            );
+            let _ = script(&line);
+        });
     }
 }

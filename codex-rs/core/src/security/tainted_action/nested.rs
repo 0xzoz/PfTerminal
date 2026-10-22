@@ -12,6 +12,7 @@
 use super::Classifier;
 use super::FileText;
 use super::Folders;
+use super::GitConfigWrites;
 use super::ProtectedActionKind;
 use super::WRITERS;
 use super::git_helpers;
@@ -64,7 +65,8 @@ const PURE_FILTERS: &[&str] = &[
 struct Found {
     /// Scripts that nested shells run, with the folder they run in, and
     /// what a launcher does with its input there (#1268).
-    scripts: Vec<(String, String, launched_git::Launch)>,
+    /// #1283: and whether that folder is unknown.
+    scripts: Vec<(String, String, launched_git::Launch, bool)>,
     /// The line as written holds a brace: a launcher's placeholder (`{}`)
     /// may be in it.
     braces: bool,
@@ -87,6 +89,8 @@ struct Found {
     /// An interpreter runs code that may write files the classifier does
     /// not see (`python3 -c "open('x','w')..."`).
     runs_code: bool,
+    /// #1283: what git does with the words as the shell passes them on.
+    git: Vec<ProtectedActionKind>,
 }
 
 /// One reading of a sed invocation and where it runs.
@@ -189,6 +193,7 @@ impl Classifier {
             previous: cwd.to_string(),
             stack: std::rc::Rc::default(),
             unfollowed: false,
+            unchecked: false,
         };
         let mut found = Found {
             braces: command.iter().any(|arg| arg.contains('{')),
@@ -223,11 +228,15 @@ impl Classifier {
         if found.unreadable || folders.unfollowed {
             self.note(ProtectedActionKind::UnseenCode);
         }
+        for kind in std::mem::take(&mut found.git) {
+            work::step();
+            self.note(kind);
+        }
         self.written.extend(found.written.iter().cloned());
         let mut judged = HashSet::new();
-        for (script, cwd, launched) in std::mem::take(&mut found.scripts) {
+        for (script, cwd, launched, unknown) in std::mem::take(&mut found.scripts) {
             work::step();
-            if !judged.insert((script.clone(), cwd.clone(), launched)) {
+            if !judged.insert((script.clone(), cwd.clone(), launched, unknown)) {
                 continue;
             }
             self.nested_scripts += 1;
@@ -240,7 +249,9 @@ impl Classifier {
                 fed: outer.fed || launched.fed,
                 replaced: outer.replaced || launched.replaced,
             };
+            self.unknown_folder += usize::from(unknown);
             self.script(&script, &cwd, depth + 1);
+            self.unknown_folder -= usize::from(unknown);
             self.launched = outer;
         }
         for sed in std::mem::take(&mut found.seds) {
@@ -258,6 +269,8 @@ impl Classifier {
     /// Collect nested scripts, sed invocations and written files from
     /// `commands` and the quoted text in them, following `cd`.
     fn walk(&self, commands: &[Command], folders: &mut Folders, level: usize, found: &mut Found) {
+        // #1276: `for k;` loops met so far.
+        let mut loops = launched_git::PositionalLoops::default();
         for command in commands {
             work::step();
             if found.scripts.len()
@@ -275,6 +288,12 @@ impl Classifier {
                 && let Some((index, name)) = indirect::command_word(&texts)
             {
                 self.change_folder(&name, &texts[index + 1..], folders, &mut HashMap::new());
+                // #1283: `cd "$d"` goes where this reading cannot follow.
+                folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
+                    && texts[index + 1..].iter().any(|text| {
+                        work::step();
+                        self.homes.resolve(text, "").contains(['$', '`'])
+                    });
             }
             let first = texts.first().map(|word| name(word));
             let compound = first
@@ -297,15 +316,28 @@ impl Classifier {
             found.written.extend(targets);
             // D153: a git setting whose quoted text names git.
             found.unreadable |= git_helpers::setting_holds_git_name(&command.words);
+            loops.read(&texts);
+            self.judge_git(&texts, &loops, found);
             // #1268: where a launcher's input reaches the words, and the
             // scripts of shells it puts input into, wherever the command
             // word is read to be (`xargs --replace sh -c '... {}'`).
             let launches = launched_git::launches(&texts, found.braces, self.launched);
+            // #1283: scripts run in a folder this reading does not follow
+            // (after `cd "$d"`, or a wrapper's: `env -C "$d" sh -c`).
+            let unknown = folders.unchecked
+                || texts.iter().any(|text| {
+                    work::step();
+                    let flag = text.split_once('=').map_or(text.as_str(), |(flag, _)| flag);
+                    super::FOLDER_FLAGS.contains(&flag)
+                });
             for (word, script) in replaced_shell_scripts(&texts, &launches, &mut found.unreadable) {
                 work::step();
-                found
-                    .scripts
-                    .push((script, folders.cwd.clone(), replaced(launches[word])));
+                found.scripts.push((
+                    script,
+                    folders.cwd.clone(),
+                    replaced(launches[word]),
+                    unknown,
+                ));
             }
             let (starts, overflow) = sed::command_starts(&texts);
             found.unreadable |= overflow;
@@ -345,9 +377,12 @@ impl Classifier {
                         roles[word] = Role::Script;
                         // Input words a launcher adds go to the wrapper's
                         // line (`xargs env -S'git config'`).
-                        found
-                            .scripts
-                            .push((script, folders.cwd.clone(), launches[wrapper]));
+                        found.scripts.push((
+                            script,
+                            folders.cwd.clone(),
+                            launches[wrapper],
+                            unknown,
+                        ));
                         runners += 1;
                     }
                     // Too many shell strings in one command: fail closed.
@@ -367,7 +402,15 @@ impl Classifier {
                     sed_command = true;
                 } else {
                     // #1141: an output option's file (`git log --output=f`).
-                    let outputs = outputs::output_files(&resolved_name, &texts[at + 1..]);
+                    let outputs = outputs::output_files(
+                        &resolved_name,
+                        &texts[at + 1..],
+                        /*unchecked*/ false,
+                    );
+                    if let Some(files) = &outputs {
+                        // A wrapper's folder counts too (`env -C ~ git`).
+                        self.judge_outputs(&texts, files, &folders.cwd, found);
+                    }
                     if WRITERS.contains(&resolved_name.as_str())
                         || outputs.is_some()
                         || !command.writes_to.is_empty()
@@ -387,7 +430,7 @@ impl Classifier {
                 // #1268: GNU parallel joins its command words, adds its
                 // input and runs the line with a shell (`parallel 'cd x &&
                 // git config'`).
-                if resolved_name == "parallel" {
+                if launched_git::PARALLELS.contains(&resolved_name.as_str()) {
                     let end = texts[at + 1..]
                         .iter()
                         .position(|word| word.starts_with(":::"))
@@ -403,10 +446,37 @@ impl Classifier {
                             fed: true,
                             replaced: launches[end].replaced,
                         };
-                        found.scripts.push((line, folders.cwd.clone(), launch));
+                        found
+                            .scripts
+                            .push((line, folders.cwd.clone(), launch, unknown));
                     }
                 }
                 if resolved_name == "eval" {
+                    // #1283: `eval` joins its words and parses them again, so
+                    // quoting split across them takes effect (`eval git config
+                    // --comment \'x --get \' core.pager sh`): the line it runs
+                    // is judged as a script. Words without quotes or
+                    // backslashes parse back the same (and their quoted
+                    // text is walked below), so a chain of `eval`s is read
+                    // once.
+                    let requotes = texts[at + 1..].iter().any(|text| {
+                        work::step();
+                        text.contains(['\'', '"', '\\'])
+                    });
+                    if requotes {
+                        let line = joined(
+                            String::new(),
+                            &texts[at + 1..],
+                            &mut joined_left,
+                            &mut found.unreadable,
+                        );
+                        found.scripts.push((
+                            line,
+                            folders.cwd.clone(),
+                            replaced(launches[at]),
+                            unknown,
+                        ));
+                    }
                     continue;
                 }
                 let shell = SHELLS.contains(&resolved_name.as_str());
@@ -429,6 +499,7 @@ impl Classifier {
                                 texts[candidate].clone(),
                                 folders.cwd.clone(),
                                 replaced(launches[at]),
+                                unknown,
                             ));
                         }
                     }
@@ -441,6 +512,7 @@ impl Classifier {
                                 input.text.clone(),
                                 folders.cwd.clone(),
                                 replaced(launches[at]),
+                                unknown,
                             ));
                         }
                     }
@@ -451,6 +523,22 @@ impl Classifier {
                 collect_seds(commands, command, &texts, folders, found);
             }
             if level >= MAX_QUOTED_LEVEL {
+                // #1283: git in text this reading does not reach is judged
+                // only by the word lexer, which splits quoted values.
+                let deeper = command
+                    .words
+                    .iter()
+                    .filter(|word| word.quoted)
+                    .chain(&command.input)
+                    .chain(&command.writes_to)
+                    .chain(&command.other_text)
+                    .any(|word| {
+                        work::step();
+                        spells_git(&word.text)
+                    });
+                if deeper {
+                    note_git(found, ProtectedActionKind::UnseenCode);
+                }
                 continue;
             }
             // Also redirection files, comments and other text the shell
@@ -478,6 +566,7 @@ impl Classifier {
                     previous: folders.previous.clone(),
                     stack: folders.stack.clone(),
                     unfollowed: false,
+                    unchecked: folders.unchecked,
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;
@@ -504,6 +593,100 @@ impl Classifier {
                 }
                 found.unreadable |= counted.unreadable || inner.unfollowed;
             }
+        }
+    }
+
+    /// #1283: the git checks of `simple_command` on the words as the shell
+    /// passes them on. The word lexer splits quoted text, so a value's text
+    /// can read as an option there (`git config --comment 'x --get'
+    /// core.pager sh` as a read); here each value stays one word. Git
+    /// spelled by text this reading cannot see is checked there instead
+    /// (`hidden_words`).
+    /// `loops`: loop variables over the positional parameters so far.
+    fn judge_git(
+        &self,
+        texts: &[String],
+        loops: &launched_git::PositionalLoops,
+        found: &mut Found,
+    ) {
+        if !texts.iter().any(|text| text.to_lowercase().contains("git")) {
+            return;
+        }
+        let lower: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
+        let looped = loops.marks(texts);
+        let mut config = GitConfigWrites::new(&lower, &[], &[]);
+        let mut launched = launched_git::LaunchedGit::new(
+            texts,
+            &lower,
+            found.braces,
+            self.launched,
+            launched_git::Marks {
+                looped: &looped,
+                ..launched_git::Marks::default()
+            },
+        );
+        for (index, word) in lower.iter().enumerate() {
+            work::step();
+            // #1276: or a finder's exec option with git attached.
+            let git_word = launched.attached(index).unwrap_or(word);
+            let helper = git_helpers::git_name(git_word);
+            let subcommand = helper.as_ref().and_then(Option::as_deref);
+            let mut kinds = Vec::new();
+            if (basename(git_word) == "git" || helper.is_some())
+                && config.persists(index + 1, subcommand)
+            {
+                kinds.push(ProtectedActionKind::Persistence);
+            }
+            kinds.extend(launched.judge(index, helper.as_ref()));
+            launched.step(index);
+            for kind in kinds {
+                work::step();
+                note_git(found, kind);
+            }
+        }
+    }
+
+    /// #1283: the files an output option names (`git config -f ~/.zshenv
+    /// --comment x,--get k v`), with quoted values kept whole, resolved
+    /// against the working folder and every `-C`-style folder in `words`
+    /// (the command's, wrappers' included).
+    fn judge_outputs(&self, words: &[String], files: &[String], cwd: &str, found: &mut Found) {
+        const MAX_BASES: usize = 8;
+        let mut bases = vec![cwd.to_string()];
+        let mut previous: Option<&str> = None;
+        for word in words {
+            work::step();
+            let value = match previous {
+                Some(flag) if super::FOLDER_FLAGS.contains(&flag) => Some(word.as_str()),
+                _ => word
+                    .split_once('=')
+                    .filter(|(flag, _)| super::FOLDER_FLAGS.contains(flag))
+                    .map(|(_, value)| value),
+            };
+            previous = Some(word);
+            let Some(value) = value else {
+                continue;
+            };
+            if bases.len() + 2 > MAX_BASES || value.len() > super::MAX_FOLDER_BYTES {
+                // Too many folders, or one too long, to follow: fail closed.
+                note_git(found, ProtectedActionKind::Persistence);
+                return;
+            }
+            // Against the folder before it and the working folder.
+            let last = bases.last().cloned().unwrap_or_default();
+            bases.push(self.homes.resolve(value, &last));
+            bases.push(self.homes.resolve(value, cwd));
+        }
+        let writes_home = files.iter().any(|file| {
+            bases.iter().any(|base| {
+                work::step();
+                let resolved = self.homes.resolve(file, base);
+                self.homes.is_persistence(&resolved)
+                    || (file.ends_with('/') && self.homes.holds_a_home(&resolved))
+            })
+        });
+        if writes_home {
+            note_git(found, ProtectedActionKind::Persistence);
         }
     }
 
@@ -941,6 +1124,25 @@ fn fish_codes(texts: &[String], at: usize, cut: &mut bool) -> Vec<String> {
         }
     }
     codes
+}
+
+/// #1283: note `kind` once (a few kinds at most, so checking is cheap).
+fn note_git(found: &mut Found, kind: ProtectedActionKind) {
+    if !found.git.contains(&kind) {
+        found.git.push(kind);
+    }
+}
+
+/// #1283: whether text may spell `git` once the word lexer reads it: it
+/// removes quotes, backslashes, line continuations and braces, and decodes
+/// `$'...'`.
+fn spells_git(text: &str) -> bool {
+    let bare: String = text
+        .replace("\\\n", "")
+        .chars()
+        .filter(|ch| !matches!(ch, '\'' | '"' | '\\' | '{' | '}'))
+        .collect();
+    bare.to_lowercase().contains("git") || text.contains("$'")
 }
 
 /// What a launcher puts into a shell's script (`xargs -I% sh -c 'git %'`):
