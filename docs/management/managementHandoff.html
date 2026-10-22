@@ -16,7 +16,7 @@ th{background:#f5f5f7}.warn{background:#fff4e5;border-left:4px solid #f0a020;pad
 <body>
 <h1>Corbanu Terminal — management handoff</h1>
 <p><small>Kept by the coordinating agent (Claude, running in Corbanu Terminal as “coordinator”) for its successor; this update written by the coordinator's handoff-doc10 worker.
-State as of <b>2026-10-22 01:30 UTC (2026-10-21 18:30 America/Phoenix)</b>, with <code>todo.md</code> read through its 01:25Z line. Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
+State as of <b>2026-10-22 01:30 UTC (2026-10-21 18:30 America/Phoenix)</b>, with <code>todo.md</code> read through its 01:25Z line and re-checked at about 02:00Z (its 01:59Z and 02:01Z lines are folded in). Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
 <code>2469e554dd</code>, the merge of #1278 at 01:06Z).
 Coordinator since 2026-10-13 04:30Z: a Claude coordinator, resumed from the 2026-10-12 pause handoff when Travis said resume; it runs in Travis's TUI. It stopped with every
 worker during the 429 outage (10-16 13:55Z) and resumed on 2026-10-19 18:30Z (box below).
@@ -48,8 +48,9 @@ red run was infrastructure (curl exit 35). The 10-21 scheduled nightly failed to
 <li><b>New coordinator rules</b> (section 3): the MERGE GUARD RULE; D152's standing contributor-merge authority and its limits; D146/D151 finish-with-credit after about a week (check
 around 10-28); the sign-in relay as used for D136. The REVIEWER LAUNCH RULE (14:00Z) is now named in every brief.</li>
 </ul>
-Running now (section 10): <code>pf84-cb1</code> (PF-84 code-blind run), <code>sec-1268</code> (#1273; round 6 granted 01:25Z), <code>sec-1275</code> (#1279) and this <code>handoff-doc10</code>:
-4 sessions, under the 6 cap.
+Running now (section 10, re-checked about 02:00Z): <code>pf84-cb1</code> (PF-84 code-blind run), <code>sec-1268b</code> (a final round 7 on #1273, granted 01:59Z),
+<code>contrib-watch3</code> (contributor watch) and this <code>handoff-doc10</code>: 4 sessions, under the 6 cap. sec-1275 finished at 01:59Z (#1279 merged 01:49Z, just after the snapshot)
+and sec-1268 at 01:59Z (#1273 open).
 <b>Waiting on Travis: D158–D168</b> (section 11), plus his own action D18 (delete the vault label <code>kimi_api</code>; not confirmed done).<br>
 <b>Goal / working agreement with Travis (unchanged):</b> keep the workstreams moving with independent workers. Check in every <b>5 minutes</b> with a short
 plain-language report that always ends with the open decisions and a recommendation for each. Since Travis's 10-14 process rule, <b>repeat every decision still
@@ -129,7 +130,7 @@ gh run list --branch main --workflow postmerge-ci --limit 10
 W=/Volumes/CorbanuDrive/Corbanu/.codex-work/workers-20261002
 L=$HOME/.corbanu-workers                          # worker tmux server, logs and results (internal disk, section 3)
 /opt/homebrew/bin/tmux -S $L/tmux.sock ls
-$L/mon.sh pf84-cb1 sec-1268 sec-1275            # one line per running worker
+$L/mon.sh pf84-cb1 sec-1268b contrib-watch3     # one line per running worker
 ls $W/*.request*.md                              # requests waiting for a grant (section 3; numbered files too)
 ls $W/*.hold.md                                  # orchestrator.rs merge holds (section 3)
 ls -lt $W/*.signin.md | head                     # sign-in codes to relay to Travis at once (section 3)
@@ -440,7 +441,10 @@ New same-class Windows spellings go to #1240 as follow-ups. grant2 (22:54Z, fina
 (<code>69b5bf1f3a..bbc31bf4d8</code>); merge only after ci-lin2's fix. #1249 merged 23:53Z on round 8's APPROVE, but before #1274 (00:19Z), against grant3; its postmerge run
 was red on the d153 timeout, and the coordinator judged the early merge harmless (<code>todo.md</code> 00:00Z).</li>
 <li>sec-1268 (#1273), grant 10-22 01:25Z: round 6 on <code>75a621fdbd</code>. Bar: anything looser than main, a correctness bug (non-linear work included), or an end-to-end bypass of the
-round-5 fix. New same-class launcher spellings go to #1276 and don't block. Merge main first if needed.</li>
+round-5 fix. New same-class launcher spellings go to #1276 and don't block. Merge main first if needed. Round 6 found one “major” item that sec-1268 judged a false alarm (its four
+example lines already asked); it pushed a defence-in-depth fix and stopped. The coordinator then granted a <b>final round 7</b> (01:59Z, in the sec-1268b brief): head
+<code>e6f1f7b929</code> or a newer head that only merges main; blocking only for anything looser than main, a correctness bug, or an end-to-end #1268 bypass the reviewer shows with
+the line and why the in-script check misses it; otherwise #1276.</li>
 </ul>
 No request is waiting at this update.</li>
 </ul>
@@ -533,7 +537,7 @@ TUI tests (small-fix11); main overflows without it too. A TUI socket-path test f
 <code>security::tainted_action::tests::d153_checks_are_linear</code> (60 s) in a Linux test shard, and the bot opened #1267 (“postmerge-ci is failing on main”). The runs for #1263, #1259,
 #1210 and #1005 passed. This was not a #1262 regression: ci-lin2 measured the work counts on main and on #1262's parent, and they agree within 0.1%; the test was already over CI's 30 s SLOW
 mark. <b>#1274</b> (ci-lin2, 00:20Z) adds an equality fast path to <code>paths::glob_any</code> when the text has no wildcard and cuts the test input from 400 to 100 repeats (35 s → 5 s
-locally). Main has been green since <code>333f0b8db7</code>. Close #1267. ci-lin2 filed #1275 (a quadratic the counters can't see; sec-1275's #1279) and flagged
+locally). Main has been green since <code>333f0b8db7</code>. Close #1267. ci-lin2 filed #1275 (a quadratic the counters can't see; fixed by sec-1275's #1279, merged 01:49Z) and flagged
 <code>issue_1065_review_1_limits</code> as the next SLOW test.</li>
 <li><b>Earlier reds in the window:</b> #1237's and #1239's runs timed out on <code>issue_1141_1142_checks_are_linear</code> (#1244; split per unit by #1247, 18:05Z). #1257's failed on a
 toolchain download (curl exit 35, infrastructure); #1265's had the same curl failure in musl clippy on top of the d153 timeout. Three runs (#1221, #1224, #1225) were cancelled by the next merge.</li>
@@ -666,14 +670,14 @@ Next to the real binary in <code>integration-package-dev/bin/</code>: <code>corb
 <code>corbanu.prev-8c73c8ea80</code> (kept for parity runs until D161 is answered) and <b><code>corbanu.31b9f3ca</code></b>: a separately signed copy of main <code>31b9f3cad8</code> (#137;
 it contains #1192 and #1250), sha256 beginning <code>bbae7d37dff90232</code>, never installed. pf84-cb1's brief pins it (D137) and copies it privately into each Tart clone, so keep it
 until pf84-cb1 has finished. <code>bc1deda532</code> and <code>aa35e3f936</code> moved to <code>old-binaries/</code> at 01:21Z. Older ones are in <code>.codex-work/integration-build-20260922a/old-binaries/</code>.</li>
-<li><b>Not in it:</b> #1278 (merged 01:06Z, test code only).
+<li><b>Not in it:</b> #1278 (merged 01:06Z, test code only) and #1279 (01:49Z: the classifier judges repeated command words in one pass, #1275).
 <ul>
 <li>Running workers keep the inode they started with; new launches get the new binary.</li>
 <li>pf84-cb1 runs <code>corbanu.31b9f3ca</code> inside its Tart clones (its brief forbids using or changing the installed binary). Parity runs use <code>8c73c8ea80</code> (D97); D139's
 runs used <code>9750861c2a</code>, kept as <code>corbanu.prev-9750861c2a</code>.</li>
 <li>The rollback test to <code>45bfa7d938</code> stays held: #616 has had no episode since 10-15 21:01Z.</li>
 <li><code>INSTALL.json</code>'s <code>what_is_new</code> lists only PRs that are in <code>333f0b8db7</code>.</li>
-<li>Next install: after the open classifier PRs (#1273, #1279) merge and postmerge is green. Don't swap under a worker whose brief pins a build, and don't delete
+<li>Next install: after #1273 merges and postmerge is green (it would add #1279 and #1273). Don't swap under a worker whose brief pins a build, and don't delete
 <code>corbanu.31b9f3ca</code> before pf84-cb1 finishes.</li>
 </ul></li>
 <li>The Apps shortcut (<code>/Applications/Corbanu Terminal Launcher.app</code>) launches the same binary with
@@ -1075,7 +1079,10 @@ rule (D125)</td><td>pf84-1193</td></tr>
 <p>Closed unmerged in the same window, each with a written explanation (DECLINE RULE): #1232 (D154: same production change as #1005, whose test checks more; its author credited
 and invited to follow-ups), #140 (D132: its decisions recorded on #127–#129 with credit), and our probe drafts #1214 and #1236. Issues closed in the window: #918, #1003, #1130, #1176,
 #1181 (D144), #1193, #1201 (see section 4), #1205, #1208, #1233, #1240, #1241, #1243, #1244, #1248, #1252, #1253, #1255 and #1264. Filed: #1251, #1261, #1266, #1267, #1268, #1269,
-#1275, #1276 and #1280 (0xzoz: a Task Node direct-write submission consumed the evidence gate without publishing evidence; not yet triaged).</p>
+#1275, #1276 and #1280 (0xzoz: a Task Node direct-write submission consumed the evidence gate without publishing evidence; not yet triaged).
+Merged just after this snapshot: <b>#1279</b> (01:49Z, sec-1275, 2 rounds): one pass (<code>LaterWords</code>) for the later-word checks of <code>gh</code>, <code>security</code>,
+<code>crontab</code>, <code>launchctl</code>, <code>systemctl</code> and the Corbanu CLI names, with the work counted; <code>glob_any</code> stops at the first difference; <code>issue_1065_review_1_limits</code>
+split into three (18.4 s → at most 5.2 s locally). No prompts changed; #1275 closed by it.</p>
 <h3>8.1 Security levels (P0/P1) — “Aggressive ships” milestone (signed off 2026-10-16)</h3>
 <div class="note"><b>Signed off by Travis on 2026-10-16</b> (“all as recommended”, D10; with D8 option (a) and D9), on the third targeted re-run's combined status:
 <b>58 passed, 0 failed, 2 blocked (AGG-R14 result 2, AGG-R06), 4 accepted (AGG-18, R07, R10, 20) of 64</b> (record #868, resting on #819, #788, #741, #628 and #447).
@@ -1392,15 +1399,16 @@ sign-in summary on the UI thread) is D155 (a), after the flag removal.</li>
 PF-84 acceptance criteria, the partial #555 legs, #426's two remaining legs, mid-session account removal with the free test account (D136) and the D86/D124/D125 <code>/status</code>
 behaviour; GLM 5.3 Flash testers on Z.AI drive the TUI. Fresh Tart clone per group, one at a time; throwaway credentials only, the test account signed out and its credentials deleted
 before a clone is. Its sequence log shows the main groups G1–G9 done at 00:46Z, the replays G6R and G8R at 01:14Z, and the amendment-v2 groups R1–R4 under way (R3 from
-01:46Z). <b>Interim, from its integrator notes</b> (verdicts are final only in its record):
+01:46Z; log read at about 01:50Z). <b>Interim, from its integrator notes</b> (verdicts are final only in its record):
 <ul>
 <li><b>D136</b> (G9): the tester's check failed: after the account was removed mid-session, the session kept answering on <code>t1</code>'s in-memory sign-in. There was no fallback to the
-default login, and nothing was left in the vault.</li>
+default login, and no trace of <code>t1</code> remained (account list, config and vault).</li>
 <li><b>NA-05</b> (R2): an in-app <code>/resume</code> of a conversation whose account was removed resumed it on the current account without a message, while the CLI path refuses (GH-02
 passed). pf84-cb1 is re-checking it against the documented rule that an explicit <code>--account</code> wins, since that session was started with one.</li>
 <li>Possible defect (G3): pasting a name and pressing Enter in the same second in the add-account name field left the field open, so the key typed next appeared in it in clear.</li>
 <li>Design premises corrected by amendment v2: the product refuses a typed key (pipe it in), and <code>/providers</code> shows 8 of 18 rows with no scroll hint (an advisory UX defect).
-With v2, NA-01 and NA-04 passed in R1 and PR-01 and GH-02 in R2.</li>
+With v2, NA-01 and NA-04 passed in R1 and PR-01 and GH-02 in R2; NA-10's tester failure in R1 was judged a design-premise mismatch (choosing the account starts a
+new session); the other amended cases were still to run.</li>
 </ul>
 Its record goes to <code>qa/provider-auth/pf-84/</code> in a docs PR with an independent
 review (budget 5).</li>
@@ -1568,7 +1576,7 @@ a clean macOS runner passed all 17), #911 (#907: lookups ~4× faster), #916 (#90
 Open: #636 (the 10-21 nightly hadn't started at 13:45Z), #349 (an unexplained 60 s TUI hang), #1201 (#1229 merged; open until scans are clean), #1130 (D103, ci-1130), #1111, #1112, #1132.</p>
 <p><b>10-21/22 (since #1231):</b> the main red→green episode (#1262 → #1274) and the other reds are in section 4; flake fixes #1242, #1245, #1247, #1260 and #1278; Windows coverage
 #1235, #1237, #1239 and #1249; the prebuilt lint (#1234, D103; #1130 closed). The 10-21 scheduled nightly failed (seventh in a row). Open: #636, #349 (the 60 s hang, with #1245's watcher
-now in place), #1267 (close it: main is green), #1275 (sec-1275), #1111, #1112, #1132, and #1201 (closed by keyword, watch per flake-6).</p>
+now in place), #1267 (close it: main is green), #1111, #1112, #1132, and #1201 (closed by keyword, watch per flake-6).</p>
 
 <h2>9. Travis's decisions (binding)</h2>
 <p>All are also recorded as comments on the named issues/PRs (and in <code>todo.md</code>). Dates are 2026 (Phoenix/UTC as logged).</p>
@@ -1889,11 +1897,11 @@ Permissive behaviour, licensing or CI policy (section 3).</td><td><code>todo.md<
 <h2>10. Current state</h2>
 <h3>Workers</h3>
 <p>Running at 2026-10-22 01:30 UTC (2026-10-21 18:30 America/Phoenix), as tmux sessions on <code>$HOME/.corbanu-workers/tmux.sock</code>. Check with
-<code>$HOME/.corbanu-workers/mon.sh pf84-cb1 sec-1268 sec-1275</code>. Session <code>watchdog</code> runs <code>watchdog.sh</code> (its last relaunch was sec-891 at 10-16
+<code>$HOME/.corbanu-workers/mon.sh pf84-cb1 sec-1268b contrib-watch3</code> (rows re-checked at about 02:00Z). Session <code>watchdog</code> runs <code>watchdog.sh</code> (its last relaunch was sec-891 at 10-16
 14:01:51Z, during the 429 stop). The stray session <code>f905</code> (an idle bash left from flake-905 on 10-16) can still be killed once confirmed idle. <code>$W/vm-macos3.lock</code>
 is free; <code>$W/vm-tart.lock</code> is held by pf84-cb1 (retaken per group; 01:46:47Z for group R3). No <code>$W/*.hold.md</code> exists. <b>4 sessions against the 6 cap</b> (3 once this update
 finishes). Launch times are from <code>todo.md</code> or, where it has no launch line, the tmux session's creation time.</p>
-<div><b>Request files:</b> none waiting. The newest are sec-1268's (granted 01:25Z) and sec-1240's two (granted 21:43Z, 22:54Z and 23:12Z); section 3 lists them.
+<div><b>Request files:</b> none waiting. The newest are sec-1268's (granted 01:25Z; its final round 7 was granted at 01:59Z in the sec-1268b brief) and sec-1240's two (granted 21:43Z, 22:54Z and 23:12Z); section 3 lists them.
 <b>Sign-in files:</b> <code>pf84-cb1.signin.md</code> (attempt 1, written about 22:14Z) was relayed and approved at once; watch it for a new attempt while pf84-cb1 runs.</div>
 <table><tr><th>Worker</th><th>Started (UTC)</th><th>What it is doing</th><th>Open work / watch for</th></tr>
 <tr><td>pf84-cb1</td><td>10-21 20:01</td><td>The PF-84 isolated code-blind acceptance run (D137, with D136's mid-session removal), flag on, on Tart clones with <code>corbanu.31b9f3ca</code> (section 8.2).
@@ -1901,16 +1909,19 @@ GLM 5.3 Flash testers; fresh clone per group; pauses if free memory drops below 
 <td>Main groups G1–G9 finished at 00:46Z and the replays G6R/G8R at 01:14Z; the amendment-v2 groups R1–R4 run now (R3 from 01:46Z). Interim results, including the D136 and NA-05
 failures, are in section 8.2. It may write a new <code>pf84-cb1.signin.md</code>: relay it at once. Then a docs PR under
 <code>qa/provider-auth/pf-84/</code> with an independent review (budget 5).</td></tr>
-<tr><td>sec-1268</td><td>10-21 ~22:45 (tmux)</td><td>#1268, decision-free: git run by launchers with arguments from input (<code>xargs</code>, <code>find -exec</code>, <code>parallel</code>, <code>env -S</code>, wrappers)
-goes through the git checks, failing closed where arguments come from input; and #1269 (<code>git config -f&lt;value&gt;</code> misread as the editor). Only adds prompts.</td>
-<td><b>#1273</b> (head <code>3749fdc8d0</code>, CI running). Rounds 1–5 each found an in-scope bypass (fixed); round 6 granted 01:25Z (section 3). Same-class leftovers on #1276.</td></tr>
-<tr><td>sec-1275</td><td>10-22 00:25</td><td>#1275, decision-free: a repeated <code>gh</code>/<code>crontab</code>/<code>corbanu</code> word made the classifier rescan the rest of the line per copy, unseen by the
-work counters; make it one pass, extend the counters and add a linearity test. Also looks at the SLOW <code>issue_1065_review_1_limits</code> test.</td>
-<td><b>#1279</b> (head <code>a923207eb3</code>, CI running). Touches the same file as #1273 and #1161: each merges main before its review.</td></tr>
+<tr><td>sec-1268b</td><td>10-22 02:01</td><td>Finishes #1273 (#1268: git run by launchers with arguments from input, such as <code>xargs</code>, <code>find -exec</code>,
+<code>parallel</code> and <code>env -S</code>, goes through the git checks, failing closed; #1269: <code>git config -f&lt;value&gt;</code> no longer misread as the editor). Only adds prompts.
+One final round 7 (section 3).</td>
+<td><b>#1273</b> (head <code>aaf4726093</code> at 02:00Z). Merges with the literal head SHA on APPROVE and green; a bar finding means fix, push, stop
+and report. Same-class leftovers on #1276.</td></tr>
+<tr><td>contrib-watch3</td><td>10-22 02:01</td><td>Contributor watch within existing approvals: #1161 round 5 if the author pushed after round 4; #1270 under D152 once ready (re-review if
+the head changed); new contributor PRs. Must not pre-empt D158–D160.</td><td>Watch list #1161, #1270, #998, #1029, #139, #141, #135, #161, #252, #1166, #1246, #1215, #1222
+and new PRs (#1271, #1272, #1277).</td></tr>
 <tr><td>handoff-doc10</td><td>10-22 01:25</td><td>This update (docs-only PR).</td><td>—</td></tr>
 </table>
 <div>Finished since the last update (results in <code>$HOME/.corbanu-workers/</code>): handoff-doc9, ci-1130, sec-1159, contrib-watch1, win-691, sbx-1056, flake-6, contrib-3,
-contrib-sec4, pf84-1193, sec-d153, small-fix12, sec-1255, small-fix13, contrib-watch2, utm-par3, sec-1240, ci-lin2 and small-fix14 (19 workers). Their PRs are in section 8.0d.
+contrib-sec4, pf84-1193, sec-d153, small-fix12, sec-1255, small-fix13, contrib-watch2, utm-par3, sec-1240, ci-lin2, small-fix14, and at 01:59Z sec-1275 (#1279) and sec-1268
+(#1273 left open for its final round) (21 workers). Their PRs are in section 8.0d.
 Work they left open:
 <ul>
 <li><b>sec-1159, sec-d153, sec-1255:</b> #1159's remainder (other programs' output options, <code>git clone</code>/<code>worktree add</code>, <code>PATH</code>/<code>BASH_ENV</code>, <code>GIT_DIR</code>
@@ -1924,7 +1935,8 @@ raising their deadline to 60 s would harden them).</li>
 #998, #1029, #139, #141, #135, #161, #252; #1224 and #1226 change TUI text and need hands-on checks in the next release record.</li>
 <li><b>pf84-1193:</b> #1080 (draft, green) waits on pf84-cb1, the Windows gate and sign-off; #1251 (D155).</li>
 <li><b>utm-par3:</b> D161–D165; #1266 (contributor #1270).</li>
-<li><b>ci-lin2:</b> <code>issue_1065_review_1_limits</code> is over 30 s on CI (sec-1275 is looking at it).</li>
+<li><b>ci-lin2, sec-1275:</b> #1279 split <code>issue_1065_review_1_limits</code>; postmerge CI will show whether it is still SLOW there. sec-1275's reviewer noted the linearity test
+wouldn't catch a return to uncounted <code>.any()</code> scans (a source-level lint would; no issue filed).</li>
 <li><b>ci-1130:</b> pre-existing: the from-source lint recipe probably doesn't pass its arguments through, and package runs print “unknown lint” warnings for dependencies.</li>
 </ul>
 Worktrees still on disk for merged work (check, then remove): <code>worktrees/sec-1176</code> (#1220), <code>worktrees/sec-1084</code> (#1114), <code>worktrees/pf84-ga2-1085</code> (#1090) and
@@ -1933,7 +1945,7 @@ Worktrees still on disk for merged work (check, then remove): <code>worktrees/se
 <table><tr><th>PR</th><th>Draft</th><th>Author</th><th>Updated</th><th>Title</th></tr><tr><td>1279</td><td>no</td><td>IridiumMaster</td><td>2026-10-22</td><td>security: judge repeated command words in one pass; faster glob reject (#1275)</td></tr><tr><td>1277</td><td>no</td><td>llmontgo</td><td>2026-10-21</td><td>message-history: move lookup_batch lock-release coverage into lock_lifetime_tests (#1003)</td></tr><tr><td>1273</td><td>no</td><td>IridiumMaster</td><td>2026-10-22</td><td>security: judge git given words from a launcher&#x27;s input (#1268, #1269)</td></tr><tr><td>1272</td><td>no</td><td>bradsbots</td><td>2026-10-21</td><td>tests: startup-lock child exits with the test process (#928)</td></tr><tr><td>1271</td><td>no</td><td>bradsbots</td><td>2026-10-21</td><td>tests: lookup_batch lock cases in lock_lifetime (#1003)</td></tr><tr><td>1270</td><td>yes</td><td>citadelculture</td><td>2026-10-21</td><td>fix(core): preserve GLM Standard reasoning selected in Spawn</td></tr><tr><td>1246</td><td>yes</td><td>citadelculture</td><td>2026-10-21</td><td>Use statx DONT_SYNC for Linux process-root identity</td></tr><tr><td>1222</td><td>no</td><td>bradsbots</td><td>2026-10-21</td><td>ci: cover more schema crates and test the gate (#1165)</td></tr><tr><td>1215</td><td>no</td><td>citadelculture</td><td>2026-10-21</td><td>refactor(core): share post-taint MCP call context</td></tr><tr><td>1166</td><td>yes</td><td>citadelculture</td><td>2026-10-21</td><td>fix(core): defer namespace allowance notes until the first attempt</td></tr><tr><td>1161</td><td>no</td><td>citadelculture</td><td>2026-10-22</td><td>fix(core): classify executable local Git configuration writes</td></tr><tr><td>1152</td><td>no</td><td>citadelculture</td><td>2026-10-20</td><td>fix: avoid repeated argument copies in arithmetic flags</td></tr><tr><td>1147</td><td>no</td><td>citadelculture</td><td>2026-10-20</td><td>fix: avoid repeated shared-target copies in sed judgments</td></tr><tr><td>1117</td><td>no</td><td>app/dependabot</td><td>2026-10-20</td><td>build(deps): bump opentelemetry_sdk from 0.31.0 to 0.33.1 in /codex-rs</td></tr><tr><td>1113</td><td>no</td><td>app/dependabot</td><td>2026-10-20</td><td>build(deps): bump actions/setup-node from 6.3.0 to 7.1.0</td></tr><tr><td>1080</td><td>yes</td><td>IridiumMaster</td><td>2026-10-21</td><td>PF-84: turn named accounts on by default (flag removal) — draft, needs Travis&#x27;s sign-off</td></tr><tr><td>1073</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>test(login): invoke provider-auth fixtures through sh</td></tr><tr><td>1063</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>test(transport): synchronize request timeout phases</td></tr><tr><td>1055</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>perf(core): cache shell substitution feed membership</td></tr><tr><td>1029</td><td>yes</td><td>citadelculture</td><td>2026-10-21</td><td>test(core): cover custom native spawn provider routes</td></tr><tr><td>998</td><td>yes</td><td>citadelculture</td><td>2026-10-21</td><td>fix: complete ZIP archive migration follow-ups</td></tr><tr><td>995</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>fix(cli): release Claude refresh locks with their owner</td></tr><tr><td>994</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>fix(arg0): release owned file locks when guards drop</td></tr><tr><td>990</td><td>yes</td><td>citadelculture</td><td>2026-10-19</td><td>fix(ci): use compiler response files for argument-comment lint</td></tr><tr><td>983</td><td>yes</td><td>citadelculture</td><td>2026-10-19</td><td>fix(core): avoid duplicate omitted-tool warnings across concurrent builds</td></tr><tr><td>979</td><td>yes</td><td>citadelculture</td><td>2026-10-20</td><td>fix(tui): name the enrolled account behind shared provider status</td></tr><tr><td>632</td><td>yes</td><td>IridiumMaster</td><td>2026-10-12</td><td>WIP (preserved): facilities — route Breeze to Bossa Nova</td></tr><tr><td>630</td><td>yes</td><td>IridiumMaster</td><td>2026-10-12</td><td>WIP (preserved): canary proxy-injection flake work (#222, likely superseded by #500)</td></tr><tr><td>252</td><td>no</td><td>grapemarketer</td><td>2026-10-21</td><td>Fix Task Node artifact URL parsing and GitHub type inference</td></tr><tr><td>161</td><td>no</td><td>meechmeechmeech</td><td>2026-10-21</td><td>Cap OpenRouter GLM 5.3 Flash output at Z.AI&#x27;s 128K (#129)</td></tr><tr><td>141</td><td>no</td><td>citadelculture</td><td>2026-10-21</td><td>test(models): protect six retained IDs across discovery and requests</td></tr><tr><td>139</td><td>no</td><td>wizbubba1</td><td>2026-10-21</td><td>docs: specify first-task wallet linkage proof</td></tr><tr><td>135</td><td>yes</td><td>citadelculture</td><td>2026-10-21</td><td>fix(models): make Grok 4.7 explicit-choice until tier pricing is supported</td></tr><tr><td>126</td><td>no</td><td>goodalexander</td><td>2026-10-02</td><td>fix(core): Vercel continuations, fake Continue. turns, and exec calls from Chat Completions providers</td></tr><tr><td>124</td><td>no</td><td>goodalexander</td><td>2026-10-02</td><td>fix(core): keep chat prompt-cache breakpoints on the newest turn (P0 cost)</td></tr><tr><td>113</td><td>no</td><td>goodalexander</td><td>2026-08-22</td><td>Add OpenRouter Ox Alpha model</td></tr><tr><td>112</td><td>no</td><td>goodalexander</td><td>2026-08-19</td><td>Fix noisy startup from stale global config and expired MCP auth</td></tr><tr><td>105</td><td>no</td><td>app/dependabot</td><td>2026-09-12</td><td>Bump hmac from 0.12.1 to 0.13.0 in /codex-rs</td></tr><tr><td>104</td><td>no</td><td>app/dependabot</td><td>2026-09-24</td><td>build(deps): bump time from 0.3.47 to 0.3.55 in /codex-rs</td></tr><tr><td>103</td><td>no</td><td>app/dependabot</td><td>2026-10-20</td><td>build(deps): bump insta from 1.46.3 to 1.48.0 in /codex-rs</td></tr><tr><td>101</td><td>no</td><td>app/dependabot</td><td>2026-09-12</td><td>Bump semver from 1.0.27 to 1.0.28 in /codex-rs</td></tr><tr><td>100</td><td>no</td><td>app/dependabot</td><td>2026-10-04</td><td>Bump actions/github-script from 8.0.0 to 9.0.0</td></tr><tr><td>99</td><td>no</td><td>app/dependabot</td><td>2026-10-04</td><td>Bump pnpm/action-setup from a8198c4bff370c8506180b035930dea56dbd5288 to fc06bc1257f339d1d5d8b3a19a8cae5388b55320</td></tr><tr><td>98</td><td>no</td><td>app/dependabot</td><td>2026-10-04</td><td>Bump actions/setup-python from 6.2.0 to 7.0.0</td></tr><tr><td>96</td><td>no</td><td>app/dependabot</td><td>2026-10-04</td><td>Bump peter-evans/create-pull-request from 8.1.0 to 8.1.1</td></tr><tr><td>94</td><td>no</td><td>goodalexander</td><td>2026-09-06</td><td>Sync PFTerminal with OpenAI Codex 0.147.0</td></tr><tr><td>88</td><td>yes</td><td>goodalexander</td><td>2026-08-09</td><td>wip: anthropic payload handling and Claude OAuth</td></tr><tr><td>28</td><td>yes</td><td>goodalexander</td><td>2026-08-09</td><td>Billing WS-A: token buckets + provider-reported cost</td></tr></table>
 <div>48 open PRs, snapshot from <code>gh pr list</code> at 01:34Z (62 at the last update).
 <ul>
-<li><b>Ours:</b> #1273 (sec-1268), #1279 (sec-1275), #1080 (draft, PF-84) and the preserved WIPs #632 and #630.</li>
+<li><b>Ours:</b> #1273 (sec-1268b), #1279 (merged 01:49Z, after the snapshot), #1080 (draft, PF-84) and the preserved WIPs #632 and #630.</li>
 <li><b>Outside contributors</b> (an independent review each; every decline gets a written explanation under the DECLINE RULE; CONTRIBUTOR-FIRST before we write overlapping code):
 <ul>
 <li>Reviewed, waiting on the author: #1161 (round 4 changes requested; pushed 00:30Z; D158), #998 (approved, needs main merged; D118, D146/D151), #1029 (D130), #139 (D132), #161 and
@@ -1952,9 +1964,10 @@ drafts: #1073, #1063, #995, #994, #990 and #983.</li>
 <p>Main head <code>2469e554dd</code> (merge of #1278, 10-22 01:06Z). <code>gh run list --branch main --workflow postmerge-ci</code> at 01:30Z, for the 40 runs from #1229's merge (14:06Z) on: 26 green,
 10 red, 3 cancelled and 1 in progress.</p>
 <ul>
-<li><b>Green</b> at <code>333f0b8db7</code> (#1274, the installed build), ending the red episode; <b>in progress:</b> <code>2469e554dd</code> (#1278).</li>
+<li><b>Green</b> at <code>333f0b8db7</code> (#1274, the installed build), ending the red episode, and, after the snapshot, at <code>2469e554dd</code> (#1278); <b>in progress</b> at about
+02:00Z: <code>b2fd8b3dc6</code> (#1279).</li>
 <li><b>Red:</b> #1237 and #1239 (the #1141/#1142 linearity test's timeout, fixed by #1247); #1257 (infrastructure: curl exit 35); and #1262, #1258, #991, #1100, #951, #1265 and #1249 (the
-<code>d153_checks_are_linear</code> timeout, fixed by #1274). Section 4 has the details. #1267, the bot's issue for the last episode, is still open: close it once #1278's run is green.</li>
+<code>d153_checks_are_linear</code> timeout, fixed by #1274). Section 4 has the details. #1267, the bot's issue for the last episode, is still open: close it (#1278's run is green).</li>
 <li><b>Cancelled:</b> #1221, #1224 and #1225 (superseded by the next merge a few seconds later).</li>
 <li><b>Nightly:</b> the scheduled runs of 10-15 to 10-21 all failed, seven in a row (10-21: the Bazel musl and native Windows test jobs). The last green nightly is still the 10-14 dispatch
 38646928235, and <b>#636 stays open</b>. Worth a worker when a slot is free.</li>
@@ -2032,7 +2045,7 @@ issue yet.</li>
 
 <h2>12. What to do next (recommended order)</h2>
 <ol>
-<li><b>Keep the 5-minute loop</b> on the running workers (<code>$HOME/.corbanu-workers/wait-event.sh 285 pf84-cb1 sec-1268 sec-1275</code>). In each round:
+<li><b>Keep the 5-minute loop</b> on the running workers (<code>$HOME/.corbanu-workers/wait-event.sh 285 pf84-cb1 sec-1268b contrib-watch3</code>). In each round:
 <ul>
 <li>Check <code>$W/*.request*.md</code> against the <b>newest</b> matching <code>grant*.md</code>, and <code>$W/*.hold.md</code>. Answer with <code>&lt;name&gt;.grant&lt;n&gt;.md</code> under the
 section 3 rules, and record the answer in <code>todo.md</code> and on the PR.</li>
@@ -2042,16 +2055,17 @@ section 3 rules, and record the answer in <code>todo.md</code> and on the PR.</l
 </ul>
 The overnight window runs 08:30Z–16:30Z; during it launch only decision-free work.</li>
 <li><b>Merge this update's PR.</b></li>
-<li><b>Main CI:</b> confirm #1278's postmerge run goes green, then close #1267 and #1143. Watch <code>issue_1065_review_1_limits</code> (next SLOW test). When a slot frees, launch a nightly
+<li><b>Main CI:</b> #1278's postmerge run is green: close #1267 and #1143; confirm #1279's run. Watch <code>issue_1065_review_1_limits</code> (next SLOW test). When a slot frees, launch a nightly
 worker for #636 (seven red scheduled nights; the 10-21 run failed in the Bazel musl and native Windows test jobs).</li>
-<li><b>Decision-free work to launch now</b> (slots: 2 free, 3 once this update exits): #1161's round 5 on the author's 00:30Z head (a contributor security worker; D158 covers what follows); the
-contributor queue under D152 (#1272; #1270 once ready); a stale-worktree cleanup (section 10).</li>
+<li><b>Decision-free work</b> (slots: 2 free, 3 once this update exits): contrib-watch3 covers #1161's round 5 and #1270; still to launch: the D152 queue for #1272, a
+stale-worktree cleanup (section 10), and the #636 nightly worker.</li>
 <li><b>When each running worker finishes</b>, read its result and bring its decisions to Travis:
 <ul>
 <li>pf84-cb1: its record PR merges on APPROVE and green; then bring #1080's remaining gates to Travis (Windows gate #694, sign-off) and, after pf84-cb1 is done, retire
 <code>corbanu.31b9f3ca</code>.</li>
-<li>sec-1268: #1273 merges on round 6's APPROVE (same-class items only) and green; its follow-ups stay on #1276.</li>
-<li>sec-1275: #1279 merges on APPROVE and green; it comments on #1275. #1273 and #1279 share a file: whichever merges second merges main first.</li>
+<li>sec-1268b: #1273 merges on round 7's APPROVE (same-class items only) and green; its follow-ups stay on #1276. If round 7 finds a bar item, the coordinator decides
+(sec-1268 listed: a short round, merge on round-6 evidence, or hold for #1276).</li>
+<li>contrib-watch3: its merges and any numbered items for Travis.</li>
 </ul>
 Don't merge a running worker's PR.</li>
 <li><b>As Travis answers:</b>
