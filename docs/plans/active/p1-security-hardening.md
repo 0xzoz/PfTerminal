@@ -249,7 +249,7 @@ Windows records need a real Windows machine for this step.
 
 ## Human acceptance
 
-2026-10-22 owner update: [D182–D185](../../../qa/security-levels/milestones/localmodel-run3-20261022/owner-decisions-20261022.md) accept MOD-11's observed behavior with its setup deviations disclosed, accept AGG-20P-A's command-dependent wording differences, and record MOD-21's evidenced pass. The accepted Aggressive disposition is 62/0/2, including D183's exception; Moderate is 32 passed and 2 accepted of 34, retaining MOD-11's deviations and D43 limit. Original run outcomes and prior sign-off records below remain unchanged; no new release sign-off is asserted.
+2026-10-22 owner update: [D182–D185](../../../qa/security-levels/milestones/localmodel-run3-20261022/owner-decisions-20261022.md) accept MOD-11's observed behavior with its setup deviations disclosed, accept AGG-20P-A's command-dependent wording differences, and record MOD-21's evidenced pass. The accepted Aggressive disposition is 62/0/2, including D183's exception; Moderate is 32 passed and 2 accepted of 34 when acceptance is counted separately, or 33 passed and 1 accepted under D182's owner disposition; MOD-11's deviations and D43 limit remain explicit. Original run outcomes and prior sign-off records below remain unchanged; no new release sign-off is asserted.
 
 | Milestone | Tester | Result |
 | --- | --- | --- |
