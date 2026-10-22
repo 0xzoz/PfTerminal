@@ -6006,9 +6006,10 @@ fn issue_1309_own_writes_in_possible_folders_are_linear() {
     for (label, unit) in [
         ("redirections", "cd /a || cd /b; echo x > a; "),
         ("writers", "(cd /b); cp x y z; "),
+        // Absolute targets keep the other folders live (below the cap).
         (
             "folder flags",
-            "cd /a || cd b; git -C c -C d log --output=e; ",
+            "cd /a || cd /b; git -C c -C d log --output=e; ",
         ),
         ("seds", "cd /a || cd /b; sed -n 'w a' x; "),
     ] {
