@@ -153,10 +153,27 @@ pub(super) fn prompt_expansion(text: &str) -> bool {
         .chars()
         .filter(|ch| !matches!(ch, '\'' | '"' | '\\'))
         .collect();
+    // #1064: a subscript whose end is uncertain counts only where some
+    // subscript's end is followed by an operator (in either reading).
+    let after_subscript = [joined.as_str(), bare.as_str()]
+        .iter()
+        .any(|text| operator_after_subscript(text));
     [joined.as_str(), bare.as_str()].iter().any(|text| {
         text.match_indices("@P").any(|(at, _)| {
             !text[at + 2..].starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
-        }) || computed_transformation(text)
+        }) || computed_transformation(text, after_subscript)
+    })
+}
+
+/// #1064: whether text holds `]@` followed by anything but one of the
+/// letters that only quote or describe a value (`${a[$(f)]@$p}`, but not
+/// `${a[@]}`, `"$@"` or `${a[i]@Q}`). The `]` that ends a subscript is
+/// written right before a transformation's `@` (backslash-newlines joined,
+/// or with quotes and backslashes removed). Linear.
+fn operator_after_subscript(text: &str) -> bool {
+    text.match_indices("]@").any(|(at, _)| {
+        work::step();
+        !text[at + 2..].starts_with(|ch: char| "QEAKakUuL".contains(ch))
     })
 }
 
@@ -164,7 +181,10 @@ pub(super) fn prompt_expansion(text: &str) -> bool {
 /// before it and a subscript after it) whose `op` is not one of `QEAKakUuL`
 /// (`${!prefix@}` lists names). A subscript is read at most 64 bytes; one
 /// not closed by then counts. Linear.
-fn computed_transformation(text: &str) -> bool {
+///
+/// #1064: such a subscript counts only when `after_subscript` (see
+/// [`operator_after_subscript`]), so `"${a[${#a[@]}-1]}"` does not.
+fn computed_transformation(text: &str, after_subscript: bool) -> bool {
     text.match_indices("${").any(|(at, _)| {
         work::step();
         let mut rest = &text[at + "${".len()..];
@@ -198,12 +218,12 @@ fn computed_transformation(text: &str) -> bool {
                             break;
                         }
                     }
-                    b'\'' | b'"' | b'\\' | b'`' | b'(' | b'{' => return true,
+                    b'\'' | b'"' | b'\\' | b'`' | b'(' | b'{' => return after_subscript,
                     _ => {}
                 }
             }
             let Some(close) = close else {
-                return true;
+                return after_subscript;
             };
             rest = &rest[close + 1..];
         }

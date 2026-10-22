@@ -35,6 +35,7 @@ mod grammar;
 mod indirect;
 mod invocation;
 mod launched_git;
+mod loader_variables;
 mod named_shell;
 mod nested;
 mod outbound;
@@ -521,6 +522,10 @@ fn judged(action: &ApprovalAction, homes: Homes, as_named: bool) -> Classifier {
             }
         }
     }
+    // #1064: an interactive POSIX shell sources the file `ENV` names.
+    if classifier.sets_env && classifier.interactive_shell {
+        classifier.note(ProtectedActionKind::UnseenCode);
+    }
     // A lookup budget ran out: something was not followed.
     if classifier.homes.exhausted() {
         classifier.note(ProtectedActionKind::UnseenCode);
@@ -556,11 +561,18 @@ impl Classifier {
             backslash: false,
             in_file: 0,
             reads_follow: false,
+            workspace: String::new(),
+            cut_values: HashSet::new(),
+            sets_env: false,
+            interactive_shell: false,
         }
     }
 
     /// Judge a command line run in `cwd`.
     fn judge_command(&mut self, command: &[String], cwd: &str) {
+        if self.workspace.is_empty() {
+            self.workspace = cwd.to_string();
+        }
         self.homes.allow_lookups_under(cwd);
         self.path(cwd);
         self.command(command, cwd, /*depth*/ 0);
@@ -902,6 +914,15 @@ struct Classifier {
     /// script runs the first judgment follows exactly
     /// (`named_shell::windows_reads_follow`); only then does it open files.
     reads_follow: bool,
+    /// #1064: the action's working folder, where the agent may write.
+    workspace: String,
+    /// #1064: variables whose value the word lexer may have cut short
+    /// (`loader_variables::scan_split_values`).
+    cut_values: HashSet<String>,
+    /// #1064: the action sets `ENV`, and starts a shell that may be
+    /// interactive (which sources it).
+    sets_env: bool,
+    interactive_shell: bool,
     /// Inside text rebuilt from joined literals: it names things but is not
     /// itself run, so its variables are not judged as unseen code.
     rebuilt: usize,
@@ -1255,6 +1276,20 @@ impl Classifier {
                 variables.insert(name.to_string(), value.to_string());
             }
         }
+        // #1064: assignments the word lexer does not read as the shell does
+        // (a quoted blank, `~` or `$`).
+        for arg in command {
+            work::step();
+            let mut cut = std::mem::take(&mut self.cut_values);
+            let judgment = loader_variables::scan_split_values(
+                arg,
+                &mut cut,
+                self.homes.windows_paths(),
+                &|entry| self.writable_folder(entry, &[cwd]),
+            );
+            self.cut_values = cut;
+            self.loader_judgment(&judgment);
+        }
         let mut lexed_seds = 0;
         let mut lexed_shells = 0;
         let mut arithmetic = arithmetic::Arithmetic::new(command);
@@ -1546,6 +1581,30 @@ impl Classifier {
         // #1142: setting a variable whose value git or a pager runs.
         if code_variables::sets_code_variable(simple, words, command.as_ref()) {
             self.note(ProtectedActionKind::UnseenCode);
+        }
+        // #1064: a variable that makes a later program load code, set to a
+        // risky value (`PATH=./bin:$PATH`, `NODE_OPTIONS=--require=x`).
+        let here: Vec<&str> = [folders.cwd.as_str(), folders.previous.as_str()]
+            .into_iter()
+            .chain(folders.others.iter().map(String::as_str))
+            .collect();
+        let mut cut = std::mem::take(&mut self.cut_values);
+        let judgment = loader_variables::judge(
+            simple,
+            words,
+            command.as_ref(),
+            &mut cut,
+            self.homes.windows_paths(),
+            &|entry| self.writable_folder(entry, &here),
+        );
+        self.cut_values = cut;
+        self.loader_judgment(&judgment);
+        if !self.interactive_shell {
+            let fed = simple.pipe_from.is_some()
+                || simple.stdin_from.is_some()
+                || simple.here_string.is_some()
+                || simple.reads_outer_output;
+            self.interactive_shell = loader_variables::starts_interactive_shell(&lower, fed);
         }
         // #1141: an output option makes a writer of its command, and its
         // value is a file written (`git log --output=~/.zshrc`, `-o.zshrc`).
@@ -1865,6 +1924,61 @@ impl Classifier {
                 // `C:`'s own folder, which the probes below do not change.
                 || (self.homes.windows_paths() && windows_reads::drive_relative(word))
                 || self.homes.resolve(word, "/a") != self.homes.resolve(word, "/b"))
+    }
+
+    /// #1064: note what [`loader_variables`] found.
+    fn loader_judgment(&mut self, judgment: &loader_variables::Judgment) {
+        self.sets_env |= judgment.sets_env;
+        if judgment.risky {
+            self.note(ProtectedActionKind::UnseenCode);
+        }
+    }
+
+    /// #1064: whether `entry` (a search-path entry, absolute or under `~`)
+    /// is a folder the agent may write: in the action's working folder, in
+    /// a folder of `here` (where the line is; the first resolves `entry`),
+    /// or in a temp folder. Also through canonical forms.
+    fn writable_folder(&self, entry: &str, here: &[&str]) -> bool {
+        let cwd = here.first().copied().unwrap_or(&self.workspace);
+        let resolved = self.homes.resolve(entry, cwd);
+        if resolved.starts_with('~') {
+            // The home is unknown.
+            return true;
+        }
+        let key = |path: &str| path.replace('\\', "/").to_lowercase();
+        let spellings = |path: &str| {
+            let mut spellings = vec![key(path)];
+            spellings.extend(self.homes.canonical(path).map(|canonical| key(&canonical)));
+            spellings
+        };
+        let paths = spellings(&resolved);
+        let temp = std::env::temp_dir().to_string_lossy().into_owned();
+        let roots = [self.workspace.as_str()]
+            .into_iter()
+            .chain(here.iter().copied())
+            .chain([
+                "/tmp",
+                "/private/tmp",
+                "/var/folders",
+                "/private/var/folders",
+            ])
+            .chain([temp.as_str()]);
+        let mut found = false;
+        for root in roots {
+            work::step();
+            if root.is_empty() {
+                continue;
+            }
+            for root in spellings(&self.homes.resolve(root, cwd)) {
+                work::step();
+                let root = root.trim_end_matches('/');
+                found |= paths.iter().any(|path| {
+                    path.strip_prefix(root)
+                        .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+                });
+            }
+        }
+        found
     }
 
     /// Follow `cd`, `pushd` and `popd` (also behind `builtin`/`command`).
