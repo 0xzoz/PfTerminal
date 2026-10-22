@@ -147,6 +147,9 @@ fn follows(command: &[String], depth: usize) -> bool {
         return false;
     };
     if depth > MAX_FOLLOWED_DEPTH
+        // A shell named by a path may be any program (`./bash`, `/bin/bash`
+        // is `\bin\bash` on the working folder's drive under Windows).
+        || shell.contains(['/', '\\'])
         || !posix_shell(shell)
         // Not `-lc`: an MSYS2 or Cygwin login shell's profile may `cd` to
         // the home before the script runs.
@@ -183,6 +186,10 @@ fn followed(words: &[PlainWord], depth: usize) -> bool {
         return false;
     };
     if posix_shell(name) {
+        // A shell named by a path may be any program (see `follows`).
+        if name.contains(['/', '\\']) {
+            return false;
+        }
         let short = |letter: char| {
             texts[1..].iter().any(|word| {
                 word.starts_with('-') && !word.starts_with("--") && word.contains(letter)
