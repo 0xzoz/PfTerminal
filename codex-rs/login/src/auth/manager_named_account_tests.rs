@@ -147,11 +147,12 @@ async fn a_removed_accounts_sign_in_is_dropped_from_memory() {
             .expect("remove")
     );
 
-    assert!(work.auth().await.is_none());
+    // Synchronous readers (connector headers, MCP refresh) see it too.
     assert!(work.auth_cached().is_none());
+    assert!(work.auth().await.is_none());
     let reason = work.named_sign_in_unavailable().expect("a reason");
     assert!(
-        reason.contains("account `work` has no sign-in (it was removed or signed out)")
+        reason.contains("account `work` has no sign-in (it may have been removed or signed out)")
             && reason.contains("corbanu login --account work")
             && reason.contains("`/providers`"),
         "{reason}"

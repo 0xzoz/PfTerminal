@@ -119,7 +119,7 @@ async fn named_openai_account_removed_mid_session_is_refused() {
     };
     let message = error.to_string();
     assert!(
-        message.contains("account `work` has no sign-in (it was removed or signed out)")
+        message.contains("account `work` has no sign-in (it may have been removed or signed out)")
             && message.contains("corbanu login --account work"),
         "{message}"
     );
@@ -141,7 +141,7 @@ async fn named_openai_account_removed_mid_session_is_refused() {
     assert!(
         error
             .to_string()
-            .contains("account `work` has no sign-in (it was removed or signed out)"),
+            .contains("account `work` has no sign-in (it may have been removed or signed out)"),
         "{error}"
     );
     let _ = std::fs::remove_dir_all(&home);

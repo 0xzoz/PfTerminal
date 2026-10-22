@@ -430,7 +430,7 @@ named_accounts = true
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{stderr}");
     assert!(
-        stderr.contains("account `work` has no sign-in (it was removed or signed out)")
+        stderr.contains("account `work` has no sign-in (it may have been removed or signed out)")
             && stderr.contains("corbanu login --account work"),
         "{stderr}"
     );

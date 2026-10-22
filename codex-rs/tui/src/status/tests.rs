@@ -2899,7 +2899,7 @@ async fn named_sign_in_status(signed_in: bool) -> String {
         /*refreshing_rate_limits*/ false,
         Some(account_usage),
     );
-    render_lines(&composite.display_lines(/*width*/ 200)).join("\n")
+    render_lines(&composite.display_lines(/*width*/ 100)).join("\n")
 }
 
 /// D171 (#1286): once the session's ChatGPT account is removed or signed
@@ -2920,9 +2920,7 @@ async fn status_does_not_present_a_removed_sign_in_account_as_the_sessions() {
     );
     assert!(
         removed.contains(
-            "account work has no sign-in (it was removed or signed out); its requests are \
-             refused. Sign in with `corbanu login --account work` or pick another account in \
-             `/providers`"
+            "account work has no sign-in: `corbanu login --account work` or `/providers`"
         ),
         "{removed}"
     );

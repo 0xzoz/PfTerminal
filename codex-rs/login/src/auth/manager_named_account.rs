@@ -33,6 +33,12 @@ use crate::auth::storage::AuthStorageBackend;
 
 type Registry = HashMap<(PathBuf, NamedChatgptAccount), Weak<AuthManager>>;
 
+/// D171 (#1286): see [`AuthManager::named_sign_in_still_stored`].
+pub(super) struct NamedAccountStore {
+    vault: codex_vault::Vault,
+    checked: Mutex<Option<codex_vault::VaultStorageMarker>>,
+}
+
 static NAMED_ACCOUNT_MANAGERS: LazyLock<Mutex<Registry>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
@@ -84,24 +90,51 @@ impl AuthManager {
         self.named_account.as_ref()
     }
 
-    /// D171 (#1286): whether the vault index still lists this named
-    /// account's sign-in. Reads the index only, never the sign-in. `false`
-    /// when it was removed or signed out (by any process) or the index
-    /// cannot be read; `true` for the default login's manager.
+    /// D171 (#1286): whether the vault still lists this named account's
+    /// sign-in; `false` once it was removed or signed out by any process.
+    /// While the store is unchanged since it last held the account this is
+    /// one file-metadata read; otherwise the vault index (never the sign-in)
+    /// is read through this manager's own vault handle, whose decrypted
+    /// store stays cached. An index that cannot be read keeps the sign-in
+    /// (and is read again next time). `true` for the default login's manager.
     pub(super) fn named_sign_in_still_stored(&self) -> bool {
-        let Some(account) = self.named_account.as_ref() else {
+        let (Some(account), Some(store)) = (self.named_account.as_ref(), self.named_store.as_ref())
+        else {
             return true;
         };
-        crate::provider_account_holds(
-            &self.codex_home,
-            &account.provider_id,
-            &account.name,
-            codex_vault::ProviderAccountKind::ChatgptAuth,
-        )
-        .unwrap_or_else(|error| {
-            tracing::warn!(%account, %error, "named account index unavailable");
-            false
-        })
+        let marker = store.vault.storage_marker();
+        let mut checked = store
+            .checked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if marker.is_some() && *checked == marker {
+            return true;
+        }
+        if marker.is_none()
+            || store.vault.key_storage() == codex_vault::VaultKeyStorage::NotInitialized
+        {
+            *checked = None;
+            return false;
+        }
+        let Ok(name) = codex_vault::ProviderAccountName::parse(&account.name) else {
+            *checked = None;
+            return false;
+        };
+        let holds = store
+            .vault
+            .provider_account_kinds(&account.provider_id, &name)
+            .map(|kinds| kinds.contains(&codex_vault::ProviderAccountKind::ChatgptAuth));
+        match holds {
+            Ok(holds) => {
+                *checked = holds.then_some(marker).flatten();
+                holds
+            }
+            Err(error) => {
+                tracing::warn!(%account, %error, "named account index unavailable; keeping the sign-in");
+                *checked = None;
+                true
+            }
+        }
     }
 
     /// PF-84-S06 (#571): why this named account's manager has no usable
@@ -116,8 +149,8 @@ impl AuthManager {
             // D171 (#1286): also a session whose account was removed or
             // signed out while it ran.
             Ok(None) => Some(format!(
-                "account `{name}` has no sign-in (it was removed or signed out); sign in \
-                 with `corbanu login --account {name}` (add `--with-api-key` for an API key), \
+                "account `{name}` has no sign-in (it may have been removed or signed out); \
+                 sign in with `corbanu login --account {name}` (add `--with-api-key` for an API key), \
                  or pick another account (`/providers` in the TUI, `--account` on the \
                  command line)",
                 name = account.name
@@ -158,6 +191,10 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             auth_route_config: self.auth_route_config.clone(),
+            named_store: Some(NamedAccountStore {
+                vault: codex_vault::Vault::new(self.codex_home.clone()),
+                checked: Mutex::new(None),
+            }),
             named_account: Some(account),
             forced_login_method: self.forced_login_method,
             base_manager: Some(base),

@@ -261,7 +261,7 @@ fingerprint.
 - An account removed or signed out while a session runs on it (from any
   terminal, for example `corbanu account remove openai work`) is not used
   again: the session's next request is refused with "account `work` has no
-  sign-in (it was removed or signed out)" and the recovery
+  sign-in (it may have been removed or signed out)" and the recovery
   (`corbanu login --account work`, or another account in `/providers` or with
   `--account`), never sent on the sign-in the session still held or on the
   default login. `/status` then shows `account unavailable` on the provider

@@ -350,9 +350,12 @@ impl StatusHistoryCell {
                 let summary = codex_login::named_account_summary(&config.codex_home, &account);
                 (account, summary)
             });
-        let session_account_gone = named_sign_in
-            .as_ref()
-            .is_some_and(|(_, summary)| matches!(summary, Ok(None)));
+        // With a remote app server the account lives on the remote host, so
+        // this home's vault does not tell.
+        let session_account_gone = remote_connection.is_none()
+            && named_sign_in
+                .as_ref()
+                .is_some_and(|(_, summary)| matches!(summary, Ok(None)));
         let model_provider = format_model_provider(
             config,
             runtime_model_provider_base_url,
@@ -363,7 +366,8 @@ impl StatusHistoryCell {
         let account_usage = account_usage.filter(|_| provider_has_named_account);
         let show_chatgpt_usage_link = config.model_provider.requires_openai_auth;
         let account = compose_account_display(account_display);
-        let account_value = status_account_value(config, account_display, named_sign_in);
+        let account_value =
+            status_account_value(config, account_display, named_sign_in, remote_connection);
         let security = crate::security::view::status_summary(
             config.security_level,
             crate::legacy_core::security_level_change::configured_level(config),
@@ -761,6 +765,7 @@ fn status_account_value(
         codex_login::NamedChatgptAccount,
         std::io::Result<Option<codex_login::NamedSignInSummary>>,
     )>,
+    remote_connection: Option<&RemoteConnectionStatus>,
 ) -> Option<String> {
     let provider = &config.model_provider;
     // PF-84-S06: a named sign-in account describes itself, never the default
@@ -773,12 +778,12 @@ fn status_account_value(
                 account.name
             ),
             // D171 (#1286): removed or signed out, also while the session ran.
-            Ok(None) => format!(
-                "account {name} has no sign-in (it was removed or signed out); its requests \
-                 are refused. Sign in with `corbanu login --account {name}` or pick another \
-                 account in `/providers`",
+            // Short, as the line is cut at the card's width.
+            Ok(None) if remote_connection.is_none() => format!(
+                "account {name} has no sign-in: `corbanu login --account {name}` or `/providers`",
                 name = account.name
             ),
+            Ok(None) => format!("account {} is not signed in", account.name),
             Err(_) => format!("account {} is not signed in", account.name),
         });
     }

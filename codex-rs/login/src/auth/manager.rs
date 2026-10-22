@@ -2559,6 +2559,10 @@ pub struct AuthManager {
     /// refreshes and logs out only that account's vault store, never the
     /// default login, the environment or the ephemeral store.
     named_account: Option<NamedChatgptAccount>,
+    /// D171 (#1286): for a named-account manager, its vault handle (kept so
+    /// the decrypted store stays cached) and the store marker last seen
+    /// holding the account.
+    named_store: Option<named_account::NamedAccountStore>,
     /// The login method the configuration requires (`forced_login_method` as
     /// configured, not the API-key-only onboarding default a third-party
     /// session provider implies); a named account's sign-in of the other
@@ -2749,6 +2753,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             named_account: None,
+            named_store: None,
             forced_login_method: None,
             base_manager: None,
             hide_restricted_default_login: false,
@@ -2782,6 +2787,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             named_account: None,
+            named_store: None,
             forced_login_method: None,
             base_manager: None,
             hide_restricted_default_login: false,
@@ -2814,6 +2820,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             named_account: None,
+            named_store: None,
             forced_login_method: None,
             base_manager: None,
             hide_restricted_default_login: false,
@@ -2854,6 +2861,7 @@ impl AuthManager {
             external_auth: RwLock::new(None),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             named_account: None,
+            named_store: None,
             forced_login_method: None,
             base_manager: None,
             hide_restricted_default_login: false,
@@ -2905,6 +2913,7 @@ impl AuthManager {
             )) as Arc<dyn ExternalAuth>)),
             provider_api_key_cache: RwLock::new(ProviderApiKeyCache::new()),
             named_account: None,
+            named_store: None,
             forced_login_method: None,
             base_manager: None,
             hide_restricted_default_login: false,
@@ -2918,7 +2927,15 @@ impl AuthManager {
     }
 
     /// Current cached auth (clone) without attempting a refresh.
+    ///
+    /// D171 (#1286): a named account's sign-in is dropped once the account
+    /// was removed or signed out (by any process); [`AuthManager::auth`]
+    /// picks up a later sign-in.
     pub fn auth_cached(&self) -> Option<CodexAuth> {
+        if !self.named_sign_in_still_stored() {
+            self.set_cached_auth(/*new_auth*/ None);
+            return None;
+        }
         self.inner
             .read()
             .ok()
