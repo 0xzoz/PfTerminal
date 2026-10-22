@@ -1046,7 +1046,7 @@ impl Classifier {
         if windows_persistence(&lower, piped) {
             self.note(ProtectedActionKind::Persistence);
         }
-        let mut git_config = GitConfigWrites::new(&lower);
+        let mut git_config = GitConfigWrites::new(&lower, &[], &[]);
         let mut later = LaterWords::new(&lower);
         let mut named_programs = 0;
         for (index, word) in words.iter().enumerate() {
