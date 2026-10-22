@@ -1357,6 +1357,9 @@ impl Classifier {
                 }
             }
         }
+        if self.rebuilt == 0 && indirect::misread_command(simple, words) {
+            self.note(ProtectedActionKind::UnseenCode);
+        }
         if let Some((index, name)) = &command {
             let args = &words[index + 1..];
             // Code named by a variable or substitution the classifier cannot
@@ -1371,7 +1374,10 @@ impl Classifier {
                         .position(|word| word.ends_with(code))
                         .is_some_and(|at| unseen[at..].iter().any(|unseen| *unseen)))
             });
-            let eval_unseen = name == "eval" && unseen[index + 1..].iter().any(|unseen| *unseen);
+            // #988: `trap` runs its action later, like `eval` now. The word
+            // lexer splits a quoted action, so every operand counts.
+            let eval_unseen = matches!(name.as_str(), "eval" | "trap")
+                && unseen[index + 1..].iter().any(|unseen| *unseen);
             if self.rebuilt == 0 && (unseen[*index] || inline_unseen || eval_unseen) {
                 self.note(ProtectedActionKind::UnseenCode);
             }

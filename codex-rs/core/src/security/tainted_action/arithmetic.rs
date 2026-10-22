@@ -2557,7 +2557,7 @@ fn unseen_substitution(region: &str) -> bool {
 }
 
 /// `NAME=value`, `NAME+=value` or `NAME[sub]=value`: the name and value.
-fn assignment(word: &str) -> Option<(&str, &str)> {
+pub(super) fn assignment(word: &str) -> Option<(&str, &str)> {
     let (left, value) = word.split_once('=')?;
     let left = left.strip_suffix('+').unwrap_or(left);
     let name = left.split_once('[').map_or(left, |(name, _)| name);
