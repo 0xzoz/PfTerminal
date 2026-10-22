@@ -734,10 +734,11 @@ pub(super) fn starts_interactive_shell(lower: &[String], fed: bool) -> bool {
         let mut skip = false;
         for (offset, option) in lower[at + 1..].iter().enumerate() {
             work::step();
-            // Past this many options it may be interactive; the cap keeps
-            // the scans from one shell word to the next linear.
+            // Past this many options it may be interactive (a later `-i`);
+            // the cap keeps the scans from one shell word to the next
+            // linear.
             if offset >= MAX_SHELL_OPTIONS {
-                return !fed;
+                return true;
             }
             if std::mem::take(&mut skip) {
                 continue;

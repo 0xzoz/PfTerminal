@@ -6721,6 +6721,9 @@ fn issue_1064_loading_variables_with_risky_values_are_unseen_code() {
         "read PATH[0] < f",
         "select PATH in ./bin; do git log; done",
         "JAVA_TOOL_OPTIONS=-Djava.class.path=. java -version",
+        // Review 2.
+        "cd /opt/x; cd /; cd /usr; PATH=/opt/x:$PATH make",
+        "ENV=./x.sh sh -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -i -c : </dev/null",
         "env \"PATH=/usr/bin :.\" git log",
         // Other ways to set it.
         "PATH+=:./bin; git log",
@@ -6882,6 +6885,14 @@ fn issue_1064_uncertain_subscripts_ask_only_before_an_operator() {
         "awk 'BEGIN { system(\"echo ${a[$((0))]\" sprintf(\"%c\", 64) \"P}\") }' # @",
         "py=python3; $py -c 'import os; t=\"[@]\"; os.system(\"echo ${a[$((0))]\" + t[1] + \"P}\")'",
         "alias p=python3; p -c 'import os; t=\"[@]\"; os.system(\"echo ${a[$((0))]\" + t[1] + \"P}\")'",
+        // Review 2: shell escapes, programs not known as interpreters, and
+        // aliases of more than one word.
+        "git log -1 --author=me@example.com; printf 'p=P; mapfile a <notes; echo ${a[$((0))]\\x40$p}\\n' | bash",
+        "echo -e 'p=P; echo ${a[$((0))]\\x40$p}' | bash # @",
+        "vim -es -c 'set shell=bash' -c 'call system(\"mapfile a <notes; p=P; echo ${a[$((0))]\" . nr2char(64) . \"$p}\")' -c 'qa!' # x@y",
+        "shopt -s expand_aliases; alias p='env python3'; p -c 'import os; t=\"[@]\"; os.system(\"echo ${a[$((0))]\" + t[1] + \"P}\")'",
+        "printf 'echo ${a[$((0))]\\x40P}' | echo $(perl -e 'exec bash') # x@y",
+        "printf 'echo ${a[$((0))]\\x40P}' | echo $(sh + 1) # x@y",
     ] {
         if script(command) != Some(UnseenCode) {
             wrong.push(command);
@@ -6895,6 +6906,8 @@ fn issue_1064_uncertain_subscripts_ask_only_before_an_operator() {
         "echo \"${a[`date +%s`]}\" ${#a[@]}",
         "echo \"${a[${#a[@]}-1]@Q}\"",
         "echo \"${a[$(date +%s)]}\" user@host",
+        "for i in 0 1; do echo \"${a[$((i+1))]}\" ${#a[@]}; done",
+        "x=\"${a[$(date +%s)]}\"; printf '%s\\n' \"$x\" \"$@\"",
     ] {
         if script(command).is_some() {
             wrong.push(command);

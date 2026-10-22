@@ -565,6 +565,9 @@ impl Classifier {
             cut_values: HashSet::new(),
             sets_env: false,
             interactive_shell: false,
+            rebuilt_foreign: true,
+            visited: Vec::new(),
+            visited_all: true,
         }
     }
 
@@ -871,6 +874,105 @@ fn has_flag(word: &str, flag: &str) -> bool {
     }
 }
 
+/// #1064: programs and shell words that neither build text nor run it as
+/// code (`printf` may decode `\x40`, but only to its output or a variable,
+/// which another command would have to run).
+const BUILDS_NO_CODE: &[&str] = &[
+    // The rest of `${a[$((i+1))]}` after the lexer's `))`.
+    "]",
+    "}",
+    "echo",
+    "printf",
+    ":",
+    "true",
+    "false",
+    "test",
+    "[",
+    "[[",
+    "]]",
+    "local",
+    "declare",
+    "typeset",
+    "export",
+    "readonly",
+    "unset",
+    "shift",
+    "return",
+    "exit",
+    "break",
+    "continue",
+    "cd",
+    "pushd",
+    "popd",
+    "dirs",
+    "read",
+    "mapfile",
+    "readarray",
+    "wait",
+    "for",
+    "in",
+    "case",
+    "esac",
+    "done",
+    "fi",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "sort",
+    "uniq",
+    "cut",
+    "tr",
+    "date",
+    "basename",
+    "dirname",
+    "mkdir",
+    "touch",
+    "rm",
+    "cp",
+    "mv",
+    "seq",
+    "pwd",
+    "grep",
+    "sleep",
+    "stat",
+    "realpath",
+    "readlink",
+];
+
+/// #1064: whether a simple command builds no shell text it runs: the text
+/// of an arithmetic expansion, no command, one of [`BUILDS_NO_CODE`] not
+/// behind a wrapper, or a shell given its script on the line (judged as a
+/// line of its own).
+fn runs_no_built_text(simple: &SimpleCommand) -> bool {
+    if simple.arithmetic {
+        return true;
+    }
+    let Some((index, name)) = indirect::command_word(&simple.words) else {
+        return simple.words.iter().all(|word| {
+            work::step();
+            word.contains('=')
+        });
+    };
+    // Before it only assignments and keywords (`do`, `then`, `!`), no
+    // wrapper.
+    let bare = simple.words[..index].iter().all(|word| {
+        work::step();
+        (word.contains('=') && !word.starts_with('-'))
+            || matches!(
+                word.as_str(),
+                "!" | "if" | "then" | "elif" | "else" | "do" | "while" | "until"
+            )
+    });
+    let inline_script = shell::SHELLS.contains(&name.as_str())
+        && matches!(
+            invocation::parse(&name, &simple.words[index + 1..]).map(|invocation| invocation.code),
+            Some(Code::Inline(None))
+        );
+    bare && (BUILDS_NO_CODE.contains(&name.as_str()) || inline_script)
+}
+
 /// #1064: folders a line may be in that a value the lexer cuts short is
 /// judged against; past it such a value asks.
 const MAX_VISITED_FOLDERS: usize = 64;
@@ -937,6 +1039,13 @@ struct Classifier {
     /// interactive (which sources it).
     sets_env: bool,
     interactive_shell: bool,
+    /// #1064: the folders the line being judged has been in (up to
+    /// `MAX_VISITED_FOLDERS`; `visited_all` is false past it).
+    visited: Vec<String>,
+    visited_all: bool,
+    /// #1064: the `foreign` reading of the line whose joined literals are
+    /// being judged (see `command`).
+    rebuilt_foreign: bool,
     /// Inside text rebuilt from joined literals: it names things but is not
     /// itself run, so its variables are not judged as unseen code.
     rebuilt: usize,
@@ -1252,33 +1361,15 @@ impl Classifier {
         // #841: this line's own sed programs (nested lines have theirs).
         let outer_scope = std::mem::replace(&mut self.sed_scope, SedScope::of(command));
         let lexed = shell::simple_commands(command);
-        // #1064: the line may run another language's code, which can build
-        // shell text at run time (see `shell::prompt_expansion`).
-        // (Text rebuilt from joined literals is read from such a line.)
-        let foreign = self.not_shell > 0
-            || lexed.commands.iter().any(|simple| {
-                // A program named by a variable may be one (`$py -c`), as may
-                // an alias's value (`alias p=python3`).
-                (self.rebuilt == 0
-                    && indirect::command_word(&simple.words).is_some_and(|(_, name)| {
-                        name.contains('$') || name.contains(shell::UNSEEN_OUTPUT)
-                    }))
-                    || simple
-                        .words
-                        .iter()
-                        .flat_map(|word| word.split('='))
-                        .any(|word| {
-                            work::step();
-                            let name = basename(word).to_lowercase();
-                            (!shell::SHELLS.contains(&name.as_str())
-                                && !matches!(name.as_str(), "source" | ".")
-                                && invocation::parse(&name, &[]).is_some())
-                                || matches!(
-                                    name.as_str(),
-                                    "awk" | "gawk" | "mawk" | "nawk" | "busybox"
-                                )
-                        })
-            });
+        // #1064: whether the line may build shell text at run time (another
+        // language's `chr(64)`, `printf '\x40' | bash`); see
+        // `shell::prompt_expansion`. Text rebuilt from joined literals is
+        // read from the line it was joined in.
+        let foreign = if self.rebuilt > 0 {
+            self.rebuilt_foreign
+        } else {
+            self.not_shell > 0 || !lexed.commands.iter().all(runs_no_built_text)
+        };
         let pipe_sources: std::collections::HashSet<usize> = lexed
             .commands
             .iter()
@@ -1330,8 +1421,8 @@ impl Classifier {
             self.loader_judgment(&judgment);
         }
         // #1064: every folder the line is in, up to a limit.
-        let mut visited: Vec<String> = vec![cwd.to_string()];
-        let mut visited_all = true;
+        let outer_visited = std::mem::replace(&mut self.visited, vec![cwd.to_string()]);
+        let outer_visited_all = std::mem::replace(&mut self.visited_all, true);
         let mut lexed_seds = 0;
         let mut lexed_shells = 0;
         let mut arithmetic = arithmetic::Arithmetic::new(command);
@@ -1388,25 +1479,23 @@ impl Classifier {
                 &mut loops,
                 depth,
             );
-            if !splits.is_empty() {
-                for folder in std::iter::once(&folders.cwd).chain(&folders.others) {
-                    work::step();
-                    if visited.contains(folder) {
-                        continue;
-                    }
-                    if visited.len() >= MAX_VISITED_FOLDERS {
-                        visited_all = false;
-                    } else {
-                        visited.push(folder.clone());
-                    }
+            for folder in std::iter::once(&folders.cwd).chain(&folders.others) {
+                work::step();
+                if self.visited.contains(folder) {
+                    continue;
+                }
+                if self.visited.len() >= MAX_VISITED_FOLDERS {
+                    self.visited_all = false;
+                } else {
+                    self.visited.push(folder.clone());
                 }
             }
         }
         if !splits.is_empty() {
-            let here: Vec<&str> = visited.iter().map(String::as_str).collect();
+            let here: Vec<&str> = self.visited.iter().map(String::as_str).collect();
             let roots = std::cell::OnceCell::new();
             let windows = self.homes.windows_paths();
-            let risky = !visited_all
+            let risky = !self.visited_all
                 || splits.iter().any(|split| {
                     work::step();
                     loader_variables::judge_split(split, windows, &|entry| {
@@ -1438,6 +1527,7 @@ impl Classifier {
         }
         self.path(&folders.cwd);
         // Strings assembled from literals by inline code (`'~/.co' + 'dex'`).
+        let outer_foreign = std::mem::replace(&mut self.rebuilt_foreign, foreign);
         for arg in command {
             work::step();
             for joined in indirect::joined_literals(arg) {
@@ -1449,9 +1539,12 @@ impl Classifier {
                 self.rebuilt -= 1;
             }
         }
+        self.rebuilt_foreign = outer_foreign;
         // #885: nested shells' scripts and sed programs, read with quotes.
         self.quoted_pass(command, cwd, depth, (lexed_seds, lexed_shells));
         self.sed_scope = outer_scope;
+        self.visited = outer_visited;
+        self.visited_all = outer_visited_all;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1660,6 +1753,7 @@ impl Classifier {
         let here: Vec<&str> = [folders.cwd.as_str(), folders.previous.as_str()]
             .into_iter()
             .chain(folders.others.iter().map(String::as_str))
+            .chain(self.visited.iter().map(String::as_str))
             .collect();
         let mut cut = std::mem::take(&mut self.cut_values);
         let roots = std::cell::OnceCell::new();
@@ -1669,7 +1763,7 @@ impl Classifier {
             command.as_ref(),
             &mut cut,
             self.homes.windows_paths(),
-            &|entry| self.writable_folder(entry, &here, &roots),
+            &|entry| !self.visited_all || self.writable_folder(entry, &here, &roots),
         );
         self.cut_values = cut;
         self.loader_judgment(&judgment);

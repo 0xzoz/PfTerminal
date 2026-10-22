@@ -68,6 +68,9 @@ pub(super) struct SimpleCommand {
     /// made by a brace expansion or `$IFS`, or holding a substitution's
     /// spliced output (`{git,config}`, `git${IFS}config`, `$(echo git)`).
     pub(super) hidden: Vec<usize>,
+    /// #1064: it is the text of an arithmetic expansion (`$((i + 1))`),
+    /// which runs no command.
+    pub(super) arithmetic: bool,
     /// #989: indexes of the words holding a parameter expansion the lexer
     /// misreads (`${c:-eval}`, `${!c}`, `${c}al`, `"$c"al`, zsh `$c:t`): it
     /// drops braces and quotes, so the substituted word is not its value.
@@ -749,6 +752,10 @@ impl Lexer {
             self.looked_up |= spliced.is_some()
                 && !matches!(top.as_slice(), [only] if fact_output(&self.done[*only]));
             let unseen = if open.arithmetic && arithmetic_close {
+                for index in open.first..self.done.len() {
+                    work::step();
+                    self.done[index].arithmetic = true;
+                }
                 ARITHMETIC_OUTPUT
             } else {
                 UNSEEN_OUTPUT
