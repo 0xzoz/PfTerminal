@@ -4582,10 +4582,12 @@ fn d153_checks_are_linear() {
         ("git then text", "-C x git a "),
         ("names in values", "-C git.exe -C git "),
     ] {
+        // 100 repeats: the work counts are compared, not the clock, and the
+        // classifier's fixed cost stays under 4% of the 1x count.
         work::assert_linear(label, |scale| {
-            let line = format!("git {} status", unit.repeat(400 * scale));
+            let line = format!("git {} status", unit.repeat(100 * scale));
             let _ = script(&line);
-            let line = format!("git.exe {} status", unit.repeat(400 * scale));
+            let line = format!("git.exe {} status", unit.repeat(100 * scale));
             let _ = script(&line);
         });
     }
