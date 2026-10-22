@@ -148,11 +148,11 @@ showed no named accounts.
 
 | Issue | Severity | What |
 | --- | --- | --- |
-| #D136 | blocks D136 | After a named account is removed elsewhere, the running session keeps using it and shows no recovery; `/status` still names it. |
-| #NA05 | needs decision | In-app `/resume` of a conversation whose recorded account is gone silently re-accounts it to the launch `--account`. |
-| #ROWS | advisory | `/providers` (8-row window) and onboarding lists hide rows with no hint; a third account or "Done" is invisible until scrolled. |
-| #NAME | low | Add-account name field: Enter right after fast typing adds a newline; a key pasted next shows in clear in the name field. |
-| #DEV | low | Escape on the `/providers` device-code screen leaves the sign-in waiting (banner stays; the auth connection stayed open until quit). |
+| [#1286](https://github.com/CorbanuCore/CorbanuTerminal/issues/1286) | blocks D136 | After a named account is removed elsewhere, the running session keeps using it and shows no recovery; `/status` still names it. |
+| [#1287](https://github.com/CorbanuCore/CorbanuTerminal/issues/1287) | needs decision | In-app `/resume` of a conversation whose recorded account is gone silently re-accounts it to the launch `--account`. |
+| [#1288](https://github.com/CorbanuCore/CorbanuTerminal/issues/1288) | advisory | `/providers` (8-row window) and onboarding lists hide rows with no hint; a third account or "Done" is invisible until scrolled. |
+| [#1289](https://github.com/CorbanuCore/CorbanuTerminal/issues/1289) | low | Add-account name field: Enter right after fast typing adds a newline; a key pasted next shows in clear in the name field. |
+| [#1290](https://github.com/CorbanuCore/CorbanuTerminal/issues/1290) | low | Escape on the `/providers` device-code screen leaves the sign-in waiting (banner stays; the auth connection stayed open until quit). |
 
 ## What this run does not show
 
