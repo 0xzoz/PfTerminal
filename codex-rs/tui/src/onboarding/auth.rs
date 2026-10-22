@@ -946,9 +946,22 @@ impl AuthModeWidget {
         let Some(entry) = self.provider_status_host.catalog().get(provider_id) else {
             return fallback.to_string();
         };
-        if session.snapshot().usable.contains(&entry.id) {
+        let local_runtime = entry
+            .setup_capabilities
+            .iter()
+            .any(|capability| matches!(capability, ProviderSetupCapability::Local { .. }));
+        let snapshot = session.snapshot();
+        // Ollama and LM Studio are never probed, so neither "ready" nor
+        // "unavailable" would be true: say what is known.
+        if local_runtime && snapshot.configured.contains(&entry.id) {
+            if snapshot.usable.contains(&entry.id) {
+                "Local (not checked) · active".to_string()
+            } else {
+                "Local (not checked)".to_string()
+            }
+        } else if snapshot.usable.contains(&entry.id) {
             "Configured · active · ready".to_string()
-        } else if session.snapshot().configured.contains(&entry.id) {
+        } else if snapshot.configured.contains(&entry.id) {
             "Configured · unavailable".to_string()
         } else {
             fallback.to_string()
@@ -2939,6 +2952,57 @@ pub(crate) mod tests {
             Some(codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID)
         );
         assert!(widget.provider_setup_session.read().unwrap().can_finish());
+    }
+
+    /// Ollama and LM Studio are never probed, so their onboarding rows do not
+    /// claim "ready".
+    #[tokio::test]
+    async fn local_runtime_rows_say_not_checked() {
+        let (mut widget, _tmp) = widget_forced_chatgpt().await;
+        widget.forced_login_method = None;
+        let option = catalog_sign_in_options(
+            &widget.provider_status_host,
+            &widget.api_key_provider_options,
+        )
+        .into_iter()
+        .find(|option| {
+            let SignInOption::ProviderRuntime(index) = option else {
+                return false;
+            };
+            widget
+                .provider_status_host
+                .catalog()
+                .entries()
+                .get(*index)
+                .is_some_and(|entry| {
+                    entry.runtime_provider_ids.iter().any(|runtime| {
+                        runtime.as_str() == codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID
+                    })
+                })
+        })
+        .expect("Ollama explicit-selection option");
+        widget.highlighted_mode = option;
+
+        let area = Rect::new(0, 0, 80, 32);
+        let mut buf = Buffer::empty(area);
+        widget.render_pick_mode(area, &mut buf);
+        let visible = buffer_text(&buf, area)
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n");
+        insta::assert_snapshot!("local_runtime_rows_not_checked", visible);
+
+        // Selected, it is active, still not checked.
+        widget.handle_sign_in_option(option);
+        let mut buf = Buffer::empty(area);
+        widget.render_pick_mode(area, &mut buf);
+        let rendered = buffer_text(&buf, area);
+        assert!(
+            rendered.contains("Local (not checked) · active"),
+            "rendered:\n{rendered}"
+        );
+        assert!(!rendered.contains("ready"), "rendered:\n{rendered}");
     }
 
     #[tokio::test]
