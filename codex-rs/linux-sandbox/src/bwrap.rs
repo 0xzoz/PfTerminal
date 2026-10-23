@@ -1422,11 +1422,13 @@ fn append_metadata_path_masks_for_writable_root(
     }
 }
 
+type GlobFileScanner = fn(&Path, &[String], Option<usize>) -> Result<Vec<AbsolutePathBuf>>;
+
 fn expand_unreadable_globs(
     patterns: &[FileSystemDenyGlob],
     cwd: &Path,
     max_depth: Option<usize>,
-    scan_files: fn(&Path, &[String], Option<usize>) -> Result<Vec<AbsolutePathBuf>>,
+    scan_files: GlobFileScanner,
 ) -> Result<Vec<AbsolutePathBuf>> {
     if patterns.is_empty() || max_depth == Some(0) {
         return Ok(Vec::new());
