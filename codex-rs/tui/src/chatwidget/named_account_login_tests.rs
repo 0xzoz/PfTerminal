@@ -103,7 +103,7 @@ async fn issue1290_escape_stops_both_requesting_and_waiting_tasks() {
         view.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_stopped(stopped).await;
         assert_eq!(view.completion(), Some(ViewCompletion::Cancelled));
-        assert!(view.lines(80).is_empty());
+        assert!(view.lines(/*width*/ 80).is_empty());
         assert_eq!(
             feedback(&mut events),
             Ok("Cancelled sign-in of openai account `work`.".to_string())
@@ -209,7 +209,7 @@ async fn issue1290_finished_success_and_failure_win_over_late_escape_once() {
         view.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert_eq!(view.completion(), Some(ViewCompletion::Accepted));
         assert_eq!(feedback(&mut events), expected);
-        assert!(view.lines(80).is_empty());
+        assert!(view.lines(/*width*/ 80).is_empty());
         assert!(!view.pre_draw_tick(Instant::now()));
         assert!(events.try_recv().is_err());
     }
@@ -401,13 +401,19 @@ fn render(view: &NamedAccountLoginView, width: u16) -> String {
 #[tokio::test]
 async fn issue1290_named_account_login_snapshots() {
     let (mut view, codes, _events, stopped) = pending_view().await;
-    insta::assert_snapshot!("issue1290_requesting_device_code", render(&view, 80));
+    insta::assert_snapshot!(
+        "issue1290_requesting_device_code",
+        render(&view, /*width*/ 80)
+    );
     send_code(&codes);
     view.pre_draw_tick(Instant::now());
-    insta::assert_snapshot!("issue1290_waiting_for_device_sign_in", render(&view, 80));
+    insta::assert_snapshot!(
+        "issue1290_waiting_for_device_sign_in",
+        render(&view, /*width*/ 80)
+    );
     insta::assert_snapshot!(
         "issue1290_waiting_for_device_sign_in_narrow",
-        render(&view, 32)
+        render(&view, /*width*/ 32)
     );
     view.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_stopped(stopped).await;
@@ -417,7 +423,7 @@ async fn issue1290_named_account_login_snapshots() {
 async fn issue1290_finishing_sign_in_snapshot() {
     let (mut view, _codes, _events, stopped) = pending_view().await;
     view.state.begin_persistence().expect("persistence won");
-    insta::assert_snapshot!("issue1290_finishing_sign_in", render(&view, 80));
+    insta::assert_snapshot!("issue1290_finishing_sign_in", render(&view, /*width*/ 80));
     // This renderer fixture has no save to finish; release its synthetic task.
     view.task.abort();
     assert_stopped(stopped).await;
