@@ -1800,7 +1800,9 @@ fn issue290_turn_completion_without_usage_update_reports_no_usage() {
 fn issue290_usage_update_for_another_thread_is_not_reported_for_this_thread() {
     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
 
-    let _ = processor.collect_thread_events(usage_update("thread-2", "turn-2", 58_128));
+    let _ = processor.collect_thread_events(usage_update(
+        "thread-2", "turn-2", /*input_tokens*/ 58_128,
+    ));
 
     let completed = processor.collect_thread_events(completed_turn("thread-1", "turn-1"));
     assert_eq!(
