@@ -4152,12 +4152,12 @@ mod tests {
 
     #[test]
     fn assignment_duration_label_uses_singular_units() {
-        assert_eq!(format_duration_seconds(60 * 60), "1 hour");
-        assert_eq!(format_duration_seconds(60), "1 minute");
-        assert_eq!(format_duration_seconds(1), "1 second");
-        assert_eq!(format_duration_seconds(2 * 60 * 60), "2 hours");
-        assert_eq!(format_duration_seconds(90 * 60), "90 minutes");
-        assert_eq!(format_duration_seconds(3599), "3599 seconds");
+        assert_eq!(format_duration_seconds(/*seconds*/ 60 * 60), "1 hour");
+        assert_eq!(format_duration_seconds(/*seconds*/ 60), "1 minute");
+        assert_eq!(format_duration_seconds(/*seconds*/ 1), "1 second");
+        assert_eq!(format_duration_seconds(/*seconds*/ 2 * 60 * 60), "2 hours");
+        assert_eq!(format_duration_seconds(/*seconds*/ 90 * 60), "90 minutes");
+        assert_eq!(format_duration_seconds(/*seconds*/ 3599), "3599 seconds");
     }
 
     #[test]
