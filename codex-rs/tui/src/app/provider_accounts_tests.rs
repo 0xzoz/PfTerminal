@@ -123,8 +123,8 @@ async fn a_default_set_by_a_higher_layer_is_reported() {
 
 /// #572: with a named Bedrock account (an AWS profile) in the vault, a
 /// session on another provider is offered Bedrock's models in `/model` (and
-/// the provider policy lets them be picked), so an account chosen with *Use
-/// for this session* is reachable. Without one, with the feature off, or
+/// the provider policy lets them be picked), so an account chosen with *Start
+/// a new session on this account* is reachable. Without one, with the feature off, or
 /// once the last one is removed, Bedrock stays out of the list as before,
 /// except the model the session is on. Only the newest check is applied.
 #[tokio::test]

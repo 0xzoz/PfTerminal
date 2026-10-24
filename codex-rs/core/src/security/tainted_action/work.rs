@@ -147,10 +147,12 @@ mod tests {
         ("git_config.rs", include_str!("git_config.rs")),
         ("indirect.rs", include_str!("indirect.rs")),
         ("invocation.rs", include_str!("invocation.rs")),
+        ("launched_git.rs", include_str!("launched_git.rs")),
         ("named_shell.rs", include_str!("named_shell.rs")),
         ("nested.rs", include_str!("nested.rs")),
         ("code_variables.rs", include_str!("code_variables.rs")),
         ("outbound.rs", include_str!("outbound.rs")),
+        ("rerun.rs", include_str!("rerun.rs")),
         ("outputs.rs", include_str!("outputs.rs")),
         ("git_helpers.rs", include_str!("git_helpers.rs")),
         ("paths.rs", include_str!("paths.rs")),
@@ -158,7 +160,9 @@ mod tests {
         ("sed.rs", include_str!("sed.rs")),
         ("shadow.rs", include_str!("shadow.rs")),
         ("shell.rs", include_str!("shell.rs")),
+        ("unknown_folder.rs", include_str!("unknown_folder.rs")),
         ("windows_paths.rs", include_str!("windows_paths.rs")),
+        ("windows_reads.rs", include_str!("windows_reads.rs")),
         ("windows_shell.rs", include_str!("windows_shell.rs")),
     ];
 

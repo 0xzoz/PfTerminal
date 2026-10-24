@@ -1,6 +1,6 @@
 //! #1159: local Git writes outside the shared command-free key allowlist.
-//! The existing read detector rules out reads; uncertain options must not
-//! turn a possible persistent code setting into a silent action.
+//! Reads are resolved within the write scan; uncertain options and split
+//! values must not turn a possible persistent code setting into a silent action.
 
 use super::basename;
 use super::code_variables;
@@ -66,7 +66,6 @@ pub(super) struct Writes<'a> {
 }
 
 struct FollowingWrites {
-    reads: Vec<bool>,
     /// Whether a later word is `config`, including this word.
     has_config: Vec<bool>,
     /// Whether any possible key, excluding the final value, is unsafe.
@@ -106,7 +105,6 @@ impl<'a> Writes<'a> {
                         && !code_variables::safe_git_key(&word.to_ascii_lowercase()));
             }
             FollowingWrites {
-                reads: outputs::git_config_reads_each(words),
                 has_config,
                 unsafe_keys,
                 writes: vec![[None; 8]; words.len()],
@@ -118,9 +116,6 @@ impl<'a> Writes<'a> {
             // Git start, so this additional check stays linear.
             return seen.has_config[from];
         };
-        if seen.reads[at] {
-            return false;
-        }
         let mut subcommand_position = true;
         let mut options = true;
         let mut after_value_option = false;
@@ -145,11 +140,28 @@ impl<'a> Writes<'a> {
             }
             if options && word.starts_with('-') {
                 let option = word.split_once('=').map_or(word.as_str(), |(name, _)| name);
-                if matches!(
-                    word.as_str(),
-                    "--unset" | "--unset-all" | "--remove-section" | "--help" | "-h"
-                ) {
-                    break false;
+                // Only flags before the first value-taking short option can select a list.
+                let bundled_list = word
+                    .strip_prefix('-')
+                    .filter(|short| !short.starts_with('-'))
+                    .and_then(|short| short.split(['f', 't']).next())
+                    .is_some_and(|flags| {
+                        flags.contains('l') && flags.chars().all(|flag| matches!(flag, 'l' | 'z'))
+                    });
+                if outputs::GIT_CONFIG_READS.contains(&word.as_str())
+                    || bundled_list
+                    || matches!(
+                        word.as_str(),
+                        "--unset" | "--unset-all" | "--remove-section" | "--help" | "-h"
+                    )
+                {
+                    if !after_value_option {
+                        break false;
+                    }
+                    // A read-looking word can be part of a split option value.
+                    // Keep checking for a later unsafe key/value pair.
+                    at += 1;
+                    continue;
                 }
                 if word == "--rename-section" {
                     break words.get(at + 2).is_some();
@@ -160,7 +172,7 @@ impl<'a> Writes<'a> {
                 } else if outputs::GIT_CONFIG_FLAGS.contains(&word.as_str())
                     || matches!(
                         word.as_str(),
-                        "--add" | "--replace-all" | "--append" | "--bool-or-str"
+                        "-z" | "--add" | "--replace-all" | "--append" | "--bool-or-str"
                     )
                 {
                     at += 1;
@@ -187,7 +199,7 @@ impl<'a> Writes<'a> {
             // first argument can select a subcommand such as `unset`.
             if options && first {
                 match word.as_str() {
-                    "unset" | "remove-section" => break false,
+                    "get" | "list" | "unset" | "remove-section" => break false,
                     "rename-section" => break words.get(at + 2).is_some(),
                     "set" => {
                         at += 1;
