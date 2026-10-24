@@ -5776,6 +5776,9 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         "D=~; env -C \"$D\" sh -c 'git config -f .zshenv --comment x,--get a.b v'",
         "env -C ~ sh -c 'git config -f .zshenv --comment x,--get a.b v'",
         "D=~; cd \"$D\"; sh -c 'echo x >> .zshenv'",
+        // #1161's owner-approved safe list also covers explicit files:
+        // an unlisted key still asks because the file may alias .git/config.
+        "cd /tmp; sh -c 'git config -f x a.b v'",
     ] {
         assert_eq!(
             script(command),
@@ -5820,7 +5823,6 @@ fn issue_1283_quoted_git_config_values_stay_whole() {
         "eval git config --get core.pager",
         "D=/tmp; cd \"$D\"; git config -f x --get core.pager",
         "D=/tmp; cd \"$D\"; sh -c 'git config --get core.pager'",
-        "cd /tmp; sh -c 'git config -f x a.b v'",
         "env -C /tmp sh -c 'git config --get core.pager'",
         "eval \"echo hi\"",
         "v=me; git config --get user.name; echo \"$v\"",

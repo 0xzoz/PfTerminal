@@ -1494,14 +1494,17 @@ impl Classifier {
             let inspecting = command.as_ref().is_some_and(|(at, _)| {
                 *at == index && git_config::inspection_only_prefix(&words[..index])
             });
+            let launched_kind = launched_git.judge(index, helper.as_ref());
             if (name == "git" || helper.is_some())
                 && !inspecting
+                // Unknown launcher input is already classified by the shared check.
+                && launched_kind != Some(ProtectedActionKind::UnseenCode)
                 && local_git_config.writes_code_setting(index + 1, subcommand)
             {
                 self.note(ProtectedActionKind::Persistence);
             }
             // #1268: git given words from a launcher's input (`xargs git`).
-            if let Some(kind) = launched_git.judge(index, helper.as_ref()) {
+            if let Some(kind) = launched_kind {
                 self.note(kind);
             }
             launched_git.step(index);

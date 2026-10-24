@@ -100,8 +100,13 @@ impl<'a> Writes<'a> {
             for (at, word) in words.iter().enumerate().rev() {
                 work::step();
                 has_config[at] = word == "config" || has_config[at + 1];
+                // Plain alphanumeric fragments cannot be keys: Git requires
+                // a section/name separator. They can be split option values
+                // or part of the value after a safe key. Dynamic and dotted
+                // words still need the shared safe-list check.
                 unsafe_keys[at] = unsafe_keys[at + 1]
                     || (at + 1 < words.len()
+                        && !word.bytes().all(|byte| byte.is_ascii_alphanumeric())
                         && !code_variables::safe_git_key(&word.to_ascii_lowercase()));
             }
             FollowingWrites {
@@ -210,8 +215,8 @@ impl<'a> Writes<'a> {
             }
             let safe = |key: &str| code_variables::safe_git_key(&key.to_ascii_lowercase());
             // A value split at blanks or commas can leave a safe-looking
-            // fragment where the key would be. Every following word except
-            // the final value must be safe before this write can stay quiet.
+            // fragment where the key would be. Every following possible key
+            // except the final value must be safe before this write stays quiet.
             break words.get(at + 1).is_some()
                 && if after_value_option {
                     seen.unsafe_keys[at]
