@@ -6823,6 +6823,11 @@ fn d191_plain_mktemp_paths_are_known_temp_paths() {
         "tmp=$(mktemp); cd ~ && echo x > \"$tmp\"",
         "tmp=$(mktemp); printf '%s\\n' a b > \"$tmp\"; jq . < \"$tmp\"; cat \"$tmp\"",
         "tmp=$(mktemp); sed 's/a/b/' f > \"$tmp\" && mv -f \"$tmp\" f; rm -f \"$tmp\"",
+        "set -euo pipefail; tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; jq . f > \"$tmp\"",
+        "set -e\nout=$(mktemp -p \"$TMPDIR\" out.XXXXXX)\njq . f > \"$out\"",
+        "tmp=$(mktemp --suffix=.json); jq . f > \"$tmp\"",
+        "tmp=$(mktemp -p /tmp x.XXXXXX); echo > \"$tmp\"",
+        "tmp=$(mktemp -d -t build); trap \"rm -rf $tmp\" 0 SIGINT 15",
     ] {
         if script(command).is_some() {
             wrong.push(command);
@@ -6846,12 +6851,61 @@ fn d191_other_mktemp_spellings_still_ask() {
     let mut wrong = Vec::new();
     for (command, expected) in [
         ("tmp=$(mktemp ./a.XXXXXX); echo > \"$tmp\"", Persistence),
-        ("tmp=$(mktemp a.XXXXXX); echo > \"$tmp\"", Persistence),
-        ("tmp=$(mktemp -p . x.XXXXXX); echo > \"$tmp\"", Persistence),
+        ("_=$(mktemp); : ~/.bashrc; echo evil >> \"$_\"", Persistence),
+        ("_=$(mktemp -d); trap 'rm -rf \"$_\"' EXIT; : ~", UnseenCode),
         (
-            "tmp=$(mktemp -p /tmp x.XXXXXX); echo > \"$tmp\"",
+            "DIRSTACK=$(mktemp -d); trap 'rm -rf \"$DIRSTACK\"' EXIT",
+            UnseenCode,
+        ),
+        ("TMP=$(mktemp); echo x > \"$TMP\"", Persistence),
+        (
+            "argv=$(mktemp); set -- ~/.zshrc; echo x > \"$argv\"",
             Persistence,
         ),
+        (
+            "tmp=$(mktemp); cd ~ && trap 'rm -rf \"$tmp\" LIBRARY DOCUMENTS' EXIT",
+            UnseenCode,
+        ),
+        ("tmp=$(mktemp); trap 'rm -rf \"$tmp\" ~/x' EXIT", UnseenCode),
+        (
+            "tmp=$(mktemp); trap 'rm -rf \"$tmp\"' EXIT; trap 'rm -rf ~' INT",
+            UnseenCode,
+        ),
+        (
+            "tmp=$(mktemp); t\"\"rap 'rm -rf \"$tmp\" x' EXIT",
+            UnseenCode,
+        ),
+        (
+            "tmp=$(mktemp); xargs mv ./link <<< \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); cat <<< \"$tmp\" | xargs mv ./link; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); mv ./link \"$TMPDIR\"/tmp.*; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); cd /tmp; mv ./link tmp.*; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); : $(( tmp = 0 )); echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        ("tmp=$(mktemp); echo x >> \"${tmp%/*}/.zshrc\"", Persistence),
+        ("tmp=$(mktemp -td X); echo x > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp -t -d foo); echo x > \"$tmp\"", Persistence),
+        (
+            "tmp=$(mktemp -p ./x a.XXXXXX); echo x > \"$tmp\"",
+            Persistence,
+        ),
+        ("set -a; tmp=$(mktemp); echo x > \"$tmp\"", Persistence),
+        ("cd x && tmp=$(mktemp); echo x > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp a.XXXXXX); echo > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp -p . x.XXXXXX); echo > \"$tmp\"", Persistence),
         (
             "tmp=$(mktemp --tmpdir=. x.XXXXXX); echo > \"$tmp\"",
             Persistence,
@@ -7039,6 +7093,14 @@ fn d191_mktemp_checks_are_linear() {
         ("traps", "tmp=$(mktemp); ", "trap 'rm -f \"$tmp\"' EXIT; "),
         ("names", "tmp=$(mktemp); ", "echo $tmp/tmp.tmp-tmp; "),
         ("options", "tmp=$(mktemp -d", " -d"),
+        ("printf", "tmp=$(mktemp); ", "printf "),
+        (
+            "raw traps",
+            "tmp=$(mktemp); ",
+            "trap 'rm -f \"$tmp\"' EXIT INT; ",
+        ),
+        ("raw names", "tmp=$(mktemp); ", "echo \"${tmp}\" $tmp/x; "),
+        ("sets", "", "set -eu; "),
     ] {
         work::assert_linear(label, |scale| {
             let _ = script(&format!("{head}{} echo hi", unit.repeat(400 * scale)));

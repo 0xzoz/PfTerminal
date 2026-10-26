@@ -117,18 +117,73 @@ const PREFIXES: &[&str] = &[
     "(",
 ];
 
-/// Variables a qualifying name may not be: set by the classifier itself or
-/// read by the shell.
-const RESERVED: &[&str] = &[
-    "PWD",
-    "OLDPWD",
-    "HOME",
-    "CODEX_HOME",
-    "CORBANU_HOME",
-    "PFTERMINAL_HOME",
-    "TMPDIR",
-    "IFS",
-    "PATH",
+/// Lowercase names zsh sets or reads itself (bash's are uppercase or `_`).
+const SHELL_NAMES: &[&str] = &[
+    "argv",
+    "match",
+    "mbegin",
+    "mend",
+    "reply",
+    "path",
+    "fpath",
+    "cdpath",
+    "manpath",
+    "mailpath",
+    "module_path",
+    "psvar",
+    "fignore",
+    "watch",
+    "histchars",
+    "prompt",
+    "pipestatus",
+    "status",
+    "signals",
+    "funcstack",
+    "functrace",
+    "funcfiletrace",
+    "funcsourcetrace",
+    "zsh_eval_context",
+    "zsh_scheduled_events",
+    "options",
+    "parameters",
+    "commands",
+    "aliases",
+    "galiases",
+    "saliases",
+    "functions",
+    "functions_source",
+    "builtins",
+    "reswords",
+    "history",
+    "historywords",
+    "jobdirs",
+    "jobstates",
+    "jobtexts",
+    "dirstack",
+    "termcap",
+    "terminfo",
+    "userdirs",
+    "usergroups",
+    "nameddirs",
+    "widgets",
+    "modules",
+    "keymaps",
+    "patchars",
+    "sysparams",
+    "errnos",
+    "killring",
+    "region_highlight",
+    "zle_highlight",
+    "mapfile",
+    "epochtime",
+];
+
+/// Signals and shell events a trap may name.
+const SIGNALS: &[&str] = &[
+    "EXIT", "ERR", "DEBUG", "RETURN", "ZERR", "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "IOT",
+    "BUS", "FPE", "KILL", "USR1", "SEGV", "USR2", "PIPE", "ALRM", "TERM", "STKFLT", "CHLD", "CLD",
+    "CONT", "STOP", "TSTP", "TTIN", "TTOU", "URG", "XCPU", "XFSZ", "VTALRM", "PROF", "WINCH", "IO",
+    "POLL", "PWR", "SYS", "INFO", "EMT",
 ];
 
 /// The variables of the line being read that hold a temp path, and the
@@ -183,9 +238,10 @@ impl Scope {
         if !system_shell || !plain {
             return None;
         }
-        let names: HashMap<String, bool> = leading_definitions(script)
+        let (definitions, rest) = leading_definitions(script);
+        let names: HashMap<String, bool> = definitions
             .into_iter()
-            .filter(|(name, _)| !RESERVED.contains(name))
+            .filter(|(name, _)| plain_variable(name))
             .map(|(name, folder)| (name.to_string(), folder))
             .collect();
         if names.is_empty() {
@@ -196,18 +252,32 @@ impl Scope {
             held: None,
             spoiled: false,
         };
+        // The text after the definitions, as written: it names the variables
+        // only as `$tmp` or `${tmp}` (`$(( tmp = 0 ))` lexes as a number),
+        // spells every trap in full, and does not look in the temp folder
+        // (`mv ./link "$TMPDIR"/tmp.*`).
+        let traps = scope.raw_traps(rest)?;
+        if !scope.raw_names_ok(rest)
+            || ["TMPDIR", "/tmp", "/var/", "/private/"]
+                .iter()
+                .any(|text| rest.contains(text))
+        {
+            return None;
+        }
         let mut definitions = 0;
+        let mut lexed_traps = 0;
         for simple in lexed {
             work::step();
             if simple.words.len() == 1 && scope.definition(&simple.words[0]) {
                 definitions += 1;
                 continue;
             }
-            if !scope.allows(&simple.words, /*substituted*/ false) {
+            if !own_mktemp(simple) && !scope.allows(&simple.words, /*substituted*/ false) {
                 return None;
             }
+            lexed_traps += simple.words.iter().filter(|word| *word == "trap").count();
         }
-        (definitions == scope.names.len()).then_some(scope)
+        (definitions == scope.names.len() && lexed_traps == traps).then_some(scope)
     }
 
     /// What `name=value` stores: [`TEMP_FILE`] or [`TEMP_DIR`] for a
@@ -228,7 +298,9 @@ impl Scope {
         if words.len() == 1 && self.definition(&words[0]) {
             return;
         }
-        if !self.allows(words, /*substituted*/ true) || !file_operands_ok(simple, words) {
+        if (!own_mktemp(simple) && !self.allows(words, /*substituted*/ true))
+            || !file_operands_ok(simple, words)
+        {
             self.spoiled = true;
         }
     }
@@ -271,6 +343,7 @@ impl Scope {
     fn allows(&self, words: &[String], substituted: bool) -> bool {
         let mut at_command = true;
         let mut after_wrapper = false;
+        let mut prints = false;
         for (index, word) in words.iter().enumerate() {
             work::step();
             // zsh `set -A name`.
@@ -286,14 +359,14 @@ impl Scope {
                 return false;
             }
             // `printf -v`, `print -v`.
-            if matches!(word.as_str(), "printf" | "print")
-                && words[index + 1..].iter().any(|word| {
-                    word.strip_prefix('-')
-                        .is_some_and(|flags| flags.contains('v'))
-                })
+            if prints
+                && word
+                    .strip_prefix('-')
+                    .is_some_and(|flags| flags.contains('v'))
             {
                 return false;
             }
+            prints |= matches!(word.as_str(), "printf" | "print");
             if at_command {
                 let assignment = word
                     .split_once('=')
@@ -382,17 +455,152 @@ impl Scope {
         let mut signals = 0;
         for word in words {
             work::step();
-            if word.is_empty()
-                || !word
-                    .bytes()
-                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
-            {
+            if !signal(word) {
                 return false;
             }
             signals += 1;
         }
         removed > 0 && signals > 0
     }
+
+    /// The traps of `text` (after the definitions), if every `trap` in it is
+    /// spelled `trap [--] 'rm [-f…] [--] "$tmp"…' SIGNAL…` (or with double
+    /// quotes and no inner ones): the quoted action and the signals stay
+    /// apart, which the word lexer's reading does not show.
+    fn raw_traps(&self, text: &str) -> Option<usize> {
+        let mut traps = 0;
+        for (at, _) in text.match_indices("trap") {
+            work::step();
+            let starts = text[..at]
+                .bytes()
+                .next_back()
+                .is_none_or(|byte| b" \t\n;&|".contains(&byte));
+            let rest = text[at + 4..].trim_start_matches([' ', '\t']);
+            let rest = rest
+                .strip_prefix("--")
+                .map_or(rest, |rest| rest.trim_start_matches([' ', '\t']));
+            let quote = rest
+                .bytes()
+                .next()
+                .filter(|byte| matches!(byte, b'\'' | b'"'))?;
+            let body = &rest[1..];
+            let end = body.find(quote as char)?;
+            if !starts || text[at + 4..].bytes().next() != Some(b' ') {
+                return None;
+            }
+            let mut words = body[..end]
+                .split([' ', '\t'])
+                .filter(|word| !word.is_empty());
+            if words.next() != Some("rm") {
+                return None;
+            }
+            let mut removed = 0;
+            for word in words {
+                work::step();
+                let inner = if quote == b'\'' {
+                    word.strip_prefix('"')
+                        .and_then(|word| word.strip_suffix('"'))
+                        .unwrap_or(word)
+                } else {
+                    word
+                };
+                let name = inner
+                    .strip_prefix("${")
+                    .and_then(|name| name.strip_suffix('}'))
+                    .or_else(|| inner.strip_prefix('$'));
+                if name.is_some_and(|name| self.names.contains_key(name)) {
+                    removed += 1;
+                } else if removed > 0 || !(rm_flags(word) || word == "--") {
+                    return None;
+                }
+            }
+            let mut signals = 0;
+            let mut after = body[end + 1..].split([' ', '\t']);
+            for word in after.by_ref() {
+                work::step();
+                if word.is_empty() {
+                    continue;
+                }
+                let (word, more) = match word.find([';', '\n', '&', '|']) {
+                    Some(stop) => (&word[..stop], true),
+                    None => (word, false),
+                };
+                if !word.is_empty() {
+                    if !signal(word) {
+                        return None;
+                    }
+                    signals += 1;
+                }
+                if more {
+                    break;
+                }
+            }
+            if removed == 0 || signals == 0 {
+                return None;
+            }
+            traps += 1;
+        }
+        Some(traps)
+    }
+
+    /// Like [`Self::names_ok`] for the text as written, where `${tmp}`
+    /// keeps its braces.
+    fn raw_names_ok(&self, text: &str) -> bool {
+        let bytes = text.as_bytes();
+        let mut start = 0;
+        while start < bytes.len() {
+            work::step();
+            if !is_name_byte(bytes[start]) {
+                start += 1;
+                continue;
+            }
+            let end = bytes[start..]
+                .iter()
+                .position(|byte| !is_name_byte(*byte))
+                .map_or(bytes.len(), |len| start + len);
+            if self.names.contains_key(&text[start..end]) {
+                let before = start.checked_sub(1).map(|at| bytes[at]);
+                let after = bytes.get(end).copied();
+                let braced = before == Some(b'{')
+                    && start.checked_sub(2).map(|at| bytes[at]) == Some(b'$')
+                    && after == Some(b'}');
+                let read =
+                    before == Some(b'$') && !matches!(after, Some(b'=' | b':' | b'[' | b'('));
+                if !(read || braced || matches!(before, Some(b'/' | b'.' | b'-'))) {
+                    return false;
+                }
+            }
+            start = end;
+        }
+        true
+    }
+}
+
+/// A `mktemp` run in a substitution (its template may hold a variable's
+/// name), which cannot set the line's variables.
+fn own_mktemp(simple: &SimpleCommand) -> bool {
+    simple.substituted && simple.words.first().is_some_and(|word| word == "mktemp")
+}
+
+/// A signal or shell event a trap names (`EXIT`, `SIGTERM`, `0`, `15`).
+fn signal(word: &str) -> bool {
+    SIGNALS.contains(&word.strip_prefix("SIG").unwrap_or(word))
+        || (!word.is_empty() && word.len() <= 2 && word.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// A name no shell sets or reads on its own, and no environment variable
+/// (those are uppercase by convention, and assigning one exports it):
+/// lowercase letters, digits and `_`, starting with a letter.
+fn plain_variable(name: &str) -> bool {
+    name.bytes()
+        .next()
+        .is_some_and(|byte| byte.is_ascii_lowercase())
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        && !SHELL_NAMES.contains(&name)
+        && !name.ends_with("_functions")
+        && !name.ends_with("_proxy")
 }
 
 /// Whether a written word (or a piece of one) is a qualifying variable's
@@ -407,14 +615,14 @@ pub(super) fn temp_place(word: &str) -> bool {
 /// `cp` without options, `mv` as the file moved, `tee`, `chmod`, `touch`,
 /// `sort`, `uniq`, `sed`, a test and a removing trap (judged on its own).
 fn file_operands_ok(simple: &SimpleCommand, words: &[String]) -> bool {
-    let redirected = |at: usize| {
-        simple.writes_to.contains(&at)
-            || simple.stdin_from == Some(at)
-            || simple.here_string == Some(at)
-    };
+    // A here-string passes the path itself (`cat <<< "$tmp" | xargs …`).
+    let redirected = |at: usize| simple.writes_to.contains(&at) || simple.stdin_from == Some(at);
     let mut used = false;
     for (at, word) in words.iter().enumerate() {
         work::step();
+        if word.contains(TEMP_FILE) && simple.here_string == Some(at) {
+            return false;
+        }
         if word.contains(TEMP_FILE) && !redirected(at) {
             if word != TEMP_FILE {
                 return false;
@@ -478,28 +686,73 @@ fn is_name_byte(byte: u8) -> bool {
 }
 
 /// The variables a script sets first, each from a plain `mktemp`, one
-/// after another (`a=$(mktemp); b="$(mktemp -d)" && …`), and whether each
-/// holds a folder.
-fn leading_definitions(script: &str) -> Vec<(&str, bool)> {
+/// after another (`a=$(mktemp); b="$(mktemp -d)" && …`, after `set -eu` or
+/// `set -o pipefail`), whether each holds a folder, and the text after them.
+fn leading_definitions(script: &str) -> (Vec<(&str, bool)>, &str) {
     let mut names = Vec::new();
     let mut rest = script.trim_start_matches([' ', '\t', '\n']);
+    while let Some(next) = leading_set(rest) {
+        work::step();
+        rest = next;
+    }
     while let Some((name, folder, after)) = definition(rest) {
         work::step();
-        let after = after.trim_start_matches([' ', '\t']);
-        if after.is_empty() || after.starts_with("&&") || after.starts_with("||") {
+        let trimmed = after.trim_start_matches([' ', '\t']);
+        if trimmed.is_empty() || trimmed.starts_with("&&") || trimmed.starts_with("||") {
             names.push((name, folder));
-            break;
+            return (names, after);
         }
-        match after.strip_prefix([';', '\n']) {
+        match trimmed.strip_prefix([';', '\n']) {
             // `;;`, `;&` and `;|` end a case item.
             Some(next) if !next.starts_with([';', '&', '|']) => {
                 names.push((name, folder));
                 rest = next.trim_start_matches([' ', '\t', '\n']);
             }
-            _ => break,
+            _ => return (Vec::new(), script),
         }
     }
-    names
+    (names, rest)
+}
+
+/// The text after a leading `set` that only turns on `-e`, `-u`, `-x`,
+/// `-v` or `-o pipefail`/`errexit`/`nounset`/`xtrace`, and its `;` or line
+/// break.
+fn leading_set(text: &str) -> Option<&str> {
+    let end = text.find([';', '\n'])?;
+    let mut words = text[..end]
+        .split([' ', '\t'])
+        .filter(|word| !word.is_empty());
+    if words.next() != Some("set") {
+        return None;
+    }
+    let mut option_next = false;
+    let mut any = false;
+    for word in words {
+        work::step();
+        let ok = if std::mem::take(&mut option_next) {
+            matches!(word, "pipefail" | "errexit" | "nounset" | "xtrace")
+        } else if word == "-o" {
+            option_next = true;
+            true
+        } else {
+            // `-euo pipefail`: a cluster may end in `o`.
+            let flags = word.strip_prefix('-');
+            option_next = flags.is_some_and(|flags| flags.len() > 1 && flags.ends_with('o'));
+            flags.is_some_and(|flags| {
+                let flags = flags.strip_suffix('o').unwrap_or(flags);
+                !flags.is_empty() && flags.bytes().all(|byte| b"euxv".contains(&byte))
+            })
+        };
+        if !ok {
+            return None;
+        }
+        any = true;
+    }
+    if !any || option_next {
+        return None;
+    }
+    let next = &text[end + 1..];
+    (!next.starts_with([';', '&', '|'])).then(|| next.trim_start_matches([' ', '\t', '\n']))
 }
 
 /// `NAME=$(mktemp …)` or `NAME="$(mktemp …)"` at the start of `text`,
@@ -539,41 +792,72 @@ fn definition(text: &str) -> Option<(&str, bool, &str)> {
     Some((name, folder, after))
 }
 
-/// `mktemp` with options `-d`, `-q`, `-t` (before any operand) and at most
-/// one operand: with `-t` a plain name (BSD's prefix, GNU's template, both
-/// in `$TMPDIR`), else a template directly in `/tmp` or `$TMPDIR` ending in
-/// the `X`s `mktemp` replaces. Whether it makes a folder.
+/// `mktemp` with options `-d`, `-q`, `--suffix=NAME`, `-p` a temp folder,
+/// and at most one operand after them: `-t NAME` (BSD's prefix, GNU's
+/// template, both in `$TMPDIR`; `-t` ends the options, as BSD reads its
+/// next word as the prefix), with `-p` a plain template, else a template
+/// directly in `/tmp` or `$TMPDIR`; a template ends in the `X`s `mktemp`
+/// replaces. Whether it makes a folder.
 fn plain_mktemp(text: &str) -> Option<bool> {
+    const ROOTS: &[&str] = &["/tmp", "$TMPDIR", "${TMPDIR}", "${TMPDIR:-/tmp}"];
     let mut words = text.split([' ', '\t']).filter(|word| !word.is_empty());
     if words.next() != Some("mktemp") {
         return None;
     }
     let mut folder = false;
     let mut in_tmpdir = false;
+    let mut in_root = false;
+    let mut root_next = false;
     let mut operand: Option<&str> = None;
     for word in words {
         work::step();
         if operand.is_some() {
             return None;
         }
-        if let Some(flags) = word.strip_prefix('-') {
-            let short = !flags.is_empty()
-                && !flags.starts_with('-')
-                && flags.bytes().all(|byte| b"dqt".contains(&byte));
-            if !(short || matches!(flags, "-directory" | "-quiet")) {
+        if std::mem::take(&mut root_next) {
+            if !ROOTS.contains(&unquoted(word)?) {
                 return None;
             }
-            in_tmpdir |= short && flags.contains('t');
-            folder |= (short && flags.contains('d')) || flags == "-directory";
+            in_root = true;
             continue;
         }
-        operand = Some(unquoted(word)?);
+        if in_tmpdir {
+            operand = Some(unquoted(word)?);
+            continue;
+        }
+        match word {
+            "-t" => in_tmpdir = true,
+            "-p" => root_next = true,
+            "--directory" => folder = true,
+            "--quiet" => {}
+            _ if word.strip_prefix("--suffix=").is_some_and(|suffix| {
+                !suffix.is_empty()
+                    && suffix
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            }) => {}
+            _ => match word.strip_prefix('-') {
+                Some(flags) if !flags.is_empty() => {
+                    if !flags.bytes().all(|byte| b"dq".contains(&byte)) {
+                        return None;
+                    }
+                    folder |= flags.contains('d');
+                }
+                Some(_) => return None,
+                None => operand = Some(unquoted(word)?),
+            },
+        }
+    }
+    if root_next || (in_tmpdir && operand.is_none()) {
+        return None;
     }
     let Some(operand) = operand else {
         return Some(folder);
     };
     let in_temp = if in_tmpdir {
-        plain_name(operand)
+        plain_name(operand) && !in_root
+    } else if in_root {
+        plain_name(operand) && operand.ends_with("XXX")
     } else {
         ["/tmp/", "$TMPDIR/", "${TMPDIR}/", "${TMPDIR:-/tmp}/"]
             .iter()
@@ -605,9 +889,10 @@ fn unquoted(word: &str) -> Option<&str> {
     if inner.contains(['\'', '"']) {
         return None;
     }
-    let tmpdir = ["$TMPDIR/", "${TMPDIR}/", "${TMPDIR:-/tmp}/"]
+    let tmpdir = ["$TMPDIR", "${TMPDIR}", "${TMPDIR:-/tmp}"]
         .iter()
-        .find_map(|root| inner.strip_prefix(root));
+        .find_map(|root| inner.strip_prefix(root))
+        .filter(|rest| rest.is_empty() || rest.starts_with('/'));
     match tmpdir {
         Some(rest) if expands && !rest.contains(['$', '{', '}']) => Some(inner),
         _ if !inner.contains(['$', '{', '}']) => Some(inner),
