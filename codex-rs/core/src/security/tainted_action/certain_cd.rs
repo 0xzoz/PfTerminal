@@ -7,11 +7,16 @@
 //! differ (a group, subshell, pipeline, background job or compound command).
 //!
 //! Only in the action's own shell script (`bash -lc '...'`), and only when
-//! it is plain: no quotes, backslashes, substitutions, groups, comments or
-//! here-documents, so both readings split it as a shell does; and when
-//! nothing in the line may make `cd` or `exit` other than the builtins.
-//! `|| return` stays uncertain: bash's `return` outside a function fails
-//! and the line goes on.
+//! it is plain: ASCII words, no quotes, backslashes, expansions, groups,
+//! comments or here-documents, so both readings split it as a shell does;
+//! and when nothing in the line may make `cd` or `exit` other than the
+//! builtins. `|| return` stays uncertain: bash's `return` outside a
+//! function fails and the line goes on.
+//!
+//! Where a `cd` goes is followed as before; what the line does not show
+//! may still send it elsewhere or hide its failure (an exported `CDPATH`,
+//! symlinks, a `cd` function from the user's startup files). The folders
+//! before it no longer cover the case where that place is one of them.
 use super::Folders;
 use super::nested;
 use super::shell::basename;
@@ -105,8 +110,9 @@ const REDEFINERS: &[&str] = &[
     "trap", "enable", "disable", "source", "eval", "autoload", "zmodload", "emulate", "fpath",
 ];
 
-/// Reserved words and wrappers after which `.` (source) may be the command.
-const DOT_BEFORE: &[&str] = &[
+/// Reserved words and wrappers after which the next word may be a
+/// command's name.
+const BEFORE_NAME: &[&str] = &[
     "then",
     "do",
     "else",
@@ -123,6 +129,7 @@ const DOT_BEFORE: &[&str] = &[
     "nocorrect",
     "-",
     "coproc",
+    "repeat",
 ];
 
 impl Aside {
@@ -155,26 +162,55 @@ fn allowed(argv: &[String]) -> Allowed {
                 && flag.starts_with('-')
                 && flag[1..].chars().all(|letter| "lcexuv".contains(letter))
         });
-    let plain =
-        !script.contains(['\'', '"', '\\', '`', '#', '(', ')', '{', '}']) && !script.contains("<<");
+    // Characters both readings split as a shell does: no quotes,
+    // backslashes, expansions, groups or comments, no here-documents, no
+    // `&>` (a background job in dash) and only ASCII words.
+    let plain = script.chars().all(|ch| {
+        matches!(ch, ' ' | '\t' | '\n') || (ch.is_ascii_graphic() && !"'\"\\`#(){}$,".contains(ch))
+    }) && !script.contains("<<")
+        && !script.contains("&>");
     if !(shell_ok && flags_ok && plain) {
         return Allowed::default();
     }
-    // `.` where a command starts: first, or after assignments, reserved
-    // words and wrappers with their options (`time -p .`, `exec -a x .`).
+    // Commands split at `;`, `&`, `|` and line breaks (not in `>&`, `<&`,
+    // `>|`); the words that may be a command's name: first, or after
+    // assignments, redirections, reserved words and wrappers with their
+    // options (`time -p`, `exec -a x`, `repeat 3`). One of them may not be
+    // `.` (source) or a pattern (`ena?le` may run `enable`).
+    let chars: Vec<char> = script.chars().collect();
+    let mut segments: Vec<String> = vec![String::new()];
+    for (at, ch) in chars.iter().enumerate() {
+        work::step();
+        let redirect = at > 0 && matches!(chars[at - 1], '<' | '>');
+        if matches!(ch, ';' | '\n') || (matches!(ch, '&' | '|') && !redirect) {
+            segments.push(String::new());
+        } else if let Some(segment) = segments.last_mut() {
+            segment.push(*ch);
+        }
+    }
     let mut words: Vec<String> = Vec::new();
-    let mut dot = false;
-    for segment in script.split([';', '&', '|', '\n']) {
+    let mut named = false;
+    for segment in &segments {
         work::step();
         let mut starts = true;
         let mut value = false;
         for word in segment.split_whitespace() {
             work::step();
-            dot |= starts && word == ".";
-            starts = value
-                || DOT_BEFORE.contains(&word)
-                || (starts && (word.starts_with('-') || word.contains('=')));
-            value = starts && word == "-a";
+            let redirection = word.contains(['<', '>']);
+            if starts && !value && !redirection {
+                named |= word == "."
+                    || word.contains(['*', '?'])
+                    || (word.contains('[') && !matches!(word, "[" | "[["));
+            }
+            let keeps = value
+                || BEFORE_NAME.contains(&word)
+                || (starts && (redirection || word.starts_with('-') || word.contains('=')));
+            // The next word is a redirection's file, `exec -a`'s name or
+            // `repeat`'s count.
+            value = keeps
+                && ((redirection && word.ends_with(['<', '>', '&', '|']))
+                    || matches!(word, "-a" | "repeat"));
+            starts = keeps;
             words.push(word.to_string());
         }
     }
@@ -193,7 +229,7 @@ fn allowed(argv: &[String]) -> Allowed {
         work::step();
         unknown_folder::searches(word)
     });
-    let and = !dot && !redefines && !searches;
+    let and = !named && !redefines && !searches;
     Allowed {
         and,
         exit: and && !unknown_folder::starts_loop(&words),

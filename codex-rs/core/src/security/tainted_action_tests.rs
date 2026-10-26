@@ -6821,6 +6821,7 @@ fn d194_commands_after_a_certain_cd_run_where_it_went() {
         "cd a || exit; cd b || exit; cd c || exit; make > log",
         "cd a && cd b && cd c && git log --output=out.txt",
         "cd a && cd b && cd c && ls . > list.txt",
+        "[ -d a ] || mkdir a; cd a && cd b && cd c && make 2>&1 | tee log",
     ]
     .into_iter()
     .filter(|command| script(command).is_some())
@@ -6880,6 +6881,22 @@ fn d194_uncertain_changes_still_ask() {
         "cd ~; . ./x; cd /tmp && echo x >> .zshenv",
         "cd ~; X=1 . ./x; cd /tmp && echo x >> .zshenv",
         "cd ~; time -p . ./x; cd /tmp && echo x >> .zshenv",
+        // A command name the line spells otherwise (review 1).
+        "cd ~; a=ena; b=ble; $a$b -n exit; cd /nope || exit; echo x >> .zshenv",
+        "cd ~; a=ena; b=ble; $a$b -n cd; cd /tmp && echo x >> .zshenv",
+        "cd ~; ena?le -n cd; cd /tmp && echo x >> .zshenv",
+        "cd ~; d=.; $d ./x; cd /tmp && echo x >> .zshenv",
+        "cd ~; >/dev/null . ./x; cd /tmp && echo x >> .zshenv",
+        "cd ~; 2>&1 . ./x; cd /tmp && echo x >> .zshenv",
+        "cd ~; > f . ./x; cd /tmp && echo x >> .zshenv",
+        "cd ~; >| f . ./x; cd /tmp && echo x >> .zshenv",
+        "cd ~; repeat 1 . ./x; cd /tmp && echo x >> .zshenv",
+        // Words the word lexer splits otherwise (review 1).
+        "cd ~; cd /nope || exit,; echo x >> .zshenv",
+        "cd ~; cd /nope || exit\r\necho x >> .zshenv",
+        "cd ~; cd /nope || exit\u{a0}; echo x >> .zshenv",
+        // `&>` puts the command before it in the background in dash.
+        "cd ~; cd /tmp &>/dev/null && echo x >> .zshenv",
         // Where `cd` goes may change too.
         "cd ~; CDPATH=/x; cd /tmp && echo x >> .zshenv",
         // Not plain.
