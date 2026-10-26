@@ -51,7 +51,8 @@ pub struct TurnCompletedEvent {
     /// Provider-reported token usage for the completing thread, copied from
     /// that thread's latest usage update. `None` when the provider reported
     /// no usage for the thread: unknown usage is never reported as zero
-    /// tokens, and one thread's usage is never reported for another thread.
+    /// tokens. Totals are kept per thread as defence in depth, so a usage
+    /// update is only ever reported for the thread it belongs to.
     pub usage: Option<Usage>,
 }
 
