@@ -3,25 +3,29 @@
 //! "rm -f $tmp" EXIT` after untrusted content no longer ask.
 //!
 //! Bounded on purpose. Only the action's own `sh`/`bash`/`zsh -c` script
-//! qualifies, and only variables it sets first, before anything else runs
-//! (`tmp=$(mktemp); …`), from `mktemp` with no template or one directly in
-//! `/tmp` or `$TMPDIR` (`-d`, `-q`, `-t` allowed; not `-p`, `-u`). Such a
-//! variable holds [`TEMP_FILE`] or [`TEMP_DIR`], which every check still
-//! reads as unseen output. Only two prompts stop: for the file itself
-//! written (`> "$tmp"`, `cp f "$tmp"`; not `"$tmp.x"` or a folder's member,
-//! which a failed `mktemp` or an extracted link may put elsewhere), and for
-//! a trap that only removes the path. They are held back until the whole
-//! line has been read, and the line keeps them when it may give the
-//! variable another value: it names the variable other than as `$tmp`
-//! (`read tmp`, `tmp=x`, `${tmp:=x}`, `export tmp`), uses a builtin that
-//! sets or evaluates variables (`read`, `printf -v`, `declare`, `eval`,
-//! `source`), names a command at run time (`$c`), or assigns a variable it
-//! names at run time (`(( $n = 1 ))`); or when it gives the file's path to
-//! a command that may put a link in its place or pass the path on (`mv
-//! ./link "$tmp"`, `ln`, `echo "$tmp" | xargs …`): only a few commands that
-//! do neither may take it as an operand, by name, on a line that defines
-//! no function and does not change `PATH`. A program that finds the file
-//! on its own may still replace it, as it may any literal temp path.
+//! qualifies, and only plain lowercase variables it sets first (after at
+//! most `set -eu`), from `mktemp` with no template, `-t NAME`, or a
+//! template directly in `/tmp` or `$TMPDIR` (`-d`, `-q`, `--suffix`, `-p` a
+//! temp folder; not `-p ./x`, `-u`). Such a variable holds [`TEMP_FILE`] or
+//! [`TEMP_DIR`], which every check still reads as unseen output. Only two
+//! prompts stop: for the file itself written (`> "$tmp"`, `cp f "$tmp"`; not
+//! `"$tmp.x"` or a folder's member, which a failed `mktemp` or an extracted
+//! link may put elsewhere), and for a trap that only removes the path.
+//! They are held back until the whole line has been read, and the line
+//! keeps them when it may give the variable another value: it names the
+//! variable other than as `$tmp` (`read tmp`, `tmp=x`, `${tmp:=x}`, `export
+//! tmp`), uses a builtin that sets or evaluates variables (`read`, `printf
+//! -v`, `declare`, `eval`, `source`), names a command at run time (`$c`),
+//! defines a function, or assigns a variable it names at run time (`(( $n
+//! = 1 ))`).
+//!
+//! What is promised is what a literal temp path (`/tmp/x`) already gets:
+//! the classifier does not follow a link that the line, or a program it
+//! runs, puts at that path before writing it. As best-effort hardening
+//! only, the line also keeps its prompts when it hands the file's path to a
+//! command other than a few plain ones (`mv ./link "$tmp"`, `ln`, `./x
+//! "$tmp"`), passes words from input (`xargs`, `parallel`), holds a
+//! here-document, or spells the temp folder (`"$TMPDIR"/tmp.*`).
 
 use super::ProtectedActionKind;
 use super::indirect;
@@ -253,12 +257,13 @@ impl Scope {
             spoiled: false,
         };
         // The text after the definitions, as written: it names the variables
-        // only as `$tmp` or `${tmp}` (`$(( tmp = 0 ))` lexes as a number),
-        // spells every trap in full, and does not look in the temp folder
-        // (`mv ./link "$TMPDIR"/tmp.*`).
+        // only as `$tmp` or `${tmp}` (`$(( tmp = 0 ))` lexes as a number) and
+        // spells every trap in full. Best effort (see above): it does not
+        // spell the temp folder (`mv ./link "$TMPDIR"/tmp.*`) or hold a
+        // here-document, whose lines the lexer reads as commands.
         let traps = scope.raw_traps(rest)?;
         if !scope.raw_names_ok(rest)
-            || ["TMPDIR", "/tmp", "/var/", "/private/"]
+            || ["TMPDIR", "/tmp", "/var/", "/private/", "<<"]
                 .iter()
                 .any(|text| rest.contains(text))
         {
@@ -346,8 +351,10 @@ impl Scope {
         let mut prints = false;
         for (index, word) in words.iter().enumerate() {
             work::step();
-            // zsh `set -A name`.
+            // zsh `set -A name`; best effort: commands that turn input into
+            // words (a printed path into `mv`'s operand).
             if SETS_VARIABLES.contains(&word.as_str())
+                || matches!(word.as_str(), "xargs" | "parallel")
                 || word
                     .strip_prefix(['-', '+'])
                     .is_some_and(|flags| flags.starts_with('A'))
@@ -609,14 +616,16 @@ pub(super) fn temp_place(word: &str) -> bool {
     word == TEMP_FILE
 }
 
-/// Whether a command takes a temp file's path, other than as a file it
-/// redirects, only whole and only as an operand of a command that neither
-/// puts a link in its place nor prints or passes the path on: `rm`, `cat`,
-/// `cp` without options, `mv` as the file moved, `tee`, `chmod`, `touch`,
-/// `sort`, `uniq`, `sed`, a test and a removing trap (judged on its own).
+/// Best effort (see the module comment): whether a command takes a temp
+/// file's path, other than as a file it redirects, only whole and only as
+/// an operand of a command that does not itself put a link in its place:
+/// `rm`, `cat`, `cp` without options, `mv` as the file moved, `tee`,
+/// `chmod`, `touch`, `sort`, `uniq`, `sed`, a test and a removing trap
+/// (judged on its own). Such a command may still print the path.
 fn file_operands_ok(simple: &SimpleCommand, words: &[String]) -> bool {
     // A here-string passes the path itself (`cat <<< "$tmp" | xargs …`).
-    let redirected = |at: usize| simple.writes_to.contains(&at) || simple.stdin_from == Some(at);
+    let writes_to: std::collections::HashSet<usize> = simple.writes_to.iter().copied().collect();
+    let redirected = |at: usize| writes_to.contains(&at) || simple.stdin_from == Some(at);
     let mut used = false;
     for (at, word) in words.iter().enumerate() {
         work::step();

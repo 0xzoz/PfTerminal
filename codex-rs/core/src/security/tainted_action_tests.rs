@@ -6851,6 +6851,22 @@ fn d191_other_mktemp_spellings_still_ask() {
     let mut wrong = Vec::new();
     for (command, expected) in [
         ("tmp=$(mktemp ./a.XXXXXX); echo > \"$tmp\"", Persistence),
+        (
+            "tmp=$(mktemp); echo x > \"$tmp\"; sed -n F \"$tmp\" | xargs mv ./link; echo y >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); rm -v \"$tmp\" | grep -o \"/[^']*\" | parallel mv ./link; echo y >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp)\ncat <<E | tail -n1 > \"$tmp\"\nrm $tmp\nE\necho y >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); mv ./link \"/\"tmp/tmp.*; echo y >> \"$tmp\"",
+            Persistence,
+        ),
         ("_=$(mktemp); : ~/.bashrc; echo evil >> \"$_\"", Persistence),
         ("_=$(mktemp -d); trap 'rm -rf \"$_\"' EXIT; : ~", UnseenCode),
         (
