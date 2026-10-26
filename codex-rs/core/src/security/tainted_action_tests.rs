@@ -6793,3 +6793,131 @@ fn issue_1309_own_writes_in_possible_folders_are_linear() {
         });
     }
 }
+
+/// D194 (#1309): in the action's own plain script, the commands after `cd
+/// x && ...` (its `&&` list) and after `cd x || exit` (the rest of the
+/// shell) run only where the change happened.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d194_commands_after_a_certain_cd_run_where_it_went() {
+    // These asked before D194.
+    let asked = [
+        "cd ~; cd /tmp && echo x >> .zshenv",
+        "cd ~; cd /tmp && make && echo x >> .zshenv",
+        "cd ~; cd /tmp && make | tee -a .zshenv",
+        "cd ~; true && cd /tmp && echo x >> .zshenv",
+        "cd ~; cd -P /tmp && echo x >> .zshenv",
+        "cd ~; cd /tmp || exit; echo x >> .zshenv",
+        "cd ~; cd /tmp || exit 1; make; echo x >> .zshenv",
+        "cd ~; cd /tmp || exit && echo x >> .zshenv",
+        "cd ~; cd /work && cd /tmp || exit; echo x >> .zshenv",
+        "cd ~; cd /tmp || exit\necho x >> .zshenv",
+        // Multi-cd build lines past `MAX_POSSIBLE_FOLDERS`.
+        "cd frontend && npm i && cd .. && cd backend && cargo build > build.log",
+        "cd /a && cd /b && cd /c && cd /d && echo x > log",
+        "cd a || exit; cd b || exit; cd c || exit; make > log",
+        "cd a && cd b && cd c && git log --output=out.txt",
+        "cd a && cd b && cd c && ls . > list.txt",
+    ]
+    .into_iter()
+    .filter(|command| script(command).is_some())
+    .collect::<Vec<_>>();
+    assert_eq!(asked, Vec::<&str>::new());
+    for command in [
+        "cd build && make > log",
+        "cd a && cd b && make > log",
+        "(cd sub && make); make > log",
+        "cd /tmp || exit; make > log",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// D194 (#1309): a line whose `cd` may fail (or not move the shell) and
+/// still run the next command asks as before; so does any line the rule
+/// does not read as plain.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d194_uncertain_changes_still_ask() {
+    let quiet = [
+        "cd ~; cd /tmp; echo x >> .zshenv",
+        "cd ~; cd /tmp\necho x >> .zshenv",
+        "cd ~; cd /tmp || true; echo x >> .zshenv",
+        // bash's `return` outside a function fails and the line goes on.
+        "cd ~; cd /tmp || return; echo x >> .zshenv",
+        "cd ~; cd /tmp || exit x; echo x >> .zshenv",
+        // After the `&&` list.
+        "cd ~; cd /tmp && true; echo x >> .zshenv",
+        "cd ~; cd /tmp && true || echo x >> .zshenv",
+        "cd ~; cd /tmp && true & echo x >> .zshenv",
+        "cd ~; cd /tmp && echo x > /dev/null; echo x >> .zshenv",
+        // A change that may be skipped, or in a pipeline, subshell or
+        // background job.
+        "cd ~; true || cd /tmp && echo x >> .zshenv",
+        "cd ~; ! cd /tmp && echo x >> .zshenv",
+        "cd ~; echo | cd /tmp && echo x >> .zshenv",
+        "cd ~; cd /tmp | cat && echo x >> .zshenv",
+        "cd ~; cd /tmp || exit | cat; echo x >> .zshenv",
+        "cd ~; cd /tmp || exit & echo x >> .zshenv",
+        "cd ~; (cd /tmp || exit); echo x >> .zshenv",
+        "cd ~; (cd /tmp && true) && echo x >> .zshenv",
+        // In a compound command that may not run it.
+        "cd ~; if false; then true; cd /tmp || exit; fi; echo x >> .zshenv",
+        "cd ~; if false\nthen\ncd /tmp || exit\nfi\necho x >> .zshenv",
+        "cd ~; for d in; cd /tmp || exit; echo x >> .zshenv",
+        // `cd` or `exit` may not be the builtin.
+        "cd ~; alias cd=true; cd /tmp && echo x >> .zshenv",
+        "cd ~; enable -n cd; cd /tmp && echo x >> .zshenv",
+        "cd ~; disable cd; cd /tmp && echo x >> .zshenv",
+        "cd ~; functions[cd]=true; cd /tmp && echo x >> .zshenv",
+        "cd ~; source ./x; cd /tmp && echo x >> .zshenv",
+        "cd ~; . ./x; cd /tmp && echo x >> .zshenv",
+        "cd ~; X=1 . ./x; cd /tmp && echo x >> .zshenv",
+        "cd ~; time -p . ./x; cd /tmp && echo x >> .zshenv",
+        // Where `cd` goes may change too.
+        "cd ~; CDPATH=/x; cd /tmp && echo x >> .zshenv",
+        // Not plain.
+        "cd ~; cd /tmp && echo 'x' >> .zshenv",
+        "cd ~; cd /tmp && echo x >> .zshenv # x",
+        "cd ~; cd /tmp\\\n&& echo x >> .zshenv",
+        "cd ~; cd /tmp~ && echo x >> .zshenv",
+        "cd ~; cd /tmp* && echo x >> .zshenv",
+    ]
+    .into_iter()
+    .filter(|command| script(command).is_none())
+    .collect::<Vec<_>>();
+    assert_eq!(quiet, Vec::<&str>::new());
+    // Not the action's own shell script.
+    for command in [
+        &["env", "bash", "-c", "cd ~; cd /tmp && echo x >> .zshenv"][..],
+        &["bash", "-i", "-c", "cd ~; cd /tmp && echo x >> .zshenv"],
+        &["bash", "-lc", "sh -c 'cd ~; cd /tmp && echo x >> .zshenv'"],
+        &["bash", "-c", "cd ~; cd /tmp || exit", "echo x >> .zshenv"],
+    ] {
+        assert!(kind(command).is_some(), "{command:?}");
+    }
+}
+
+/// D194: following certain changes stays linear.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d194_certain_changes_are_linear() {
+    for (label, unit) in [
+        ("and lists", "cd /a && cd /b && echo x > a; "),
+        ("exits", "cd /a && cd /b || exit; make | tee b; "),
+        ("mixed", "cd /a || exit; cd /b; cd /c && make > c; "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let _ = script(&unit.repeat(100 * scale));
+        });
+    }
+}

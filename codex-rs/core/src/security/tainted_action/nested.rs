@@ -16,6 +16,7 @@ use super::GitConfigWrites;
 use super::MAX_FOLDER_BYTES;
 use super::ProtectedActionKind;
 use super::WRITERS;
+use super::certain_cd;
 use super::git_helpers;
 use super::indirect;
 use super::invocation;
@@ -213,6 +214,11 @@ impl Classifier {
             unchecked: false,
             others: Vec::new(),
             lost: false,
+            aside: if depth == 0 {
+                certain_cd::Aside::for_line(command)
+            } else {
+                certain_cd::Aside::default()
+            },
         };
         let mut found = Found {
             braces: command.iter().any(|arg| arg.contains('{')),
@@ -315,6 +321,20 @@ impl Classifier {
                 return;
             }
             let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
+            // D194: where a certain `cd` stops being certain.
+            let certain = certain_cd::before(
+                folders,
+                if command.substituted {
+                    certain_cd::Joint::Other
+                } else {
+                    command.after
+                },
+                &texts,
+                !command.writes_to.is_empty()
+                    || command.writes_descriptor
+                    || !command.input.is_empty()
+                    || !command.other_text.is_empty(),
+            );
             // #1309: a later iteration of a loop starts where the one
             // before it left.
             found.deferred |= unknown_folder::starts_loop(&texts);
@@ -330,6 +350,7 @@ impl Classifier {
                     folders,
                     &mut HashMap::new(),
                     unknown,
+                    certain,
                 );
                 // #1283: `cd "$d"` goes where this reading cannot follow.
                 folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
@@ -655,6 +676,7 @@ impl Classifier {
                     unchecked: folders.unchecked,
                     others: folders.others.clone(),
                     lost: folders.lost,
+                    aside: folders.aside.inner(),
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;
@@ -683,6 +705,7 @@ impl Classifier {
                 found.unreadable |= counted.unreadable || inner.unfollowed;
             }
         }
+        certain_cd::finish(folders);
     }
 
     /// #1283: the git checks of `simple_command` on the words as the shell
@@ -885,7 +908,8 @@ impl Classifier {
     /// subshell or in a background job. Those are the folders before it and
     /// its target from each of them; past `MAX_POSSIBLE_FOLDERS`, or one
     /// too long, the folder is unknown. `unknown`: the reading already
-    /// cannot know its folder.
+    /// cannot know its folder. `certain` (D194): what follows runs only
+    /// where the change happened, so the folders before it are set aside.
     pub(super) fn follow_change(
         &self,
         name: &str,
@@ -893,6 +917,7 @@ impl Classifier {
         folders: &mut Folders,
         variables: &mut HashMap<String, String>,
         unknown: bool,
+        certain: bool,
     ) {
         let before = folders.cwd.clone();
         if !self.change_folder(name, args, folders, variables) {
@@ -921,23 +946,19 @@ impl Classifier {
                 None => folders.cwd.clone(),
             });
         }
-        possible.extend(reached);
+        if certain {
+            // D194: what follows runs only where the change happened.
+            certain_cd::set_aside(folders, std::mem::replace(&mut possible, reached));
+        } else {
+            possible.extend(reached);
+        }
         for folder in possible {
             work::step();
             if folder != folders.cwd && !folders.others.contains(&folder) {
                 folders.others.push(folder);
             }
         }
-        if folders.others.len() >= MAX_POSSIBLE_FOLDERS
-            || folders
-                .others
-                .iter()
-                .any(|folder| folder.len() > MAX_FOLDER_BYTES)
-        {
-            folders.unchecked = true;
-            folders.lost = true;
-            folders.others.clear();
-        }
+        too_many(folders);
     }
 
     /// #1309: the folders a command's relative words resolve against from
@@ -986,6 +1007,21 @@ impl Classifier {
                 self.ran.iter().any(|ran| name(ran) == target)
             }
         }
+    }
+}
+
+/// #1309: past `MAX_POSSIBLE_FOLDERS`, or with one too long, the folder
+/// is unknown.
+pub(super) fn too_many(folders: &mut Folders) {
+    if folders.others.len() >= MAX_POSSIBLE_FOLDERS
+        || folders
+            .others
+            .iter()
+            .any(|folder| folder.len() > MAX_FOLDER_BYTES)
+    {
+        folders.unchecked = true;
+        folders.lost = true;
+        folders.others.clear();
     }
 }
 

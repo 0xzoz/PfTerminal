@@ -29,6 +29,7 @@ use std::collections::HashSet;
 use std::path::Path;
 
 mod arithmetic;
+mod certain_cd;
 mod code_variables;
 mod git_helpers;
 mod grammar;
@@ -885,6 +886,8 @@ struct Folders {
     /// folders to follow, so a file it names relative to its folder may
     /// be anywhere.
     lost: bool,
+    /// D194: folders set aside by a `cd` whose failure stops what follows.
+    aside: certain_cd::Aside,
 }
 
 struct Classifier {
@@ -1245,6 +1248,11 @@ impl Classifier {
             unchecked: self.unknown_folder > 0,
             others: Vec::new(),
             lost: false,
+            aside: if depth == 0 {
+                certain_cd::Aside::for_line(command)
+            } else {
+                certain_cd::Aside::default()
+            },
         };
         let mut variables: HashMap<String, String> = HashMap::new();
         for (name, value) in [
@@ -1302,6 +1310,19 @@ impl Classifier {
             lexed_seds += sed::positions(&words).len();
             lexed_shells += nested::shell_commands(&words);
             let feeds_pipe = pipe_sources.contains(&index);
+            // D194: where a certain `cd` stops being certain.
+            let certain = certain_cd::before(
+                &mut folders,
+                if simple.substituted {
+                    certain_cd::Joint::Other
+                } else {
+                    simple.after
+                },
+                &simple.words,
+                simple.stdin_from.is_some()
+                    || simple.here_string.is_some()
+                    || !simple.writes_to.is_empty(),
+            );
             self.simple_command(
                 simple,
                 &words,
@@ -1312,8 +1333,10 @@ impl Classifier {
                 &mut variables,
                 &mut loops,
                 depth,
+                certain,
             );
         }
+        certain_cd::finish(&mut folders);
         // #937: arithmetic on a variable filled from command output or
         // `read` runs the substitutions in its value, like `eval`.
         // #1028: zsh `e`/`+` glob qualifiers run code the classifier does
@@ -1363,6 +1386,7 @@ impl Classifier {
         variables: &mut HashMap<String, String>,
         loops: &mut launched_git::PositionalLoops,
         depth: usize,
+        certain: bool,
     ) {
         let lower: Vec<String> = words.iter().map(|word| word.to_lowercase()).collect();
         let (hidden, mut unchecked) = self.word_marks(simple, words, variables);
@@ -1449,7 +1473,7 @@ impl Classifier {
             // #1309: this reading knows the words of `cd "$d"`; it loses
             // its folder only past the possible folders.
             let unknown = folders.lost;
-            self.follow_change(name, args, folders, variables, unknown);
+            self.follow_change(name, args, folders, variables, unknown, certain);
         }
         let mut git_config = GitConfigWrites::new(&lower, &hidden, &unchecked);
         let mut launched_git = launched_git::LaunchedGit::new(
