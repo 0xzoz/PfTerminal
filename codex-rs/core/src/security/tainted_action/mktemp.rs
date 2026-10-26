@@ -17,7 +17,10 @@
 //! tmp`), uses a builtin that sets or evaluates variables (`read`, `printf
 //! -v`, `declare`, `eval`, `source`), names a command at run time (`$c`),
 //! defines a function, or assigns a variable it names at run time (`(( $n
-//! = 1 ))`).
+//! = 1 ))`); and unless the bash grammar reads every command as named by
+//! plain text (not `{r..r}ead`, `rea?`, `$(printf %s read)`) with
+//! `printf`/`print`/`set` options spelled out. An action that asks for
+//! anything else asks as on main, for the strongest prompt.
 //!
 //! What is promised is what a literal temp path (`/tmp/x`) already gets:
 //! the classifier does not follow a link that the line, or a program it
@@ -28,6 +31,7 @@
 //! here-document, or spells the temp folder (`"$TMPDIR"/tmp.*`).
 
 use super::ProtectedActionKind;
+use super::grammar;
 use super::indirect;
 use super::shell::SimpleCommand;
 use super::shell::UNSEEN_OUTPUT;
@@ -98,6 +102,15 @@ const SETS_VARIABLES: &[&str] = &[
     "zsystem",
     "zcurses",
     "hash",
+    "nameref",
+    "sched",
+    "zgetattr",
+    "zlistattr",
+    "zsetattr",
+    "zdelattr",
+    "ztie",
+    "syserror",
+    "sysopen",
 ];
 
 /// Words before a command that leave it in this shell, and keywords.
@@ -262,6 +275,11 @@ impl Scope {
         // spell the temp folder (`mv ./link "$TMPDIR"/tmp.*`) or hold a
         // here-document, whose lines the lexer reads as commands.
         let traps = scope.raw_traps(rest)?;
+        // The grammar is unsure how zsh reads `set`; the leading ones were
+        // read above.
+        if !commands_named_as_written(after_sets(script)) {
+            return None;
+        }
         if !scope.raw_names_ok(rest)
             || ["TMPDIR", "/tmp", "/var/", "/private/", "<<"]
                 .iter()
@@ -327,15 +345,11 @@ impl Scope {
         }
     }
 
-    /// The prompts the line keeps: those held back, unless the variables
-    /// kept their temp paths. `assigns_unseen_name`: arithmetic may set a
-    /// variable named at run time.
-    pub(super) fn finish(self, assigns_unseen_name: bool) -> Option<ProtectedActionKind> {
-        if self.spoiled || assigns_unseen_name {
-            self.held
-        } else {
-            None
-        }
+    /// The prompts held back, and whether the line keeps them now: when it
+    /// may give a variable another value. `assigns_unseen_name`: arithmetic
+    /// may set a variable named at run time.
+    pub(super) fn finish(self, assigns_unseen_name: bool) -> (Option<ProtectedActionKind>, bool) {
+        (self.held, self.spoiled || assigns_unseen_name)
     }
 
     /// `name=` and the unseen output of its `mktemp`.
@@ -478,10 +492,15 @@ impl Scope {
         let mut traps = 0;
         for (at, _) in text.match_indices("trap") {
             work::step();
+            // Not a command (`./bootstrap.sh`); a quoted or escaped `trap`
+            // the lexer reads as one makes the counts differ.
             let starts = text[..at]
                 .bytes()
                 .next_back()
                 .is_none_or(|byte| b" \t\n;&|".contains(&byte));
+            if !starts {
+                continue;
+            }
             let rest = text[at + 4..].trim_start_matches([' ', '\t']);
             let rest = rest
                 .strip_prefix("--")
@@ -492,7 +511,7 @@ impl Scope {
                 .filter(|byte| matches!(byte, b'\'' | b'"'))?;
             let body = &rest[1..];
             let end = body.find(quote as char)?;
-            if !starts || text[at + 4..].bytes().next() != Some(b' ') {
+            if text[at + 4..].bytes().next() != Some(b' ') {
                 return None;
             }
             let mut words = body[..end]
@@ -581,6 +600,56 @@ impl Scope {
         }
         true
     }
+}
+
+/// Whether the bash grammar reads `text` as zsh would and finds every
+/// command named by plain text that is not a builtin setting variables,
+/// with `printf`, `print` and `set` options spelled out too. The word lexer
+/// does not expand `{r..r}ead`, `rea?` or `$(printf %s read)`, which the
+/// shell may turn into `read`; nor `printf -? "$n"` into `printf -v`.
+/// Used only to refuse.
+fn commands_named_as_written(text: &str) -> bool {
+    let Ok(reading) = grammar::read(text) else {
+        return false;
+    };
+    if reading.zsh_unsure {
+        return false;
+    }
+    reading.commands.iter().all(|command| {
+        work::step();
+        let Some((name, args)) = command.words.split_first() else {
+            return true;
+        };
+        let plain = |word: &grammar::Word| {
+            word.data
+                && !word.text.is_empty()
+                && word
+                    .text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._/+-".contains(&byte))
+        };
+        if !plain(name) || name.text == "." || SETS_VARIABLES.contains(&name.text.as_str()) {
+            return false;
+        }
+        if !matches!(name.text.as_str(), "printf" | "print" | "set") {
+            return true;
+        }
+        // Options come first: as written, up to `--` or the first other
+        // word, and none sets a variable (`-v`, zsh `set -A`).
+        for word in args {
+            work::step();
+            if !word.data {
+                return false;
+            }
+            if word.text == "--" || !word.text.starts_with(['-', '+']) {
+                break;
+            }
+            if word.text.contains(['v', 'A']) {
+                return false;
+            }
+        }
+        true
+    })
 }
 
 /// A `mktemp` run in a substitution (its template may hold a variable's
@@ -699,11 +768,7 @@ fn is_name_byte(byte: u8) -> bool {
 /// `set -o pipefail`), whether each holds a folder, and the text after them.
 fn leading_definitions(script: &str) -> (Vec<(&str, bool)>, &str) {
     let mut names = Vec::new();
-    let mut rest = script.trim_start_matches([' ', '\t', '\n']);
-    while let Some(next) = leading_set(rest) {
-        work::step();
-        rest = next;
-    }
+    let mut rest = after_sets(script);
     while let Some((name, folder, after)) = definition(rest) {
         work::step();
         let trimmed = after.trim_start_matches([' ', '\t']);
@@ -721,6 +786,16 @@ fn leading_definitions(script: &str) -> (Vec<(&str, bool)>, &str) {
         }
     }
     (names, rest)
+}
+
+/// The text after the leading `set`s that [`leading_set`] reads.
+fn after_sets(script: &str) -> &str {
+    let mut rest = script.trim_start_matches([' ', '\t', '\n']);
+    while let Some(next) = leading_set(rest) {
+        work::step();
+        rest = next;
+    }
+    rest
 }
 
 /// The text after a leading `set` that only turns on `-e`, `-u`, `-x`,

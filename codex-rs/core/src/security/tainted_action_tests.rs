@@ -6828,6 +6828,7 @@ fn d191_plain_mktemp_paths_are_known_temp_paths() {
         "tmp=$(mktemp --suffix=.json); jq . f > \"$tmp\"",
         "tmp=$(mktemp -p /tmp x.XXXXXX); echo > \"$tmp\"",
         "tmp=$(mktemp -d -t build); trap \"rm -rf $tmp\" 0 SIGINT 15",
+        "tmp=$(mktemp); cat bootstrap.txt > \"$tmp\"",
     ] {
         if script(command).is_some() {
             wrong.push(command);
@@ -6851,6 +6852,42 @@ fn d191_other_mktemp_spellings_still_ask() {
     let mut wrong = Vec::new();
     for (command, expected) in [
         ("tmp=$(mktemp ./a.XXXXXX); echo > \"$tmp\"", Persistence),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); {r..r}ead -r $n < notes.txt; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); rea? -r $n < notes.txt; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); printf -? $n %s ~/.zshrc; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); $(printf %s read) -r $n < notes.txt; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); o=$(cat f); printf \"$o\" $n ~/.zshrc; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); o=$(cat f); set \"$o\" $n ~/.zshrc; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); nameref r=$n; r=$HOME/.profile; echo x > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); x=$(cat f); [[ $x -eq 0 ]]; echo x > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); x=$(cat f); eval \"$x\"; echo x > \"$tmp\"",
+            Persistence,
+        ),
         (
             "tmp=$(mktemp); echo x > \"$tmp\"; sed -n F \"$tmp\" | xargs mv ./link; echo y >> \"$tmp\"",
             Persistence,

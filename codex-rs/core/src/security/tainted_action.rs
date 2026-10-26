@@ -526,6 +526,12 @@ fn judged(action: &ApprovalAction, homes: Homes, as_named: bool) -> Classifier {
     if classifier.homes.exhausted() {
         classifier.note(ProtectedActionKind::UnseenCode);
     }
+    // D191: an action that asks anyway asks as on main.
+    if classifier.found.is_some()
+        && let Some(kind) = classifier.held.take()
+    {
+        classifier.note(kind);
+    }
     classifier
 }
 
@@ -558,6 +564,7 @@ impl Classifier {
             in_file: 0,
             reads_follow: false,
             temp: None,
+            held: None,
         }
     }
 
@@ -951,6 +958,9 @@ struct Classifier {
     windows_budget: usize,
     /// D191: the action's own line's variables that hold a `mktemp` path.
     temp: Option<mktemp::Scope>,
+    /// D191: prompts only a temp path raised, dropped only when the action
+    /// asks for nothing else (else it asks as on main, for the strongest).
+    held: Option<ProtectedActionKind>,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
@@ -1369,12 +1379,16 @@ impl Classifier {
         {
             self.note(ProtectedActionKind::UnseenCode);
         }
-        // D191: the prompts only a temp path raised, unless its variable
-        // kept that path.
-        if let Some(scope) = std::mem::replace(&mut self.temp, outer_temp)
-            && let Some(kind) = scope.finish(arithmetic.assigns_unseen_name(command))
-        {
-            self.note(kind);
+        // D191: the prompts only a temp path raised, kept now unless its
+        // variable kept that path (see `release_held`).
+        if let Some(scope) = std::mem::replace(&mut self.temp, outer_temp) {
+            match scope.finish(arithmetic.assigns_unseen_name(command)) {
+                (Some(kind), true) => self.note(kind),
+                (Some(kind), false) => {
+                    self.held = Some(self.held.map_or(kind, |held| held.strongest(kind)));
+                }
+                (None, _) => {}
+            }
         }
         self.path(&folders.cwd);
         // Strings assembled from literals by inline code (`'~/.co' + 'dex'`).
