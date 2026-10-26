@@ -6914,13 +6914,16 @@ fn issue_1064_uncertain_subscripts_ask_only_before_an_operator() {
     }
     // Review 4: a shell given its script may also load a start-up file.
     let subscript = "echo \"${a[${#a[@]}-1]}\"";
-    let asks: [&[&str]; 5] = [
+    let asks: [&[&str]; 7] = [
         &["bash", "--rcfile", "notes", "-ic", subscript],
         &["bash", "--init-file", "notes", "-ic", subscript],
         &["bash", "$o", "notes", "-ic", subscript],
         // Review 5: fish runs its `-C` code first.
         &["fish", "-C./n", "-c", subscript],
         &["fish", "-Cmake", "-c", subscript],
+        // Review 6: Korn shells may read `ENV` when not interactive.
+        &["posh", "-c", subscript],
+        &["ksh", "-c", subscript],
     ];
     for command in asks {
         if kind(command) != Some(UnseenCode) {

@@ -977,8 +977,12 @@ fn runs_no_built_text(simple: &SimpleCommand) -> bool {
         });
     // Other options may load a file or run code first (`--rcfile notes`,
     // fish `-C./n`, `$o`): only a POSIX-style shell given known options.
+    // Korn shells may read `ENV` when not interactive (ksh88, pdksh).
     let inline_script = shell::SHELLS.contains(&name.as_str())
-        && !matches!(name.as_str(), "fish" | "csh" | "tcsh")
+        && !matches!(
+            name.as_str(),
+            "fish" | "csh" | "tcsh" | "ksh" | "mksh" | "lksh" | "oksh" | "posh"
+        )
         && plain_shell_options(args)
         && matches!(
             invocation::parse(&name, args).map(|invocation| invocation.code),
