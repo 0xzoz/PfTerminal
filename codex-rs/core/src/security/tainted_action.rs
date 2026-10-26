@@ -975,18 +975,53 @@ fn runs_no_built_text(simple: &SimpleCommand) -> bool {
             (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C'))
                 || may_be_built(arg)
         });
-    // A shell's long options may load a file (`--rcfile notes -ic …`), and
-    // an option spelled by a variable may be one.
+    // Other options may load a file or run code first (`--rcfile notes`,
+    // fish `-C./n`, `$o`): only a POSIX-style shell given known options.
     let inline_script = shell::SHELLS.contains(&name.as_str())
-        && !args.iter().any(|arg| {
-            work::step();
-            arg.starts_with("--") || (arg.starts_with(['-', '+', '$', '`']) && may_be_built(arg))
-        })
+        && !matches!(name.as_str(), "fish" | "csh" | "tcsh")
+        && plain_shell_options(args)
         && matches!(
             invocation::parse(&name, args).map(|invocation| invocation.code),
             Some(Code::Inline(None))
         );
     bare && named && !callback && (BUILDS_NO_CODE.contains(&name.as_str()) || inline_script)
+}
+
+/// #1064: whether `args` are only short options of a POSIX-style shell
+/// that load and run nothing (`-l`, `-c`, `-eu`, `-o pipefail`): no
+/// `-i`/`-k`/`-s`, ksh's `-E`, long option or word built at run time.
+fn plain_shell_options(args: &[String]) -> bool {
+    const LETTERS: &str = "abcefhlmnpuvxBCHP";
+    let mut names = 0usize;
+    for arg in args {
+        work::step();
+        if names > 0 {
+            names -= 1;
+            if arg.is_empty()
+                || !arg
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            {
+                return false;
+            }
+            continue;
+        }
+        let Some(letters) = arg.strip_prefix(['-', '+']) else {
+            return false;
+        };
+        if letters.is_empty() {
+            return false;
+        }
+        for letter in letters.chars() {
+            work::step();
+            if matches!(letter, 'o' | 'O') {
+                names += 1;
+            } else if !LETTERS.contains(letter) {
+                return false;
+            }
+        }
+    }
+    names == 0
 }
 
 /// #1064: whether `word` holds text the shell builds when it runs: a
@@ -1468,7 +1503,7 @@ impl Classifier {
         }
         // #1064: every folder the line is in, up to a limit.
         let outer_visited = std::mem::replace(&mut self.visited, vec![cwd.to_string()]);
-        let outer_visited_all = std::mem::replace(&mut self.visited_all, true);
+        let outer_visited_all = std::mem::replace(&mut self.visited_all, self.unknown_folder == 0);
         let mut lexed_seds = 0;
         let mut lexed_shells = 0;
         let mut arithmetic = arithmetic::Arithmetic::new(command);

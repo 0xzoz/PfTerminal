@@ -6914,17 +6914,28 @@ fn issue_1064_uncertain_subscripts_ask_only_before_an_operator() {
     }
     // Review 4: a shell given its script may also load a start-up file.
     let subscript = "echo \"${a[${#a[@]}-1]}\"";
-    for command in [
-        ["bash", "--rcfile", "notes", "-ic", subscript],
-        ["bash", "--init-file", "notes", "-ic", subscript],
-        ["bash", "$o", "notes", "-ic", subscript],
-    ] {
-        if kind(&command) != Some(UnseenCode) {
+    let asks: [&[&str]; 5] = [
+        &["bash", "--rcfile", "notes", "-ic", subscript],
+        &["bash", "--init-file", "notes", "-ic", subscript],
+        &["bash", "$o", "notes", "-ic", subscript],
+        // Review 5: fish runs its `-C` code first.
+        &["fish", "-C./n", "-c", subscript],
+        &["fish", "-Cmake", "-c", subscript],
+    ];
+    for command in asks {
+        if kind(command) != Some(UnseenCode) {
             wrong.push(command[1]);
         }
     }
-    if kind(&["bash", "-c", subscript]).is_some() {
-        wrong.push("bash -c");
+    let quiet: [&[&str]; 3] = [
+        &["bash", "-c", subscript],
+        &["bash", "-eu", "-o", "pipefail", "-c", subscript],
+        &["sh", "-lc", subscript],
+    ];
+    for command in quiet {
+        if kind(command).is_some() {
+            wrong.push(command[1]);
+        }
     }
     for command in [
         "echo \"${arr[${#arr[@]}-1]}\"",
