@@ -361,7 +361,7 @@ pub(super) fn joins_names(name: &str, args: &[String]) -> bool {
 /// The folder a path prefix writes in, ending with `/`: itself when it ends
 /// with `/`, else the folder that holds it (`./` when it names none).
 fn prefix_folder(prefix: &str) -> String {
-    match prefix.rfind('/') {
+    match work::rfind(prefix, "/") {
         Some(at) => prefix[..=at].to_string(),
         None => "./".to_string(),
     }

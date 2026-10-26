@@ -1592,7 +1592,7 @@ const MAX_FLAGS: usize = 64;
 /// (`${(P)n:-x=y}`). Linear: each expansion looks at most `MAX_FLAGS`
 /// bytes ahead for its flags, and its `=` is any later one.
 fn assigns_named_variable(text: &str) -> bool {
-    let Some(last_equals) = text.rfind('=') else {
+    let Some(last_equals) = work::rfind(text, "=") else {
         return false;
     };
     text.match_indices("${").any(|(at, _)| {
@@ -3308,9 +3308,10 @@ fn qualifier_runs_code(list: &str) -> bool {
 /// assignments or the options of a declaring builtin.
 fn assignment_position(text: &str, at: usize) -> bool {
     let before = &text[..at];
-    let start = before
-        .rfind(|ch: char| ch.is_ascii_whitespace() || ";&|(".contains(ch))
-        .map_or(0, |space| space + 1);
+    let start = work::rfind_by(before, |ch: char| {
+        ch.is_ascii_whitespace() || ";&|(".contains(ch)
+    })
+    .map_or(0, |space| space + 1);
     let left = before[start..]
         .strip_suffix('+')
         .unwrap_or(&before[start..]);
@@ -3325,9 +3326,10 @@ fn assignment_position(text: &str, at: usize) -> bool {
         if rest.is_empty() || rest.ends_with([';', '&', '|', '(', '{', '!']) {
             return true;
         }
-        let word_start = rest
-            .rfind(|ch: char| ch.is_ascii_whitespace() || ";&|({".contains(ch))
-            .map_or(0, |space| space + 1);
+        let word_start = work::rfind_by(rest, |ch: char| {
+            ch.is_ascii_whitespace() || ";&|({".contains(ch)
+        })
+        .map_or(0, |space| space + 1);
         let word = &rest[word_start..];
         // An earlier array assignment (`a=(1 2) b=(3)`): read on from its
         // `a=`.
