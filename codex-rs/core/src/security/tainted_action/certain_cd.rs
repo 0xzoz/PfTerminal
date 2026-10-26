@@ -7,10 +7,11 @@
 //! differ (a group, subshell, pipeline, background job or compound command).
 //!
 //! Only in the action's own shell script (`bash -lc '...'`), and only when
-//! it is plain: ASCII words, no quotes, backslashes, expansions, groups,
-//! comments or here-documents, so both readings split it as a shell does;
-//! and when nothing in the line may make `cd` or `exit` other than the
-//! builtins. `|| return` stays uncertain: bash's `return` outside a
+//! it is plain: ASCII words, no quotes, backslashes, expansions (`$`,
+//! patterns, `~`), groups, comments or here-documents, so both readings
+//! split it as a shell does and every value is visible; and when nothing
+//! in the line may make `cd` or `exit` other than the builtins, change
+//! where `cd` goes, or read a value from data. `|| return` stays uncertain: bash's `return` outside a
 //! function fails and the line goes on.
 //!
 //! Where a `cd` goes is followed as before; what the line does not show
@@ -176,70 +177,23 @@ fn allowed(argv: &[String]) -> Allowed {
         && flags.iter().all(|flag| {
             flag.len() > 1
                 && flag.starts_with('-')
-                && flag[1..].chars().all(|letter| "lcexuv".contains(letter))
+                && flag[1..].chars().all(|letter| "lceu".contains(letter))
         });
-    // Characters both readings split as a shell does: no quotes,
-    // backslashes, expansions, groups or comments, no here-documents, no
-    // `&>` (a background job in dash) and only ASCII words.
+    // Characters both readings split as a shell does, with nothing it
+    // expands: ASCII words; no quotes, backslashes, `$`, groups, comments,
+    // patterns or `~`; no here-documents and no `&>` (a background job in
+    // dash).
     let plain = script.chars().all(|ch| {
-        matches!(ch, ' ' | '\t' | '\n') || (ch.is_ascii_graphic() && !"'\"\\`#(){}$,".contains(ch))
+        matches!(ch, ' ' | '\t' | '\n')
+            || (ch.is_ascii_graphic() && !"'\"\\`#(){}$,*?~^".contains(ch))
     }) && !script.contains("<<")
         && !script.contains("&>");
     if !(shell_ok && flags_ok && plain) {
         return Allowed::default();
     }
-    // Commands split at `;`, `&`, `|` and line breaks (not in `>&`, `<&`,
-    // `>|`); the words that may be a command's name: first, or after
-    // assignments, redirections, reserved words and wrappers with their
-    // options (`time -p`, `exec -a x`, `repeat 3`). One of them may not be
-    // `.` (source) or a pattern (`ena?le` may run `enable`).
-    let chars: Vec<char> = script.chars().collect();
-    let mut segments: Vec<String> = vec![String::new()];
-    for (at, ch) in chars.iter().enumerate() {
-        work::step();
-        let redirect = at > 0 && matches!(chars[at - 1], '<' | '>');
-        if matches!(ch, ';' | '\n') || (matches!(ch, '&' | '|') && !redirect) {
-            segments.push(String::new());
-        } else if let Some(segment) = segments.last_mut() {
-            segment.push(*ch);
-        }
-    }
-    let mut words: Vec<String> = Vec::new();
-    let mut named = false;
-    let mut exit_redirected = false;
-    for segment in &segments {
-        work::step();
-        let mut starts = true;
-        let mut value = false;
-        let redirected = segment.contains(['<', '>']);
-        for word in segment.split_whitespace() {
-            work::step();
-            // A redirection joined to a word: the part before it is the
-            // word (`.>/dev/null` runs `.`); a number or nothing there is
-            // the redirection's own (`2>&1`).
-            let at = word.find(['<', '>']);
-            let before = at.map_or(word, |at| &word[..at]);
-            let bare = at.is_some() && before.bytes().all(|byte| byte.is_ascii_digit());
-            if starts && !value && !bare {
-                named |= matches!(before, "." | "r")
-                    || before.contains(['*', '?', '^'])
-                    || before.get(1..).is_some_and(|rest| rest.contains('~'))
-                    || (before.contains('[') && !matches!(before, "[" | "[["));
-                // bash and zsh go on when a builtin's redirection fails.
-                exit_redirected |= before == "exit" && redirected;
-            }
-            let keeps = value
-                || BEFORE_NAME.contains(&word)
-                || (starts && (bare || before.starts_with('-') || before.contains('=')));
-            // The next word is a redirection's file, `exec -a`'s name or
-            // `repeat`'s count.
-            value = keeps
-                && ((bare && word.ends_with(['<', '>', '&', '|']))
-                    || matches!(word, "-a" | "repeat"));
-            starts = keeps;
-            words.push(word.to_string());
-        }
-    }
+    let Some(scan) = scan(script) else {
+        return Allowed::default();
+    };
     let mut redefines = false;
     let mut moves = false;
     for token in script.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')) {
@@ -252,17 +206,117 @@ fn allowed(argv: &[String]) -> Allowed {
             || token.contains("alias")
             || REDEFINERS.contains(&token.as_str());
     }
-    // Where `cd` goes may change too (`CDPATH`, `cdable_vars`, `HOME`).
+    // Where `cd` goes may change too (`CDPATH`, `cdable_vars`).
     let searches = moves
-        || words.iter().any(|word| {
+        || scan.words.iter().any(|word| {
             work::step();
             unknown_folder::searches(word)
         });
-    let and = !named && !redefines && !searches;
+    let and = !scan.named && !redefines && !searches;
     Allowed {
         and,
-        exit: and && !exit_redirected && !unknown_folder::starts_loop(&words),
+        exit: and && !scan.exit_redirected && !unknown_folder::starts_loop(&scan.words),
     }
+}
+
+/// What `scan` finds in a plain script.
+struct Scan {
+    words: Vec<String>,
+    /// `.` or `r` may be a command's name.
+    named: bool,
+    /// An `exit` has a redirection.
+    exit_redirected: bool,
+}
+
+/// Read a plain script's words as a shell splits them (`None`: a `[` or
+/// `]` that may be a pattern, or a redirection shells read otherwise). Commands end at `;`, `&`, `|` and line
+/// breaks (not in `>&`, `<&`, `>|`); a redirection's operator (`2>`,
+/// `>&`, zsh `>!`) takes the next word as its file, joined or not, except
+/// one that closes (`>&-`). A word may be a command's name first, or after
+/// assignments, redirections, reserved words and wrappers with their
+/// options (`time -p`, `exec -a x`, `repeat 3`).
+fn scan(script: &str) -> Option<Scan> {
+    let chars: Vec<char> = script.chars().collect();
+    let mut segments: Vec<&[char]> = Vec::new();
+    let mut from = 0;
+    for (at, ch) in chars.iter().enumerate() {
+        work::step();
+        let redirect = at > 0 && matches!(chars[at - 1], '<' | '>');
+        if matches!(ch, ';' | '\n') || (matches!(ch, '&' | '|') && !redirect) {
+            segments.push(&chars[from..at]);
+            from = at + 1;
+        }
+    }
+    segments.push(&chars[from..]);
+    let mut found = Scan {
+        words: Vec::new(),
+        named: false,
+        exit_redirected: false,
+    };
+    for segment in segments {
+        work::step();
+        let redirected = segment.iter().any(|ch| matches!(ch, '<' | '>'));
+        let mut starts = true;
+        let mut value = false;
+        let mut file = false;
+        let mut at = 0;
+        while at < segment.len() {
+            work::step();
+            if segment[at].is_ascii_whitespace() {
+                at += 1;
+                continue;
+            }
+            if matches!(segment[at], '<' | '>') {
+                at += 1;
+                while at < segment.len() && "<>&|!".contains(segment[at]) {
+                    work::step();
+                    // zsh `>!` takes a file; in bash `!` is the file.
+                    if segment[at] == '!' {
+                        return None;
+                    }
+                    at += 1;
+                }
+                file = true;
+                if segment.get(at) == Some(&'-') && segment[at - 1] == '&' {
+                    at += 1;
+                    file = false;
+                }
+                continue;
+            }
+            let start = at;
+            while at < segment.len()
+                && !segment[at].is_ascii_whitespace()
+                && !matches!(segment[at], '<' | '>')
+            {
+                work::step();
+                at += 1;
+            }
+            let word: String = segment[start..at].iter().collect();
+            if word.contains(['[', ']']) && !matches!(word.as_str(), "[" | "]" | "[[" | "]]") {
+                return None;
+            }
+            found.words.push(word.clone());
+            let operator_next = segment.get(at).is_some_and(|ch| matches!(ch, '<' | '>'));
+            if std::mem::take(&mut file)
+                || (operator_next && word.bytes().all(|byte| byte.is_ascii_digit()))
+            {
+                // A redirection's file, or its descriptor (`2>`).
+                continue;
+            }
+            if starts && !value {
+                found.named |= matches!(word.as_str(), "." | "r");
+                // bash and zsh go on when a builtin's redirection fails.
+                found.exit_redirected |= word == "exit" && redirected;
+            }
+            let keeps = value
+                || BEFORE_NAME.contains(&word.as_str())
+                || (starts && (word.starts_with('-') || word.contains('=')));
+            // The next word is `exec -a`'s name or `repeat`'s count.
+            value = keeps && matches!(word.as_str(), "-a" | "repeat");
+            starts = keeps;
+        }
+    }
+    Some(found)
 }
 
 /// Before each command a reading follows, in order (`joint`: `Other` for
@@ -388,15 +442,10 @@ fn plain_cd(words: &[String]) -> bool {
         [cd, option, target] if cd == "cd" && matches!(option.as_str(), "-P" | "-L") => target,
         _ => return false,
     };
-    let rest = if target == "~" {
-        ""
-    } else {
-        target.strip_prefix("~/").unwrap_or(target)
-    };
     !target.is_empty()
         && !target.starts_with(['-', '+'])
-        && rest.chars().all(|ch| {
+        && target.chars().all(|ch| {
             work::step();
-            ch.is_alphanumeric() || "._-/+@%:,".contains(ch)
+            ch.is_alphanumeric() || "._-/+@%:".contains(ch)
         })
 }
