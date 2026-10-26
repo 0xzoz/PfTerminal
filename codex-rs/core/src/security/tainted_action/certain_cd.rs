@@ -107,7 +107,21 @@ const COMPOUND: &[&str] = &[
 /// Names that may make `cd` or `exit` other than the builtin, or run code
 /// that may (besides any name holding `function` or `alias`).
 const REDEFINERS: &[&str] = &[
-    "trap", "enable", "disable", "source", "eval", "autoload", "zmodload", "emulate", "fpath",
+    "trap",
+    "enable",
+    "disable",
+    "source",
+    "eval",
+    "autoload",
+    "zmodload",
+    "emulate",
+    "fpath",
+    // Code run from a callback or the history (`mapfile -C .`, `fc -s`).
+    "mapfile",
+    "readarray",
+    "fc",
+    "history",
+    "unhash",
 ];
 
 /// Reserved words and wrappers after which the next word may be a
@@ -130,6 +144,8 @@ const BEFORE_NAME: &[&str] = &[
     "-",
     "coproc",
     "repeat",
+    // zsh `if [[ x ]] cmd`.
+    "]]",
 ];
 
 impl Aside {
@@ -190,49 +206,62 @@ fn allowed(argv: &[String]) -> Allowed {
     }
     let mut words: Vec<String> = Vec::new();
     let mut named = false;
+    let mut exit_redirected = false;
     for segment in &segments {
         work::step();
         let mut starts = true;
         let mut value = false;
+        let redirected = segment.contains(['<', '>']);
         for word in segment.split_whitespace() {
             work::step();
-            let redirection = word.contains(['<', '>']);
-            if starts && !value && !redirection {
-                named |= word == "."
-                    || word.contains(['*', '?'])
-                    || (word.contains('[') && !matches!(word, "[" | "[["));
+            // A redirection joined to a word: the part before it is the
+            // word (`.>/dev/null` runs `.`); a number or nothing there is
+            // the redirection's own (`2>&1`).
+            let at = word.find(['<', '>']);
+            let before = at.map_or(word, |at| &word[..at]);
+            let bare = at.is_some() && before.bytes().all(|byte| byte.is_ascii_digit());
+            if starts && !value && !bare {
+                named |= matches!(before, "." | "r")
+                    || before.contains(['*', '?', '^'])
+                    || before.get(1..).is_some_and(|rest| rest.contains('~'))
+                    || (before.contains('[') && !matches!(before, "[" | "[["));
+                // bash and zsh go on when a builtin's redirection fails.
+                exit_redirected |= before == "exit" && redirected;
             }
             let keeps = value
                 || BEFORE_NAME.contains(&word)
-                || (starts && (redirection || word.starts_with('-') || word.contains('=')));
+                || (starts && (bare || before.starts_with('-') || before.contains('=')));
             // The next word is a redirection's file, `exec -a`'s name or
             // `repeat`'s count.
             value = keeps
-                && ((redirection && word.ends_with(['<', '>', '&', '|']))
+                && ((bare && word.ends_with(['<', '>', '&', '|']))
                     || matches!(word, "-a" | "repeat"));
             starts = keeps;
             words.push(word.to_string());
         }
     }
-    let redefines = script
-        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
-        .any(|token| {
-            work::step();
-            let token = token.to_ascii_lowercase();
-            // zsh `functions[cd]=...`, `aliases[cd]=...` too.
-            token.contains("function")
-                || token.contains("alias")
-                || REDEFINERS.contains(&token.as_str())
-        });
-    // Where `cd` goes may change too (`CDPATH`, `cdable_vars`, `HOME`).
-    let searches = words.iter().any(|word| {
+    let mut redefines = false;
+    let mut moves = false;
+    for token in script.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_')) {
         work::step();
-        unknown_folder::searches(word)
-    });
+        // `HOME[0]=x`, `declare -n r=HOME`; zsh `PWD=x`.
+        moves |= matches!(token, "HOME" | "PWD");
+        let token = token.to_ascii_lowercase();
+        // zsh `functions[cd]=...`, `aliases[cd]=...` too.
+        redefines |= token.contains("function")
+            || token.contains("alias")
+            || REDEFINERS.contains(&token.as_str());
+    }
+    // Where `cd` goes may change too (`CDPATH`, `cdable_vars`, `HOME`).
+    let searches = moves
+        || words.iter().any(|word| {
+            work::step();
+            unknown_folder::searches(word)
+        });
     let and = !named && !redefines && !searches;
     Allowed {
         and,
-        exit: and && !unknown_folder::starts_loop(&words),
+        exit: and && !exit_redirected && !unknown_folder::starts_loop(&words),
     }
 }
 
