@@ -19,7 +19,7 @@
 //! defines a function, or assigns a variable it names at run time (`(( $n
 //! = 1 ))`); and unless the bash grammar reads every command as named by
 //! plain text (not `{r..r}ead`, `rea?`, `$(printf %s read)`) with
-//! `printf`/`print`/`set` options spelled out. An action that asks for
+//! `printf`/`print`/`set` options spelled out (all of zsh `print`'s words). An action that asks for
 //! anything else asks as on main, for the strongest prompt.
 //!
 //! What is promised is what a literal temp path (`/tmp/x`) already gets:
@@ -379,11 +379,11 @@ impl Scope {
             if word == "trap" && !self.removes(&words[index + 1..], substituted) {
                 return false;
             }
-            // `printf -v`, `print -v`.
+            // `printf -v`, `print -v`, also as a pattern (`-?`).
             if prints
                 && word
                     .strip_prefix('-')
-                    .is_some_and(|flags| flags.contains('v'))
+                    .is_some_and(|flags| flags.contains(['v', '?', '*', '[', '{']))
             {
                 return false;
             }
@@ -604,10 +604,10 @@ impl Scope {
 
 /// Whether the bash grammar reads `text` as zsh would and finds every
 /// command named by plain text that is not a builtin setting variables,
-/// with `printf`, `print` and `set` options spelled out too. The word lexer
-/// does not expand `{r..r}ead`, `rea?` or `$(printf %s read)`, which the
-/// shell may turn into `read`; nor `printf -? "$n"` into `printf -v`.
-/// Used only to refuse.
+/// with `printf`, `print` and `set` options (all of `print`'s words before
+/// `--`) spelled out too. The word lexer does not expand `{r..r}ead`,
+/// `rea?` or `$(printf %s read)`, which the shell may turn into `read`; nor
+/// `printf -? "$n"` into `printf -v`. Used only to refuse.
 fn commands_named_as_written(text: &str) -> bool {
     let Ok(reading) = grammar::read(text) else {
         return false;
@@ -635,14 +635,20 @@ fn commands_named_as_written(text: &str) -> bool {
             return true;
         }
         // Options come first: as written, up to `--` or the first other
-        // word, and none sets a variable (`-v`, zsh `set -A`).
+        // word, and none sets a variable (`-v`, zsh `set -A`). zsh `print`
+        // reads options again after an option's value (`print -f %s -v n`):
+        // all its words up to `--`.
+        let print = name.text == "print";
         for word in args {
             work::step();
             if !word.data {
                 return false;
             }
-            if word.text == "--" || !word.text.starts_with(['-', '+']) {
+            if word.text == "--" || (!print && !word.text.starts_with(['-', '+'])) {
                 break;
+            }
+            if !word.text.starts_with(['-', '+']) {
+                continue;
             }
             if word.text.contains(['v', 'A']) {
                 return false;

@@ -6829,6 +6829,7 @@ fn d191_plain_mktemp_paths_are_known_temp_paths() {
         "tmp=$(mktemp -p /tmp x.XXXXXX); echo > \"$tmp\"",
         "tmp=$(mktemp -d -t build); trap \"rm -rf $tmp\" 0 SIGINT 15",
         "tmp=$(mktemp); cat bootstrap.txt > \"$tmp\"",
+        "tmp=$(mktemp); print -r -- hello > \"$tmp\"",
     ] {
         if script(command).is_some() {
             wrong.push(command);
@@ -6852,6 +6853,18 @@ fn d191_other_mktemp_spellings_still_ask() {
     let mut wrong = Vec::new();
     for (command, expected) in [
         ("tmp=$(mktemp ./a.XXXXXX); echo > \"$tmp\"", Persistence),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); p=$(cat dest.txt); : > ./-v; print -f %s -? \"$n\" \"$p\"; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); p=$(cat dest.txt); print -u 1 -? \"$n\" \"$p\"; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); o=$(cat f); print -f %s \"$o\" \"$n\" x; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
         (
             "tmp=$(mktemp); n=$(printf t%s mp); {r..r}ead -r $n < notes.txt; cat payload >> \"$tmp\"",
             Persistence,
