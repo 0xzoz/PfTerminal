@@ -967,18 +967,32 @@ fn runs_no_built_text(simple: &SimpleCommand) -> bool {
     // The program by its name, not a file named by a path (`./echo`).
     let named = simple.words[index].to_lowercase() == name;
     let args = &simple.words[index + 1..];
-    // `mapfile -C eval` runs its callback on each line it reads.
+    // `mapfile -C eval` runs its callback on each line it reads; `$o` or
+    // `-$x` may spell `-C`.
     let callback = matches!(name.as_str(), "mapfile" | "readarray")
         && args.iter().any(|arg| {
             work::step();
-            arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C')
+            (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C'))
+                || may_be_built(arg)
         });
+    // A shell's long options may load a file (`--rcfile notes -ic …`), and
+    // an option spelled by a variable may be one.
     let inline_script = shell::SHELLS.contains(&name.as_str())
+        && !args.iter().any(|arg| {
+            work::step();
+            arg.starts_with("--") || (arg.starts_with(['-', '+', '$', '`']) && may_be_built(arg))
+        })
         && matches!(
             invocation::parse(&name, args).map(|invocation| invocation.code),
             Some(Code::Inline(None))
         );
     bare && named && !callback && (BUILDS_NO_CODE.contains(&name.as_str()) || inline_script)
+}
+
+/// #1064: whether `word` holds text the shell builds when it runs: a
+/// variable, a substitution or unseen output.
+fn may_be_built(word: &str) -> bool {
+    word.contains(['$', '`']) || word.contains(shell::UNSEEN_OUTPUT)
 }
 
 /// #1064: whether `word` is an assignment as the shell reads one: a name,
@@ -1511,6 +1525,10 @@ impl Classifier {
                 &mut loops,
                 depth,
             );
+            // #1309: past its possible folders the line may be anywhere.
+            if folders.lost || self.unknown_folder > 0 {
+                self.visited_all = false;
+            }
             for folder in std::iter::once(&folders.cwd).chain(&folders.others) {
                 work::step();
                 if self.visited.contains(folder) {

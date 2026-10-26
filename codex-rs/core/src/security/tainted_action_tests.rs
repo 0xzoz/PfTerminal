@@ -6723,6 +6723,9 @@ fn issue_1064_loading_variables_with_risky_values_are_unseen_code() {
         "JAVA_TOOL_OPTIONS=-Djava.class.path=. java -version",
         // Review 2.
         "cd /opt/x; cd /; cd /usr; PATH=/opt/x:$PATH make",
+        // Review 4: past #1309's possible folders the line may be in `/p`.
+        "cd /p/a; cd /q/b; cd ..; PATH=\"/p:/usr/my bin\" make",
+        "cd /p/a; cd /q/b; cd ..; PATH=/p:$PATH make",
         "ENV=./x.sh sh -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -e -i -c : </dev/null",
         "env \"PATH=/usr/bin :.\" git log",
         // Other ways to set it.
@@ -6901,10 +6904,27 @@ fn issue_1064_uncertain_subscripts_ask_only_before_an_operator() {
         "cp /bin/bash ./b=1; cat notes | ./b=1; echo \"${a[${#a[@]}-1]}\"",
         "cat notes | =bash; echo \"${a[${#a[@]}-1]}\"",
         "cp /bin/bash ./echo; cat notes | ./echo; echo \"${a[${#a[@]}-1]}\"",
+        // Review 4: `-C` spelled by a variable.
+        "o=-C; mapfile $o eval -c 1 a < notes; echo \"${a[${#a[@]}-1]}\"",
+        "x=C; mapfile -$x eval -c 1 a < notes; echo \"${a[${#a[@]}-1]}\"",
     ] {
         if script(command) != Some(UnseenCode) {
             wrong.push(command);
         }
+    }
+    // Review 4: a shell given its script may also load a start-up file.
+    let subscript = "echo \"${a[${#a[@]}-1]}\"";
+    for command in [
+        ["bash", "--rcfile", "notes", "-ic", subscript],
+        ["bash", "--init-file", "notes", "-ic", subscript],
+        ["bash", "$o", "notes", "-ic", subscript],
+    ] {
+        if kind(&command) != Some(UnseenCode) {
+            wrong.push(command[1]);
+        }
+    }
+    if kind(&["bash", "-c", subscript]).is_some() {
+        wrong.push("bash -c");
     }
     for command in [
         "echo \"${arr[${#arr[@]}-1]}\"",
