@@ -774,7 +774,7 @@ fn pf_28_s02_legacy_credential_is_bound_to_https_method_and_path() {
             .route_request_credentials(scheme, host, port, method, path, &mut headers)
             .map(|routing| match routing {
                 CredentialRouting::Direct(gate) => gate.is_some(),
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 CredentialRouting::Brokered(_) => false,
             });
         (result, authorization(&headers).map(str::to_string))
@@ -862,7 +862,7 @@ fn pf_28_s02_legacy_route_returns_a_gate_for_the_injected_value() {
     let Ok(CredentialRouting::Direct(Some(gate))) = broker.route_request_credentials(
         "https",
         "api.github.com",
-        443,
+        /*port*/ 443,
         "GET",
         "/user",
         &mut headers,
@@ -885,7 +885,7 @@ fn pf_28_s02_legacy_route_is_unchanged_without_the_gate() {
     let routing = broker.route_request_credentials(
         "https",
         "github.com",
-        443,
+        /*port*/ 443,
         "GET",
         "/settings/tokens",
         &mut headers,

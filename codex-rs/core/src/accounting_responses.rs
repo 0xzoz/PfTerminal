@@ -20,19 +20,29 @@ pub(crate) type Slot = Arc<Mutex<Option<Arc<DeferredResponsesSampling>>>>;
 pub(crate) struct DeferredResponsesSampling {
     request: Uuid,
     session: Arc<Session>,
+    /// The thread its attempts are recorded under.
+    owner: codex_protocol::ThreadId,
+    /// The ledger that thread lives in; the session's own when `None`.
+    owner_db: Option<codex_rollout::state_db::StateDbHandle>,
     turn: String,
     mode: AccountingMode,
     sampling: OnceCell<Arc<Sampling>>,
     failed: AtomicBool,
 }
 
+/// The sampling attached to `slot`. A poisoned slot is closed and the request
+/// goes unrecorded.
 pub(crate) fn read(slot: &Slot) -> Result<Option<Arc<DeferredResponsesSampling>>, CodexErr> {
-    slot.lock().map(|value| value.clone()).map_err(|poison| {
-        if let Some(value) = poison.into_inner().take() {
-            value.reject();
-        }
-        CodexErr::Fatal(failure("read sampling slot", "slot lock poisoned").into())
-    })
+    Ok(slot
+        .lock()
+        .map(|value| value.clone())
+        .unwrap_or_else(|poison| {
+            if let Some(value) = poison.into_inner().take() {
+                value.reject();
+            }
+            super::gap("read sampling slot", "slot lock poisoned");
+            None
+        }))
 }
 
 pub(crate) struct Scope(Slot);
@@ -41,9 +51,19 @@ impl Scope {
         slot: Slot,
         value: Option<Arc<DeferredResponsesSampling>>,
     ) -> Result<Self, CodexErr> {
-        *slot.lock().map_err(|_| {
-            CodexErr::Fatal(failure("attach sampling", "slot lock poisoned").into())
-        })? = value;
+        match slot.lock() {
+            Ok(mut slot) => *slot = value,
+            Err(poison) => {
+                // Leave the slot empty: this turn's requests go unrecorded.
+                if let Some(stale) = poison.into_inner().take() {
+                    stale.reject();
+                }
+                if let Some(value) = value {
+                    value.reject();
+                }
+                super::gap("attach sampling", "slot lock poisoned");
+            }
+        }
         Ok(Self(slot))
     }
 }
@@ -70,10 +90,33 @@ impl Drop for Bootstrap<'_> {
 }
 
 impl DeferredResponsesSampling {
+    #[cfg(test)]
     pub(crate) fn new(session: Arc<Session>, turn: String, mode: AccountingMode) -> Arc<Self> {
         Arc::new(Self {
             request: Uuid::new_v4(),
+            owner: session.thread_id,
+            owner_db: None,
             session,
+            turn,
+            mode,
+            sampling: OnceCell::new(),
+            failed: AtomicBool::new(false),
+        })
+    }
+
+    /// A sampling recorded under `owner`: the session's own thread, or the
+    /// conversation an ephemeral review fork works for.
+    pub(crate) fn new_for(
+        session: Arc<Session>,
+        owner: crate::accounting::AccountingOwner,
+        turn: String,
+        mode: AccountingMode,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            request: Uuid::new_v4(),
+            session,
+            owner: owner.thread,
+            owner_db: Some(owner.db),
             turn,
             mode,
             sampling: OnceCell::new(),
@@ -87,7 +130,7 @@ impl DeferredResponsesSampling {
             tracing::warn!(
                 target: "codex_core::accounting",
                 at = %std::panic::Location::caller(),
-                "accounting sampling closed; later requests in this turn stop"
+                "accounting sampling closed; later requests in this turn are sent unrecorded"
             );
         }
         if let Some(sampling) = self.sampling.get() {
@@ -102,19 +145,50 @@ impl DeferredResponsesSampling {
         self.sampling.get().map_or(Ok(()), |value| value.check())
     }
 
+    /// Whether this sampling has stopped recording.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.check().is_err()
+    }
+
+    /// Whether this sampling stopped its turn (`Sampling::halt`).
+    pub(crate) fn is_halted(&self) -> bool {
+        self.sampling.get().is_some_and(|value| value.is_halted())
+    }
+
+    /// Leave this request unrecorded. A sampling already in flight closes, so
+    /// the rest of the turn goes unrecorded too; the request itself proceeds.
     pub(crate) fn exclude(&self) -> Result<(), CodexErr> {
         if self.sampling.initialized() {
             self.reject();
         }
-        self.check()
+        Ok(())
+    }
+
+    /// The accounting mode this collector was attached with.
+    #[cfg(test)]
+    pub(crate) fn mode(&self) -> &AccountingMode {
+        &self.mode
     }
 
     pub(super) fn provider_mode(&self) -> bool {
         matches!(self.mode, AccountingMode::Provider { .. })
     }
 
+    /// The approved websocket route, or `None` when this turn's websocket
+    /// requests are not recorded - including after accounting failed.
     pub(crate) fn websocket_endpoint(&self) -> Result<Option<String>, CodexErr> {
-        self.check()?;
+        if self.is_closed() {
+            return Ok(None);
+        }
+        let endpoint = self.try_websocket_endpoint();
+        if let Err(error) = &endpoint {
+            super::gap("websocket endpoint", error);
+            return Ok(None);
+        }
+        endpoint
+    }
+
+    fn try_websocket_endpoint(&self) -> Result<Option<String>, CodexErr> {
         match &self.mode {
             AccountingMode::DirectOpenAiResponses {
                 approved_endpoint, ..
@@ -148,7 +222,30 @@ impl DeferredResponsesSampling {
     /// Compaction has its own path on the same approved route. Pinning it
     /// against `responses` would read as a route change and reject the turn,
     /// which is how the legacy compaction endpoint stayed uncollected.
+    ///
+    /// Accounting never stops a request: when it fails, this sampling closes
+    /// and the request, like every later one in the turn, is sent unrecorded.
     pub(crate) async fn resolve_path(
+        &self,
+        provider: &ModelProviderInfo,
+        auth: Option<&CodexAuth>,
+        endpoint: &str,
+        path: &str,
+    ) -> Result<Option<Arc<Sampling>>, CodexErr> {
+        if self.is_closed() {
+            return Ok(None);
+        }
+        match self.try_resolve_path(provider, auth, endpoint, path).await {
+            Ok(sampling) => Ok(sampling),
+            Err(error) => {
+                self.reject();
+                super::gap("resolve sampling", error);
+                Ok(None)
+            }
+        }
+    }
+
+    async fn try_resolve_path(
         &self,
         provider: &ModelProviderInfo,
         auth: Option<&CodexAuth>,
@@ -215,7 +312,9 @@ impl DeferredResponsesSampling {
         // record this turn's economics under the wrong authority.
         if let Some(existing) = self.sampling.get()
             && matches!(mode, AccountingMode::Provider { .. })
-            && super::pricing_for(&mode) != existing.pricing
+            && (super::pricing_for(&mode) != existing.pricing
+                || super::basis_source_for(&mode) != existing.basis_source
+                || !existing.same_account(&mode))
         {
             self.reject();
             return Err(CodexErr::Fatal(
@@ -232,12 +331,16 @@ impl DeferredResponsesSampling {
                     .map_err(|error| {
                         CodexErr::Fatal(failure("materialize rollout", error).into())
                     })?;
-                let runtime = self.session.state_db().ok_or_else(|| {
-                    CodexErr::Fatal(failure("open sampling", "no state database").into())
-                })?;
+                let runtime = self
+                    .owner_db
+                    .clone()
+                    .or_else(|| self.session.state_db())
+                    .ok_or_else(|| {
+                        CodexErr::Fatal(failure("open sampling", "no state database").into())
+                    })?;
                 let sampling = Sampling::start_request(
                     runtime,
-                    self.session.thread_id,
+                    self.owner,
                     self.turn.clone(),
                     &mode,
                     self.request,
@@ -298,12 +401,26 @@ pub(super) fn patch(
             ResponsesTokenPresence::Number(value) => Presence::Number(value.try_into()?),
         })
     };
+    // #814: apply #786's per-report Chat rule here too. An impossible
+    // reasoning subset must not make replay discard otherwise valid usage
+    // and the provider-reported charge. Split/cumulative reports are unchanged.
+    let output = presence(usage.output_tokens)?;
+    let mut reasoning = presence(usage.reasoning_tokens)?;
+    if let (Presence::Number(reasoning_count), Presence::Number(output_count)) = (reasoning, output)
+        && i64::from(reasoning_count) > i64::from(output_count)
+    {
+        tracing::debug!(
+            target: "codex_core::accounting",
+            "reasoning count above the output count; recorded as not reported"
+        );
+        reasoning = Presence::Missing;
+    }
     Ok(codex_state::accounting::Patch {
         input: presence(usage.input_tokens)?,
         read: presence(usage.cached_tokens)?,
         write: presence(usage.cache_write_tokens)?,
-        output: presence(usage.output_tokens)?,
-        reasoning: presence(usage.reasoning_tokens)?,
+        output,
+        reasoning,
         total: presence(usage.total_tokens)?,
         // The Vercel AI Gateway states what it charged with every response.
         // Other routes carry no such figure. A figure the exact decimal type
@@ -312,6 +429,8 @@ pub(super) fn patch(
             .then_some(usage.billed_usd)
             .flatten()
             .and_then(|text| codex_state::accounting::Decimal::try_from(text).ok()),
+        refused_status: None,
+        session_ended_at_ms: None,
     })
 }
 

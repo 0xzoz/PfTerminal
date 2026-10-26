@@ -25,7 +25,10 @@
 //! downgrade applies at the next start (the launch-time controls of this
 //! process cannot be widened in place; a new session in this process is such
 //! a start), while its revocation applies now. A downgrade or kill-switch
-//! release that cannot be saved changes nothing.
+//! release that cannot be saved changes nothing. The kill switch, on or off,
+//! also reaches the other processes running on the home, through their watch
+//! of the saved state ([`kill_switch_watch`], #507), and so do Moderate
+//! (#842) and Aggressive (#919), which only ever raise them.
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -35,7 +38,9 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::Weak;
 
+use codex_protocol::ThreadId;
 use codex_protocol::security::SecurityControlAction;
+use codex_security_policy::AuthorityEpoch;
 use codex_security_policy::RevocationEvent;
 use codex_security_policy::RevocationReason;
 use codex_security_policy::RevocationState;
@@ -80,6 +85,10 @@ pub(crate) struct PreparedTransition {
     kind: TransitionKind,
     from: SecurityLevel,
     to: SecurityLevel,
+    /// The stricter of `from` and the stored level the human reviewed: a
+    /// level the human chose below it is a downgrade of the saved record,
+    /// and a stored level above it was saved since (PF-24-S02).
+    floor: SecurityLevel,
     event: Option<(RevocationTarget, RevocationReason)>,
 }
 
@@ -122,6 +131,8 @@ pub(crate) struct CommittedTransition {
     /// Set when a restrictive transition applied but could not be saved: it
     /// holds until this process ends, not across a restart.
     pub(crate) not_saved: Option<String>,
+    /// Whether it reached another policy tree of this process on the home.
+    pub(crate) reached_other_trees: bool,
 }
 
 /// Told after a committed restrictive transition, kill switch or run end,
@@ -169,6 +180,21 @@ impl TrustedSecurityController {
         confirmed: ConfirmedSecurityRequest,
         probes: ProbeOutcome,
     ) -> Result<PreparedTransition, TransitionError> {
+        self.prepare_reviewed_transition(confirmed, probes, /*reviewed_stored*/ None)
+    }
+
+    /// [`Self::prepare_transition`] for a human who reviewed
+    /// `reviewed_stored` as the saved level (PF-24-S02; Permissive when
+    /// absent). Choosing a level below it lowers the saved record without
+    /// first raising this tree, and only a stored level above it is refused
+    /// as changed since. `None` keeps [`Self::prepare_transition`]'s rule:
+    /// the level in force is the floor.
+    pub(crate) fn prepare_reviewed_transition(
+        &self,
+        confirmed: ConfirmedSecurityRequest,
+        probes: ProbeOutcome,
+        reviewed_stored: Option<SecurityLevel>,
+    ) -> Result<PreparedTransition, TransitionError> {
         let (from, kill_switch_active) = {
             let guard = self.read_state()?;
             let state = guard
@@ -182,10 +208,12 @@ impl TrustedSecurityController {
         };
         let (kind, to, event) = match confirmed.request().action() {
             SecurityControlAction::SetLevel { level } => {
-                let kind = match level.cmp(&from) {
-                    std::cmp::Ordering::Greater => TransitionKind::Restrictive,
-                    std::cmp::Ordering::Less => TransitionKind::Downgrade,
-                    std::cmp::Ordering::Equal => TransitionKind::Unchanged,
+                let kind = if *level > from {
+                    TransitionKind::Restrictive
+                } else if *level < from.max(reviewed_stored.unwrap_or_default()) {
+                    TransitionKind::Downgrade
+                } else {
+                    TransitionKind::Unchanged
                 };
                 let event = (kind != TransitionKind::Unchanged).then_some((
                     RevocationTarget::AllActiveAuthority,
@@ -225,6 +253,7 @@ impl TrustedSecurityController {
             kind,
             from,
             to,
+            floor: reviewed_stored.unwrap_or(from),
             event,
         })
     }
@@ -294,7 +323,7 @@ impl TrustedSecurityController {
                 }
                 // A level stored by another session after this one was shown
                 // is not lowered without the human seeing it.
-                TransitionKind::Downgrade if stored_level > prepared.from => {
+                TransitionKind::Downgrade if stored_level > prepared.floor => {
                     return Err(TransitionError::StoredLevelChanged(stored_level));
                 }
                 TransitionKind::Downgrade => prepared.to,
@@ -317,24 +346,68 @@ impl TrustedSecurityController {
             Ok(next)
         });
         let (next, not_saved) = match saved {
-            Ok(next) => (next, None),
-            Err(error @ TransitionError::Persist(_))
+            Ok(next) => {
+                // #507: the watch of this home must not report this
+                // process's own switch as made elsewhere.
+                if let Some(event) = &event
+                    && store.home().is_some()
+                    && matches!(event.target, RevocationTarget::KillSwitch { .. })
+                {
+                    kill_switch_watch::saved_here(event.event_id.as_str());
+                }
+                (next, None)
+            }
+            Err(TransitionError::Persist(reason))
                 if prepared.kind == TransitionKind::Restrictive =>
             {
-                // An emergency stop never waits for the disk.
+                // An emergency stop never waits for the disk. Only the cause
+                // is kept: this change did apply.
                 let next = match merged {
                     Some(next) => next,
                     None => merge(None)?,
                 };
-                (next, Some(error.to_string()))
+                (next, Some(reason))
             }
             Err(error) => return Err(error),
         };
-        let committed = self.apply(&prepared, next.clone(), not_saved)?;
-        if prepared.kind == TransitionKind::Restrictive
-            && let Some(home) = store.home()
-        {
-            propagate(&self.shared, home, &next, prepared.closes_channels());
+        let mut committed = self.apply(&prepared, next.clone(), not_saved)?;
+        if let Some(home) = store.home() {
+            let reached = match prepared.kind {
+                TransitionKind::Restrictive => propagate(
+                    &self.shared,
+                    home,
+                    &next,
+                    prepared.closes_channels(),
+                    /*only_if_stricter*/ false,
+                    /*only_with_switch*/ None,
+                ),
+                // The level in force is chosen again (PF-24-S02): sessions of
+                // this process below it rise to it.
+                TransitionKind::Unchanged => propagate(
+                    &self.shared,
+                    home,
+                    &next,
+                    /*closes_channels*/ false,
+                    /*only_if_stricter*/ true,
+                    /*only_with_switch*/ None,
+                ),
+                // PF-25-S02: the switch is saved for the home, so the other
+                // sessions of this process that hold this very switch release
+                // it too; a tree with another switch is left alone.
+                TransitionKind::KillSwitchRelease => match memory.kill_switch_event_id() {
+                    Some(released) => propagate(
+                        &self.shared,
+                        home,
+                        &next,
+                        /*closes_channels*/ false,
+                        /*only_if_stricter*/ false,
+                        Some(released),
+                    ),
+                    None => 0,
+                },
+                TransitionKind::Downgrade => 0,
+            };
+            committed.reached_other_trees = reached > 0;
         }
         if prepared.closes_channels() {
             self.notify_revocation_sinks();
@@ -383,8 +456,14 @@ impl TrustedSecurityController {
             }
         }
         // A revocation or kill-switch change leaves what the next start
-        // enforces as it was.
-        if prepared.to != prepared.from || prepared.kind == TransitionKind::Unchanged {
+        // enforces as it was. A downgrade of the saved record can keep the
+        // level in force (PF-24-S02), and still sets the next start.
+        if prepared.to != prepared.from
+            || matches!(
+                prepared.kind,
+                TransitionKind::Unchanged | TransitionKind::Downgrade
+            )
+        {
             state.next_start_level = next.level;
         }
         Ok(CommittedTransition {
@@ -395,6 +474,7 @@ impl TrustedSecurityController {
             next_start_level: state.next_start_level,
             kill_switch_active: state.persisted.revocations.kill_switch_active,
             not_saved,
+            reached_other_trees: false,
         })
     }
 
@@ -428,6 +508,133 @@ impl TrustedSecurityController {
     pub(crate) fn notify_revocation_sinks(&self) {
         notify(&self.shared);
     }
+
+    /// The epoch a request confirmed now must name.
+    pub(crate) fn authority_epoch(&self) -> Result<AuthorityEpoch, SecurityPolicyError> {
+        let guard = self.read_state()?;
+        let state = guard
+            .as_ref()
+            .ok_or(SecurityPolicyError::RuntimeNotInitialized)?;
+        AuthorityEpoch::new(
+            state.runtime_nonce,
+            state.epoch,
+            state.persisted.revocations.generation,
+        )
+        .map_err(|_| SecurityPolicyError::AuthorityMismatch)
+    }
+
+    /// The kill-switch event in force, if any (PF-25-S02).
+    pub(crate) fn kill_switch_event_id(&self) -> Option<String> {
+        let guard = self.read_state().ok()?;
+        guard
+            .as_ref()?
+            .persisted
+            .revocations
+            .kill_switch_event_id()
+            .map(|id| id.as_str().to_string())
+    }
+
+    /// When the kill-switch event in force was made, if any (PF-25-S02).
+    pub(crate) fn kill_switch_event_at(&self) -> Option<i64> {
+        let guard = self.read_state().ok()?;
+        guard
+            .as_ref()?
+            .persisted
+            .revocations
+            .kill_switch_event_at_unix_seconds()
+    }
+
+    /// The level in force, the level the next start enforces, and whether
+    /// the kill switch is on.
+    pub(crate) fn in_force(
+        &self,
+    ) -> Result<(SecurityLevel, SecurityLevel, bool), SecurityPolicyError> {
+        let guard = self.read_state()?;
+        let state = guard
+            .as_ref()
+            .ok_or(SecurityPolicyError::RuntimeNotInitialized)?;
+        Ok((
+            state.persisted.settings.level,
+            state.next_start_level,
+            state.persisted.revocations.kill_switch_active,
+        ))
+    }
+}
+
+/// PF-24-S02: the trusted controller of the live policy tree on `home` that
+/// holds `thread` (the session the human confirmation was made in). A
+/// commit through it reaches the other trees on `home`. `None` when no tree
+/// of this process holds it.
+pub(crate) fn live_controller(home: &Path, thread: ThreadId) -> Option<TrustedSecurityController> {
+    let home = canonical(home);
+    let mut trees = TREES.lock().unwrap_or_else(PoisonError::into_inner);
+    trees.retain(|(_, tree)| tree.strong_count() > 0);
+    trees
+        .iter()
+        .filter(|(tree_home, _)| *tree_home == home)
+        .filter_map(|(_, tree)| tree.upgrade())
+        .find(|shared| {
+            shared
+                .state
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|state| {
+                    state.root_agent_id == thread || state.agents.contains_key(&thread)
+                })
+        })
+        .map(|shared| TrustedSecurityController { shared })
+}
+
+/// #978: whether a policy tree of this process runs on `home` (a session of
+/// this process uses it; not one of a remote app server). #1015: only an
+/// initialized tree counts, as only those take a commit (`propagate`), and
+/// not the one holding `except` (the confirming session's own).
+pub(crate) fn trees_run_on(home: &Path, except: Option<ThreadId>) -> bool {
+    let home = canonical(home);
+    let trees: Vec<Arc<SharedEffectivePolicy>> = {
+        let mut trees = TREES.lock().unwrap_or_else(PoisonError::into_inner);
+        trees.retain(|(_, tree)| tree.strong_count() > 0);
+        trees
+            .iter()
+            .filter(|(tree_home, _)| *tree_home == home)
+            .filter_map(|(_, tree)| tree.upgrade())
+            .collect()
+    };
+    trees.iter().any(|tree| {
+        tree.state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .is_some_and(|state| {
+                except.is_none_or(|thread| {
+                    state.root_agent_id != thread && !state.agents.contains_key(&thread)
+                })
+            })
+    })
+}
+
+/// #507: whether a person's kill switch is on in a policy tree of this
+/// process on `home`; `None` when no tree of this process is on it.
+pub(crate) fn live_kill_switch(home: &Path) -> Option<bool> {
+    let home = canonical(home);
+    let trees: Vec<Arc<SharedEffectivePolicy>> = {
+        let mut trees = TREES.lock().unwrap_or_else(PoisonError::into_inner);
+        trees.retain(|(_, tree)| tree.strong_count() > 0);
+        trees
+            .iter()
+            .filter(|(tree_home, _)| *tree_home == home)
+            .filter_map(|(_, tree)| tree.upgrade())
+            .collect()
+    };
+    let mut on = None;
+    for tree in trees {
+        let guard = tree.state.read().unwrap_or_else(PoisonError::into_inner);
+        if let Some(state) = guard.as_ref() {
+            on = Some(on.unwrap_or(false) || state.persisted.revocations.kill_switch_active);
+        }
+    }
+    on
 }
 
 /// Swap in a level and revocation state: the epoch moves and every grant of
@@ -456,12 +663,17 @@ fn adopt(
 /// A restrictive commit reaches the other trees of this process on `home`:
 /// their level rises to it, they take the merged revocations (the kill
 /// switch included) when those are newer, and their sinks revoke.
+/// `only_with_switch`: only trees whose kill switch in force is this event
+/// (a release). Returns how many trees took it.
 fn propagate(
     origin: &Arc<SharedEffectivePolicy>,
     home: &Path,
     next: &DurableSecurityState,
     closes_channels: bool,
-) {
+    only_if_stricter: bool,
+    only_with_switch: Option<&codex_security_policy::BoundedText>,
+) -> usize {
+    let mut reached = 0;
     let home = canonical(home);
     let trees: Vec<Arc<SharedEffectivePolicy>> = {
         let mut trees = TREES.lock().unwrap_or_else(PoisonError::into_inner);
@@ -474,12 +686,21 @@ fn propagate(
             .collect()
     };
     for tree in trees {
-        {
+        let rose = {
             let mut guard = tree.state.write().unwrap_or_else(PoisonError::into_inner);
             let Some(state) = guard.as_mut() else {
                 continue;
             };
             let level = state.persisted.settings.level.max(next.level);
+            if only_if_stricter && level == state.persisted.settings.level {
+                continue;
+            }
+            if let Some(switch) = only_with_switch
+                && state.persisted.revocations.kill_switch_event_id() != Some(switch)
+            {
+                continue;
+            }
+            let rose = level > state.persisted.settings.level;
             let mut revocations = state.persisted.revocations.clone();
             let merged = revocations
                 .merge(&next.revocations)
@@ -493,11 +714,16 @@ fn propagate(
                 continue;
             }
             state.next_start_level = state.next_start_level.max(next.level);
-        }
-        if closes_channels {
+            reached += 1;
+            rose
+        };
+        // A raised level ends the tree's "for session" approvals and
+        // brokered channels too.
+        if closes_channels || rose {
             notify(&tree);
         }
     }
+    reached
 }
 
 impl super::EffectivePolicyView {
@@ -532,8 +758,12 @@ impl super::EffectivePolicyView {
             .iter()
             .any(|(_, tree)| std::ptr::eq(tree.as_ptr(), Arc::as_ptr(&self.shared)))
         {
-            trees.push((home, Arc::downgrade(&self.shared)));
+            trees.push((home.clone(), Arc::downgrade(&self.shared)));
         }
+        drop(trees);
+        // #507: a kill switch saved by another process reaches this tree
+        // (#842, #919: and Moderate or Aggressive, only ever raising it).
+        kill_switch_watch::ensure(&home);
     }
 }
 
@@ -571,6 +801,9 @@ fn notify(shared: &SharedEffectivePolicy) {
         sink.revoke();
     }
 }
+
+#[path = "kill_switch_watch.rs"]
+pub(crate) mod kill_switch_watch;
 
 #[cfg(test)]
 #[path = "transition_tests.rs"]

@@ -1,6 +1,7 @@
 use pretty_assertions::assert_eq;
 
 use super::*;
+use crate::legacy_core::security_level_change::SecurityLevel;
 
 fn write_state(home: &Path, contents: &str) {
     std::fs::write(state_path(home), contents).unwrap();
@@ -18,7 +19,8 @@ fn absent_state_is_permissive_and_touches_nothing() {
 fn unknown_or_corrupt_state_fails_visibly_and_enforces_aggressive() {
     let home = tempfile::tempdir().unwrap();
     for contents in [
-        "version = 1\nlevel = \"moderate\"\n",
+        "version = 1\nlevel = \"relaxed\"\n",
+        "version = 1\nlevel = \"Moderate\"\n",
         "version = 1\nlevel = \"Permissive\"\n",
         "version = 2\nlevel = \"permissive\"\n",
         "version = 1\nlevel = \"permissive\"\nextra = true\n",
@@ -103,16 +105,26 @@ fn rules_forbid_every_vault_entry_point() {
 fn status_line_reports_active_and_pending_levels() {
     assert_eq!(
         [
-            status_line(ChosenLevel::Permissive, &StoredLevel::Absent),
             status_line(
-                ChosenLevel::Aggressive,
-                &StoredLevel::Chosen(ChosenLevel::Aggressive)
+                ChosenLevel::Permissive,
+                &StoredLevel::Absent,
+                SecurityLevel::Permissive
             ),
             status_line(
                 ChosenLevel::Aggressive,
-                &StoredLevel::Chosen(ChosenLevel::Permissive)
+                &StoredLevel::Chosen(ChosenLevel::Aggressive),
+                SecurityLevel::Aggressive
             ),
-            status_line(ChosenLevel::Aggressive, &StoredLevel::Invalid("x".into())),
+            status_line(
+                ChosenLevel::Aggressive,
+                &StoredLevel::Chosen(ChosenLevel::Permissive),
+                SecurityLevel::Permissive
+            ),
+            status_line(
+                ChosenLevel::Aggressive,
+                &StoredLevel::Invalid("x".into()),
+                SecurityLevel::Permissive
+            ),
         ],
         [
             "Permissive active (/security)".to_string(),
@@ -214,7 +226,7 @@ fn contained_panes_lift_the_refusal_only_when_containment_is_ready() {
         );
     }
     let _feature = feature(true);
-    let _armed = test_settings::set_contract_armed(true);
+    let _armed = test_settings::set_contract_armed(/*armed*/ true);
     let has_sandbox =
         codex_sandboxing::get_platform_sandbox(/*windows_sandbox_enabled*/ false).is_some();
     assert_eq!(external_agent_block_reason().is_none(), has_sandbox);
@@ -226,4 +238,69 @@ fn smoke_runs_without_a_launch_context_read_the_stored_level() {
     assert_eq!(external_agent_block_reason_for_home(home.path()), None);
     save(home.path(), ChosenLevel::Aggressive, NestedAgents::Refuse).unwrap();
     assert!(external_agent_block_reason_for_home(home.path()).is_some());
+}
+
+/// #441: the rule file follows the nested-launch setting, and both forms are
+/// recognised as Corbanu's own.
+#[test]
+fn issue_441_rules_follow_the_nested_agents_setting() {
+    let home = tempfile::tempdir().unwrap();
+    save(home.path(), ChosenLevel::Aggressive, NestedAgents::Pass).unwrap();
+    let pass = std::fs::read_to_string(rules_path(home.path())).unwrap();
+    assert!(!pass.contains("\"exec\""), "{pass}");
+    save(home.path(), ChosenLevel::Aggressive, NestedAgents::Refuse).unwrap();
+    let refuse = std::fs::read_to_string(rules_path(home.path())).unwrap();
+    assert_eq!(refuse, rules_contents());
+    for program in VAULT_PROGRAMS {
+        for subcommand in ["exec", "e", "review"] {
+            assert!(
+                refuse.contains(&format!(
+                    "pattern = [\"{program}\", \"{subcommand}\"], decision = \"forbidden\""
+                )),
+                "{program} {subcommand}"
+            );
+        }
+    }
+    // Saving Permissive leaves the file to the next launch; a session still
+    // enforcing Aggressive recognises it either way.
+    save(home.path(), ChosenLevel::Aggressive, NestedAgents::Pass).unwrap();
+    save(home.path(), ChosenLevel::Permissive, NestedAgents::Refuse).unwrap();
+    let kept = std::fs::read_to_string(rules_path(home.path())).unwrap();
+    assert_eq!(kept, pass);
+    assert!(codex_security_level::level::is_rules_contents(&kept));
+    // The vault-only file earlier versions wrote is the "pass" form.
+    assert!(!pass.contains("nested agent launches"), "{pass}");
+    assert!(codex_security_level::level::is_rules_contents(&pass));
+    assert!(codex_security_level::level::is_rules_contents(&refuse));
+    assert!(!codex_security_level::level::is_rules_contents("# mine\n"));
+}
+
+/// #750: Moderate that Core keeps (config, or Core's record over a
+/// Permissive file) is the next start's level, not "Permissive saved".
+#[test]
+fn issue_750_status_line_counts_the_moderate_core_keeps() {
+    assert_eq!(
+        [
+            status_line(
+                ChosenLevel::Moderate,
+                &StoredLevel::Absent,
+                SecurityLevel::Moderate
+            ),
+            status_line(
+                ChosenLevel::Moderate,
+                &StoredLevel::Chosen(ChosenLevel::Permissive),
+                SecurityLevel::Permissive
+            ),
+            status_line(
+                ChosenLevel::Permissive,
+                &StoredLevel::Chosen(ChosenLevel::Moderate),
+                SecurityLevel::Moderate
+            ),
+        ],
+        [
+            "Moderate active (/security)".to_string(),
+            "Moderate active; Permissive saved for next start (/security)".to_string(),
+            "Permissive active; Moderate saved for next start (/security)".to_string(),
+        ]
+    );
 }

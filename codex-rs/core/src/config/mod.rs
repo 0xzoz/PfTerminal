@@ -109,8 +109,11 @@ use codex_model_provider_info::corrected_catalog_provider;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_model_provider_info::default_model_context_window_for_provider;
 use codex_model_provider_info::default_model_max_output_tokens_for_provider;
+use codex_model_provider_info::is_retired_model;
 use codex_model_provider_info::merge_configured_model_providers;
 use codex_model_provider_info::resolve_model_for_provider;
+use codex_model_provider_info::retired_model_notice;
+use codex_model_provider_info::retired_model_replacement;
 use codex_models_manager::ModelsManagerConfig;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
@@ -181,6 +184,21 @@ mod network_proxy_spec;
 mod otel;
 mod permission_profile_catalog;
 mod permissions;
+mod provider_accounts;
+pub use codex_model_provider::selected_account_error;
+pub use provider_accounts::apply_recorded_provider_account;
+pub(crate) use provider_accounts::configured_account_names;
+pub use provider_accounts::default_login_restriction_error;
+pub use provider_accounts::other_provider_account_error;
+pub(crate) use provider_accounts::restore_recorded_agent_account;
+pub(crate) use provider_accounts::resume_default_key_error;
+pub use provider_accounts::session_account_error;
+pub(crate) use provider_accounts::spawn_default_key_error;
+pub use provider_accounts::split_account_selection;
+pub(crate) use provider_accounts::stamp_provider_account;
+pub use provider_accounts::subagent_account_error;
+pub use provider_accounts::supports_named_accounts;
+pub use provider_accounts::unused_other_provider_account_error;
 mod requirements;
 mod resolved_permission_profile;
 #[cfg(test)]
@@ -362,21 +380,56 @@ pub(crate) async fn test_config() -> Config {
     config
 }
 
-/// Which economics this client may state for a turn, decided by the route and
-/// the authentication actually used.
+/// Which economics this client may state for a turn, from the billing basis
+/// declared for the route and credential actually used
+/// (`codex_model_provider_info::declared_billing`).
 ///
-/// These are three situations, not two. Conflating "ran on a plan" with "ran
-/// under an API key somewhere this client cannot price" would book API-key spend
-/// as subscription capacity.
+/// Conflating "ran on a plan" with "ran under an API key somewhere this client
+/// cannot price" would book API-key spend as subscription capacity, so every
+/// basis is its own variant and none is inferred from the kind of login.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PriceAuthority {
-    /// Rates the provider charges per token for this route and this credential.
+    /// Pay per use: the rates the provider charges per token for this route
+    /// and this credential.
     ApiKeyRates,
-    /// Subscription capacity: the plan rate that applied, and any API equivalent
-    /// the catalogue states for the same row.
+    /// Pay per use on a known route reached through a provider the user
+    /// configured: the rates the route's operator publishes for it, looked up
+    /// by the route actually used, since the provider id is the user's own
+    /// name (#368).
+    RouteRates(PricedRoute),
+    /// Subscription capacity at a built-in route: the plan rate that applied,
+    /// and any API equivalent the catalogue states for the same row.
     PlanRate,
-    /// Neither. Tokens are still recorded; no economics are claimed.
+    /// Subscription capacity off the built-in routes: subscription work with
+    /// no catalogue figure.
+    PlanBasis,
+    /// Pay per use with no rate this client can attribute. Tokens are still
+    /// recorded; no money is stated.
     Unavailable,
+    /// Runs on the user's own machine: no charge.
+    Local,
+    /// No basis is declared for this route and credential: neither money
+    /// spent nor subscription work.
+    Undeclared,
+}
+
+/// A route whose operator publishes per-token prices for it, priced by the
+/// route rather than by a built-in provider's catalogue row (#368).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PricedRoute {
+    /// Moonshot's Kimi Open Platform, `https://api.moonshot.ai/v1`, billed in
+    /// US dollars per token.
+    MoonshotOpenPlatform,
+}
+
+impl PricedRoute {
+    /// The priced route at `endpoint`, the base URL a request actually went to.
+    pub fn at(endpoint: &str) -> Option<Self> {
+        match endpoint.trim_end_matches('/') {
+            "https://api.moonshot.ai/v1" => Some(Self::MoonshotOpenPlatform),
+            _ => None,
+        }
+    }
 }
 
 /// Application configuration loaded from disk and merged with overrides.
@@ -513,6 +566,22 @@ impl Permissions {
     /// Named profile selected by config, if the current profile has one.
     pub fn active_permission_profile(&self) -> Option<ActivePermissionProfile> {
         self.permission_profile_state.active_permission_profile()
+    }
+
+    /// Whether these permissions come from the launch overrides of an
+    /// Aggressive level Corbanu Terminal enforces and shows (the stored
+    /// `/security` level, or a nested launch held to it), even while Core's
+    /// level stays lower (#428). Only those overrides select the Aggressive
+    /// profile and set the origin marker, and launch refuses Aggressive when
+    /// another layer defines the profile; either signal alone only makes a
+    /// check stricter.
+    pub fn launch_enforces_aggressive(&self) -> bool {
+        self.active_permission_profile()
+            .is_some_and(|profile| profile.id == codex_security_level::level::AGGRESSIVE_PROFILE_ID)
+            || self
+                .shell_environment_policy
+                .r#set
+                .contains_key(codex_security_level::nested::ORIGIN_ENV)
     }
 
     /// Effective filesystem sandbox policy derived from the canonical profile.
@@ -678,6 +747,11 @@ pub enum AccountingMode {
         /// here because the provider stores them in a `HashMap`.
         approved_query: Option<String>,
         pricing: PriceAuthority,
+        /// Where the basis behind `pricing` was declared.
+        basis_source: codex_state::accounting::BasisSource,
+        /// PF-84: the named account of the serving provider this turn's
+        /// requests use; `None` is the `default` account. Rebound per turn.
+        account: Option<codex_state::accounting::AttemptAccount>,
     },
     DirectAnthropic {
         scope: uuid::Uuid,
@@ -741,6 +815,12 @@ pub struct Config {
 
     /// User-facing security posture composed with the existing permission system.
     pub security_level: SecurityLevel,
+
+    /// PF-84: the explicit `--account` selection this config was loaded with,
+    /// forwarded with thread start and resume so it beats a recorded account.
+    pub provider_account_override: Option<String>,
+    /// What turned `broker_model_auth` on (#391).
+    pub broker_model_auth_origin: crate::model_broker_auth::BrokerModelAuthOrigin,
 
     /// Effective permission configuration for shell tool execution.
     pub permissions: Permissions,
@@ -1177,6 +1257,17 @@ pub struct Config {
     /// When `true`, suppress warnings about unstable (under development) features.
     pub suppress_unstable_features_warning: bool,
 
+    /// When `true`, a reopened conversation sends no startup warm-up request
+    /// (#403). A new conversation still does.
+    pub skip_reopen_warmup: bool,
+
+    /// #1038: this new conversation continues a saved one whose first
+    /// message the person edited. Its warm-up is a reopen warm-up (#403),
+    /// as when a later message is edited. Set per thread, never from TOML;
+    /// read once at session start. Agents spawned from this config inherit
+    /// it to no effect: only a root session can be a reopen.
+    pub reopened_by_prompt_edit: bool,
+
     /// The currently active project config, resolved by checking if cwd:
     /// is (1) part of a git repo, (2) a git worktree, or (3) just using the cwd
     pub active_project: ProjectConfig,
@@ -1454,6 +1545,18 @@ impl AuthManagerConfig for Config {
     fn auth_route_config(&self) -> AuthRouteConfig {
         Config::auth_route_config(self)
     }
+
+    fn forced_login_method(&self) -> Option<ForcedLoginMethod> {
+        self.forced_login_method
+    }
+
+    fn configured_forced_login_method(&self) -> Option<ForcedLoginMethod> {
+        self.configured_forced_login_method
+    }
+
+    fn runs_on_named_sign_in_account(&self) -> bool {
+        Config::runs_on_named_sign_in_account(self)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1662,7 +1765,10 @@ pub fn gpu_runtime_model_provider(
     provider.name = format!("Rented GPU · {}", record.model_id);
     provider.auth = Some(ModelProviderAuthInfo {
         command: current_corbanu_auth_helper(),
-        args: vec!["internal-gpu-endpoint-token".to_string(), record.rental_id],
+        args: vec![
+            codex_login::auth::GPU_ENDPOINT_TOKEN_HELPER_SUBCOMMAND.to_string(),
+            record.rental_id,
+        ],
         // Vault access may briefly serialize with the rental controller in another process.
         // Leave enough startup time for that lock handoff instead of rejecting a healthy
         // runtime provider at the generic five-second auth-helper default.
@@ -1877,6 +1983,40 @@ impl Config {
     /// Returns auth routing resolved from the effective feature configuration.
     pub fn auth_route_config(&self) -> AuthRouteConfig {
         AuthRouteConfig::from_http_client_factory(self.http_client_factory())
+    }
+
+    /// The default login's settings and the configured login restrictions, as
+    /// checked (and enforced) against the default login at startup.
+    pub fn default_login_restrictions(&self) -> codex_login::AuthConfig {
+        codex_login::AuthConfig {
+            codex_home: self.codex_home.to_path_buf(),
+            auth_credentials_store_mode: self.cli_auth_credentials_store_mode,
+            keyring_backend_kind: self.auth_keyring_backend_kind(),
+            forced_login_method: self.configured_forced_login_method,
+            forced_chatgpt_workspace_id: self.forced_chatgpt_workspace_id.clone(),
+            chatgpt_base_url: Some(self.chatgpt_base_url.clone()),
+            auth_route_config: self.auth_route_config(),
+        }
+    }
+
+    /// PF-84-S06 (#570): whether this session's own provider runs on a named
+    /// OpenAI sign-in account. Such a session checks the login restrictions
+    /// against that account only and never reads or logs out the default
+    /// login at startup.
+    pub fn runs_on_named_sign_in_account(&self) -> bool {
+        codex_model_provider::named_sign_in_account(&self.model_provider).is_some()
+    }
+
+    /// Whether the `named_accounts` feature is on.
+    pub fn named_accounts_enabled(&self) -> bool {
+        self.features.enabled(Feature::NamedAccounts)
+    }
+
+    /// PF-84 (#1085): whether this home uses named OpenAI sign-in accounts
+    /// (one is enrolled, or `[provider_accounts]` selects one). Blocking: an
+    /// initialised vault is decrypted to read its account metadata.
+    pub fn uses_named_sign_in_accounts(&self) -> bool {
+        provider_accounts::uses_named_sign_in_accounts(&self.codex_home, &self.model_providers)
     }
 
     /// Creates the HTTP client factory resolved from the effective feature configuration.
@@ -2267,10 +2407,32 @@ pub async fn load_config_toml_with_layer_stack(
     .await?;
 
     let merged_toml = config_layer_stack.effective_config();
-    let cfg = deserialize_config_toml_with_base(merged_toml, codex_home).map_err(|e| {
-        tracing::error!("Failed to deserialize overridden config: {e}");
-        e
-    })?;
+    let cfg = {
+        let _guard = AbsolutePathBufGuard::new(codex_home);
+        merged_toml.try_into::<ConfigToml>()
+    };
+    let cfg = match cfg {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            tracing::error!("Failed to deserialize overridden config: {err}");
+            // Name the file that fails on its own (e.g. a project
+            // `[security]` table without `version`, #845) instead of the
+            // opaque merged-config error.
+            if let Some(config_error) = codex_config::first_layer_config_error::<ConfigToml>(
+                &config_layer_stack,
+                codex_config::CONFIG_TOML_FILE,
+            )
+            .await
+            {
+                return Err(codex_config::io_error_from_config_error(
+                    ErrorKind::InvalidData,
+                    config_error,
+                    Some(err),
+                ));
+            }
+            return Err(std::io::Error::new(ErrorKind::InvalidData, err));
+        }
+    };
 
     Ok(ConfigTomlLoadResult {
         config_toml: cfg,
@@ -2869,6 +3031,17 @@ pub struct ConfigOverrides {
     /// Explicit absolute runtime workspace roots for this session. When set,
     /// this is the full runtime root list rather than an additive override.
     pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    /// PF-84: an explicit account selection (`--account [<provider>:]<name>`).
+    /// It beats `[provider_accounts]`; without a provider prefix it applies
+    /// to the session's provider.
+    pub provider_account: Option<String>,
+    /// PF-84: the account a resumed thread recorded, or a spawned worker's
+    /// parent runs on (`<provider>:<name>`). It beats `[provider_accounts]`;
+    /// `provider_account` beats it only when both name the same provider, so
+    /// another provider's explicit account never drops it (#425).
+    pub inherited_provider_account: Option<String>,
+    /// #1038: see [`Config::reopened_by_prompt_edit`].
+    pub reopened_by_prompt_edit: bool,
 }
 
 fn dedupe_absolute_paths(paths: &mut Vec<AbsolutePathBuf>) {
@@ -3550,12 +3723,10 @@ impl Config {
         // PF-23-S03: the level of every layer and a confirmed level stored by
         // the trusted controller are floors; an unreadable store enforces
         // Aggressive and says so.
-        let recovery = crate::security::recovery::recover(
-            codex_home.as_path(),
-            security_settings
-                .level
-                .max(layered_security_floor(&config_layer_stack)),
-        );
+        let configured_level = security_settings
+            .level
+            .max(layered_security_floor(&config_layer_stack));
+        let recovery = crate::security::recovery::recover(codex_home.as_path(), configured_level);
         if let Some(warning) = recovery.warning() {
             startup_warnings.push(warning);
         }
@@ -3619,6 +3790,9 @@ impl Config {
             bypass_hook_trust,
             additional_writable_roots,
             workspace_roots: workspace_roots_override,
+            provider_account: provider_account_override,
+            inherited_provider_account,
+            reopened_by_prompt_edit,
         } = overrides;
         let bypass_hook_trust = bypass_hook_trust.unwrap_or_default();
 
@@ -3661,7 +3835,7 @@ impl Config {
             web_search_request: override_tools_web_search_request,
         };
 
-        let configured_features = Features::from_sources(
+        let mut configured_features = Features::from_sources(
             FeatureConfigSource {
                 features: cfg.features.as_ref(),
                 experimental_use_unified_exec_tool: cfg.experimental_use_unified_exec_tool,
@@ -3671,18 +3845,48 @@ impl Config {
             },
             feature_overrides,
         );
+        // #391, D2: Aggressive or Moderate (Core's level or the stored
+        // `/security` level) turns `broker_model_auth` on unless the person's own configuration
+        // sets it; a project layer cannot turn it off.
+        let explicit_broker = explicit_feature_setting(
+            &config_layer_stack,
+            cfg.features.as_ref(),
+            Feature::BrokerModelAuth,
+        );
+        let level_for_broker =
+            crate::model_broker_auth::level_for_defaults(codex_home.as_path(), configured_level);
+        let level_broker = crate::model_broker_auth::level_broker_setting(
+            level_for_broker,
+            crate::model_broker_auth::LEVEL_DEFAULT_SUPPORTED,
+            explicit_broker,
+        );
+        if let Some(enabled) = level_broker {
+            configured_features.set_enabled(Feature::BrokerModelAuth, enabled);
+        }
         let mut features = ManagedFeatures::from_configured_with_warnings(
             configured_features,
             feature_requirements,
             &mut startup_warnings,
         )?;
+        let broker_model_auth_origin = {
+            use crate::model_broker_auth::BrokerModelAuthOrigin;
+            if !features.enabled(Feature::BrokerModelAuth) {
+                BrokerModelAuthOrigin::Config
+            } else if features.pinned(Feature::BrokerModelAuth) == Some(true) {
+                BrokerModelAuthOrigin::Policy
+            } else if level_broker == Some(true) && explicit_broker.is_none() {
+                crate::model_broker_auth::level_origin(level_for_broker)
+            } else {
+                BrokerModelAuthOrigin::Config
+            }
+        };
         let secretless_agent_launch = features.enabled(Feature::SecretlessAgentLaunch);
         if secretless_agent_launch {
             // PF-27-S02: arm the launch contract for this process, and never
             // replay a login-shell snapshot that re-exports profile secrets.
             crate::security::launch_contract::arm(&codex_home);
             if features.enabled(Feature::ShellSnapshot)
-                && features.disable(Feature::ShellSnapshot).is_err()
+                && !features.turn_off_unless_required(Feature::ShellSnapshot)
             {
                 startup_warnings.push(
                     "secretless_agent_launch: shell_snapshot is required by policy; agent commands cannot read the snapshot files"
@@ -3690,7 +3894,16 @@ impl Config {
                 );
             }
         }
-        if features.enabled(Feature::BrokerModelAuth) {
+        // PF-27-S07: drop the CODEX_HOME deny a protected run left behind.
+        #[cfg(windows)]
+        if !secretless_agent_launch {
+            crate::security::launch_contract::release_codex_home_when_unarmed(&codex_home);
+        }
+        // Core's unit tests load Aggressive configs in one shared process;
+        // the level's setting must not make that whole process brokered (nor
+        // start its broker: `install_for_config` follows this mark there).
+        let level_default_in_unit_test = cfg!(test) && level_broker.is_some();
+        if features.enabled(Feature::BrokerModelAuth) && !level_default_in_unit_test {
             // PF-27-S05: this process brokers provider credentials from now on;
             // until its broker runs, they are not sent at all.
             codex_model_provider::require_model_key_broker();
@@ -3700,7 +3913,7 @@ impl Config {
             // snapshots persist the environment, so they are off too; if
             // policy pins them on, fail closed before arming.
             if features.enabled(Feature::ShellSnapshot)
-                && features.disable(Feature::ShellSnapshot).is_err()
+                && !features.turn_off_unless_required(Feature::ShellSnapshot)
             {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
@@ -3709,6 +3922,7 @@ impl Config {
             }
             crate::security::disclosure_gate::arm(codex_home.as_path())
                 .map_err(|err| std::io::Error::new(std::io::ErrorKind::PermissionDenied, err))?;
+            crate::security::disclosure_gate::watch_vault(codex_home.as_path());
             if !features.enabled(Feature::SecretlessAgentLaunch) {
                 startup_warnings.push(
                     "secret_output_gate: without secretless_agent_launch, agent commands can read the vault themselves (for example `corbanu vault auth-helper`); values revealed outside Core are not gated"
@@ -4101,6 +4315,8 @@ impl Config {
                     .map(|path| path.to_path_buf())
             })
             .unwrap_or_else(|| codex_home.to_path_buf());
+        // #651: an armed launch contract protects a separate database folder.
+        crate::security::launch_contract::protect_database_folder(&sqlite_home);
 
         let mut built_in_model_providers = built_in_model_providers(openai_base_url);
         if let Some(command) = codex_self_exe
@@ -4121,9 +4337,15 @@ impl Config {
             provider.chat_completions_provider = Some(openrouter_provider);
         }
 
-        let model_providers =
+        let mut model_providers =
             merge_configured_model_providers(built_in_model_providers, cfg.model_providers)
                 .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
+        provider_accounts::apply_provider_accounts(
+            &mut model_providers,
+            cfg.provider_accounts.as_ref(),
+            features.enabled(Feature::NamedAccounts),
+            &mut startup_warnings,
+        )?;
 
         let provider_came_from_override = model_provider.is_some();
         let model_came_from_override = model.is_some();
@@ -4148,6 +4370,48 @@ impl Config {
         } else {
             requested_model_provider_id
         };
+        let named_accounts_enabled = features.enabled(Feature::NamedAccounts);
+        let explicit_account = provider_account_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|selection| !selection.is_empty());
+        if let Some(inherited) = inherited_provider_account
+            .as_deref()
+            .map(str::trim)
+            .filter(|selection| !selection.is_empty())
+        {
+            // Only the thread's own provider: a recorded or parent account of
+            // another provider is never what this thread runs on.
+            let (inherited_provider, _) = split_account_selection(inherited, &model_provider_id);
+            let replaced = explicit_account.is_some_and(|selection| {
+                split_account_selection(selection, &model_provider_id).0 == inherited_provider
+            });
+            if inherited_provider == model_provider_id && !replaced {
+                provider_accounts::apply_explicit_provider_account(
+                    &mut model_providers,
+                    &model_provider_id,
+                    inherited,
+                    named_accounts_enabled,
+                    /*recorded*/ true,
+                )?;
+            }
+        }
+        // Kept qualified by the provider it was validated against, so a thread
+        // later started or resumed on another provider cannot reinterpret it.
+        let provider_account_override = match explicit_account {
+            Some(selection) => {
+                provider_accounts::apply_explicit_provider_account(
+                    &mut model_providers,
+                    &model_provider_id,
+                    selection,
+                    named_accounts_enabled,
+                    /*recorded*/ false,
+                )?;
+                let (provider_id, name) = split_account_selection(selection, &model_provider_id);
+                Some(format!("{provider_id}:{name}"))
+            }
+            None => None,
+        };
         let model_provider = model_providers
             .get(&model_provider_id)
             .ok_or_else(|| {
@@ -4161,6 +4425,11 @@ impl Config {
             .clone();
 
         let requested_model_for_pair_validation = model.clone().or_else(|| cfg.model.clone());
+        let retired_pin = requested_model_for_pair_validation
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| is_retired_model(model))
+            .map(str::to_string);
         let incompatible_explicit_provider = model_provider_was_explicit
             .then_some(requested_model_for_pair_validation.as_deref())
             .flatten()
@@ -4238,6 +4507,11 @@ impl Config {
                     .map(|info| (corrected, info.clone()))
             }) {
                 Some((corrected, info)) => {
+                    let info = info
+                        .with_account_from(&model_provider)
+                        .map_err(|message| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, message)
+                        })?;
                 tracing::warn!(
                     model = model.as_deref().unwrap_or_default(),
                     stored_provider = %model_provider_id,
@@ -4252,6 +4526,25 @@ impl Config {
                 }
                 None => (model_provider_id, model_provider, model, false),
             };
+        // A retired pin (config, override, resumed thread or connector state)
+        // would fail every turn: its catalogue row is gone. Move it on and say so,
+        // whichever step above already replaced it.
+        let model = model.map(|model| {
+            retired_model_replacement(&model, &model_provider_id).map_or(model, str::to_string)
+        });
+        // Only when the retirement is what changed it, not another fallback
+        // (an incompatible provider, a provider's own default model).
+        if let (Some(retired), Some(current)) = (retired_pin.as_deref(), model.as_deref())
+            && retired_model_replacement(retired, &model_provider_id) == Some(current)
+        {
+            tracing::warn!(
+                retired,
+                current,
+                provider = %model_provider_id,
+                "replaced a retired model pin"
+            );
+            startup_warnings.push(retired_model_notice(retired, current));
+        }
         let mut shell_environment_policy: ShellEnvironmentPolicy =
             cfg.shell_environment_policy.into();
         let mut allow_login_shell = cfg.allow_login_shell.unwrap_or(true);
@@ -4717,6 +5010,8 @@ impl Config {
             workspace_roots_explicit,
             startup_warnings,
             security_level,
+            provider_account_override,
+            broker_model_auth_origin,
             permissions: Permissions {
                 approval_policy: constrained_approval_policy.value,
                 permission_profile_state,
@@ -4879,6 +5174,8 @@ impl Config {
             suppress_unstable_features_warning: cfg
                 .suppress_unstable_features_warning
                 .unwrap_or(false),
+            skip_reopen_warmup: cfg.skip_reopen_warmup.unwrap_or(false),
+            reopened_by_prompt_edit,
             active_project,
             notices,
             check_for_update_on_startup,
@@ -5297,6 +5594,8 @@ pub fn find_codex_home() -> std::io::Result<AbsolutePathBuf> {
     codex_utils_home_dir::find_codex_home()
 }
 
+pub use codex_utils_home_dir::home_variables_conflict;
+
 /// Returns the path to the folder where Codex logs are stored. Does not verify
 /// that the directory exists.
 pub fn log_dir(cfg: &Config) -> std::io::Result<PathBuf> {
@@ -5319,6 +5618,40 @@ pub async fn apply_agent_role_to_config(
     role_name: Option<&str>,
 ) -> Result<(), String> {
     crate::agent::role::apply_role_to_config(config, role_name).await
+}
+
+/// The value the person's own configuration sets for `feature` (by its key
+/// or a legacy alias): config files, launch flags and managed layers, the
+/// highest precedence first. A project's `.codex` folder does not count, so a
+/// repository cannot lower a level's default. A stack without layers (config
+/// built directly from a `ConfigToml`) reads `features`.
+fn explicit_feature_setting(
+    stack: &ConfigLayerStack,
+    features: Option<&FeaturesToml>,
+    feature: Feature,
+) -> Option<bool> {
+    let is_feature = |key: &str| codex_features::feature_for_key(key) == Some(feature);
+    let layers = stack.layers_high_to_low();
+    if layers.is_empty() {
+        return features?
+            .entries()
+            .into_iter()
+            .filter(|(key, _)| is_feature(key))
+            .map(|(_, enabled)| enabled)
+            .next_back();
+    }
+    layers
+        .into_iter()
+        .filter(|layer| !matches!(layer.name, ConfigLayerSource::Project { .. }))
+        .find_map(|layer| {
+            layer
+                .config
+                .get("features")?
+                .as_table()?
+                .iter()
+                .filter(|(key, _)| is_feature(key))
+                .find_map(|(_, value)| value.as_bool())
+        })
 }
 
 /// PF-23-S03: the strictest security level any enabled config layer sets.
@@ -5350,5 +5683,13 @@ mod tests;
 mod catalogue_effort_tests;
 
 #[cfg(test)]
+#[path = "retired_model_tests.rs"]
+mod retired_model_tests;
+
+#[cfg(test)]
 #[path = "config_loader_tests.rs"]
 mod config_loader_tests;
+
+#[cfg(test)]
+#[path = "project_security_startup_tests.rs"]
+mod project_security_startup_tests;

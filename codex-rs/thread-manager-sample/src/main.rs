@@ -17,6 +17,7 @@ use codex_core_api::AskForApproval;
 use codex_core_api::AuthCredentialsStoreMode;
 use codex_core_api::AuthManager;
 use codex_core_api::AutoCompactTokenLimitScope;
+use codex_core_api::BrokerModelAuthOrigin;
 use codex_core_api::CodexAppsToolsCache;
 use codex_core_api::CodexHomeUserInstructionsProvider;
 use codex_core_api::CodexThread;
@@ -200,6 +201,8 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         model_provider,
         personality: None,
         security_level: SecurityLevel::Permissive,
+        broker_model_auth_origin: BrokerModelAuthOrigin::Config,
+        provider_account_override: None,
         permissions: Permissions::from_approval_and_profile(
             Constrained::allow_any(AskForApproval::Never),
             Constrained::allow_any(PermissionProfile::read_only()),
@@ -313,6 +316,8 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
         current_time_reminder: None,
         features: Default::default(),
         suppress_unstable_features_warning: false,
+        skip_reopen_warmup: false,
+        reopened_by_prompt_edit: false,
         active_project: ProjectConfig { trust_level: None },
         notices: Notice::default(),
         check_for_update_on_startup: false,

@@ -1,8 +1,9 @@
 //! The broker process: the only place raw brokered credential values live.
 //!
-//! It accepts typed provider requests on a private Unix socket from exactly
-//! the controller process that spawned it, substitutes the provider header for
-//! the bound host, and performs the upstream HTTPS request itself.
+//! It accepts typed provider requests on a private Unix socket (a named pipe
+//! on Windows, PF-27-S06) from exactly the controller process that spawned
+//! it, substitutes the provider header for the bound host, and performs the
+//! upstream HTTPS request itself.
 
 use super::protocol::BROKER_ERROR_HEADER;
 use super::protocol::BROKER_RUNTIME_DIR_ENV;
@@ -22,6 +23,7 @@ use super::protocol::MAX_STASHED_ENV;
 use super::protocol::ModelAuthHeader;
 use super::protocol::ModelBindingWire;
 use super::protocol::ProviderId;
+use super::protocol::StoredKeyAccount;
 use super::protocol::decode_key;
 use super::protocol::encode_hex;
 use super::protocol::valid_env_name;
@@ -60,14 +62,11 @@ use rama_http::header::HOST;
 use rama_http::layer::remove_header::RemoveRequestHeaderLayer;
 use rama_http::layer::remove_header::RemoveResponseHeaderLayer;
 use rama_http_backend::server::HttpServer;
-use rama_unix::server::UnixListener;
 use rand::RngCore as _;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
-use std::os::unix::fs::MetadataExt as _;
-use std::os::unix::fs::PermissionsExt as _;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -78,8 +77,6 @@ use tokio::io::AsyncBufReadExt as _;
 use tokio::io::AsyncReadExt as _;
 use tokio::io::AsyncWriteExt as _;
 use tokio::io::BufReader;
-use tokio::signal::unix::SignalKind;
-use tokio::signal::unix::signal;
 use tokio::sync::watch;
 use zeroize::Zeroizing;
 
@@ -92,17 +89,26 @@ const RESPONSE_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 const MAX_FRAME_HEADER_BYTES: usize = 22 * 1024;
 const BROKER_EXIT_UNAVAILABLE: i32 = 78;
 const CONTROL_ACCEPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+#[cfg(unix)]
 const PARENT_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// PF-27-S05: reads the provider key stored for `provider_key_id` under a
 /// Corbanu home (encrypted vault, then the legacy file) inside the broker, so
 /// Core never decrypts it. Supplied by the binary, which links the vault.
-pub type StoredKeyResolver = fn(&std::path::Path, &str) -> std::io::Result<Option<String>>;
+/// PF-84: with an account, only that named account's key is read (never the
+/// default key or an environment variable).
+pub type StoredKeyResolver =
+    fn(&std::path::Path, &str, Option<&StoredKeyAccount>) -> std::io::Result<Option<String>>;
 
 /// Entry point for `corbanu --codex-run-as-credential-broker`.
 pub fn run_credential_broker_main() -> ! {
     run_credential_broker_main_with(/*resolver*/ None)
 }
+
+/// Test builds only: milliseconds the broker process waits after its cleanup
+/// before it exits (#504).
+#[cfg(test)]
+pub(crate) const TEST_EXIT_HOLD_MS_ENV: &str = "CODEX_PF27_BROKER_TEST_EXIT_HOLD_MS";
 
 /// Like [`run_credential_broker_main`], resolving stored provider keys with
 /// `resolver` (PF-27-S05).
@@ -115,17 +121,34 @@ pub fn run_credential_broker_main_with(resolver: Option<StoredKeyResolver>) -> !
     // processes, no cross-process inspection, writes only under the runtime
     // directory (and the vault's lock file, which a vault read must lock).
     let runtime_dir = runtime_dir();
-    let store_home = resolver.and(store_home());
-    // Landlock rules need the file to exist (the vault may be created later
-    // in the session), so the lock is created here, before containment. Only
-    // a regular file reached without symlinks is made writable.
-    let vault_lock: Vec<std::path::PathBuf> = store_home
-        .iter()
-        .filter_map(|home| prepare_vault_lock(home))
-        .collect();
-    let containment =
-        codex_process_hardening::contain_credential_broker_with_files(&runtime_dir, &vault_lock);
-    let stored_keys = resolver.zip(store_home);
+    #[cfg(unix)]
+    let (containment, stored_keys) = {
+        let store_home = resolver.and(store_home());
+        // Landlock rules need the file to exist (the vault may be created later
+        // in the session), so the lock is created here, before containment. Only
+        // a regular file reached without symlinks is made writable.
+        let vault_lock: Vec<std::path::PathBuf> = store_home
+            .iter()
+            .filter_map(|home| prepare_vault_lock(home))
+            .collect();
+        let containment = codex_process_hardening::contain_credential_broker_with_files(
+            &runtime_dir,
+            &vault_lock,
+        );
+        (containment, resolver.zip(store_home))
+    };
+    // PF-27-S06/S08: checks the broker token Core started it under, then
+    // applies the process DACL and a no-child-process job. PF-27-S09: stored
+    // provider keys are read here too, the vault key from Credential Manager
+    // under the broker token (Travis's key-path decision (c)). The token
+    // cannot create the vault lock; Core creates it before the broker starts
+    // (`ModelCredentialBroker::spawn`), and a vault read locks it through a
+    // read-only handle.
+    #[cfg(windows)]
+    let (containment, stored_keys) = (
+        codex_process_hardening::contain_credential_broker(&runtime_dir),
+        resolver.zip(store_home()),
+    );
     let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -133,11 +156,23 @@ pub fn run_credential_broker_main_with(resolver: Option<StoredKeyResolver>) -> !
     else {
         std::process::exit(BROKER_EXIT_UNAVAILABLE);
     };
-    let exit_code =
-        match runtime.block_on(run_broker(runtime_dir, containment.mechanism, stored_keys)) {
-            Ok(()) => 0,
-            Err(_) => BROKER_EXIT_UNAVAILABLE,
-        };
+    // A panic has already revoked (`RevokeOnExit`); it still exits here,
+    // without dropping the runtime.
+    let exit_code = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(run_broker(runtime_dir, containment.mechanism, stored_keys))
+    })) {
+        Ok(Ok(())) => 0,
+        Ok(Err(_)) | Err(_) => BROKER_EXIT_UNAVAILABLE,
+    };
+    // #504: tests hold the process here, after its cleanup, to observe the
+    // window before it exits.
+    #[cfg(test)]
+    if let Some(hold) = std::env::var(TEST_EXIT_HOLD_MS_ENV)
+        .ok()
+        .and_then(|ms| ms.parse().ok())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(hold));
+    }
     // Exit without dropping the runtime: a blocking reader may still be
     // parked on a channel the controller holds open (signal-initiated shutdown).
     std::process::exit(exit_code)
@@ -152,8 +187,22 @@ fn runtime_dir() -> std::path::PathBuf {
         .unwrap_or_else(socket_parent)
 }
 
+/// Unix socket paths are limited to roughly 100 bytes; fall back to `/tmp`
+/// when the per-user temporary directory is too deep. Windows pipes need no
+/// directory.
+fn socket_parent() -> std::path::PathBuf {
+    const MAX_SOCKET_PARENT_BYTES: usize = 80;
+    let temp_dir = std::env::temp_dir();
+    if cfg!(windows) || temp_dir.as_os_str().len() <= MAX_SOCKET_PARENT_BYTES {
+        temp_dir
+    } else {
+        std::path::PathBuf::from("/tmp")
+    }
+}
+
 /// Creates `<home>/secrets/.vault.lock` if needed (never through a symlink)
 /// and returns its path when it is a regular file in a real directory.
+#[cfg(unix)]
 pub(crate) fn prepare_vault_lock(home: &std::path::Path) -> Option<std::path::PathBuf> {
     use std::os::unix::fs::OpenOptionsExt as _;
     let dir = home.join("secrets");
@@ -178,6 +227,65 @@ pub(crate) fn prepare_vault_lock(home: &std::path::Path) -> Option<std::path::Pa
         .then_some(lock)
 }
 
+/// PF-27-S09: Windows counterpart of the Unix `prepare_vault_lock`, run by
+/// Core before it starts the broker, whose token cannot create files in the
+/// user's profile. A `secrets` directory or lock file that is a reparse point
+/// (symlink or junction) is refused, and the opened file must be the lock in
+/// `home`'s own `secrets` directory (a directory swapped meanwhile is caught).
+#[cfg(windows)]
+pub(crate) fn prepare_vault_lock(home: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    let home = std::fs::canonicalize(home).ok()?;
+    let dir = home.join("secrets");
+    match std::fs::symlink_metadata(&dir) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return None,
+        Err(_) => std::fs::create_dir(&dir).ok()?,
+    }
+    let lock = dir.join(".vault.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&lock)
+        .ok()?;
+    let opened_is_lock = file.metadata().is_ok_and(|meta| meta.is_file())
+        && final_path(&file).is_some_and(|path| path.eq_ignore_ascii_case(lock.as_os_str()));
+    opened_is_lock.then_some(lock)
+}
+
+/// The path Windows reports for an open file (`\\?\` form, like
+/// `std::fs::canonicalize`).
+#[cfg(windows)]
+fn final_path(file: &std::fs::File) -> Option<std::ffi::OsString> {
+    use std::os::windows::ffi::OsStringExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+    let mut buffer = vec![0_u16; 1024];
+    loop {
+        // SAFETY: `buffer` holds `buffer.len()` units; flags 0: normalized,
+        // with a drive letter.
+        let len = unsafe {
+            GetFinalPathNameByHandleW(
+                file.as_raw_handle() as _,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                0,
+            )
+        } as usize;
+        if len == 0 {
+            return None;
+        }
+        if len < buffer.len() {
+            return Some(std::ffi::OsString::from_wide(&buffer[..len]));
+        }
+        buffer.resize(len + 1, 0);
+    }
+}
+
 /// The Corbanu home named by the controller, if it is an absolute directory.
 fn store_home() -> Option<std::path::PathBuf> {
     std::env::var_os(BROKER_STORE_HOME_ENV)
@@ -192,41 +300,46 @@ async fn run_broker(
 ) -> anyhow::Result<()> {
     // The control channel accepts exactly the process that spawned us. A
     // stale parent (reparented to init or launchd) means the controller died.
-    let parent_pid = std::os::unix::process::parent_id();
-    let socket_dir = tempfile::Builder::new()
-        .prefix("cbk-")
-        .tempdir_in(&runtime_dir)
-        .context("create private broker directory")?;
-    std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700))?;
-    let owner_uid = std::fs::metadata(socket_dir.path())?.uid();
-    let control_path = socket_dir.path().join("c.sock");
-    let control_listener = tokio::net::UnixListener::bind(&control_path)?;
-    std::fs::set_permissions(&control_path, std::fs::Permissions::from_mode(0o600))?;
-    let socket_path = socket_dir.path().join("b.sock");
-    let listener = UnixListener::bind_path(&socket_path).await?;
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
-
+    let parent = transport::Parent::open().context("find the controller process")?;
+    let parent_pid = parent.pid;
     // PF-27-S02: stdout carries only the (non-secret) control socket path.
     // Secrets never cross a descriptor the controller created, so a process
     // that inherits one during the macOS close-on-exec window gets nothing.
     let mut stdout = tokio::io::stdout();
+    let mut endpoint = match transport::Endpoint::bind(&runtime_dir).await {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            // #390: a name held by another process is reported, never joined.
+            if name_taken(&error) {
+                write_json_line(
+                    &mut stdout,
+                    &BrokerBootstrap {
+                        protocol_version: CONTROL_PROTOCOL_VERSION,
+                        control_socket: String::new(),
+                        pipe_taken: true,
+                    },
+                )
+                .await?;
+            }
+            return Err(error);
+        }
+    };
     write_json_line(
         &mut stdout,
         &BrokerBootstrap {
             protocol_version: CONTROL_PROTOCOL_VERSION,
-            control_socket: control_path.to_string_lossy().into_owned(),
+            control_socket: endpoint.control_name(),
+            pipe_taken: false,
         },
     )
     .await?;
     let control_stream = tokio::time::timeout(
         CONTROL_ACCEPT_TIMEOUT,
-        accept_controller(&control_listener, parent_pid, owner_uid),
+        endpoint.accept_controller(parent_pid),
     )
     .await
     .context("controller did not connect")??;
-    drop(control_listener);
-    let _ = std::fs::remove_file(&control_path);
-    let (control_read, mut control_write) = control_stream.into_split();
+    let (control_read, mut control_write) = tokio::io::split(control_stream);
     let mut control = BufReader::new(control_read);
 
     let hello = read_control_line(&mut control)
@@ -268,7 +381,6 @@ async fn run_broker(
     let broker = Arc::new(Broker {
         mac: BrokerChannelMac::from_secret(*key),
         controller_pid: *controller_pid,
-        owner_uid,
         controller_instance: controller_instance.clone(),
         broker_instance: broker_instance.clone(),
         state: Mutex::new(BrokerState::default()),
@@ -280,39 +392,30 @@ async fn run_broker(
     });
     drop(hello);
 
+    // #504: every exit from here on revokes first, a panic included.
+    let mut exit = RevokeOnExit {
+        broker: broker.clone(),
+        accept: None,
+    };
+
     write_json_line(
         &mut control_write,
         &ControlResponse::Ready {
             protocol_version: CONTROL_PROTOCOL_VERSION,
             broker_instance,
-            socket_path: socket_path.to_string_lossy().into_owned(),
+            socket_path: endpoint.data_name(),
             run_generation: 1,
             containment,
         },
     )
     .await?;
 
-    let accept_broker = broker.clone();
-    let accept = tokio::spawn(async move { accept_loop(listener, accept_broker).await });
-    let mut terminate = signal(SignalKind::terminate())?;
-    let mut hangup = signal(SignalKind::hangup())?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let parent_gone = async move {
-        let mut interval = tokio::time::interval(PARENT_CHECK_INTERVAL);
-        loop {
-            interval.tick().await;
-            if std::os::unix::process::parent_id() != parent_pid {
-                break;
-            }
-        }
-    };
+    exit.accept = Some(endpoint.serve(broker.clone()));
+    let parent_gone = transport::shutdown_requested(parent)?;
     tokio::pin!(parent_gone);
     loop {
         let line = tokio::select! {
             line = read_control_line(&mut control) => line?,
-            _ = terminate.recv() => None,
-            _ = hangup.recv() => None,
-            _ = interrupt.recv() => None,
             () = &mut parent_gone => None,
         };
         let Some(line) = line else {
@@ -330,44 +433,38 @@ async fn run_broker(
     // Controller EOF, controller death or a termination signal: close every
     // outstanding channel by revoking, then remove the private socket
     // directory before exiting.
-    broker.revoke();
-    accept.abort();
-    drop(socket_dir);
+    drop(exit);
+    drop(endpoint);
     Ok(())
 }
 
-/// Accepts the first control connection whose OS peer is the spawning
-/// controller; any other peer is dropped before a byte is read.
-async fn accept_controller(
-    listener: &tokio::net::UnixListener,
-    parent_pid: u32,
-    owner_uid: u32,
-) -> std::io::Result<tokio::net::UnixStream> {
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let from_parent = stream.peer_cred().is_ok_and(|peer| {
-            peer.uid() == owner_uid
-                && peer
-                    .pid()
-                    .and_then(|pid| u32::try_from(pid).ok())
-                    .is_some_and(|pid| pid == parent_pid)
-        });
-        if from_parent {
-            return Ok(stream);
+/// #504: revokes every reference (clears the credentials and the env stash,
+/// bumps the run generation, wakes in-flight requests), then stops
+/// accepting, however `run_broker` leaves once the broker exists: a return,
+/// an error (such as a broken control channel) or a panic. Declared after
+/// the endpoint, so it runs before the endpoint removes the socket
+/// directory.
+struct RevokeOnExit {
+    broker: Arc<Broker>,
+    accept: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for RevokeOnExit {
+    fn drop(&mut self) {
+        self.broker.revoke();
+        if let Some(accept) = self.accept.take() {
+            accept.abort();
         }
     }
 }
 
-/// Unix socket paths are limited to roughly 100 bytes; fall back to `/tmp`
-/// when the per-user temporary directory is too deep.
-fn socket_parent() -> std::path::PathBuf {
-    const MAX_SOCKET_PARENT_BYTES: usize = 80;
-    let temp_dir = std::env::temp_dir();
-    if temp_dir.as_os_str().len() <= MAX_SOCKET_PARENT_BYTES {
-        temp_dir
-    } else {
-        std::path::PathBuf::from("/tmp")
-    }
+/// True when binding failed because another process holds a pipe name
+/// (Windows; Unix sockets live in a fresh private directory).
+fn name_taken(error: &anyhow::Error) -> bool {
+    cfg!(windows)
+        && error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::AddrInUse)
 }
 
 fn upstream_client(
@@ -392,47 +489,28 @@ fn upstream_client(
     })
 }
 
-async fn accept_loop(listener: UnixListener, broker: Arc<Broker>) {
-    loop {
-        let Ok((stream, _)) = listener.accept().await else {
-            // Back off so a persistent error (for example, no free file
-            // descriptors) cannot pin a CPU.
-            tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
-            continue;
-        };
-        let peer_allowed = stream.stream.peer_cred().is_ok_and(|peer| {
-            peer.uid() == broker.owner_uid
-                && peer
-                    .pid()
-                    .and_then(|pid| u32::try_from(pid).ok())
-                    .is_some_and(|pid| pid == broker.controller_pid)
-        });
-        if !peer_allowed {
-            // Wrong OS peer: close before reading a single request byte.
-            drop(stream);
-            continue;
-        }
-        let broker = broker.clone();
-        tokio::spawn(async move {
-            let service = HttpServer::auto(Executor::default()).service(
-                (
-                    RemoveResponseHeaderLayer::hop_by_hop(),
-                    RemoveRequestHeaderLayer::hop_by_hop(),
-                )
-                    .into_layer(service_fn(move |request| {
-                        let broker = broker.clone();
-                        async move { Ok::<_, Infallible>(broker.handle(request).await) }
-                    })),
-            );
-            let _ = service.serve(stream).await;
-        });
-    }
+/// Serves HTTP provider requests on one connection already checked to come
+/// from the controller.
+async fn serve_connection<S>(stream: S, broker: Arc<Broker>)
+where
+    S: rama_core::stream::Stream + rama_core::extensions::ExtensionsMut,
+{
+    let service = HttpServer::auto(Executor::default()).service(
+        (
+            RemoveResponseHeaderLayer::hop_by_hop(),
+            RemoveRequestHeaderLayer::hop_by_hop(),
+        )
+            .into_layer(service_fn(move |request| {
+                let broker = broker.clone();
+                async move { Ok::<_, Infallible>(broker.handle(request).await) }
+            })),
+    );
+    let _ = service.serve(stream).await;
 }
 
 struct Broker {
     mac: BrokerChannelMac,
     controller_pid: u32,
-    owner_uid: u32,
     controller_instance: String,
     broker_instance: String,
     state: Mutex<BrokerState>,
@@ -596,7 +674,8 @@ impl Broker {
                 binding,
                 provider_key_id,
                 env_names,
-            } => self.register_stored(binding, provider_key_id, env_names),
+                account,
+            } => self.register_stored(binding, provider_key_id, env_names, account.as_ref()),
             ControlRequest::Unregister { reference } => {
                 let Ok(reference) = CredentialReference::from_sha256_hex(reference.clone()) else {
                     return ControlResponse::Error {
@@ -694,16 +773,20 @@ impl Broker {
         binding: &ModelBindingWire,
         provider_key_id: &str,
         env_names: &[String],
+        account: Option<&StoredKeyAccount>,
     ) -> ControlResponse {
         if !valid_env_name(provider_key_id)
             || env_names.len() > MAX_STASHED_ENV
             || !env_names.iter().all(|name| valid_env_name(name))
+            || account.is_some_and(|account| !account.validate())
         {
             return ControlResponse::Error {
                 code: ControlErrorCode::Malformed,
             };
         }
         let stashed = match self.state.lock() {
+            // PF-84: a named account never takes the default's env key.
+            Ok(_) if account.is_some() => None,
             Ok(state) => env_names
                 .iter()
                 .find_map(|name| state.env_stash.get(name).cloned()),
@@ -721,7 +804,7 @@ impl Broker {
                         code: ControlErrorCode::NotFound,
                     };
                 };
-                match resolver(home, provider_key_id) {
+                match resolver(home, provider_key_id, account) {
                     Ok(Some(value)) if !value.trim().is_empty() => Zeroizing::new(value),
                     Ok(Some(value)) => {
                         drop(Zeroizing::new(value));
@@ -761,6 +844,7 @@ impl Broker {
                 let mut state = poisoned.into_inner();
                 state.credentials.clear();
                 state.env_stash.clear();
+                state.replay = ReplayWindow::default();
                 state.run_generation = state.run_generation.saturating_add(1);
                 state.run_generation
             }
@@ -1054,4 +1138,257 @@ where
     line.push(b'\n');
     writer.write_all(&line).await?;
     writer.flush().await
+}
+
+/// Unix transport: sockets in a private directory under the runtime
+/// directory, peers checked by uid and pid.
+#[cfg(unix)]
+mod transport {
+    use super::ACCEPT_RETRY_DELAY;
+    use super::Broker;
+    use super::serve_connection;
+    use anyhow::Context as _;
+    use rama_unix::server::UnixListener;
+    use std::os::unix::fs::MetadataExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::Arc;
+    use tokio::signal::unix::SignalKind;
+    use tokio::signal::unix::signal;
+
+    /// The spawning controller (Unix: polled by process id).
+    pub(super) struct Parent {
+        pub(super) pid: u32,
+    }
+
+    impl Parent {
+        pub(super) fn open() -> std::io::Result<Self> {
+            Ok(Self {
+                pid: std::os::unix::process::parent_id(),
+            })
+        }
+    }
+
+    pub(super) struct Endpoint {
+        /// Dropping it removes the private socket directory.
+        _socket_dir: tempfile::TempDir,
+        owner_uid: u32,
+        control_path: std::path::PathBuf,
+        control: Option<tokio::net::UnixListener>,
+        data_path: std::path::PathBuf,
+        data: Option<UnixListener>,
+    }
+
+    impl Endpoint {
+        pub(super) async fn bind(runtime_dir: &std::path::Path) -> anyhow::Result<Self> {
+            let socket_dir = tempfile::Builder::new()
+                .prefix("cbk-")
+                .tempdir_in(runtime_dir)
+                .context("create private broker directory")?;
+            std::fs::set_permissions(socket_dir.path(), std::fs::Permissions::from_mode(0o700))?;
+            let owner_uid = std::fs::metadata(socket_dir.path())?.uid();
+            let control_path = socket_dir.path().join("c.sock");
+            let control = tokio::net::UnixListener::bind(&control_path)?;
+            std::fs::set_permissions(&control_path, std::fs::Permissions::from_mode(0o600))?;
+            let data_path = socket_dir.path().join("b.sock");
+            let data = UnixListener::bind_path(&data_path).await?;
+            std::fs::set_permissions(&data_path, std::fs::Permissions::from_mode(0o600))?;
+            Ok(Self {
+                _socket_dir: socket_dir,
+                owner_uid,
+                control_path,
+                control: Some(control),
+                data_path,
+                data: Some(data),
+            })
+        }
+
+        pub(super) fn control_name(&self) -> String {
+            self.control_path.to_string_lossy().into_owned()
+        }
+
+        pub(super) fn data_name(&self) -> String {
+            self.data_path.to_string_lossy().into_owned()
+        }
+
+        /// Accepts the first control connection whose OS peer is the spawning
+        /// controller; any other peer is dropped before a byte is read.
+        pub(super) async fn accept_controller(
+            &mut self,
+            parent_pid: u32,
+        ) -> std::io::Result<tokio::net::UnixStream> {
+            let listener = self
+                .control
+                .take()
+                .ok_or(std::io::ErrorKind::NotConnected)?;
+            loop {
+                let (stream, _) = listener.accept().await?;
+                if peer_is(&stream, self.owner_uid, parent_pid) {
+                    let _ = std::fs::remove_file(&self.control_path);
+                    return Ok(stream);
+                }
+            }
+        }
+
+        pub(super) fn serve(&mut self, broker: Arc<Broker>) -> tokio::task::JoinHandle<()> {
+            let listener = self.data.take();
+            let owner_uid = self.owner_uid;
+            tokio::spawn(async move {
+                if let Some(listener) = listener {
+                    accept_loop(listener, owner_uid, broker).await;
+                }
+            })
+        }
+    }
+
+    fn peer_is(stream: &tokio::net::UnixStream, owner_uid: u32, pid: u32) -> bool {
+        stream.peer_cred().is_ok_and(|peer| {
+            peer.uid() == owner_uid
+                && peer
+                    .pid()
+                    .and_then(|peer_pid| u32::try_from(peer_pid).ok())
+                    .is_some_and(|peer_pid| peer_pid == pid)
+        })
+    }
+
+    async fn accept_loop(listener: UnixListener, owner_uid: u32, broker: Arc<Broker>) {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                // Back off so a persistent error (for example, no free file
+                // descriptors) cannot pin a CPU.
+                tokio::time::sleep(ACCEPT_RETRY_DELAY).await;
+                continue;
+            };
+            if !peer_is(&stream.stream, owner_uid, broker.controller_pid) {
+                // Wrong OS peer: close before reading a single request byte.
+                drop(stream);
+                continue;
+            }
+            tokio::spawn(serve_connection(stream, broker.clone()));
+        }
+    }
+
+    /// Resolves on a termination signal or when the controller has died
+    /// (the broker was reparented).
+    pub(super) fn shutdown_requested(
+        parent: Parent,
+    ) -> anyhow::Result<impl std::future::Future<Output = ()>> {
+        let parent_pid = parent.pid;
+        let mut terminate = signal(SignalKind::terminate())?;
+        let mut hangup = signal(SignalKind::hangup())?;
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        Ok(async move {
+            let mut interval = tokio::time::interval(super::PARENT_CHECK_INTERVAL);
+            loop {
+                tokio::select! {
+                    _ = terminate.recv() => return,
+                    _ = hangup.recv() => return,
+                    _ = interrupt.recv() => return,
+                    _ = interval.tick() => {
+                        if std::os::unix::process::parent_id() != parent_pid {
+                            return;
+                        }
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// PF-27-S06 Windows transport: named pipes created by the broker with a
+/// DACL for its user, peers checked by process id.
+#[cfg(windows)]
+mod transport {
+    use super::ACCEPT_RETRY_DELAY;
+    use super::Broker;
+    use super::serve_connection;
+    use crate::credential_broker::isolated::pipe;
+    use std::sync::Arc;
+    use tokio::net::windows::named_pipe::NamedPipeServer;
+
+    /// The spawning controller, held open (Windows).
+    pub(super) type Parent = pipe::ParentProcess;
+
+    pub(super) struct Endpoint {
+        control_name: String,
+        control: Option<pipe::SinglePipeListener>,
+        data_name: String,
+        data: Option<pipe::PipeListener>,
+    }
+
+    impl Endpoint {
+        pub(super) async fn bind(_runtime_dir: &std::path::Path) -> anyhow::Result<Self> {
+            let (control_name, data_name) = pipe::pipe_names();
+            // #390: one control instance at most, so none can be added.
+            let control = pipe::SinglePipeListener::bind(&control_name)?;
+            let data = pipe::PipeListener::bind(&data_name)?;
+            Ok(Self {
+                control_name,
+                control: Some(control),
+                data_name,
+                data: Some(data),
+            })
+        }
+
+        pub(super) fn control_name(&self) -> String {
+            self.control_name.clone()
+        }
+
+        pub(super) fn data_name(&self) -> String {
+            self.data_name.clone()
+        }
+
+        /// Accepts the controller on the control pipe, its only instance
+        /// (#390); other clients are dropped unread.
+        pub(super) async fn accept_controller(
+            &mut self,
+            parent_pid: u32,
+        ) -> std::io::Result<NamedPipeServer> {
+            let listener = self
+                .control
+                .take()
+                .ok_or(std::io::ErrorKind::NotConnected)?;
+            listener.accept(parent_pid).await
+        }
+
+        pub(super) fn serve(&mut self, broker: Arc<Broker>) -> tokio::task::JoinHandle<()> {
+            let listener = self.data.take();
+            tokio::spawn(async move {
+                let Some(mut listener) = listener else {
+                    return;
+                };
+                loop {
+                    match listener.accept(broker.controller_pid).await {
+                        Ok(mut stream) => {
+                            let broker = broker.clone();
+                            tokio::spawn(async move {
+                                // #390: prove the channel key before Core
+                                // sends its request.
+                                if pipe::answer_peer_challenge(
+                                    &mut stream,
+                                    &broker.mac,
+                                    broker.controller_pid,
+                                )
+                                .await
+                                .is_ok()
+                                {
+                                    serve_connection(pipe::PipeStream::new(stream), broker).await;
+                                }
+                            });
+                        }
+                        Err(_) => tokio::time::sleep(ACCEPT_RETRY_DELAY).await,
+                    }
+                }
+            })
+        }
+    }
+
+    /// Resolves when the controller process exits.
+    pub(super) fn shutdown_requested(
+        parent: Parent,
+    ) -> anyhow::Result<impl std::future::Future<Output = ()>> {
+        let exited = parent.exited();
+        Ok(async move {
+            let _ = exited.await;
+        })
+    }
 }

@@ -1,9 +1,9 @@
 name: rust-ci lint/build
 
 # Cargo clippy (`--tests -D warnings`) for one runner/target/profile. Shared by
-# rust-ci.yml (PR: Linux gnu dev only) and rust-ci-full.yml (postmerge: gnu,
-# musl and musl release), so both run the same job definition and share the
-# cargo-home and sccache caches.
+# rust-ci.yml (PR: Linux gnu dev and Windows msvc dev) and rust-ci-full.yml (postmerge: gnu,
+# musl, musl release and Windows msvc dev), so both run the same job definition
+# and share the cargo-home and sccache caches.
 on:
   workflow_call:
     inputs:
@@ -19,6 +19,16 @@ on:
       timeout_minutes:
         required: true
         type: number
+      save_caches:
+        description: >-
+          Save the cargo-home and sccache caches. Saves happen only on main
+          regardless (PRs restore main's caches, #636); blocking-ci's legs
+          turn it off so main's push run doesn't duplicate the caches
+          postmerge rust-ci-full saves under the same keys. Only the
+          local-disk sccache fallback honours it; the sccache GitHub backend,
+          if ever enabled, writes the cache itself.
+        type: boolean
+        default: true
 
 jobs:
   clippy:
@@ -49,7 +59,7 @@ jobs:
             sudo apt-get update -y
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
           fi
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
         with:
           targets: ${{ inputs.target }}
           components: clippy
@@ -153,6 +163,8 @@ jobs:
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.14.0
+          # setup-zig can't restore without saving, so only main caches (#636).
+          use-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - if: ${{ inputs.target == 'x86_64-unknown-linux-musl' || inputs.target == 'aarch64-unknown-linux-musl'}}
         name: Install musl build tools
@@ -198,9 +210,10 @@ jobs:
           if-no-files-found: warn
 
       # Save caches explicitly; make non-fatal so cache packaging
-      # never fails the overall job. Only save when key wasn't hit.
+      # never fails the overall job. Only save when key wasn't hit, and only
+      # on main: PRs and branch runs restore main's caches (#636).
       - name: Save cargo home cache
-        if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
+        if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true' && inputs.save_caches && github.ref == 'refs/heads/main'
         continue-on-error: true
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
@@ -216,7 +229,7 @@ jobs:
           key: cargo-home-${{ inputs.runner }}-${{ inputs.target }}-${{ inputs.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
 
       - name: Save sccache cache (fallback)
-        if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
+        if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true' && inputs.save_caches && github.ref == 'refs/heads/main'
         continue-on-error: true
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:
@@ -241,7 +254,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save APT cache (musl)
-        if: always() && !cancelled() && (inputs.target == 'x86_64-unknown-linux-musl' || inputs.target == 'aarch64-unknown-linux-musl') && steps.cache_apt_restore.outputs.cache-hit != 'true'
+        if: always() && !cancelled() && (inputs.target == 'x86_64-unknown-linux-musl' || inputs.target == 'aarch64-unknown-linux-musl') && steps.cache_apt_restore.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
         continue-on-error: true
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:

@@ -9,6 +9,8 @@ codex-rs/tui/tests/fixtures/oss-story.jsonl
 codex-rs/tui_app_server/tests/fixtures/oss-story.jsonl
 codex-rs/tui/src/app.rs
 codex-rs/tui/src/app/tests.rs
+# Over the limit on main since #687 (512109 bytes); #505 adds one field to its fixtures.
+codex-rs/core/src/session/tests.rs
 # PF-60-S03 accounting evidence (full TUI run output), kept verbatim.
 qa/portfolio/agent-cost-accounting/pf-60-s03/impl-03-tui-full-final.junit.xml
 qa/portfolio/agent-cost-accounting/pf-60-s03/impl-03-tui-full-final.log

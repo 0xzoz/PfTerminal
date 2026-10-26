@@ -514,22 +514,60 @@ pub async fn exec_approval(
     decision: ReviewDecision,
 ) {
     let event_turn_id = turn_id.unwrap_or_else(|| approval_id.clone());
+    let mut stale_amendment = false;
     if let ReviewDecision::ApprovedExecpolicyAmendment {
         proposed_execpolicy_amendment,
     } = &decision
     {
-        match sess
-            .persist_execpolicy_amendment(proposed_execpolicy_amendment)
-            .await
-        {
-            Ok(()) => {
+        // #945: only an answer to an open prompt may save a rule. One with no
+        // open prompt (its turn ended) is dropped by `notify_approval` anyway.
+        let persisted = match sess.pending_approval_shown_under(&approval_id).await {
+            Some(shown_under) => Some(
+                sess.persist_execpolicy_amendment(proposed_execpolicy_amendment, shown_under)
+                    .await,
+            ),
+            None => {
+                tracing::warn!(
+                    "not saving a \"don't ask again\" rule for {approval_id}: no prompt is open"
+                );
+                None
+            }
+        };
+        match persisted {
+            None => {}
+            // #945: the prompt was shown before a security transition. The
+            // rule is not saved; D50 (#1001): nor does the answer approve the
+            // command, which is asked about again under the new level.
+            Some(Ok(None)) => {
+                let message = "The security level changed while this approval was open, so \
+                               \"don't ask again\" was not saved and the answer was not used."
+                    .to_string();
+                sess.send_event_raw(Event {
+                    id: event_turn_id.clone(),
+                    msg: EventMsg::Warning(WarningEvent { message }),
+                })
+                .await;
+                stale_amendment = true;
+            }
+            Some(Ok(Some(crate::exec_policy::AmendmentScope::Saved))) => {
                 sess.record_execpolicy_amendment_message(
                     &event_turn_id,
                     proposed_execpolicy_amendment,
                 )
                 .await;
             }
-            Err(err) => {
+            Some(Ok(Some(crate::exec_policy::AmendmentScope::Session))) => {
+                let message = "This command contains a credential, so the approval applies to \
+                               this session only and was not saved to your rules."
+                    .to_string();
+                let warning = EventMsg::Warning(WarningEvent { message });
+                sess.send_event_raw(Event {
+                    id: event_turn_id.clone(),
+                    msg: warning,
+                })
+                .await;
+            }
+            Some(Err(err)) => {
                 let message = format!("Failed to apply execpolicy amendment: {err}");
                 tracing::warn!("{message}");
                 let warning = EventMsg::Warning(WarningEvent { message });
@@ -541,6 +579,11 @@ pub async fn exec_approval(
             }
         }
     }
+    let decision = if stale_amendment {
+        ReviewDecision::Approved
+    } else {
+        decision
+    };
     match decision {
         ReviewDecision::Abort => {
             sess.interrupt_task().await;
@@ -800,6 +843,8 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
         };
         sess.send_event_raw(event).await;
     }
+    // #872: nothing writes this thread's items after its shutdown.
+    crate::home_access::note_thread_ended(sess.thread_id());
 
     let event = Event {
         id: sub_id,
@@ -1056,6 +1101,7 @@ pub(super) async fn submission_loop(
         {
             warn!("failed to shutdown thread persistence after submission channel closed: {err}");
         }
+        crate::home_access::note_thread_ended(sess.thread_id());
     }
     debug!("Agent loop exited");
 }

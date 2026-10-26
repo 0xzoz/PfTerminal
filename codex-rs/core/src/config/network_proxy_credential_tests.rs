@@ -12,6 +12,7 @@ fn human() -> PolicyPrincipal {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn credential_authority_revoke_during_use_linearizes_after_the_active_resolution() {
     let revocations = RwLock::new(RevocationState::new());
 
@@ -92,7 +93,14 @@ network_access = true
 [features]
 network_proxy = true
 {features}
-"#
+{windows}"#,
+                // Without a Windows sandbox, workspace-write falls back to
+                // read-only on Windows and the managed proxy never starts.
+                windows = if cfg!(windows) {
+                    "\n[windows]\nsandbox = \"unelevated\"\n"
+                } else {
+                    ""
+                },
             ),
         )?;
         ConfigBuilder::without_managed_config_for_tests()

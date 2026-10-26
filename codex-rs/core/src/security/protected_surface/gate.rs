@@ -62,6 +62,8 @@ pub(crate) struct HumanCheck {
     route: Route,
     call_id: String,
     asked: Instant,
+    /// PF-41-S01: an unanswered check is recorded as declined.
+    pending: crate::security::inspection::PendingProtectedAction,
 }
 
 impl HumanCheck {
@@ -71,9 +73,11 @@ impl HumanCheck {
 
     /// Record the answer; an approval holds only if the taint and policy are
     /// still the ones the human saw.
-    pub(crate) fn resolve(self, session: &Session, approved: bool) -> Result<(), String> {
+    pub(crate) fn resolve(mut self, session: &Session, approved: bool) -> Result<(), String> {
+        self.pending.answered();
         let outcome = if approved { "approved" } else { "declined" };
         log(
+            session.thread_id(),
             self.route,
             &self.action,
             &self.call_id,
@@ -89,6 +93,7 @@ impl HumanCheck {
         let now = session.services.model_client().post_taint_state();
         self.action.recheck(now.as_ref()).inspect_err(|_| {
             log(
+                session.thread_id(),
                 self.route,
                 &self.action,
                 &self.call_id,
@@ -140,6 +145,7 @@ where
     );
     if let Some(refusal) = action.refused_up_front() {
         log(
+            session.thread_id(),
             route,
             &action,
             call_id,
@@ -150,6 +156,7 @@ where
     }
     if approval_policy == AskForApproval::Never {
         log(
+            session.thread_id(),
             route,
             &action,
             call_id,
@@ -159,6 +166,10 @@ where
         return Admission::Refused(action.approvals_off_rejection());
     }
     Admission::AskHuman(HumanCheck {
+        pending: crate::security::inspection::PendingProtectedAction::new(
+            session.thread_id(),
+            action.kind,
+        ),
         action,
         route,
         call_id: call_id.to_string(),
@@ -173,7 +184,24 @@ pub(crate) async fn ask_human(
     call_id: &str,
     question: String,
 ) -> bool {
-    let id = format!("{QUESTION_PREFIX}_{call_id}");
+    ask_human_answer(session, turn, call_id, question).await == Some(true)
+}
+
+/// The id of the question [`ask_human`] asks for `call_id`.
+pub(crate) fn question_id(call_id: &str) -> String {
+    format!("{QUESTION_PREFIX}_{call_id}")
+}
+
+/// [`ask_human`], telling an answer (`Some(true)` for "Allow once",
+/// `Some(false)` for any other) from no answer at all (`None`): the client
+/// cannot ask, such as `corbanu exec`, or the question was dismissed.
+pub(crate) async fn ask_human_answer(
+    session: &Session,
+    turn: &TurnContext,
+    call_id: &str,
+    question: String,
+) -> Option<bool> {
+    let id = question_id(call_id);
     let option = |label: &str, description: &str| RequestUserInputQuestionOption {
         label: label.to_string(),
         description: description.to_string(),
@@ -196,7 +224,7 @@ pub(crate) async fn ask_human(
         .request_user_input(turn, call_id.to_string(), args)
         .await
         .and_then(|mut response| response.answers.remove(&id))
-        .is_some_and(|answer| answer.answers == [ALLOW])
+        .map(|answer| answer.answers == [ALLOW])
 }
 
 /// PF-23-S01 dispatch-boundary check: an unclassified route, or a policy
@@ -250,12 +278,14 @@ pub(crate) async fn check_dispatch(
 
 /// One line per post-taint decision (PF-26 counts these); never arguments.
 fn log(
+    thread: codex_protocol::ThreadId,
     route: Route,
     action: &PostTaintAction,
     call_id: &str,
     outcome: &'static str,
     waited: Option<Duration>,
 ) {
+    crate::security::inspection::record_protected_action(Some(thread), action.kind, outcome);
     tracing::info!(
         target: "codex_core::security::tainted_action",
         route = route.as_str(),

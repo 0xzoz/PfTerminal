@@ -209,12 +209,103 @@ pub(crate) fn auth_manager_for_provider(
 ) -> Option<Arc<AuthManager>> {
     let cache_policy = external_bearer_cache_policy(auth_manager.as_deref(), provider);
     match provider.auth.clone() {
-        Some(config) => Some(AuthManager::external_bearer_only_with_cache_policy(
-            config,
-            cache_policy,
-        )),
-        None => auth_manager,
+        Some(config) => {
+            let account = external_bearer_account(
+                provider,
+                auth_manager.as_deref().map(AuthManager::codex_home),
+            );
+            Some(AuthManager::external_bearer_only_for_account(
+                config,
+                cache_policy,
+                account,
+            ))
+        }
+        // PF-84-S06: a named sign-in account uses its own manager (its own
+        // vault store and refresh lock), never the default login.
+        None => match named_sign_in_account(provider) {
+            Some(account) => {
+                auth_manager.map(|auth_manager| auth_manager.for_named_account(account))
+            }
+            // A session swapped to a named account's manager must not lend
+            // that account to an OpenAI-auth provider on its default login.
+            None if provider.requires_openai_auth => {
+                auth_manager.map(|auth_manager| auth_manager.default_account_manager())
+            }
+            None => auth_manager,
+        },
     }
+}
+
+/// D171 (#1286): why a request on `provider`'s named OpenAI sign-in account
+/// that found no sign-in is refused, with the account's recovery; `None` when
+/// `provider` selects no such account. Reads the vault through
+/// `auth_manager`.
+pub fn named_sign_in_refusal(
+    provider: &ModelProviderInfo,
+    auth_manager: Option<&AuthManager>,
+) -> Option<CodexErr> {
+    let account = named_sign_in_account(provider)?;
+    let reason = auth_manager
+        .and_then(AuthManager::named_sign_in_unavailable)
+        .unwrap_or_else(|| {
+            format!(
+                "account `{name}` has no usable sign-in; sign in again with \
+                 `corbanu login --account {name}`",
+                name = account.name
+            )
+        });
+    Some(CodexErr::Fatal(format!("{}: {reason}", provider.name)))
+}
+
+/// PF-84-S06: the named ChatGPT/OpenAI sign-in account `provider` selects.
+pub fn named_sign_in_account(
+    provider: &ModelProviderInfo,
+) -> Option<codex_login::NamedChatgptAccount> {
+    if !provider.requires_openai_auth || provider.aws.is_some() || provider.auth.is_some() {
+        return None;
+    }
+    let account = provider.account.as_ref()?;
+    Some(codex_login::NamedChatgptAccount {
+        provider_id: account.provider_id.clone(),
+        name: account.name.clone(),
+    })
+}
+
+/// PF-84-S06 (#658): the OpenAI sign-in a session on `provider` runs on: a
+/// named account, the default login, or none (a provider without OpenAI
+/// sign-in).
+pub fn session_sign_in(provider: &ModelProviderInfo) -> codex_login::SessionSignIn {
+    if !provider.requires_openai_auth || provider.aws.is_some() || provider.auth.is_some() {
+        return codex_login::SessionSignIn::NotOpenAi;
+    }
+    match named_sign_in_account(provider) {
+        Some(account) => codex_login::SessionSignIn::Named(account),
+        None => codex_login::SessionSignIn::Default,
+    }
+}
+
+/// PF-84: the named account `provider`'s auth command must serve, checked
+/// against the registry in `registry_home` before the command runs.
+pub(crate) fn external_bearer_account(
+    provider: &ModelProviderInfo,
+    registry_home: Option<&std::path::Path>,
+) -> Option<codex_login::auth::ExternalBearerAccount> {
+    let account = provider.account.as_ref()?;
+    Some(codex_login::auth::ExternalBearerAccount {
+        provider_id: account.provider_id.clone(),
+        name: account.name.clone(),
+        registry_home: registry_home.map(std::path::Path::to_path_buf),
+        server: if provider.is_claude_plan()
+            && provider
+                .auth
+                .as_ref()
+                .is_some_and(codex_login::auth::is_claude_plan_token_helper)
+        {
+            codex_login::auth::ExternalBearerAccountServer::ClaudePlanHelper
+        } else {
+            codex_login::auth::ExternalBearerAccountServer::Command
+        },
+    })
 }
 
 fn external_bearer_cache_policy(
@@ -370,16 +461,22 @@ fn brokered_auth_request(
         // sign-in login used for this provider is brokered below with the
         // provider's header, as direct auth would send it.
         if matches!(auth, None | Some(CodexAuth::ApiKey(_))) {
-            let env_vars = provider
-                .api_key_env_vars()
-                .into_iter()
-                .map(str::to_string)
-                .collect();
+            // PF-84: a named account's key comes only from that account.
+            let env_vars = if provider.account.is_some() {
+                Vec::new()
+            } else {
+                provider
+                    .api_key_env_vars()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect()
+            };
             return request(
                 header,
                 BrokeredKeySource::ProviderKey {
                     provider_key_id,
                     env_vars,
+                    account: provider.account.clone(),
                 },
                 HeaderMap::new(),
             );
@@ -840,10 +937,35 @@ mod tests {
         let mut bearer =
             create_oss_provider_with_base_url("https://llm.example/v1", WireApi::Responses);
         bearer.experimental_bearer_token = Some("bearer-pf27s05".to_string());
-        assert_brokered_matches_direct(None, &bearer, ProviderApiKeyHeader::Bearer);
+        assert_brokered_matches_direct(/*auth*/ None, &bearer, ProviderApiKeyHeader::Bearer);
     }
 
     use crate::model_key_broker::test_support::with_recording_broker;
+
+    #[test]
+    fn pf_84_named_account_key_is_brokered_without_env_keys() {
+        with_recording_broker(|broker| {
+            let mut zai = ModelProviderInfo::create_zai_provider();
+            zai.account = Some(codex_model_provider_info::NamedProviderAccount {
+                provider_id: "zai".to_string(),
+                name: "work".to_string(),
+            });
+            resolve_provider_auth(/*auth*/ None, &zai).expect("brokered auth");
+            let uses = broker.uses.lock().expect("uses");
+            assert_eq!(uses.len(), 1);
+            let crate::model_key_broker::BrokeredKeySource::ProviderKey {
+                provider_key_id,
+                env_vars,
+                account,
+            } = &uses[0].source
+            else {
+                panic!("expected a named provider key: {:?}", uses[0]);
+            };
+            assert_eq!(provider_key_id, zai.env_key.as_deref().expect("env key"));
+            assert!(env_vars.is_empty(), "a named account never takes env keys");
+            assert_eq!(account, &zai.account);
+        });
+    }
 
     #[test]
     fn pf_27_s05_brokered_provider_keys_are_named_not_read() {
@@ -862,11 +984,14 @@ mod tests {
                 assert_eq!(request.header, ProviderApiKeyHeader::Bearer);
                 assert_eq!(
                     request.base_url,
-                    zai.to_api_provider(None).expect("provider").base_url
+                    zai.to_api_provider(/*auth_mode*/ None)
+                        .expect("provider")
+                        .base_url
                 );
                 let crate::model_key_broker::BrokeredKeySource::ProviderKey {
                     provider_key_id,
                     env_vars,
+                    account: None,
                 } = &request.source
                 else {
                     panic!("expected a named provider key: {request:?}");
@@ -970,12 +1095,12 @@ mod tests {
     /// Before the process's broker runs, brokered credentials are not sent.
     #[test]
     fn pf_27_s05_required_broker_not_running_fails_closed() {
-        crate::model_key_broker::set_test_broker_required(true);
+        crate::model_key_broker::set_test_broker_required(/*required*/ true);
         let mut provider =
             create_oss_provider_with_base_url("https://llm.example/v1", WireApi::Responses);
         provider.experimental_bearer_token = Some("bearer-pf27s05".to_string());
         let result = resolve_provider_auth(/*auth*/ None, &provider);
-        crate::model_key_broker::set_test_broker_required(false);
+        crate::model_key_broker::set_test_broker_required(/*required*/ false);
         let Err(error) = result else {
             panic!("a credential must not be attached before the broker runs");
         };
@@ -1344,3 +1469,7 @@ mod tests {
         assert_eq!(registration_count.load(Ordering::SeqCst), 3);
     }
 }
+
+#[cfg(test)]
+#[path = "named_sign_in_tests.rs"]
+mod named_sign_in_tests;

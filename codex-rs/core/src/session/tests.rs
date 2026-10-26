@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "#[traced_test] installs tracing-test's in-memory global subscriber"
+)]
 use super::mcp_refresh::McpRefresh;
 use super::turn_context::TurnEnvironment;
 use super::*;
@@ -243,6 +247,7 @@ impl StepContext {
 }
 
 mod guardian_tests;
+mod panicking_task_tests;
 
 struct InstructionsTestCase {
     slug: &'static str,
@@ -1249,6 +1254,13 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
     impl crate::tools::sandboxing::Approvable<()> for ProbeToolRuntime {
         type ApprovalKey = String;
 
+        fn additional_permissions<'a>(
+            &self,
+            _req: &'a (),
+        ) -> Option<&'a codex_protocol::models::AdditionalPermissionProfile> {
+            None
+        }
+
         fn approval_keys(&self, _req: &()) -> Vec<Self::ApprovalKey> {
             vec!["probe".to_string()]
         }
@@ -1370,6 +1382,85 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
 
     assert_eq!(tool.enforce_managed_network, vec![false]);
 
+    Ok(())
+}
+
+/// D52 (#1001): while Aggressive is in force, the managed proxy's allowlist
+/// leaves out the network allow rules saved under a less strict level; a host
+/// allowed while Aggressive was in force stays. Outside Aggressive both apply.
+#[tokio::test]
+async fn issue_1001_aggressive_proxy_leaves_out_allow_rules_saved_outside_it() -> anyhow::Result<()>
+{
+    let permission_profile = PermissionProfile::workspace_write();
+    let network_spec = crate::config::NetworkProxySpec::from_config_and_constraints(
+        NetworkProxyConfig::default(),
+        /*requirements*/ None,
+        &permission_profile,
+    )?;
+    let session = make_session_with_config(move |config| {
+        config
+            .permissions
+            .set_permission_profile(permission_profile)
+            .expect("test setup should allow permission profile");
+        config.permissions.network = Some(network_spec);
+    })
+    .await?;
+    let codex_home = session.codex_home().await.to_path_buf();
+    std::fs::create_dir_all(&codex_home)?;
+    for (host, approved_under) in [
+        (
+            "aggressive.example",
+            crate::exec_policy::ApprovedUnder::Aggressive,
+        ),
+        (
+            "permissive.example",
+            crate::exec_policy::ApprovedUnder::LessStrict,
+        ),
+    ] {
+        session
+            .services
+            .exec_policy
+            .append_network_rule_and_update(
+                &codex_home,
+                host,
+                NetworkRuleProtocol::Https,
+                Decision::Allow,
+                Some("Allowed by you".to_string()),
+                approved_under,
+            )
+            .await?;
+    }
+    let allowed = async || -> anyhow::Result<Vec<String>> {
+        session
+            .refresh_managed_network_proxy_for_current_permission_profile()
+            .await;
+        let proxy = session
+            .services
+            .network_proxy
+            .load_full()
+            .expect("a managed proxy");
+        let mut allowed = proxy
+            .proxy()
+            .current_cfg()
+            .await?
+            .allowed_domains()
+            .unwrap_or_default();
+        allowed.sort();
+        Ok(allowed)
+    };
+
+    assert_eq!(
+        allowed().await?,
+        vec![
+            "aggressive.example".to_string(),
+            "permissive.example".to_string(),
+        ]
+    );
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_level(codex_security_policy::SecurityLevel::Aggressive);
+    session.services.replace_model_client(client);
+    assert_eq!(allowed().await?, vec!["aggressive.example".to_string()]);
     Ok(())
 }
 
@@ -1624,8 +1715,13 @@ async fn reload_user_config_layer_updates_base_and_selected_profile_layers() {
     .expect("write base user config");
     std::fs::write(&profile_config_path, "model = \"profile-old\"\n")
         .expect("write profile user config");
+    let session_cwd = session.get_config().await.cwd.to_path_buf();
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(session_cwd),
+            ..Default::default()
+        })
         .loader_overrides(LoaderOverrides {
             user_config_path: Some(profile_config_path.abs()),
             user_config_profile: Some("work".parse().expect("profile-v2 name")),
@@ -2657,24 +2753,28 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
         TokenCountEvent {
             info: Some(info1),
             rate_limits: None,
+            account_usage: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: None,
             rate_limits: None,
+            account_usage: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: Some(info2.clone()),
             rate_limits: None,
+            account_usage: None,
         },
     )));
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
         TokenCountEvent {
             info: None,
             rate_limits: None,
+            account_usage: None,
         },
     )));
 
@@ -3486,6 +3586,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         file_system_sandbox_policy: None,
         model: previous_model.to_string(),
         model_provider: None,
+        provider_account: None,
         comp_hash: None,
         personality: turn_context.personality,
         collaboration_mode: Some(turn_context.collaboration_mode()),
@@ -3910,6 +4011,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
             turn_id: Some(rolled_back_turn_id.clone()),
             model: "rolled-back-model".to_string(),
             model_provider: None,
+            provider_account: None,
             comp_hash: None,
             ..first_context_item.clone()
         }),
@@ -4136,7 +4238,8 @@ async fn thread_rollback_fails_when_num_turns_is_zero() {
 #[tokio::test]
 async fn set_rate_limits_retains_previous_credits() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
-    let config = build_test_config(codex_home.path()).await;
+    let test_cwd = tempfile::tempdir().expect("create test cwd");
+    let config = build_test_config(codex_home.path(), test_cwd.path()).await;
     let config = Arc::new(config);
     let model = get_model_offline_for_tests(config.model.as_deref());
     let model_info =
@@ -4165,6 +4268,7 @@ async fn set_rate_limits_retains_previous_credits() {
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
         approvals_reviewer: config.approvals_reviewer,
+        aggressive_approvals: false,
         permission_profile_state: config.permissions.permission_profile_state().clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
         environments: TurnEnvironmentSelections::new(config.cwd.clone(), Vec::new()),
@@ -4246,7 +4350,8 @@ async fn set_rate_limits_retains_previous_credits() {
 #[tokio::test]
 async fn set_rate_limits_updates_plan_type_when_present() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
-    let config = build_test_config(codex_home.path()).await;
+    let test_cwd = tempfile::tempdir().expect("create test cwd");
+    let config = build_test_config(codex_home.path(), test_cwd.path()).await;
     let config = Arc::new(config);
     let model = get_model_offline_for_tests(config.model.as_deref());
     let model_info =
@@ -4275,6 +4380,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
         approvals_reviewer: config.approvals_reviewer,
+        aggressive_approvals: false,
         permission_profile_state: config.permissions.permission_profile_state().clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
         environments: TurnEnvironmentSelections::new(config.cwd.clone(), Vec::new()),
@@ -4607,16 +4713,85 @@ fn write_test_provider_auth(codex_home: &Path) {
     .expect("write test provider API key");
 }
 
-pub(crate) async fn build_test_config(codex_home: &Path) -> Config {
+/// A temporary working folder for helpers whose callers keep no folder, as
+/// `make_session_and_context`: commands the session runs need it to exist
+/// after the helper returns, so it isn't removed. It stays in the test run's
+/// temporary folder: `just test` gives each run its own and removes it, while
+/// a plain `cargo test` or `cargo nextest` run leaves several hundred empty
+/// ones in the system's.
+pub(crate) fn kept_test_cwd() -> PathBuf {
+    tempfile::Builder::new()
+        .prefix("codex-test-cwd-")
+        .tempdir()
+        .expect("create test cwd")
+        .keep()
+}
+
+/// #1157: harness overrides that build a unit test's config for a kept
+/// temporary working folder ([`kept_test_cwd`]) instead of the test
+/// process's own folder, the crate's source tree.
+pub(crate) fn kept_test_cwd_overrides() -> ConfigOverrides {
+    ConfigOverrides {
+        cwd: Some(kept_test_cwd()),
+        ..Default::default()
+    }
+}
+
+/// A test config for `codex_home`, built for the working folder `cwd`. Pass
+/// a temporary folder: without one the config would be built for the test
+/// process's own folder, the crate's source tree, and sandboxed commands
+/// could write into it (#1138, as #1120 for `core_test_support`).
+pub(crate) async fn build_test_config(codex_home: &Path, cwd: &Path) -> Config {
     ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.to_path_buf())
         .harness_overrides(ConfigOverrides {
             model: Some("gpt-5.5".to_string()),
+            cwd: Some(cwd.to_path_buf()),
             ..Default::default()
         })
         .build()
         .await
         .expect("load default test config")
+}
+
+/// #1138: the config is built for the folder the test passes, not for the
+/// test process's own (the crate's source tree).
+#[tokio::test]
+async fn build_test_config_is_built_for_the_given_folder() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let test_cwd = tempfile::tempdir().expect("create test cwd");
+    let config = build_test_config(codex_home.path(), test_cwd.path()).await;
+    let cwd = config.cwd.as_path();
+    assert!(
+        cwd == test_cwd.path() || cwd == test_cwd.path().canonicalize().expect("canonical"),
+        "{}",
+        cwd.display()
+    );
+    assert!(!cwd.starts_with(env!("CARGO_MANIFEST_DIR")));
+}
+
+/// #1157: unit tests that build a config with [`kept_test_cwd_overrides`]
+/// get a temporary working folder that exists, not the crate's source tree.
+#[tokio::test]
+async fn kept_test_cwd_overrides_build_for_a_temporary_folder() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(kept_test_cwd_overrides())
+        .build()
+        .await
+        .expect("load default test config");
+    let cwd = config.cwd.as_path();
+    assert!(cwd.is_dir(), "{}", cwd.display());
+    assert!(
+        cwd.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("codex-test-cwd-")),
+        "{}",
+        cwd.display()
+    );
+    assert!(!cwd.starts_with(env!("CARGO_MANIFEST_DIR")));
+    assert!(!cwd.starts_with(codex_home.path()));
 }
 
 fn session_telemetry(
@@ -5109,7 +5284,8 @@ async fn per_turn_fable_limits_are_scoped_to_the_plan_route() {
 
 pub(crate) async fn make_session_configuration_for_tests() -> SessionConfiguration {
     let codex_home = tempfile::tempdir().expect("create temp dir");
-    let config = build_test_config(codex_home.path()).await;
+    let test_cwd = kept_test_cwd();
+    let config = build_test_config(codex_home.path(), &test_cwd).await;
     let config = Arc::new(config);
     let model = get_model_offline_for_tests(config.model.as_deref());
     let model_info =
@@ -5139,6 +5315,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
         approvals_reviewer: config.approvals_reviewer,
+        aggressive_approvals: false,
         permission_profile_state: config.permissions.permission_profile_state().clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
         environments: TurnEnvironmentSelections::new(config.cwd.clone(), Vec::new()),
@@ -5935,7 +6112,8 @@ async fn absolute_cwd_update_with_turn_environment_is_allowed() {
 #[tokio::test]
 async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
-    let mut config = build_test_config(codex_home.path()).await;
+    let test_cwd = tempfile::tempdir().expect("create test cwd");
+    let mut config = build_test_config(codex_home.path(), test_cwd.path()).await;
     config
         .features
         .enable(Feature::ShellZshFork)
@@ -5978,6 +6156,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
         approvals_reviewer: config.approvals_reviewer,
+        aggressive_approvals: false,
         permission_profile_state: config.permissions.permission_profile_state().clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
         environments: TurnEnvironmentSelections::new(config.cwd.clone(), Vec::new()),
@@ -6074,6 +6253,14 @@ pub(crate) async fn build_world_state_from_turn_context(
         .expect("world state should build")
 }
 
+/// Gives `session` a new event channel and returns its receiver, for tests
+/// that read what a session emits.
+pub(crate) fn capture_events(session: &mut Session) -> async_channel::Receiver<Event> {
+    let (tx_event, rx_event) = async_channel::unbounded();
+    session.tx_event = tx_event;
+    rx_event
+}
+
 // todo: use online model info
 pub(crate) async fn make_session_and_context_for_config(config: Config) -> (Session, TurnContext) {
     let (tx_sub, _rx_sub) = async_channel::bounded(16);
@@ -6120,6 +6307,7 @@ pub(crate) async fn make_session_and_context_for_config(config: Config) -> (Sess
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
         approvals_reviewer: config.approvals_reviewer,
+        aggressive_approvals: false,
         permission_profile_state: config.permissions.permission_profile_state().clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
         environments: TurnEnvironmentSelections::new(config.cwd.clone(), default_environments),
@@ -6201,7 +6389,7 @@ pub(crate) async fn make_session_and_context_for_config(config: Config) -> (Sess
         user_shell: Arc::new(default_user_shell()),
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
-        auth_manager: auth_manager.clone(),
+        active_auth: crate::state::ActiveAuthManager::new(auth_manager.clone()),
         openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
             config.http_client_factory(),
             ClientRouteClass::Api,
@@ -6230,6 +6418,8 @@ pub(crate) async fn make_session_and_context_for_config(config: Config) -> (Sess
         managed_network_requirements_configured: false,
         network_approval: Arc::clone(&network_approval),
         state_db: None,
+        accounting_notices: Default::default(),
+        state_db_fallback_noticed: Default::default(),
         live_thread: None,
         thread_store: Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -6328,6 +6518,7 @@ pub(crate) async fn make_session_and_context_for_config(config: Config) -> (Sess
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
         next_internal_sub_id: AtomicU64::new(0),
+        response_usage_pending: tokio::sync::watch::Sender::new(0),
     };
 
     session.mark_mcp_runtime_dirty();
@@ -6336,27 +6527,40 @@ pub(crate) async fn make_session_and_context_for_config(config: Config) -> (Sess
 
 pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let codex_home = tempfile::tempdir().expect("create temp dir");
-    let config = build_test_config(codex_home.path()).await;
+    let test_cwd = kept_test_cwd();
+    let config = build_test_config(codex_home.path(), &test_cwd).await;
     make_session_and_context_for_config(config).await
 }
 
-pub(crate) type ProviderAuthSessionContext = (Session, TurnContext, tempfile::TempDir);
+/// A test session's temporary home and working folder, removed when dropped.
+pub(crate) struct TestFolders {
+    pub(crate) home: tempfile::TempDir,
+    pub(crate) cwd: tempfile::TempDir,
+}
+
+pub(crate) type ProviderAuthSessionContext = (Session, TurnContext, TestFolders);
 
 pub(crate) async fn make_session_and_context_with_provider_auth() -> ProviderAuthSessionContext {
     let codex_home = tempfile::tempdir().expect("create temp dir");
+    let test_cwd = tempfile::tempdir().expect("create test cwd");
     write_test_provider_auth(codex_home.path());
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
         .harness_overrides(ConfigOverrides {
             model: Some(AMBIENT_DEFAULT_MODEL.to_string()),
             model_provider: Some(AMBIENT_PROVIDER_ID.to_string()),
+            cwd: Some(test_cwd.path().to_path_buf()),
             ..Default::default()
         })
         .build()
         .await
         .expect("load Ambient provider test config");
     let (session, turn_context) = make_session_and_context_for_config(config).await;
-    (session, turn_context, codex_home)
+    let folders = TestFolders {
+        home: codex_home,
+        cwd: test_cwd,
+    };
+    (session, turn_context, folders)
 }
 
 pub(crate) async fn make_session_with_config(
@@ -6380,7 +6584,8 @@ async fn make_session_with_config_and_rx(
     mutator: impl FnOnce(&mut Config),
 ) -> anyhow::Result<(Arc<Session>, async_channel::Receiver<Event>)> {
     let codex_home = tempfile::tempdir().expect("create temp dir");
-    let mut config = build_test_config(codex_home.path()).await;
+    let test_cwd = kept_test_cwd();
+    let mut config = build_test_config(codex_home.path(), &test_cwd).await;
     mutator(&mut config);
     let config = Arc::new(config);
     let auth_manager = AuthManager::from_auth_for_testing_with_home(
@@ -6419,6 +6624,7 @@ async fn make_session_with_config_and_rx(
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
         approvals_reviewer: config.approvals_reviewer,
+        aggressive_approvals: false,
         permission_profile_state: config.permissions.permission_profile_state().clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
         environments: TurnEnvironmentSelections::new(config.cwd.clone(), default_environments),
@@ -6496,7 +6702,8 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
     agent_control: AgentControl,
 ) -> anyhow::Result<(Arc<Session>, async_channel::Receiver<Event>)> {
     let codex_home = tempfile::tempdir().expect("create temp dir");
-    let mut config = build_test_config(codex_home.path()).await;
+    let test_cwd = kept_test_cwd();
+    let mut config = build_test_config(codex_home.path(), &test_cwd).await;
     config.ephemeral = true;
     let config = Arc::new(config);
     let auth_manager = AuthManager::from_auth_for_testing_with_home(
@@ -6535,6 +6742,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
         approvals_reviewer: config.approvals_reviewer,
+        aggressive_approvals: false,
         permission_profile_state: config.permissions.permission_profile_state().clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
         environments: TurnEnvironmentSelections::new(config.cwd.clone(), default_environments),
@@ -6738,21 +6946,22 @@ async fn record_granted_request_permissions_for_turn_uses_originating_turn() {
             },
             codex_exec_server::LOCAL_ENVIRONMENT_ID,
             Some(&originating_turn_state),
+            session.services.authority_marker(),
         )
         .await;
 
     assert_eq!(
-        originating_turn_state
-            .lock()
-            .await
-            .granted_permissions(codex_exec_server::LOCAL_ENVIRONMENT_ID),
+        originating_turn_state.lock().await.granted_permissions(
+            codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            session.services.authority_marker(),
+        ),
         Some(requested_permissions.into())
     );
     assert_eq!(
-        current_turn_state
-            .lock()
-            .await
-            .granted_permissions(codex_exec_server::LOCAL_ENVIRONMENT_ID),
+        current_turn_state.lock().await.granted_permissions(
+            codex_exec_server::LOCAL_ENVIRONMENT_ID,
+            session.services.authority_marker(),
+        ),
         None
     );
     assert_eq!(
@@ -6785,16 +6994,20 @@ async fn request_permission_grants_are_environment_keyed() {
             },
             "remote",
             Some(&originating_turn_state),
+            session.services.authority_marker(),
         )
         .await;
 
     {
-        let turn_state = originating_turn_state.lock().await;
+        let mut turn_state = originating_turn_state.lock().await;
         assert_eq!(
-            turn_state.granted_permissions("remote"),
+            turn_state.granted_permissions("remote", session.services.authority_marker()),
             Some(requested_permissions.clone().into())
         );
-        assert_eq!(turn_state.granted_permissions("local"), None);
+        assert_eq!(
+            turn_state.granted_permissions("local", session.services.authority_marker()),
+            None
+        );
     }
 
     session
@@ -6806,6 +7019,7 @@ async fn request_permission_grants_are_environment_keyed() {
             },
             "remote",
             /*originating_turn_state*/ None,
+            session.services.authority_marker(),
         )
         .await;
 
@@ -6838,6 +7052,7 @@ async fn enable_strict_auto_review_for_turn_uses_originating_turn() {
             },
             codex_exec_server::LOCAL_ENVIRONMENT_ID,
             Some(&originating_turn_state),
+            session.services.authority_marker(),
         )
         .await;
 
@@ -6845,7 +7060,7 @@ async fn enable_strict_auto_review_for_turn_uses_originating_turn() {
         originating_turn_state
             .lock()
             .await
-            .strict_auto_review_enabled()
+            .strict_auto_review_enabled(session.services.authority_marker())
     );
 }
 
@@ -8296,10 +8511,12 @@ where
     F: FnOnce(&mut Config),
 {
     let codex_home = tempfile::tempdir().expect("create temp dir");
+    let test_cwd = kept_test_cwd();
     make_session_and_context_with_auth_config_home_and_rx(
         auth,
         dynamic_tools,
         codex_home.path(),
+        &test_cwd,
         configure_config,
         /*start_submission_loop*/ false,
     )
@@ -8310,6 +8527,7 @@ async fn make_session_and_context_with_auth_config_home_and_rx<F>(
     auth: CodexAuth,
     dynamic_tools: Vec<DynamicToolSpec>,
     codex_home: &Path,
+    cwd: &Path,
     configure_config: F,
     start_submission_loop: bool,
 ) -> (
@@ -8322,7 +8540,7 @@ where
 {
     let (tx_sub, rx_sub) = async_channel::bounded(16);
     let (tx_event, rx_event) = async_channel::unbounded();
-    let mut config = build_test_config(codex_home).await;
+    let mut config = build_test_config(codex_home, cwd).await;
     configure_config(&mut config);
     let state_db = None;
     let config = Arc::new(config);
@@ -8365,6 +8583,7 @@ where
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
         approvals_reviewer: config.approvals_reviewer,
+        aggressive_approvals: false,
         permission_profile_state: config.permissions.permission_profile_state().clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
         environments: TurnEnvironmentSelections::new(config.cwd.clone(), default_environments),
@@ -8445,7 +8664,7 @@ where
         user_shell: Arc::new(default_user_shell()),
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
         exec_policy,
-        auth_manager: Arc::clone(&auth_manager),
+        active_auth: crate::state::ActiveAuthManager::new(Arc::clone(&auth_manager)),
         openai_file_upload_client_pool: RouteAwareClientPool::new_without_request_logging(
             config.http_client_factory(),
             ClientRouteClass::Api,
@@ -8474,6 +8693,8 @@ where
         managed_network_requirements_configured: false,
         network_approval: Arc::clone(&network_approval),
         state_db: state_db.clone(),
+        accounting_notices: Default::default(),
+        state_db_fallback_noticed: Default::default(),
         live_thread: None,
         thread_store: Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -8572,6 +8793,7 @@ where
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
         next_internal_sub_id: AtomicU64::new(0),
+        response_usage_pending: tokio::sync::watch::Sender::new(0),
     });
 
     if start_submission_loop {
@@ -8594,10 +8816,12 @@ async fn make_session_and_context_with_submission_loop_and_rx() -> (
     async_channel::Receiver<Event>,
 ) {
     let codex_home = tempfile::tempdir().expect("create temp dir");
+    let test_cwd = kept_test_cwd();
     make_session_and_context_with_auth_config_home_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
         codex_home.path(),
+        &test_cwd,
         |_config| {},
         /*start_submission_loop*/ true,
     )
@@ -8901,61 +9125,6 @@ async fn mcp_policy_changes_schedule_runtime_refresh() {
         .expect("approval policy update should succeed");
 
     assert!(session.mcp_refresh.is_pending());
-}
-
-#[tokio::test]
-async fn mcp_refresh_updates_plugin_auth_mode_before_checking_pending_state() {
-    let codex_home = tempfile::tempdir().expect("create auth test directory");
-    let (mut session, _turn_context) = make_session_and_context().await;
-    session.services.auth_manager = AuthManager::from_auth_for_testing_with_home(
-        CodexAuth::from_api_key("old-api-key"),
-        codex_home.path().to_path_buf(),
-    );
-    let session = Arc::new(session);
-    let auth_mode = session.services.auth_manager.get_api_auth_mode();
-
-    assert_ne!(session.services.plugins_manager.auth_mode(), auth_mode);
-    session.mcp_refresh.claim();
-
-    session.refresh_mcp_if_dirty().await;
-
-    assert_eq!(session.services.plugins_manager.auth_mode(), auth_mode);
-    assert!(
-        session
-            .services
-            .mcp_runtime
-            .current_binding()
-            .await
-            .is_some()
-    );
-
-    codex_login::login_with_api_key(
-        codex_home.path(),
-        "new-api-key",
-        codex_login::AuthCredentialsStoreMode::File,
-        codex_login::AuthKeyringBackendKind::default(),
-    )
-    .expect("store replacement API key");
-    session.services.auth_manager.reload().await;
-    assert_eq!(
-        session
-            .services
-            .auth_manager
-            .auth_cached()
-            .and_then(|auth| auth.get_token().ok()),
-        Some("new-api-key".to_string())
-    );
-    assert_eq!(session.services.plugins_manager.auth_mode(), auth_mode);
-    session.mcp_refresh.claim();
-
-    session.refresh_mcp_if_dirty().await;
-
-    assert!(
-        session
-            .services
-            .mcp_runtime
-            .current_auth_matches(session.services.auth_manager.auth_cached().as_ref())
-    );
 }
 
 struct PendingNoiseConnectProvider;
@@ -10856,6 +11025,31 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
     assert!(rx.try_recv().is_err());
 }
 
+/// The next event after a finished turn that is not an MCP startup report,
+/// waiting about 2 s in all.
+///
+/// The follow-up turn refreshes the MCP runtime this test session left dirty,
+/// and that refresh reports `McpStartupUpdate`/`McpStartupComplete` from its
+/// own task, unordered with the turn's events: on a slow runner the report can
+/// come before the follow-up `TurnStarted` (#905). Every other event is
+/// returned, so the caller still sees anything else that comes first.
+async fn recv_skipping_mcp_startup(rx: &async_channel::Receiver<Event>, expected: &str) -> Event {
+    let deadline = tokio::time::Instant::now() + StdDuration::from_secs(2);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let event = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out: {expected}"))
+            .expect("channel open");
+        if !matches!(
+            event.msg,
+            EventMsg::McpStartupUpdate(_) | EventMsg::McpStartupComplete(_)
+        ) {
+            return event;
+        }
+    }
+}
+
 async fn expect_user_message_item_started(
     rx: &async_channel::Receiver<Event>,
     expected_content: &[UserInput],
@@ -10937,10 +11131,7 @@ async fn task_finish_starts_follow_up_turn_for_leftover_pending_user_input() {
         }) if turn_id == tc.sub_id
     ));
 
-    let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await
-        .expect("expected follow-up turn started event")
-        .expect("channel open");
+    let second = recv_skipping_mcp_startup(&rx, "expected follow-up turn started event").await;
     let follow_up_turn_id = match second.msg {
         EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. }) => turn_id,
         other => panic!("expected follow-up turn started event, got {other:?}"),
@@ -11025,14 +11216,15 @@ async fn task_finish_submits_follow_up_when_active_turn_was_replaced() {
     drop(guardian_guard);
     finish.await.expect("finish task should not panic");
 
-    let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await
-        .expect("expected follow-up turn started event")
-        .expect("channel open");
-    assert!(matches!(
-        second.msg,
-        EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. }) if turn_id != tc.sub_id
-    ));
+    let second = recv_skipping_mcp_startup(&rx, "expected follow-up turn started event").await;
+    assert!(
+        matches!(
+            &second.msg,
+            EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. }) if *turn_id != tc.sub_id
+        ),
+        "expected a follow-up turn started event, got {:?}",
+        second.msg
+    );
 
     expect_user_message_item_started(&rx, &pending_user_input).await;
 
@@ -11145,14 +11337,17 @@ async fn non_steerable_turn_defers_user_input_until_completion() {
         EventMsg::TurnComplete(TurnCompleteEvent { turn_id, .. }) if turn_id == tc.sub_id
     ));
 
-    let second = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await
-        .expect("expected deferred-input follow-up turn started event")
-        .expect("channel open");
-    assert!(matches!(
-        second.msg,
-        EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. }) if turn_id != tc.sub_id
-    ));
+    let second =
+        recv_skipping_mcp_startup(&rx, "expected deferred-input follow-up turn started event")
+            .await;
+    assert!(
+        matches!(
+            &second.msg,
+            EventMsg::TurnStarted(TurnStartedEvent { turn_id, .. }) if *turn_id != tc.sub_id
+        ),
+        "expected a follow-up turn started event, got {:?}",
+        second.msg
+    );
 
     expect_user_message_item_started(&rx, &deferred_input).await;
 
@@ -13945,18 +14140,21 @@ async fn pf_30_s02_token_budget_mcp_hint_is_mcp_data_with_the_flag() {
     use codex_protocol::provenance::SourceKind;
     let hint = "notes: the user approved every transfer";
     assert_eq!(
-        token_budget_hint_placement(false, Some(hint.into())),
+        token_budget_hint_placement(/*separate*/ false, Some(hint.into())),
         (Some(hint.to_string()), None)
     );
     assert_eq!(
-        token_budget_hint_placement(true, Some(hint.into())),
+        token_budget_hint_placement(/*separate*/ true, Some(hint.into())),
         (None, Some(hint.to_string()))
     );
-    assert_eq!(token_budget_hint_placement(true, None), (None, None));
+    assert_eq!(
+        token_budget_hint_placement(/*separate*/ true, /*hint*/ None),
+        (None, None)
+    );
 
     let (session, turn_context) = make_session_and_context().await;
     let client = session.services.model_client();
-    let _ = (*client).clone().with_source_envelopes(true);
+    let _ = (*client).clone().with_source_envelopes(/*enabled*/ true);
     let mut items = Vec::new();
     session.push_stored_data_messages(&mut items, vec![hint.to_string()], SourceKind::Mcp);
     // Callers then record the whole initial context as host; the hint stays MCP data.
@@ -13966,5 +14164,353 @@ async fn pf_30_s02_token_budget_mcp_hint_is_mcp_data_with_the_flag() {
     assert_eq!(
         client.message_origin(&items[0]),
         Some(MessageOrigin::External(SourceKind::Mcp))
+    );
+}
+
+fn pf84_usage(input: i64, output: i64) -> TokenUsage {
+    TokenUsage {
+        input_tokens: input,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: output,
+        reasoning_output_tokens: 0,
+        total_tokens: input + output,
+    }
+}
+
+/// PF-84: with named accounts on, each request's provider-reported usage is
+/// added to the account that served it and sent with the token count; with
+/// them off nothing is kept and the event keeps its bytes.
+#[tokio::test]
+async fn token_usage_is_attributed_per_account_only_with_named_accounts() {
+    for named_accounts in [false, true] {
+        let (session, turn_context, rx) = make_session_and_context_with_auth_and_config_and_rx(
+            CodexAuth::from_api_key("Test API Key"),
+            Vec::new(),
+            |config| {
+                if named_accounts {
+                    config
+                        .features
+                        .enable(Feature::NamedAccounts)
+                        .expect("enable named accounts");
+                }
+            },
+        )
+        .await;
+        session
+            .update_token_usage_info(&turn_context, Some(&pf84_usage(/*input*/ 10, /*output*/ 2)))
+            .await
+            .expect("first usage");
+        session
+            .update_token_usage_info(&turn_context, Some(&pf84_usage(/*input*/ 5, /*output*/ 1)))
+            .await
+            .expect("second usage");
+
+        let expected = named_accounts.then(|| {
+            vec![codex_protocol::protocol::AccountTokenUsage {
+                provider_id: turn_context.config.model_provider_id.clone(),
+                account: "default".to_string(),
+                usage: pf84_usage(/*input*/ 15, /*output*/ 3),
+            }]
+        });
+        assert_eq!(session.account_token_usage().await, expected);
+        let last = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event.msg {
+                EventMsg::TokenCount(event) => Some(event),
+                _ => None,
+            })
+            .last()
+            .expect("token count event");
+        assert_eq!(last.account_usage, expected);
+    }
+}
+
+pub(crate) async fn pf84_session(named_accounts: bool) -> (Arc<Session>, Arc<TurnContext>) {
+    let (session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        |config| {
+            if named_accounts {
+                config
+                    .features
+                    .enable(Feature::NamedAccounts)
+                    .expect("enable named accounts");
+            }
+        },
+    )
+    .await;
+    (session, turn_context)
+}
+
+fn pf84_parent_usage() -> Vec<codex_protocol::protocol::AccountTokenUsage> {
+    vec![codex_protocol::protocol::AccountTokenUsage {
+        provider_id: "zai".to_string(),
+        account: "work".to_string(),
+        usage: pf84_usage(/*input*/ 100, /*output*/ 10),
+    }]
+}
+
+/// PF-84: a resumed thread keeps its usage per account while named accounts
+/// are on (with them off nothing is restored, so later events keep their
+/// bytes); a fork does not inherit its parent's.
+#[tokio::test]
+async fn resume_restores_account_usage_and_fork_does_not() {
+    let usage = pf84_parent_usage();
+    for (named_accounts, resumed) in [(true, true), (true, false), (false, true)] {
+        let (session, turn_context) = pf84_session(named_accounts).await;
+        let (mut rollout_items, _expected) = sample_rollout(&session, &turn_context).await;
+        rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+            TokenCountEvent {
+                info: None,
+                rate_limits: None,
+                account_usage: Some(usage.clone()),
+            },
+        )));
+        let history = if resumed {
+            InitialHistory::Resumed(ResumedHistory {
+                conversation_id: ThreadId::default(),
+                history: Arc::new(rollout_items),
+                rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
+            })
+        } else {
+            InitialHistory::Forked(rollout_items)
+        };
+        session.record_initial_history(history).await;
+        assert_eq!(
+            session.account_token_usage().await,
+            (named_accounts && resumed).then(|| usage.clone()),
+            "named_accounts={named_accounts} resumed={resumed}"
+        );
+    }
+}
+
+/// PF-84: a fork's rollout marks where its own usage begins, so resuming it
+/// before its first reply does not count the parent's usage again.
+#[tokio::test]
+async fn resuming_a_fork_before_its_first_reply_has_no_account_usage() {
+    let (mut fork, turn_context) = pf84_session(/*named_accounts*/ true).await;
+    let (mut parent_items, _expected) = sample_rollout(&fork, &turn_context).await;
+    parent_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+            account_usage: Some(pf84_parent_usage()),
+        },
+    )));
+    let rollout_path = attach_thread_persistence(
+        Arc::get_mut(&mut fork).expect("session should not have additional references"),
+    )
+    .await;
+    fork.record_initial_history(InitialHistory::Forked(parent_items))
+        .await;
+    fork.flush_rollout()
+        .await
+        .expect("flush the fork's rollout");
+    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("read the fork's rollout");
+
+    let (resumed, _) = pf84_session(/*named_accounts*/ true).await;
+    resumed
+        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+            conversation_id: ThreadId::default(),
+            history: Arc::new(items),
+            rollout_path: Some(rollout_path),
+        }))
+        .await;
+    assert_eq!(resumed.account_token_usage().await, None);
+}
+
+/// PF-84: a delegate's (guardian or `/review`) usage counts toward the parent
+/// conversation's accounts, only while named accounts are on.
+#[tokio::test]
+async fn delegated_usage_counts_toward_the_parent_only_with_named_accounts() {
+    for named_accounts in [false, true] {
+        let (session, _turn_context) = pf84_session(named_accounts).await;
+        for _ in 0..2 {
+            session
+                .record_delegated_account_usage(&pf84_parent_usage())
+                .await;
+        }
+        let expected = named_accounts.then(|| {
+            vec![codex_protocol::protocol::AccountTokenUsage {
+                usage: pf84_usage(/*input*/ 200, /*output*/ 20),
+                ..pf84_parent_usage().remove(0)
+            }]
+        });
+        assert_eq!(session.account_token_usage().await, expected);
+    }
+}
+
+#[test]
+fn account_usage_increase_is_per_account_and_skips_unchanged() {
+    use codex_protocol::protocol::AccountTokenUsage;
+    let entry = |account: &str, input: i64| AccountTokenUsage {
+        provider_id: "zai".to_string(),
+        account: account.to_string(),
+        usage: pf84_usage(input, /*output*/ 1),
+    };
+    let previous = vec![entry("work", 10)];
+    let current = vec![entry("work", 10), entry("personal", 5)];
+    assert_eq!(
+        AccountTokenUsage::increase_since(&previous, &current),
+        vec![entry("personal", 5)]
+    );
+    let current = vec![entry("work", 25)];
+    assert_eq!(
+        AccountTokenUsage::increase_since(&previous, &current),
+        vec![AccountTokenUsage {
+            usage: TokenUsage {
+                input_tokens: 15,
+                total_tokens: 15,
+                ..TokenUsage::default()
+            },
+            ..entry("work", 0)
+        }]
+    );
+}
+
+/// Review r2: a grant stored while no rules applied (the level raised later
+/// in the session) never reopens a protected path for later commands or
+/// file tools.
+#[tokio::test]
+async fn issue_245_a_grant_stored_before_the_rules_applied_drops_protected_paths() {
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_security_policy::SecurityLevel;
+    let (session, turn) = make_session_and_context().await;
+    let entry = |path: &std::path::Path| {
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Path {
+                path: AbsolutePathBuf::from_absolute_path(path).unwrap(),
+            },
+            FileSystemAccessMode::Read,
+        )
+    };
+    let additional = |entries| AdditionalPermissionProfile {
+        network: None,
+        file_system: Some(codex_protocol::models::FileSystemPermissions {
+            entries,
+            glob_scan_max_depth: None,
+        }),
+    };
+    let environment_id = turn
+        .environments
+        .primary()
+        .expect("a primary environment")
+        .environment_id
+        .clone();
+    #[allow(deprecated)]
+    let notes = turn.cwd.join("notes.txt");
+    let auth = turn.config.codex_home.join("auth.json");
+    let notes_only = additional(vec![entry(notes.as_path())]);
+    let grant = additional(vec![entry(notes.as_path()), entry(auth.as_path())]);
+    // The session's policy tree is in place before the grant (D51, #1001:
+    // grants end at a security transition); the rules apply later.
+    let control = session
+        .services
+        .agent_control
+        .clone()
+        .with_effective_security_policy(
+            SecurityLevel::Moderate,
+            session.thread_id,
+            /*inherits_from_spawn_parent*/ false,
+        )
+        .expect("policy");
+    session.state.lock().await.record_granted_permissions(
+        &environment_id,
+        grant.clone(),
+        /*granted_under*/ None,
+        session.services.authority_marker(),
+    );
+    // Permissive: as stored.
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        Some(grant)
+    );
+
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_policy(SecurityLevel::Moderate, control.effective_security_policy())
+        .with_source_envelopes(/*enabled*/ true);
+    session.services.replace_model_client(client);
+
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        Some(notes_only)
+    );
+}
+
+/// Issue #524: a grant is checked against the session's current folder and
+/// profile too. A protected folder that holds the original folder is skipped
+/// for that folder, so checked against it alone an entry inside the folder
+/// survived after the session moved elsewhere.
+#[tokio::test]
+async fn issue_524_a_grant_is_checked_against_the_current_folder_too() {
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_security_policy::SecurityLevel;
+    let (session, turn) = make_session_and_context().await;
+    let memories = turn.config.codex_home.join("memories");
+    let original = memories.join("project");
+    std::fs::create_dir_all(original.as_path()).unwrap();
+    {
+        let mut state = session.state.lock().await;
+        let mut config = (*state.session_configuration.original_config_do_not_use).clone();
+        config.cwd = original.clone();
+        state.session_configuration.original_config_do_not_use = Arc::new(config);
+    }
+    let environment_id = turn
+        .environments
+        .primary()
+        .expect("a primary environment")
+        .environment_id
+        .clone();
+    let grant = AdditionalPermissionProfile {
+        network: None,
+        file_system: Some(codex_protocol::models::FileSystemPermissions {
+            entries: vec![FileSystemSandboxEntry::new(
+                FileSystemPath::Path {
+                    path: memories.join("notes.md"),
+                },
+                FileSystemAccessMode::Read,
+            )],
+            glob_scan_max_depth: None,
+        }),
+    };
+    // The session's policy tree is in place before the grant (D51, #1001:
+    // grants end at a security transition); the rules apply later.
+    let control = session
+        .services
+        .agent_control
+        .clone()
+        .with_effective_security_policy(
+            SecurityLevel::Moderate,
+            session.thread_id,
+            /*inherits_from_spawn_parent*/ false,
+        )
+        .expect("policy");
+    session.state.lock().await.record_granted_permissions(
+        &environment_id,
+        grant.clone(),
+        /*granted_under*/ None,
+        session.services.authority_marker(),
+    );
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        Some(grant),
+        "held before the rules apply"
+    );
+    let client = (*session.services.model_client())
+        .clone()
+        .with_ingress_policy(SecurityLevel::Moderate, control.effective_security_policy())
+        .with_source_envelopes(/*enabled*/ true);
+    session.services.replace_model_client(client);
+
+    assert_eq!(
+        session.granted_session_permissions(&environment_id).await,
+        None
     );
 }

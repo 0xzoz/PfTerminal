@@ -14,6 +14,11 @@ mod accounting_tests;
 use crate::client::ModelClient;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
+use crate::provider_throttle::AdmittedProviderRequest;
+use crate::provider_throttle::AuxiliaryRequest;
+use crate::provider_throttle::AuxiliaryRoute;
+use crate::provider_throttle::record_auxiliary_error;
+use crate::provider_throttle::record_auxiliary_outcome;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::security::ingress::NativeIngress;
 use crate::security::ingress::OriginKey;
@@ -36,6 +41,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AccountTokenUsage;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::TokenUsage;
 use codex_rollout_trace::InferenceTraceContext;
@@ -376,7 +382,7 @@ impl StageOneMemoryClient {
             binding.floor.max(config.security_level).max(policy.level) != SecurityLevel::Permissive;
         binding.check().await?;
         let client = ModelClient::new(
-            Some(Arc::clone(&session.services.auth_manager)),
+            Some(session.services.auth_manager()),
             AgentIdentityAuthPolicy::JwtOnly,
             expected_owner,
             config.model_provider.clone(),
@@ -509,7 +515,12 @@ impl StageOneMemoryClient {
             .project_labelled(&conversation)
             .iter()
             .filter_map(keep_for_stage_one)
-            .filter_map(|item| serde_json::to_string(&item).ok())
+            .filter_map(|mut item| {
+                // #578: local provenance (fragment sources and producer) is
+                // not part of the memory text.
+                item.clear_local_provenance();
+                serde_json::to_string(&item).ok()
+            })
             .collect();
         // Drop whole items from the middle (keeping head and tail, as the
         // Permissive text cut does) until the text fits: one pass to size,
@@ -571,7 +582,7 @@ impl StageOneMemoryClient {
         if self.client.provider_info() != &self.binding.provider {
             return Ok(None);
         }
-        let auth = owner.services.auth_manager.auth().await;
+        let auth = owner.services.auth_manager().auth().await;
         let auth_mode = auth.as_ref().map(codex_login::CodexAuth::auth_mode);
         let endpoint = self
             .binding
@@ -592,6 +603,57 @@ impl StageOneMemoryClient {
             )
             .await?,
         ))
+    }
+
+    /// PF-84: extraction is recorded under the owning conversation, so its
+    /// usage counts toward that conversation's account.
+    async fn record_account_usage(&self, usage: Option<&TokenUsage>) {
+        let (Some(usage), Some(owner)) = (usage, self.binding.owner.upgrade()) else {
+            return;
+        };
+        let account = self
+            .binding
+            .provider
+            .account
+            .as_ref()
+            .map_or(codex_vault::DEFAULT_PROVIDER_ACCOUNT, |account| {
+                account.name.as_str()
+            });
+        owner
+            .record_delegated_account_usage(&[AccountTokenUsage {
+                provider_id: self.accounting_provider_id.clone(),
+                account: account.to_string(),
+                usage: usage.clone(),
+            }])
+            .await;
+    }
+
+    /// Check the owner's provider key for a cooldown before extracting.
+    async fn admit_provider_request(
+        &self,
+        request: &StageOneMemoryRequest<'_>,
+    ) -> Result<Option<AdmittedProviderRequest>, StageOneMemoryError> {
+        let Some(owner) = self.binding.owner.upgrade() else {
+            return Ok(None);
+        };
+        let auth_manager = owner.services.auth_manager();
+        let (admitted, _fallback) = AdmittedProviderRequest::admit(
+            AuxiliaryRequest::MemoryExtraction,
+            AuxiliaryRoute {
+                state_db: owner.state_db(),
+                // Where the request reads a named account's key from.
+                codex_home: auth_manager.codex_home(),
+                provider_id: &self.accounting_provider_id,
+                provider: &self.binding.provider,
+                model: &request.model_info.slug,
+                auth_mode: auth_manager.auth_mode(),
+                thread_id: Some(self.binding.owner_id.to_string()),
+                turn_id: None,
+            },
+            request.prompt,
+        )
+        .await?;
+        Ok(admitted)
     }
 
     pub async fn extract(
@@ -628,12 +690,18 @@ impl StageOneMemoryClient {
                 None
             }
         };
+        // #509: extraction is a model request on the owner's key like any
+        // other: a cooldown holds it back, and its 429 holds the key back.
+        let admitted = self.admit_provider_request(&request).await?;
         let trace = InferenceTraceContext::disabled();
         let mut stream = tokio::select! {
             _ = self.binding.termination.clone() => return Err(StageOneMemoryDenial::OwnerTerminated.into()),
             result = session.stream(request.prompt, request.model_info, request.session_telemetry,
                 request.reasoning_effort, request.reasoning_summary, request.service_tier,
-                request.responses_metadata, &trace) => result.map_err(|error| self.binding.request_error(error))?,
+                request.responses_metadata, &trace) => {
+                record_auxiliary_outcome(admitted.as_ref(), &result).await;
+                result.map_err(|error| self.binding.request_error(error))?
+            }
         };
         let mut text = String::new();
         loop {
@@ -642,10 +710,11 @@ impl StageOneMemoryClient {
                 _ = self.binding.termination.clone() => return Err(StageOneMemoryDenial::OwnerTerminated.into()),
                 event = stream.next() => event,
             };
-            match event
-                .transpose()
-                .map_err(|error| self.binding.request_error(error))?
-            {
+            let event = event.transpose();
+            if let Err(error) = &event {
+                record_auxiliary_error(admitted.as_ref(), Some(error)).await;
+            }
+            match event.map_err(|error| self.binding.request_error(error))? {
                 Some(ResponseEvent::OutputTextDelta { delta, .. }) => text.push_str(&delta),
                 Some(ResponseEvent::OutputItemDone(
                     codex_protocol::models::ResponseItem::Message { content, .. },
@@ -656,6 +725,7 @@ impl StageOneMemoryClient {
                 }
                 Some(ResponseEvent::Completed { token_usage, .. }) => {
                     self.check_completion().await?;
+                    self.record_account_usage(token_usage.as_ref()).await;
                     return Ok(StageOneMemoryOutput { text, token_usage });
                 }
                 None => {

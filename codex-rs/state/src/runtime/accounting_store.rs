@@ -7,13 +7,16 @@ use codex_protocol::ThreadId;
 use sqlx::SqliteConnection;
 
 pub use super::pricing::Basis;
+pub use super::pricing::BasisSource;
 pub use super::pricing::BucketQuote;
 pub use super::pricing::Currency;
 pub use super::pricing::Current;
 pub use super::pricing::DayTotals;
 pub use super::pricing::Decimal;
 pub use super::pricing::DisplayAmount;
+pub use super::pricing::LongContext;
 pub use super::pricing::Metric;
+pub use super::pricing::NewerLedgerFormat;
 pub use super::pricing::ObservationQuote;
 pub use super::pricing::Rates;
 pub use super::pricing::RetainedDay;
@@ -21,17 +24,35 @@ pub use super::pricing::RetentionCoverage;
 pub use super::pricing::Snapshot;
 pub use super::pricing::SourceKind;
 pub use super::pricing::Unit;
+pub use super::pricing::is_newer_format;
 pub use super::types::Attempt;
+pub use super::types::AttemptAccount;
 pub use super::types::Count;
+pub use super::types::DEFAULT_ACCOUNT;
 pub use super::types::Dialect;
 pub use super::types::Observation;
 pub use super::types::Patch;
 pub use super::types::Presence;
 pub use super::types::Usage;
+pub use scope::DeletedAttempts;
 pub use scope::OtherConversations;
+
+pub use writer::AccountingWriter;
+pub use writer::LedgerWrite;
+pub use writer::PENDING_DIR;
+pub use writer::WriteOutcome;
 
 #[path = "accounting_scope.rs"]
 mod scope;
+
+#[path = "accounting_empty_day.rs"]
+mod empty_day;
+
+#[path = "accounting_indexes.rs"]
+mod indexes;
+
+#[path = "accounting_writer.rs"]
+mod writer;
 
 /// One UTC day's immutable, recorded-only explanation. No collection coverage claim.
 #[derive(Debug, PartialEq, Eq)]
@@ -52,6 +73,28 @@ pub struct Inspection {
     /// Same-day attempts of other root conversations, outside every total above.
     /// `None` when this view did not read them (range buckets).
     pub other_conversations: Option<OtherConversations>,
+    /// What the emptiness of the day, or of a range bucket's part of it,
+    /// means when neither this conversation nor a resolved subagent has a
+    /// recorded attempt there. `None` when they have one.
+    pub empty_day: Option<EmptyDay>,
+}
+
+/// A day on which neither the conversation nor a resolved subagent has a
+/// recorded attempt. Only `BeforeConversation` says there were no requests:
+/// the ledger keeps no record of when a writer ran or which writes failed
+/// (#314), so an empty day inside the ledger's life proves nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmptyDay {
+    /// Proven: the whole UTC day ends before the conversation started, and no
+    /// thread of unresolved ancestry has anything on it. `started_day` is the
+    /// UTC day of the earliest of every spawn-tree thread's UUIDv7 id time, its
+    /// stored creation times and every request recorded for it. As good as the
+    /// clock that stamped them, the same clock that dates every request.
+    BeforeConversation { started_day: i64 },
+    /// Not proven: the day ends before this home's ledger was created.
+    BeforeLedger { ledger_started_day: i64 },
+    /// Not proven: nothing is recorded; collection coverage is unknown.
+    NotRecorded,
 }
 
 /// UTC half-open requested interval and calendar-aligned grouping.
@@ -154,7 +197,12 @@ pub struct InspectionBucket {
 pub enum InspectionDay {
     Range {
         requested: InspectionRange,
-        oldest_aggregate_day: Option<i64>,
+        /// First UTC day whose daily totals are kept; `None` while the ledger
+        /// has no completed checkpoint.
+        aggregate_day_floor: Option<i64>,
+        /// Inclusive completed checkpoint from this read snapshot, also when
+        /// every requested bucket starts after it. No checkpoint while staging.
+        completed_as_of_ms: Option<i64>,
         read_at_ms: i64,
         buckets: Vec<InspectionBucket>,
     },
@@ -211,6 +259,12 @@ pub struct AccountingStore<'a> {
 /// the wait, and the store rejects backward time. `Now` is read only once the
 /// write lock is held, so it cannot. `At` keeps an explicit time, which tests
 /// and imports need; a backward explicit time is still rejected.
+///
+/// `Now` is also never behind the ledger's own checkpoint. A wall clock that
+/// stepped back (NTP, a VM restore, a hand-set clock) used to make every write
+/// fail as a backward checkpoint, and with it every model request. The ledger
+/// time holds at the checkpoint until the clock passes it again; each attempt
+/// still carries the dispatch time the clock actually read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AsOf {
     At(i64),
@@ -223,6 +277,51 @@ impl AsOf {
             Self::At(as_of_ms) => as_of_ms,
             Self::Now => chrono::Utc::now().timestamp_millis(),
         }
+    }
+
+    /// `sample`, with `Now` held at the checkpoint `conn`'s transaction sees.
+    /// Conversation deletion uses the same rule as ledger writes.
+    pub(in crate::runtime) async fn sample_on(
+        self,
+        conn: &mut SqliteConnection,
+    ) -> anyhow::Result<i64> {
+        let now = self.sample();
+        if self != Self::Now {
+            return Ok(now);
+        }
+        let installed: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'draft_accounting_retention_checkpoint')",
+        )
+        .fetch_one(&mut *conn)
+        .await?;
+        if !installed {
+            return Ok(now);
+        }
+        let checkpoint: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT completed_as_of_ms FROM draft_accounting_retention_checkpoint WHERE singleton = 1",
+        )
+        .fetch_optional(&mut *conn)
+        .await?;
+        match checkpoint.flatten() {
+            Some(checkpoint) if checkpoint > now => {
+                warn_clock_behind(checkpoint - now);
+                Ok(checkpoint)
+            }
+            _ => Ok(now),
+        }
+    }
+}
+
+/// Say once per process that the clock is behind the ledger.
+fn warn_clock_behind(behind_ms: i64) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!(
+            target: "codex_core::accounting",
+            behind_ms,
+            "accounting: the system clock is behind the accounting ledger; holding ledger write time at the checkpoint until the clock catches up; request dispatch times are unchanged. \
+             Requests cannot be recorded while the clock is 90 days or more behind"
+        );
     }
 }
 
@@ -331,7 +430,7 @@ impl<'a> AccountingStore<'a> {
         bundle: &[RetainedImport],
         as_of_ms: i64,
     ) -> anyhow::Result<Vec<RetainedImportOutcome>> {
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
         match Journal::import_retained_on_connection(&mut tx, owner, bundle, as_of_ms).await {
             Ok(outcomes) => {
                 tx.commit().await?;
@@ -344,6 +443,21 @@ impl<'a> AccountingStore<'a> {
         }
     }
 
+    /// Refuse a ledger written in a newer format (`NewerLedgerFormat`); a
+    /// missing ledger or one this build can read is fine. Read-only and cheap:
+    /// it reads the applied migrations only.
+    pub async fn check_format(runtime: &StateRuntime) -> anyhow::Result<()> {
+        let mut conn = runtime.pool.acquire().await?;
+        if !ledger_exists(&mut conn).await? {
+            return Ok(());
+        }
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _accounting_migrations ORDER BY version")
+                .fetch_all(&mut *conn)
+                .await?;
+        refuse_newer(versions)
+    }
+
     /// Install only when wholly absent, otherwise validate without schema repair.
     /// Activation is a real complete retention sweep, never a fabricated checkpoint.
     pub async fn open(runtime: &'a StateRuntime, as_of: impl Into<AsOf>) -> anyhow::Result<Self> {
@@ -351,7 +465,7 @@ impl<'a> AccountingStore<'a> {
         if let AsOf::At(as_of_ms) = as_of {
             ensure!(as_of_ms >= 0, "negative accounting time");
         }
-        let mut tx = runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&runtime.pool).await?;
         match install_on_connection(&mut tx).await {
             Ok(()) => tx.commit().await?,
             Err(error) => {
@@ -405,8 +519,14 @@ impl<'a> AccountingStore<'a> {
         as_of: AsOf,
     ) -> anyhow::Result<ObservationQuote> {
         let validated_at_ms = self.prepare_write(as_of).await?;
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let as_of_ms = as_of.sample();
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
+        let as_of_ms = match as_of.sample_on(&mut tx).await {
+            Ok(as_of_ms) => as_of_ms,
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(error);
+            }
+        };
         let result = Journal::store_on_connection(
             &mut tx,
             owner,
@@ -441,7 +561,7 @@ impl<'a> AccountingStore<'a> {
             // The schema read opens the snapshot before the clock is read, so the
             // snapshot's checkpoint can never be later than this reading.
             validate_on_connection(&mut tx).await?;
-            let as_of_ms = as_of.sample();
+            let as_of_ms = as_of.sample_on(&mut tx).await?;
             let previous = cached.load(std::sync::atomic::Ordering::Acquire);
             let validated =
                 Journal::validate_hour_on_connection(&mut tx, as_of_ms, previous).await?;
@@ -453,6 +573,34 @@ impl<'a> AccountingStore<'a> {
         .await;
         tx.rollback().await?;
         result
+    }
+
+    /// Whether the next write at `as_of` would first run the hour's
+    /// whole-ledger validation (`validate_hour`): this process has not run it
+    /// this hour and no write moved the checkpoint into this hour yet. Reads
+    /// the checkpoint only; no lock.
+    async fn validation_due(&self, as_of: AsOf) -> anyhow::Result<bool> {
+        let now = as_of.sample();
+        let hour_start = now - now.rem_euclid(Journal::VALIDATION_INTERVAL_MS);
+        let cached = self
+            .runtime
+            .accounting_validated_at_millis
+            .load(std::sync::atomic::Ordering::Acquire);
+        if (hour_start..=now).contains(&cached) {
+            return Ok(false);
+        }
+        let mut conn = self.runtime.pool.acquire().await?;
+        if !ledger_exists(&mut conn).await? {
+            return Ok(false);
+        }
+        Ok(
+            match super::retention_fixture_on_connection(&mut conn).await? {
+                super::RetentionFixture::Active(checkpoint) => {
+                    checkpoint < hour_start && checkpoint <= now
+                }
+                super::RetentionFixture::Absent | super::RetentionFixture::Staging => false,
+            },
+        )
     }
 
     /// Everything ahead of a write's own transaction: the hour's validation on a
@@ -484,8 +632,8 @@ impl<'a> AccountingStore<'a> {
         let mut tx = self.runtime.pool.begin().await?;
         let due = async {
             validate_on_connection(&mut tx).await?;
-            Journal::expiry_due_for_write_on_connection(&mut tx, as_of.sample(), validated_at_ms)
-                .await
+            let as_of_ms = as_of.sample_on(&mut tx).await?;
+            Journal::expiry_due_for_write_on_connection(&mut tx, as_of_ms, validated_at_ms).await
         }
         .await;
         tx.rollback().await?;
@@ -493,11 +641,11 @@ impl<'a> AccountingStore<'a> {
             return Ok(());
         }
         loop {
-            let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+            let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
             let held = std::time::Instant::now();
-            let as_of_ms = as_of.sample();
             let result = async {
                 validate_on_connection(&mut tx).await?;
+                let as_of_ms = as_of.sample_on(&mut tx).await?;
                 Journal::expire_for_write_on_connection(&mut tx, as_of_ms, validated_at_ms).await
             }
             .await;
@@ -530,8 +678,30 @@ impl<'a> AccountingStore<'a> {
         }
     }
 
+    /// What a conversation deletion does before it takes the write lock: the
+    /// hour's validation on a read snapshot and the due expiries in short
+    /// batches, as ahead of a write (`prepare_write`). Returns when the
+    /// validation ran; `None` when there is no ledger.
+    ///
+    /// As for ledger writes, the whole ledger is validated at most once per
+    /// hour: a deletion after another process already validated it this hour
+    /// does not validate it again.
+    pub(in crate::runtime) async fn prepare_delete(
+        runtime: &'a StateRuntime,
+        as_of: AsOf,
+    ) -> anyhow::Result<Option<i64>> {
+        let exists = {
+            let mut conn = runtime.pool.acquire().await?;
+            ledger_exists(&mut conn).await?
+        };
+        if !exists {
+            return Ok(None);
+        }
+        Self { runtime }.prepare_write(as_of).await
+    }
+
     pub async fn maintain(&self, as_of_ms: i64) -> anyhow::Result<()> {
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
         let result = async {
             validate_on_connection(&mut tx).await?;
             Journal::maintain_native_on_connection(&mut tx, as_of_ms).await
@@ -555,10 +725,10 @@ impl<'a> AccountingStore<'a> {
     /// advances the checkpoint (see `maintain_for_write_on_connection`).
     async fn maintain_for_write(&self, as_of: AsOf) -> anyhow::Result<()> {
         let validated_at_ms = self.prepare_write(as_of).await?;
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let as_of_ms = as_of.sample();
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
         let result = async {
             validate_on_connection(&mut tx).await?;
+            let as_of_ms = as_of.sample_on(&mut tx).await?;
             Journal::maintain_for_write_on_connection(&mut tx, as_of_ms, validated_at_ms).await
         }
         .await;
@@ -595,6 +765,9 @@ pub(super) struct InspectionWork {
     rows: usize,
     visits: usize,
     scan_rows: usize,
+    /// FUP-02: a conversation's start, read once per inspection (a range reads
+    /// it for every empty bucket day).
+    started: Option<(ThreadId, Option<i64>)>,
 }
 
 impl InspectionWork {
@@ -610,6 +783,7 @@ impl InspectionWork {
             rows: 4_000_000usize.saturating_sub(scanned as usize),
             visits: 20_000,
             scan_rows: scanned as usize,
+            started: None,
         })
     }
 
@@ -621,6 +795,14 @@ impl InspectionWork {
         }
         self.rows -= cost;
         true
+    }
+
+    /// One scan when the budget has room for it and `reserve` more. Unlike
+    /// [`Self::scans`], a refusal leaves the budget for the rest of the
+    /// inspection.
+    pub(super) fn spare_scan(&mut self, reserve: usize) -> bool {
+        self.scan_rows.saturating_mul(reserve.saturating_add(1)) <= self.rows
+            && self.scans(/*count*/ 1)
     }
 
     pub(super) fn visit(&mut self) -> bool {
@@ -665,6 +847,21 @@ async fn inspect_tree_window(
     let InspectionDay::Ready(mut view) = first else {
         return Ok(first);
     };
+    // FUP-02: a single day with nothing recorded for the owner. Before the
+    // aggregate floor it stays unavailable, as before, unless the conversation
+    // had not started yet; that is decided here, ahead of the tree.
+    let mut started = None;
+    if window.is_none() && view.totals.attempts == 0 && day < view.coverage.aggregate_day_floor {
+        let early = started_ms(conn, owner, work).await?;
+        if !empty_day::proven_before(day, early) {
+            return Ok(InspectionDay::DetailUnavailable {
+                coverage: view.coverage,
+                read_at_ms,
+                compact: false,
+            });
+        }
+        started = Some(early);
+    }
     if !work.scans(/*count*/ 1) {
         return Ok(InspectionDay::TooLarge);
     }
@@ -689,6 +886,9 @@ async fn inspect_tree_window(
         }
     }
     let mut unrelated = Vec::new();
+    // A thread of unknown ancestry with anything on this UTC day, inside a
+    // range bucket's window or not, may be an unlinked subagent.
+    let mut unknown_on_day = false;
     for candidate in candidates {
         if !work.visit() {
             return Ok(InspectionDay::TooLarge);
@@ -775,6 +975,7 @@ async fn inspect_tree_window(
             return Ok(InspectionDay::TooLarge);
         }
         ancestry.extend(discovered);
+        unknown_on_day |= relation.is_none();
         let other = Journal::inspect_window_on_connection(
             conn,
             ThreadId::from_string(&candidate)?,
@@ -831,7 +1032,56 @@ async fn inspect_tree_window(
         view.other_conversations =
             Some(scope::other_conversations(conn, unrelated, day, read_at_ms, work).await);
     }
+    // Last, so the start's scan never takes budget the rest of the view needs.
+    // #1196: a range bucket's part of the day is classified the same way.
+    if view.totals.attempts == 0 {
+        let started = match started {
+            Some(started) => started,
+            None => started_ms(conn, owner, work).await?,
+        };
+        let unknown_clear = !unknown_on_day
+            && view.unknown_parent_totals.attempts == 0
+            && view.unknown_parent_unavailable_threads == 0;
+        let empty = empty_day::classify(
+            day,
+            started,
+            empty_day::ledger_started_day(conn).await?,
+            unknown_clear,
+        );
+        if day < view.coverage.aggregate_day_floor
+            && !matches!(empty, EmptyDay::BeforeConversation { .. })
+        {
+            return Ok(InspectionDay::DetailUnavailable {
+                coverage: view.coverage,
+                read_at_ms,
+                compact: false,
+            });
+        }
+        view.empty_day = Some(empty);
+    }
     Ok(InspectionDay::Ready(view))
+}
+
+/// `empty_day::started_ms`, charged to the work budget: one scan of the
+/// accounting rows for the tree's earliest recorded request, once per
+/// inspection. Without budget left for it there is no proof, and the view stays
+/// as it would have been.
+async fn started_ms(
+    conn: &mut SqliteConnection,
+    owner: ThreadId,
+    work: &mut InspectionWork,
+) -> anyhow::Result<Option<i64>> {
+    if let Some((read_for, started)) = work.started
+        && read_for == owner
+    {
+        return Ok(started);
+    }
+    if !work.spare_scan(/*reserve*/ 0) {
+        return Ok(None);
+    }
+    let started = empty_day::started_ms(conn, owner).await?;
+    work.started = Some((owner, started));
+    Ok(started)
 }
 
 // All buckets reuse the already-open deferred snapshot, including ancestry.
@@ -845,10 +1095,13 @@ async fn inspect_buckets(
     if !work.scans(/*count*/ 1) {
         return Ok(InspectionDay::TooLarge);
     }
-    let oldest_aggregate_day =
-        sqlx::query_scalar("SELECT min(utc_day) FROM draft_accounting_compact_days")
-            .fetch_one(&mut *conn)
-            .await?;
+    // The same floor the day pages state, not the oldest compacted day: a
+    // ledger that has compacted nothing yet still keeps a year of totals.
+    let completed_as_of_ms = match super::retention_fixture_on_connection(conn).await? {
+        super::RetentionFixture::Active(checkpoint) => Some(checkpoint),
+        super::RetentionFixture::Staging | super::RetentionFixture::Absent => None,
+    };
+    let aggregate_day_floor = completed_as_of_ms.map(super::aggregate_day_floor);
     let mut buckets = Vec::new();
     let mut cursor = requested.start_ms;
     let mut attempts = 0;
@@ -887,14 +1140,22 @@ async fn inspect_buckets(
                 InspectionDay::TooLarge => return Ok(value),
                 _ => None,
             };
-            if let (Some((from, to)), Some(coverage)) = (effective, coverage) {
-                let from = from.max(coverage.aggregate_day_floor * 86_400_000);
-                let to = to
-                    .min(coverage.completed_as_of_ms.saturating_add(1))
-                    .min(read_at_ms.saturating_add(1));
-                effective = (from < to).then_some((from, to));
-            } else {
-                effective = None;
+            match (effective, coverage) {
+                (Some((from, to)), Some(coverage)) => {
+                    let from = from.max(coverage.aggregate_day_floor * 86_400_000);
+                    let to = to
+                        .min(coverage.completed_as_of_ms.saturating_add(1))
+                        .min(read_at_ms.saturating_add(1));
+                    effective = (from < to).then_some((from, to));
+                }
+                // A day the ledger has not reached yet, after days it has: the
+                // bucket's coverage ends where the previous day's did, exactly
+                // as a day bucket that contains today reports it. Keep it only
+                // if coverage already ends before this day; a lagging day inside
+                // the ledger (detail awaiting compaction) is unverified.
+                (Some((_, to)), None)
+                    if to <= day * 86_400_000 && matches!(value, InspectionDay::CheckpointLag) => {}
+                _ => effective = None,
             }
             // Include empty-bucket/header costs in the unchanged packet ceiling.
             bytes += 8192;
@@ -915,7 +1176,8 @@ async fn inspect_buckets(
     }
     Ok(InspectionDay::Range {
         requested,
-        oldest_aggregate_day,
+        aggregate_day_floor,
+        completed_as_of_ms,
         read_at_ms,
         buckets,
     })
@@ -930,6 +1192,11 @@ pub(super) async fn ledger_exists(conn: &mut SqliteConnection) -> anyhow::Result
 }
 
 // Caller owns BEGIN IMMEDIATE: schema and independent ledger commit together.
+//
+// A new ledger is installed in format 1, and an existing one is left in the
+// format it has: it is upgraded only when a record that needs a newer format is
+// first written (`require_format_on_connection`). An older build sharing the
+// state DB keeps reading the ledger until then.
 async fn install_on_connection(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     if !ledger_exists(conn).await? {
         let objects: i64 = sqlx::query_scalar(
@@ -939,13 +1206,67 @@ async fn install_on_connection(conn: &mut SqliteConnection) -> anyhow::Result<()
         .await?;
         ensure!(objects == 0, "unversioned accounting schema");
         crate::migrations::accounting_migrator()
-            .run_direct(/*target*/ None, conn, /*skip*/ false)
+            .run_direct(/*target*/ Some(1), conn, /*skip*/ false)
             .await?;
     }
     validate_on_connection(conn).await
 }
 
+/// Upgrade the ledger to at least `format` before writing a record that needs
+/// it. Caller owns the write transaction, so the upgrade commits with the
+/// record or not at all. An unknown or damaged ledger is refused, not migrated.
+pub(crate) async fn require_format_on_connection(
+    conn: &mut SqliteConnection,
+    format: i64,
+) -> anyhow::Result<()> {
+    // Callers write inside a transaction that already validated the ledger.
+    if applied_format(conn).await? >= format {
+        return Ok(());
+    }
+    validate_on_connection(conn).await?;
+    if applied_format(conn).await? < format {
+        crate::migrations::accounting_migrator()
+            .run_direct(/*target*/ Some(format), conn, /*skip*/ false)
+            .await?;
+        validate_on_connection(conn).await?;
+    }
+    ensure!(
+        applied_format(conn).await? >= format,
+        "accounting ledger was not upgraded"
+    );
+    Ok(())
+}
+
+async fn applied_format(conn: &mut SqliteConnection) -> anyhow::Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT count(*) FROM _accounting_migrations")
+            .fetch_one(conn)
+            .await?,
+    )
+}
+
+/// `NewerLedgerFormat` when any applied migration is newer than this build's.
+fn refuse_newer(applied: impl IntoIterator<Item = i64>) -> anyhow::Result<()> {
+    let supported = crate::migrations::accounting_migrator()
+        .iter()
+        .map(|migration| migration.version)
+        .max()
+        .unwrap_or(0);
+    match applied
+        .into_iter()
+        .filter(|version| *version > supported)
+        .max()
+    {
+        Some(found) => Err(NewerLedgerFormat { found, supported }.into()),
+        None => Ok(()),
+    }
+}
+
 /// Read-only version and physical-schema validation; no migration adoption/repair.
+///
+/// A ledger in an older format validates against the migrations it applied:
+/// it is read as written. One in a newer format is refused with
+/// `NewerLedgerFormat`.
 pub(super) async fn validate_on_connection(conn: &mut SqliteConnection) -> anyhow::Result<()> {
     ensure!(ledger_exists(conn).await?, "accounting ledger missing");
     let migrator = crate::migrations::accounting_migrator();
@@ -958,13 +1279,30 @@ pub(super) async fn validate_on_connection(conn: &mut SqliteConnection) -> anyho
         .iter()
         .map(|m| (m.version, true, m.checksum.to_vec()))
         .collect();
+    refuse_newer(rows.iter().map(|(version, _, _)| *version))?;
     ensure!(
-        rows == expected,
+        !rows.is_empty() && expected.starts_with(&rows),
         "unsupported, failed or checksum-mismatched accounting migration"
     );
+    // A migration not yet applied must have left nothing behind: a ledger that
+    // claims an older format while holding a newer one's objects could hold
+    // records that format cannot express.
+    for migration in migrator.iter().skip(rows.len()) {
+        for name in created_objects(migration.sql.as_str()) {
+            let present: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = ?)")
+                    .bind(name)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            ensure!(
+                !present,
+                "accounting ledger holds objects of a later format: {name}"
+            );
+        }
+    }
     // Compare every owned table/index definition, not just a ledger claim.
     // SQLite preserves CREATE SQL; whitespace is not schema identity.
-    for migration in migrator.iter() {
+    for migration in migrator.iter().take(rows.len()) {
         for statement in migration
             .sql
             .as_str()
@@ -992,6 +1330,17 @@ pub(super) async fn validate_on_connection(conn: &mut SqliteConnection) -> anyho
     }
     super::retention_fixture_on_connection(conn).await?;
     Ok(())
+}
+
+/// The names of the objects a migration's `CREATE` statements make. Every
+/// accounting migration starts with its `CREATE` statements (a test checks
+/// each yields at least one), so a leading comment cannot hide an object.
+fn created_objects(sql: &str) -> Vec<&str> {
+    sql.split(';')
+        .map(str::trim)
+        .filter(|statement| statement.starts_with("CREATE "))
+        .filter_map(|statement| statement.split_whitespace().nth(2))
+        .collect()
 }
 
 #[cfg(test)]

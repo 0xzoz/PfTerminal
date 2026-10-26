@@ -30,13 +30,10 @@ async fn accounting_responses_ws_native_admission_and_guard_barriers() -> anyhow
     gate.next().await?.complete().await?;
     terminal(&test).await?;
     sqlx::query("CREATE TRIGGER reject_ws_attempt BEFORE INSERT ON draft_accounting_attempts BEGIN SELECT RAISE(ABORT, 'fixture'); END").execute(&mut lock).await?;
+    // A failed admission sends the request unrecorded.
     submit(&test).await?;
-    assert!(
-        terminal(&test)
-            .await?
-            .iter()
-            .any(|e| matches!(e, EventMsg::Error(_)))
-    );
+    gate.next().await?.complete().await?;
+    core_test_support::assert_accounting_gap(&terminal(&test).await?);
     gate.no_pending().await;
     assert_eq!(turn_attempts(&db).await?.len(), 1);
     let guard = test
@@ -120,7 +117,7 @@ async fn live_binding_denial(prime_denial: bool) -> anyhow::Result<()> {
         held.complete().await?;
         let events = terminal(&test).await?;
         assert!(events.iter().any(|event| matches!(event, EventMsg::Error(error)
-            if error.message == "Fatal error: Native Anthropic accounting failed; request stopped without a repair send")),
+            if error.message == "Fatal error: Stage-one memory denied this request while it was streaming; it was not re-sent")),
             "live stage-one denial must stop the already-admitted sampling request");
         assert!(
             !events
@@ -160,12 +157,7 @@ async fn accounting_responses_ws_native_observation_failure_no_repair() -> anyho
     let before = turn_observations(&db).await?;
     sqlx::query("CREATE TRIGGER reject_ws_observation BEFORE INSERT ON draft_accounting_observations BEGIN SELECT RAISE(ABORT, 'fixture'); END").execute(&mut connection(&db).await?).await?;
     held.complete().await?;
-    assert!(
-        terminal(&test)
-            .await?
-            .iter()
-            .any(|e| matches!(e, EventMsg::Error(_)))
-    );
+    core_test_support::assert_accounting_gap(&terminal(&test).await?);
     gate.no_pending().await;
     assert_eq!(turn_observations(&db).await?, before);
     assert_eq!(turn_attempts(&db).await?.len(), 1);
@@ -221,9 +213,9 @@ async fn accounting_responses_ws_native_cancel_before_and_after_dispatch() -> an
 #[tokio::test]
 async fn accounting_responses_ws_native_two_reopens_and_original_prices() -> anyhow::Result<()> {
     for (prefix, model) in [
-        (false, "gpt-5.6-sol"),
-        (true, "gpt-5.6-sol"),
-        (true, "gpt-6-astra"),
+        (false, "gpt-5.6-terra"),
+        (true, "gpt-5.6-terra"),
+        (true, "codex-auto-review"),
     ] {
         let server = MockServer::start().await;
         let mut gate = Gate::start().await?;
@@ -249,23 +241,29 @@ async fn accounting_responses_ws_native_two_reopens_and_original_prices() -> any
         drop(held);
         let records = turn_attempts(&db).await?;
         let patches = turn_observations(&db).await?;
-        let prices: Vec<Snapshot> = payloads(&db, "draft_accounting_price_snapshots").await?;
+        let prices: Vec<Snapshot> = payloads::<Snapshot>(&db, "draft_accounting_price_snapshots")
+            .await?
+            .into_iter()
+            // An unpriced attempt is bound to a pay-per-use record with no
+            // rates (PF-60-S05); only priced records are counted here.
+            .filter(|snapshot| snapshot.rates != codex_state::accounting::Rates::default())
+            .collect();
         let before = totals(&db, &records[0]).await?;
         if prefix {
-            // The turn's own money, plus the startup prewarm's $0.02997 - which
+            // The turn's own money, plus the startup prewarm's $0.011988 - which
             // exists only where the catalogue prices this model at all.
-            let priced = model == "gpt-5.6-sol";
+            let priced = model == "gpt-5.6-terra";
             assert_eq!(
                 before.known_usd,
                 with_prewarms(
-                    if priced { "0.00161" } else { "0" }
+                    if priced { "0.000644" } else { "0" }
                         .to_string()
                         .try_into()?,
                     usize::from(priced)
                 )?
             );
         }
-        assert_eq!(prices.is_empty(), model == "gpt-6-astra");
+        assert_eq!(prices.is_empty(), model == "codex-auto-review");
         let home = test.home.clone();
         let rollout = test.codex.rollout_path().unwrap();
         stop(&test).await;
@@ -505,7 +503,7 @@ async fn accounting_responses_ws_native_unknown_prices_and_no_usage() -> anyhow:
         let server = MockServer::start().await;
         let mut gate = Gate::start().await?;
         let test = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
-            .with_config(|config| config.model = Some("gpt-6-astra".into()))
+            .with_config(|config| config.model = Some("codex-auto-review".into()))
             .build_with_auto_env(&server)
             .await?;
         submit(&test).await?;
@@ -523,11 +521,13 @@ async fn accounting_responses_ws_native_unknown_prices_and_no_usage() -> anyhow:
         let db = test.codex.state_db().unwrap();
         let records = turn_attempts(&db).await?;
         assert_eq!(records.len(), 1);
-        assert!(
-            payloads::<Snapshot>(&db, "draft_accounting_price_snapshots")
-                .await?
-                .is_empty()
-        );
+        // No price: the attempt is bound only to its pay-per-use basis, by a
+        // record with no rates (PF-60-S05).
+        let bound: Vec<Snapshot> = payloads(&db, "draft_accounting_price_snapshots").await?;
+        assert!(!bound.is_empty());
+        assert!(bound.iter().all(|snapshot| snapshot.basis
+            == codex_state::accounting::Basis::Billed
+            && snapshot.rates == codex_state::accounting::Rates::default()));
         assert_eq!(
             turn_observations(&db).await?.len(),
             usize::from(usage_present)
@@ -638,7 +638,7 @@ async fn metadata_terminal_matrix(
                 let mut end = json!({"type":kind,"response":{"id":"same","error":{"code":"invalid_prompt","message":"fixture terminal"},"incomplete_details":{"reason":"max_output_tokens"}},"metadata":metadata});
                 if mask & 4 != 0 {
                     end["safety_buffering"] = json!({"use_cases":["cyber"],"reasons":["user_risk"],"retry_model":"gpt-fast-wire"});
-                    expected.push(json!({"type":"safety_buffering","model":"gpt-5.6-sol","use_cases":["cyber"],"reasons":["user_risk"],"show_buffering_ui":true,"faster_model":"gpt-fast-wire"}));
+                    expected.push(json!({"type":"safety_buffering","model":"gpt-5.6-terra","use_cases":["cyber"],"reasons":["user_risk"],"show_buffering_ui":true,"faster_model":"gpt-fast-wire"}));
                 }
                 if usage_kind != 0 {
                     end["response"]["usage"] = if usage_kind == 2 {
@@ -706,7 +706,7 @@ async fn metadata_terminal_matrix(
                             },
                             unknown: i64::from(usage_kind != 2) + i64::from(fallback),
                         }),
-                        known_usd: if usage_kind == 2 { "0.00161" } else { "0" }
+                        known_usd: if usage_kind == 2 { "0.000644" } else { "0" }
                             .to_string()
                             .try_into()?,
                         unknown_estimates: i64::from(usage_kind != 2) + i64::from(fallback),
@@ -720,6 +720,131 @@ async fn metadata_terminal_matrix(
                 stop(&test).await;
             }
         }
+    }
+    Ok(())
+}
+
+/// #1038: editing the first message continues in a conversation with no
+/// history. Marked by the client, its warm-up is a reopen warm-up all the
+/// same: recorded under the reopen label, announced, and skipped with
+/// `skip_reopen_warmup`, as when a later message is edited.
+#[tokio::test]
+async fn accounting_first_message_edit_warmup_is_a_reopen_warmup() -> anyhow::Result<()> {
+    const NOTICE: &str = "Reopening or forking this conversation sent a warm-up request";
+    for skip in [false, true] {
+        let server = MockServer::start().await;
+        let mut gate = Gate::start().await?;
+        let test = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
+            .with_config(move |config| {
+                config.skip_reopen_warmup = skip;
+                config.reopened_by_prompt_edit = true;
+            })
+            .build_with_auto_env(&server)
+            .await?;
+        // The first turn waits for any warm-up, so by its end a warm-up was
+        // either sent and announced, or never sent.
+        submit(&test).await?;
+        gate.next().await?.complete().await?;
+        let events = terminal(&test).await?;
+        let announced = events.iter().any(
+            |event| matches!(event, EventMsg::Warning(warning) if warning.message.contains(NOTICE)),
+        );
+        let db = test.codex.state_db().unwrap();
+        let prewarms: Vec<String> = attempts(&db)
+            .await?
+            .into_iter()
+            .map(|attempt| attempt.turn)
+            .filter(|turn| turn.starts_with("prewarm:"))
+            .collect();
+        let warmups = gate.counts.lock().unwrap().1;
+        if skip {
+            assert!(!announced, "a skipped warm-up is not announced");
+            assert!(prewarms.is_empty(), "{prewarms:?}");
+            assert_eq!(warmups, 0, "no warm-up sent");
+        } else {
+            assert!(announced, "the warm-up is announced: {events:?}");
+            assert_eq!(prewarms.len(), 1, "{prewarms:?}");
+            assert!(prewarms[0].starts_with("prewarm:reopen:"), "{prewarms:?}");
+            assert_eq!(warmups, 1);
+        }
+        stop(&test).await;
+    }
+    Ok(())
+}
+
+/// #403 (Travis, 2026-10-14, option C): reopening a conversation sends its
+/// warm-up as a reopen warm-up, recorded under its own label and announced
+/// once sent. With `skip_reopen_warmup` set, a reopen sends no warm-up at all,
+/// while a new conversation still warms up as before.
+#[tokio::test]
+async fn accounting_reopen_warmup_is_labelled_announced_and_skippable() -> anyhow::Result<()> {
+    const NOTICE: &str = "Reopening or forking this conversation sent a warm-up request";
+    for skip in [false, true] {
+        let server = MockServer::start().await;
+        let mut gate = Gate::start().await?;
+        let test = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
+            .with_config(move |config| config.skip_reopen_warmup = skip)
+            .build_with_auto_env(&server)
+            .await?;
+        submit(&test).await?;
+        gate.next().await?.complete().await?;
+        let events = terminal(&test).await?;
+        assert!(
+            !events.iter().any(
+                |event| matches!(event, EventMsg::Warning(warning) if warning.message.contains(NOTICE))
+            ),
+            "a new conversation is not a reopen"
+        );
+        let warmups_before = gate.counts.lock().unwrap().1;
+        assert_eq!(
+            warmups_before, 1,
+            "a new conversation warms up (skip={skip})"
+        );
+        let labels = |attempts: Vec<Attempt>| {
+            attempts
+                .into_iter()
+                .map(|attempt| attempt.turn)
+                .filter(|turn| turn.starts_with("prewarm:"))
+                .collect::<Vec<_>>()
+        };
+        let db = test.codex.state_db().unwrap();
+        let new_prewarms = labels(attempts(&db).await?);
+        assert_eq!(new_prewarms.len(), 1);
+        assert!(!new_prewarms[0].starts_with("prewarm:reopen:"));
+        let home = test.home.clone();
+        let rollout = test.codex.rollout_path().unwrap();
+        stop(&test).await;
+        drop(test);
+        db.close().await;
+
+        let reopened = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
+            .with_config(move |config| config.skip_reopen_warmup = skip)
+            .resume(&server, home, rollout)
+            .await?;
+        // The first turn after a reopen waits for any warm-up, so by its end a
+        // warm-up was either sent and announced, or never sent.
+        submit(&reopened).await?;
+        gate.next().await?.complete().await?;
+        let events = terminal(&reopened).await?;
+        let announced = events.iter().any(
+            |event| matches!(event, EventMsg::Warning(warning) if warning.message.contains(NOTICE)),
+        );
+        let db = reopened.codex.state_db().unwrap();
+        let reopen_prewarms: Vec<String> = labels(attempts(&db).await?)
+            .into_iter()
+            .filter(|turn| turn.starts_with("prewarm:reopen:"))
+            .collect();
+        let warmups_after = gate.counts.lock().unwrap().1;
+        if skip {
+            assert!(!announced, "a skipped warm-up is not announced");
+            assert!(reopen_prewarms.is_empty(), "{reopen_prewarms:?}");
+            assert_eq!(warmups_after, warmups_before, "no warm-up sent on reopen");
+        } else {
+            assert!(announced, "the reopen warm-up is announced: {events:?}");
+            assert_eq!(reopen_prewarms.len(), 1, "{reopen_prewarms:?}");
+            assert_eq!(warmups_after, warmups_before + 1);
+        }
+        stop(&reopened).await;
     }
     Ok(())
 }

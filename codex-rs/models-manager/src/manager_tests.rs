@@ -14,6 +14,7 @@ use codex_protocol::auth::AuthMode;
 use codex_protocol::openai_models::ChatReasoningEffortProtocol;
 use codex_protocol::openai_models::ChatReasoningProtocol;
 use codex_protocol::openai_models::InputModality;
+use codex_protocol::openai_models::LongContextRates;
 use codex_protocol::openai_models::MeteredRates;
 use codex_protocol::openai_models::ModelBilling;
 use codex_protocol::openai_models::ModelCapabilityTier;
@@ -785,6 +786,7 @@ async fn remote_model_overlay_preserves_bundled_orchestration_metadata() {
         provider_id: "attacker-provider".to_string(),
         capability: ModelCapabilityTier::Legacy,
         reason: "remote payload attempted to replace local policy".to_string(),
+        billing: None,
     });
     remote_models[0].supported_reasoning_levels = vec![ReasoningEffortPreset {
         effort: ReasoningEffort::Custom("untrusted-expensive-mode".to_string()),
@@ -815,9 +817,18 @@ async fn remote_model_overlay_preserves_bundled_orchestration_metadata() {
             capability: ModelCapabilityTier::Frontier,
             billing: ModelBilling::AuthDependent {
                 plan_relative_burn_millis: 1_000,
-                api_key_input_milli_usd_per_million_tokens: 5_000,
-                api_key_output_milli_usd_per_million_tokens: 30_000,
-                api_key_cached_input_milli_usd_per_million_tokens: Some(500),
+                api_key_input_milli_usd_per_million_tokens: 4_000,
+                api_key_output_milli_usd_per_million_tokens: 20_000,
+                api_key_cached_input_milli_usd_per_million_tokens: Some(400),
+                api_key_cache_write_milli_usd_per_million_tokens: Some(5_000),
+                api_key_long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 8_000,
+                    output_milli_usd_per_million_tokens: 30_000,
+                    cached_input_milli_usd_per_million_tokens: Some(800),
+                    cache_write_milli_usd_per_million_tokens: Some(10_000),
+                }),
+                api_key_valid_through_utc: Some("2026-11-21T23:59:59.999Z".to_string()),
             },
         })
     );
@@ -2073,9 +2084,18 @@ fn bundled_orchestration_policy_distinguishes_gpt_5_6_tiers_and_disables_gpt_5_5
             capability: ModelCapabilityTier::Frontier,
             billing: ModelBilling::AuthDependent {
                 plan_relative_burn_millis: 1_000,
-                api_key_input_milli_usd_per_million_tokens: 5_000,
-                api_key_output_milli_usd_per_million_tokens: 30_000,
-                api_key_cached_input_milli_usd_per_million_tokens: Some(500),
+                api_key_input_milli_usd_per_million_tokens: 4_000,
+                api_key_output_milli_usd_per_million_tokens: 20_000,
+                api_key_cached_input_milli_usd_per_million_tokens: Some(400),
+                api_key_cache_write_milli_usd_per_million_tokens: Some(5_000),
+                api_key_long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 8_000,
+                    output_milli_usd_per_million_tokens: 30_000,
+                    cached_input_milli_usd_per_million_tokens: Some(800),
+                    cache_write_milli_usd_per_million_tokens: Some(10_000),
+                }),
+                api_key_valid_through_utc: Some("2026-11-21T23:59:59.999Z".to_string()),
             },
         }
     );
@@ -2086,9 +2106,18 @@ fn bundled_orchestration_policy_distinguishes_gpt_5_6_tiers_and_disables_gpt_5_5
             capability: ModelCapabilityTier::Balanced,
             billing: ModelBilling::AuthDependent {
                 plan_relative_burn_millis: 500,
-                api_key_input_milli_usd_per_million_tokens: 2_500,
-                api_key_output_milli_usd_per_million_tokens: 15_000,
-                api_key_cached_input_milli_usd_per_million_tokens: Some(250),
+                api_key_input_milli_usd_per_million_tokens: 2_000,
+                api_key_output_milli_usd_per_million_tokens: 12_000,
+                api_key_cached_input_milli_usd_per_million_tokens: Some(200),
+                api_key_cache_write_milli_usd_per_million_tokens: Some(2_500),
+                api_key_long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 4_000,
+                    output_milli_usd_per_million_tokens: 18_000,
+                    cached_input_milli_usd_per_million_tokens: Some(400),
+                    cache_write_milli_usd_per_million_tokens: Some(5_000),
+                }),
+                api_key_valid_through_utc: None,
             },
         }
     );
@@ -2099,9 +2128,18 @@ fn bundled_orchestration_policy_distinguishes_gpt_5_6_tiers_and_disables_gpt_5_5
             capability: ModelCapabilityTier::Fast,
             billing: ModelBilling::AuthDependent {
                 plan_relative_burn_millis: 200,
-                api_key_input_milli_usd_per_million_tokens: 1_000,
-                api_key_output_milli_usd_per_million_tokens: 6_000,
-                api_key_cached_input_milli_usd_per_million_tokens: Some(100),
+                api_key_input_milli_usd_per_million_tokens: 200,
+                api_key_output_milli_usd_per_million_tokens: 1_200,
+                api_key_cached_input_milli_usd_per_million_tokens: Some(20),
+                api_key_cache_write_milli_usd_per_million_tokens: Some(250),
+                api_key_long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 400,
+                    output_milli_usd_per_million_tokens: 1_800,
+                    cached_input_milli_usd_per_million_tokens: Some(40),
+                    cache_write_milli_usd_per_million_tokens: Some(500),
+                }),
+                api_key_valid_through_utc: None,
             },
         }
     );
@@ -2112,6 +2150,21 @@ fn bundled_orchestration_policy_distinguishes_gpt_5_6_tiers_and_disables_gpt_5_5
             capability: ModelCapabilityTier::Legacy,
             reason: "superseded by GPT-5.6 and lower capability than Sol, Terra, and Luna"
                 .to_string(),
+            billing: Some(ModelBilling::Metered {
+                input_milli_usd_per_million_tokens: 5_000,
+                output_milli_usd_per_million_tokens: 30_000,
+                cached_input_milli_usd_per_million_tokens: Some(500),
+                cache_write_milli_usd_per_million_tokens: None,
+                long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 10_000,
+                    output_milli_usd_per_million_tokens: 45_000,
+                    // The page states 2x input and 1.5x output only.
+                    cached_input_milli_usd_per_million_tokens: None,
+                    cache_write_milli_usd_per_million_tokens: None,
+                }),
+                valid_through_utc: None,
+            }),
         }
     );
 }
@@ -2142,13 +2195,17 @@ fn bundled_orchestration_states_published_rates_for_opus_5_5_and_gpt_6_sol() {
                 input_milli_usd_per_million_tokens: 4_000,
                 output_milli_usd_per_million_tokens: 20_000,
                 cached_input_milli_usd_per_million_tokens: Some(200),
+                cache_write_milli_usd_per_million_tokens: None,
+                long_context: None,
+                valid_through_utc: None,
             },
         })
     );
     assert_eq!(model("claude-opus-5-5").context_window, Some(1_000_000));
     assert_eq!(model("claude-opus-5-5").max_output_tokens, Some(128_000));
 
-    // OpenAI: $2 / $10 per million, cache reads $0.20 per million.
+    // OpenAI: $2 / $10 per million, cache reads $0.20, cache writes $2.50 per
+    // million; above 272K input tokens 2x input and cache rates, 1.5x output.
     //
     // Metered, not auth-dependent. OpenAI publishes those API rates and nothing
     // about subscription capacity for this model, and Codex rejects it outright
@@ -2165,11 +2222,109 @@ fn bundled_orchestration_states_published_rates_for_opus_5_5_and_gpt_6_sol() {
                 input_milli_usd_per_million_tokens: 2_000,
                 output_milli_usd_per_million_tokens: 10_000,
                 cached_input_milli_usd_per_million_tokens: Some(200),
+                cache_write_milli_usd_per_million_tokens: Some(2_500),
+                long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 4_000,
+                    output_milli_usd_per_million_tokens: 15_000,
+                    cached_input_milli_usd_per_million_tokens: Some(400),
+                    cache_write_milli_usd_per_million_tokens: Some(5_000),
+                }),
+                valid_through_utc: None,
             },
         })
     );
     assert_eq!(model("gpt-6-sol").context_window, Some(1_050_000));
     assert_eq!(model("gpt-6-sol").max_output_tokens, Some(128_000));
+}
+
+/// #368: GPT-6.1 Sol at the Standard rates OpenAI publishes, read 2026-10-14
+/// from developers.openai.com/api/docs/pricing and
+/// developers.openai.com/api/docs/models/gpt-6.1-sol: $2 input, $0.10 cached
+/// input (5% of input), $2.50 cache writes (1.25x), $10 output per million;
+/// above 272K input tokens 2x input and cache rates and 1.5x output. Manual
+/// selection only, like GPT-6 Astra and Luna: it states its price for
+/// accounting and takes no automatically allocated work.
+#[test]
+fn bundled_orchestration_states_published_rates_for_gpt_6_1_sol() {
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+    let model = response
+        .models
+        .iter()
+        .find(|model| model.slug == "gpt-6.1-sol")
+        .expect("gpt-6.1-sol must be in the bundled catalogue");
+    assert_eq!(
+        model.orchestration,
+        Some(ModelOrchestrationMetadata::Disabled {
+            provider_id: "openai".to_string(),
+            capability: ModelCapabilityTier::Frontier,
+            reason: "manual selection only; automatic allocation economics are not configured"
+                .to_string(),
+            billing: Some(ModelBilling::Metered {
+                input_milli_usd_per_million_tokens: 2_000,
+                output_milli_usd_per_million_tokens: 10_000,
+                cached_input_milli_usd_per_million_tokens: Some(100),
+                cache_write_milli_usd_per_million_tokens: Some(2_500),
+                long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 4_000,
+                    output_milli_usd_per_million_tokens: 15_000,
+                    cached_input_milli_usd_per_million_tokens: Some(200),
+                    cache_write_milli_usd_per_million_tokens: Some(5_000),
+                }),
+                valid_through_utc: None,
+            }),
+        })
+    );
+    assert_eq!(model.context_window, Some(1_050_000));
+    assert_eq!(model.max_output_tokens, Some(128_000));
+    assert_eq!(model.visibility, ModelVisibility::List);
+    assert!(model.base_instructions.contains("based on GPT-6.1 Sol"));
+}
+
+/// Off-peak holiday dates are whole UTC days on which a weekday peak would
+/// otherwise apply. Listing a weekend or repeating a date is a transcription
+/// slip, and rows of one provider must agree: `scripts/check_price_calendars.py`
+/// reads each list as covering through the end of its last year (#368).
+#[test]
+fn bundled_off_peak_dates_are_sorted_unique_weekdays_shared_per_provider() {
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+    let mut lists = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for model in &response.models {
+        let Some(metadata) = model.orchestration.as_ref() else {
+            continue;
+        };
+        let Some(ModelBilling::MeteredSchedule {
+            peak_weekdays,
+            off_peak_dates_utc,
+            ..
+        }) = metadata.billing()
+        else {
+            continue;
+        };
+        for pair in off_peak_dates_utc.windows(2) {
+            assert!(pair[0] < pair[1], "{}: {pair:?} out of order", model.slug);
+        }
+        for date in off_peak_dates_utc {
+            let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .unwrap_or_else(|err| panic!("{}: {date}: {err}", model.slug));
+            let weekday = day.format("%A").to_string();
+            assert!(
+                peak_weekdays.is_none_or(|weekdays| weekdays.names().contains(&weekday.as_str())),
+                "{}: {date} is not a peak weekday",
+                model.slug
+            );
+        }
+        if let Some(other) = lists.insert(
+            metadata.provider_id().to_string(),
+            off_peak_dates_utc.clone(),
+        ) {
+            assert_eq!(&other, off_peak_dates_utc, "{}", model.slug);
+        }
+    }
+    assert!(lists.contains_key("deepseek"));
 }
 
 #[test]
@@ -2247,6 +2402,9 @@ fn bundled_models_json_contains_ambient_and_zai_models() {
             input_milli_usd_per_million_tokens: 1_400,
             output_milli_usd_per_million_tokens: 4_400,
             cached_input_milli_usd_per_million_tokens: Some(260),
+            cache_write_milli_usd_per_million_tokens: None,
+            long_context: None,
+            valid_through_utc: None,
         })
     );
     let preset = ModelPreset::from(zai_glm_5_3.clone());
@@ -2994,4 +3152,43 @@ fn glm_5_3_flash_routes_use_standard_base_with_work_pattern() {
             "{slug}"
         );
     }
+}
+
+/// PF-84: a list that needs a fetch is current only with a fresh cache of
+/// this client version, the same check refreshing applies.
+#[tokio::test]
+async fn load_cached_list_needs_a_usable_cache() {
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::new(vec![vec![remote_model(
+        "cached-model",
+        "Cached",
+        /*priority*/ 1,
+    )]]);
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+    assert!(!manager.load_cached_list().await, "no cache yet");
+
+    manager
+        .list_models(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    let reloaded = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint);
+    assert!(reloaded.load_cached_list().await, "fresh cache");
+    reloaded
+        .cache_manager
+        .as_ref()
+        .expect("cache manager")
+        .manipulate_cache_for_test(|fetched_at| {
+            *fetched_at = Utc::now() - chrono::Duration::hours(1);
+        })
+        .await
+        .expect("age the cache");
+    assert!(!reloaded.load_cached_list().await, "stale cache");
+
+    let no_fetch = openai_manager_for_tests(
+        tempdir().expect("temp dir").path().to_path_buf(),
+        TestModelsEndpoint::without_refresh(Vec::new()),
+    );
+    assert!(
+        no_fetch.load_cached_list().await,
+        "an API-key list needs no fetch"
+    );
 }

@@ -27,7 +27,9 @@ use crate::security::view::requested_summary;
 use super::CancellationEvent;
 use super::bottom_pane_view::BottomPaneView;
 use super::bottom_pane_view::ViewCompletion;
+use super::security_inspector::SecurityInspector;
 use super::security_level_picker::SecurityLevelPicker;
+use crate::security::revocation_view::RevocationView;
 
 pub(crate) struct SecurityView {
     requested: Option<SecurityLevel>,
@@ -36,6 +38,11 @@ pub(crate) struct SecurityView {
     cancelled: bool,
     inspected: bool,
     picker: Option<SecurityLevelPicker>,
+    /// PF-25-S02: the grants and kill switch view, opened from the picker.
+    revocations: Option<RevocationView>,
+    /// PF-41-S01: what the inspector reads; `i` opens it over the picker.
+    inspector_input: Option<crate::security::inspector::InspectorInput>,
+    inspector: Option<SecurityInspector>,
 }
 
 impl SecurityView {
@@ -61,7 +68,63 @@ impl SecurityView {
             keymap,
             cancelled: false,
             inspected: false,
+            revocations: None,
+            inspector_input: None,
+            inspector: None,
         }
+    }
+
+    /// PF-41-S01: offer the read-only inspector (only with the picker; the
+    /// flag-off view is unchanged).
+    pub(crate) fn with_inspector(
+        mut self,
+        input: impl FnOnce() -> crate::security::inspector::InspectorInput,
+    ) -> Self {
+        if self.picker.is_some() {
+            self.inspector_input = Some(input());
+        }
+        self
+    }
+
+    /// #691/#783: how to set up the Windows sandbox, which Moderate and
+    /// Aggressive need before they can be chosen.
+    pub(crate) fn with_windows_sandbox_steps(mut self, steps: Option<String>) -> Self {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.set_windows_sandbox_steps(steps);
+        }
+        self
+    }
+
+    /// PF-24-S02: Core's configured levels, and where "restart now" goes.
+    pub(crate) fn with_confirmation(
+        mut self,
+        core: super::security_level_picker::CoreLevels,
+        app_event_tx: crate::app_event_sender::AppEventSender,
+    ) -> Self {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.set_core_levels(core);
+            picker.set_app_event_tx(app_event_tx);
+        }
+        self
+    }
+
+    /// #750: the feature flags the Moderate review describes.
+    pub(crate) fn with_moderate_facts(mut self, facts: crate::security::moderate::Facts) -> Self {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.set_moderate_facts(facts);
+        }
+        self
+    }
+
+    /// #816: what confirming Aggressive puts in force before the restart.
+    pub(crate) fn with_before_restart(
+        mut self,
+        facts: impl FnOnce() -> crate::security::current::BeforeRestart,
+    ) -> Self {
+        if let Some(picker) = self.picker.as_mut() {
+            picker.set_before_restart(facts());
+        }
+        self
     }
 
     fn lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -127,6 +190,9 @@ impl SecurityView {
 
 impl SecurityView {
     fn body(&self, width: u16) -> Vec<Line<'static>> {
+        if let Some(revocations) = &self.revocations {
+            return revocations.lines(width);
+        }
         match &self.picker {
             Some(picker) => picker.lines(width),
             None => self.lines(width),
@@ -134,7 +200,13 @@ impl SecurityView {
     }
 
     fn footer_text(&self) -> String {
+        if let Some(revocations) = &self.revocations {
+            return revocations.footer();
+        }
         match &self.picker {
+            Some(picker) if self.inspector_input.is_some() => {
+                format!("{} · i inspect", picker.footer())
+            }
             Some(picker) => picker.footer(),
             None => self.footer(),
         }
@@ -143,9 +215,43 @@ impl SecurityView {
 
 impl BottomPaneView for SecurityView {
     fn handle_key_event(&mut self, key: KeyEvent) {
+        if let Some(inspector) = self.inspector.as_mut() {
+            inspector.handle_key_event(key);
+            if inspector.closed {
+                self.inspector = None;
+            }
+            return;
+        }
+        if let Some(revocations) = self.revocations.as_mut() {
+            revocations.handle_key_event(key);
+            if revocations.closed {
+                self.revocations = None;
+                if let Some(picker) = self.picker.as_mut() {
+                    picker.revocations_closed();
+                }
+            }
+            return;
+        }
+        if let Some(input) = &self.inspector_input
+            && key_hint::plain(KeyCode::Char('i')).is_press(key)
+            && !self.keymap.move_up.is_pressed(key)
+            && !self.keymap.move_down.is_pressed(key)
+            && !self.keymap.accept.is_pressed(key)
+        {
+            self.inspector = Some(SecurityInspector::new(input.clone(), self.keymap.clone()));
+            return;
+        }
         if let Some(picker) = self.picker.as_mut() {
             picker.handle_key_event(key);
             self.cancelled = picker.closed;
+            if picker.open_revocations {
+                let (target, app_event_tx) = picker.revocation_target();
+                self.revocations = Some(RevocationView::new(
+                    target,
+                    self.keymap.clone(),
+                    app_event_tx,
+                ));
+            }
             return;
         }
         if key_hint::plain(KeyCode::Esc).is_press(key) || self.keymap.cancel.is_pressed(key) {
@@ -170,17 +276,55 @@ impl BottomPaneView for SecurityView {
     }
 
     fn on_ctrl_c(&mut self) -> CancellationEvent {
-        self.cancelled = true;
+        // A confirmation being saved finishes first; its result is shown.
+        if !self
+            .picker
+            .as_ref()
+            .is_some_and(SecurityLevelPicker::saving)
+            && !self
+                .revocations
+                .as_ref()
+                .is_some_and(RevocationView::saving)
+        {
+            self.cancelled = true;
+        }
         CancellationEvent::Handled
     }
 
     fn prefer_esc_to_handle_key_event(&self) -> bool {
         true
     }
+
+    fn pre_draw_tick(&mut self, _now: std::time::Instant) -> bool {
+        if let Some(revocations) = self.revocations.as_mut() {
+            return revocations.poll();
+        }
+        self.picker.as_mut().is_some_and(SecurityLevelPicker::poll)
+    }
+
+    fn next_frame_delay(&self) -> Option<std::time::Duration> {
+        // The inspector's observation age (and staleness) must keep moving
+        // even when nothing else redraws.
+        if self.inspector.is_some() {
+            return Some(std::time::Duration::from_secs(1));
+        }
+        let saving = self
+            .picker
+            .as_ref()
+            .is_some_and(SecurityLevelPicker::saving)
+            || self
+                .revocations
+                .as_ref()
+                .is_some_and(RevocationView::saving);
+        saving.then_some(std::time::Duration::from_millis(50))
+    }
 }
 
 impl Renderable for SecurityView {
     fn desired_height(&self, width: u16) -> u16 {
+        if let Some(inspector) = &self.inspector {
+            return inspector.desired_height(width);
+        }
         self.body(width).len() as u16
             + textwrap::wrap(&self.footer_text(), usize::from(width.max(1))).len() as u16
             + 1
@@ -188,6 +332,10 @@ impl Renderable for SecurityView {
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
         Clear.render(area, buf);
+        if let Some(inspector) = &self.inspector {
+            inspector.render(area, buf);
+            return;
+        }
         let footer_lines = |text: String| -> Vec<Line<'static>> {
             textwrap::wrap(&text, usize::from(area.width.max(1)))
                 .into_iter()
@@ -196,7 +344,9 @@ impl Renderable for SecurityView {
         };
         let lines = self.body(area.width);
         let mut footer = footer_lines(self.footer_text());
-        if let Some(picker) = self.picker.as_ref() {
+        if self.revocations.is_none()
+            && let Some(picker) = self.picker.as_ref()
+        {
             // A review taller than the pane scrolls, and its footer says so.
             let body_height = area.height.saturating_sub(footer.len() as u16);
             picker.scroll_for(lines.len(), body_height);
@@ -207,10 +357,11 @@ impl Renderable for SecurityView {
             height: area.height.saturating_sub(footer_height),
             ..area
         };
-        let scroll = self
-            .picker
-            .as_ref()
-            .map_or(0, |picker| picker.scroll_for(lines.len(), body.height));
+        let scroll = match (&self.revocations, &self.picker) {
+            (Some(revocations), _) => revocations.scroll_for(lines.len(), body.height),
+            (None, Some(picker)) => picker.scroll_for(lines.len(), body.height),
+            (None, None) => 0,
+        };
         Paragraph::new(lines).scroll((scroll, 0)).render(body, buf);
         Paragraph::new(footer).render(
             Rect {

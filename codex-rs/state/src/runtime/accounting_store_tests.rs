@@ -6,6 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[path = "accounting_empty_day_tests.rs"]
+mod empty_day;
+
 fn inspection(value: InspectionDay) -> Inspection {
     let InspectionDay::Ready(value) = value else {
         panic!("{value:?}")
@@ -227,7 +230,9 @@ async fn accounting_inspect_schema_rejection_matrix() -> anyhow::Result<()> {
         "DROP INDEX draft_accounting_request",
         "UPDATE _accounting_migrations SET success = 0",
         "UPDATE _accounting_migrations SET checksum = X'00'",
-        "UPDATE _accounting_migrations SET version = 2",
+        "UPDATE _accounting_migrations SET version = version + 10",
+        "DELETE FROM _accounting_migrations WHERE version = 1",
+        "CREATE TABLE draft_accounting_ledger_format (version INTEGER PRIMARY KEY NOT NULL CHECK(version = 2))",
         "DELETE FROM _accounting_migrations",
         "DROP TABLE _accounting_migrations",
     ] {
@@ -366,6 +371,19 @@ async fn accounting_inspect_checkpoint_and_stale_estimate() -> anyhow::Result<()
         inspected(&runtime, /*day*/ 1, /*time*/ 86_400_000).await?,
         InspectionDay::CheckpointLag
     );
+    let range = range_read(
+        &runtime,
+        /*start*/ 86_400_000,
+        /*end*/ 90_000_000,
+        InspectionGrouping::Hour,
+        /*now*/ 88_200_000,
+    )
+    .await?;
+    assert!(matches!(
+        range,
+        InspectionDay::Range { completed_as_of_ms: Some(0), buckets, .. }
+            if buckets[0].days == vec![InspectionDay::CheckpointLag]
+    ));
     assert_eq!(rows(&runtime).await?, before);
     store
         .observe(a.thread_id, &a, &[row(/*revision*/ 1)], /*as_of*/ 0)
@@ -407,6 +425,19 @@ async fn accounting_inspect_never_maintained_is_checkpoint_lag() -> anyhow::Resu
         inspected(&runtime, /*day*/ 0, /*time*/ 0).await?,
         InspectionDay::CheckpointLag
     );
+    let range = range_read(
+        &runtime,
+        /*start*/ 0,
+        /*end*/ 3_600_000,
+        InspectionGrouping::Hour,
+        /*now*/ 0,
+    )
+    .await?;
+    assert!(matches!(
+        range,
+        InspectionDay::Range { completed_as_of_ms: None, buckets, .. }
+            if buckets[0].days == vec![InspectionDay::CheckpointLag]
+    ));
     assert_eq!(rows(&runtime).await?, before);
     runtime.close().await;
     Ok(())
@@ -846,6 +877,7 @@ async fn accounting_inspect_other_conversations_are_read_beside_the_tree() -> an
             conversations: 1,
             unavailable: 0,
             requests: alone.requests,
+            deleted_attempts: DeletedAttempts::Counted(0),
         })
     );
     assert_eq!(
@@ -859,6 +891,7 @@ async fn accounting_inspect_other_conversations_are_read_beside_the_tree() -> an
         conversations: 1,
         unavailable: 1,
         requests: Default::default(),
+        deleted_attempts: DeletedAttempts::Counted(0),
     });
     sqlx::query("DELETE FROM draft_accounting_contributions WHERE attempt_id = ?")
         .bind(Uuid::from_u128(5).to_string())
@@ -870,6 +903,98 @@ async fn accounting_inspect_other_conversations_are_read_beside_the_tree() -> an
         InspectionDay::Ready(expected)
     );
     assert_eq!(rows(&runtime).await?, before);
+    runtime.close().await;
+    Ok(())
+}
+
+// #286: deleting a conversation removes its attempts and their cost. The day
+// must still say that deleted conversations spent on it, never read as empty.
+#[tokio::test]
+async fn accounting_inspect_counts_deleted_conversations_attempts() -> anyhow::Result<()> {
+    let path = home();
+    let runtime = open(&path).await?;
+    tree_fixture(&runtime).await?;
+    let other = ThreadId::from_string(&Uuid::from_u128(11).to_string())?;
+    let before = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?)
+        .other_conversations
+        .expect("day view reads other conversations");
+    let attempts: usize = before.requests.values().map(Vec::len).sum();
+    assert_eq!((before.conversations, attempts), (1, 1));
+    runtime.delete_threads_at(&[other], /*as_of_ms*/ 0).await?;
+    assert_eq!(
+        inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?).other_conversations,
+        Some(OtherConversations {
+            conversations: 0,
+            unavailable: 0,
+            requests: Default::default(),
+            deleted_attempts: DeletedAttempts::Counted(attempts),
+        })
+    );
+    runtime.close().await;
+    Ok(())
+}
+
+// #286: only tombstones that cannot come from retention count as deletions.
+#[tokio::test]
+async fn accounting_deleted_attempts_count_only_what_retention_cannot_explain() -> anyhow::Result<()>
+{
+    const REPLAY: i64 = 365 * DAY;
+    let path = home();
+    let runtime = open(&path).await?;
+    seed(&runtime).await?;
+    let ahead = 200 * DAY;
+    AccountingStore::open(&runtime, ahead).await?;
+    // Tombstones for attempts dispatched on day 150 and day 100.
+    for (id, dispatch) in [(1u128, 150 * DAY + 5), (2, 100 * DAY + 5)] {
+        sqlx::query("INSERT INTO draft_accounting_tombstones VALUES (?, ?)")
+            .bind(Uuid::from_u128(id).to_string())
+            .bind(dispatch + REPLAY)
+            .execute(runtime.pool.as_ref())
+            .await?;
+    }
+    let count = |day: i64, read_at: i64| {
+        let runtime = runtime.clone();
+        async move {
+            let mut conn = runtime.pool.acquire().await?;
+            let mut work = InspectionWork::new(&mut conn).await?;
+            anyhow::Ok(scope::deleted_attempts(&mut conn, day, read_at, &mut work).await)
+        }
+    };
+    // Inside the detail window at the checkpoint: a deletion.
+    assert_eq!(count(150, ahead).await?, DeletedAttempts::Counted(1));
+    // Past it (day 100 + 90 days <= day 200): retention may have written it.
+    assert_eq!(count(100, ahead).await?, DeletedAttempts::PastDetailWindow);
+    // Batched expiry can run ahead of the checkpoint: the reader's clock
+    // bounds the window too, exactly at the edge.
+    assert_eq!(
+        count(150, 240 * DAY).await?,
+        DeletedAttempts::PastDetailWindow
+    );
+    assert_eq!(
+        count(150, 240 * DAY - 1).await?,
+        DeletedAttempts::Counted(1)
+    );
+    // A day nothing was deleted on, inside the window.
+    assert_eq!(count(151, ahead).await?, DeletedAttempts::Counted(0));
+    // An exhausted work budget reads as unread, never zero.
+    {
+        let mut conn = runtime.pool.acquire().await?;
+        let mut work = InspectionWork {
+            rows: 0,
+            visits: 0,
+            scan_rows: 1,
+            started: None,
+        };
+        assert_eq!(
+            scope::deleted_attempts(&mut conn, /*day*/ 150, ahead, &mut work).await,
+            DeletedAttempts::Unread
+        );
+    }
+    // No checkpoint yet: unread, never zero.
+    sqlx::query("UPDATE draft_accounting_retention_checkpoint SET completed_as_of_ms = NULL, admission_active = 0")
+        .execute(runtime.pool.as_ref())
+        .await?;
+    assert_eq!(count(150, ahead).await?, DeletedAttempts::Unread);
     runtime.close().await;
     Ok(())
 }
@@ -1077,6 +1202,55 @@ async fn range_read(
         now,
     )
     .await
+}
+
+/// #289: a week or month bucket that reaches past the ledger reports the
+/// interval it covers, as a day bucket containing today does, not
+/// "unavailable".
+#[tokio::test]
+async fn accounting_inspect_range_bucket_reaching_past_the_ledger_states_its_coverage()
+-> anyhow::Result<()> {
+    let path = home();
+    let runtime = open(&path).await?;
+    seed(&runtime).await?;
+    // The ledger is current to 12:00 on day 6 (a Wednesday); the read is at
+    // the same time. Day 4 (1970-01-05) is a Monday, so one ISO week and one
+    // month bucket cover the range.
+    let now = 6 * DAY + DAY / 2;
+    AccountingStore::open(&runtime, now).await?;
+    for grouping in [InspectionGrouping::Week, InspectionGrouping::Month] {
+        let buckets = range_buckets(
+            range_read(
+                &runtime,
+                /*start*/ 4 * DAY,
+                /*end*/ 11 * DAY,
+                grouping,
+                now,
+            )
+            .await?,
+        );
+        assert_eq!(buckets.len(), 1, "{grouping:?}");
+        assert!(buckets[0].partial);
+        assert_eq!(
+            buckets[0].effective,
+            Some((4 * DAY, now + 1)),
+            "{grouping:?}"
+        );
+    }
+    // A bucket whose first day the ledger has not reached stays unavailable.
+    let later = range_buckets(
+        range_read(
+            &runtime,
+            /*start*/ 7 * DAY,
+            /*end*/ 9 * DAY,
+            InspectionGrouping::Week,
+            /*now*/ 9 * DAY,
+        )
+        .await?,
+    );
+    assert_eq!(later[0].effective, None);
+    runtime.close().await;
+    Ok(())
 }
 
 #[tokio::test]
@@ -1317,7 +1491,7 @@ async fn accounting_inspect_range_mixed_compaction_exact_no_double_count() -> an
     )
     .await?;
     assert!(
-        matches!(&value, InspectionDay::Range { oldest_aggregate_day: Some(0), read_at_ms, .. } if *read_at_ms == 90 * DAY)
+        matches!(&value, InspectionDay::Range { aggregate_day_floor: Some(0), read_at_ms, .. } if *read_at_ms == 90 * DAY)
     );
     let mut buckets = range_buckets(value);
     assert!(matches!(
@@ -1345,6 +1519,35 @@ async fn accounting_inspect_range_mixed_compaction_exact_no_double_count() -> an
     };
     assert_eq!(compact.known_usd, "0.000001".to_owned().try_into()?);
     assert_eq!(rows(&runtime).await?, before);
+    runtime.close().await;
+    Ok(())
+}
+
+// #289 R3: a range states the same daily-totals floor as the day pages, even
+// before anything has been compacted.
+#[tokio::test]
+async fn accounting_inspect_range_states_day_page_retention_floor() -> anyhow::Result<()> {
+    const DAY: i64 = 86_400_000;
+    let path = home();
+    let runtime = open(&path).await?;
+    seed(&runtime).await?;
+    let time = 400 * DAY;
+    let store = AccountingStore::open(&runtime, time).await?;
+    let mut a = attempt(/*id*/ 1);
+    a.dispatched_at_ms = time.try_into()?;
+    store.admit(a.thread_id, &a, &[snapshot()], time).await?;
+    store
+        .observe(a.thread_id, &a, &[row(/*revision*/ 1)], time)
+        .await?;
+    let floor = inspection(inspected(&runtime, /*day*/ 400, time).await?)
+        .coverage
+        .aggregate_day_floor;
+    assert_eq!(floor, 36);
+    let value = range_read(&runtime, time, time + DAY, InspectionGrouping::Day, time).await?;
+    assert!(
+        matches!(value, InspectionDay::Range { aggregate_day_floor: Some(f), .. } if f == floor),
+        "{value:?}"
+    );
     runtime.close().await;
     Ok(())
 }
@@ -1422,12 +1625,26 @@ async fn accounting_inspect_range_week_day_slices_and_expired_prefix() -> anyhow
         ),
         (7, Some((6 * DAY, 11 * DAY)), true)
     );
-    assert!(
-        buckets[0]
-            .days
-            .iter()
-            .all(|d| matches!(d, InspectionDay::DetailUnavailable { .. }))
-    );
+    // The two recorded days are past the daily totals. #1196: the five empty
+    // days inside them read as the day view reads them, never as zero.
+    for (index, day) in buckets[0].days.iter().enumerate() {
+        if index < 2 {
+            assert!(
+                matches!(day, InspectionDay::DetailUnavailable { .. }),
+                "{day:?}"
+            );
+            continue;
+        }
+        let InspectionDay::Ready(view) = day else {
+            panic!("{day:?}")
+        };
+        assert_eq!((view.utc_day, view.totals.attempts), (4 + index as i64, 0));
+        assert!(view.requests.is_empty());
+        assert!(
+            matches!(view.empty_day, Some(EmptyDay::BeforeLedger { .. })),
+            "{view:?}"
+        );
+    }
     runtime.close().await;
     Ok(())
 }
@@ -2024,7 +2241,13 @@ async fn absent_store_delete_locks_before_inspection_and_ordinary_writer() -> an
     );
     assert_eq!(whole(&mut deletion).await?, before);
     assert_eq!(
-        StateRuntime::delete_threads_on_connection(&mut deletion, &[owner], /*as_of_ms*/ 0).await?,
+        StateRuntime::delete_threads_on_connection(
+            &mut deletion,
+            &[owner],
+            /*as_of_ms*/ 0,
+            /*validated_at_ms*/ None
+        )
+        .await?,
         1
     );
     deletion.commit().await?;
@@ -2162,7 +2385,8 @@ async fn price_bound_admission_and_native_delete_contend_in_both_orders_with_sna
                     StateRuntime::delete_threads_on_connection(
                         &mut tx,
                         &[a.thread_id],
-                        /*as_of_ms*/ 1
+                        /*as_of_ms*/ 1,
+                        /*validated_at_ms*/ None,
                     )
                     .await?,
                     1
@@ -2616,6 +2840,172 @@ async fn contention_is_named_and_nothing_else_is() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A wall clock that stepped back behind the checkpoint (58 s and 6 days in the
+/// PF-60-S03 acceptance run) used to fail every `Now` write as a backward
+/// checkpoint, and with it every model request. The ledger now holds its time
+/// at the checkpoint; the attempt keeps the dispatch time the clock read.
+#[tokio::test]
+async fn now_writes_hold_at_the_checkpoint_when_the_clock_is_behind_it() -> anyhow::Result<()> {
+    for behind in [58_000, 6 * 86_400_000] {
+        let path = home();
+        let runtime = open(&path).await?;
+        seed(&runtime).await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let ahead = now + behind;
+        AccountingStore::open(&runtime, ahead).await?;
+        let store = AccountingStore::open(&runtime, AsOf::Now).await?;
+        let mut a = serde_json::to_value(attempt(/*id*/ 1))?;
+        a["dispatched_at_ms"] = json!(now);
+        let a: Attempt = serde_json::from_value(a)?;
+        store.admit(a.thread_id, &a, &[], AsOf::Now).await?;
+        store
+            .observe(a.thread_id, &a, &[row(/*revision*/ 1)], AsOf::Now)
+            .await?;
+        let checkpoint: i64 = sqlx::query_scalar(
+            "SELECT completed_as_of_ms FROM draft_accounting_retention_checkpoint",
+        )
+        .fetch_one(runtime.pool.as_ref())
+        .await?;
+        assert!(checkpoint >= ahead, "the checkpoint never moves backward");
+        let stored: Vec<String> =
+            sqlx::query_scalar("SELECT payload FROM draft_accounting_attempts")
+                .fetch_all(runtime.pool.as_ref())
+                .await?;
+        let stored: Vec<Attempt> = stored
+            .iter()
+            .map(|payload| serde_json::from_str(payload))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(stored, vec![a]);
+        // Explicit times stay strict.
+        marker(
+            AccountingStore::open(&runtime, now)
+                .await
+                .err()
+                .expect("stale time"),
+            "backward",
+        );
+        runtime.close().await;
+    }
+    Ok(())
+}
+
+/// #308: deleting a conversation with the clock behind the checkpoint (58 s and
+/// 6 days in the acceptance run) failed as a backward checkpoint. It now holds
+/// at the checkpoint like ledger writes, and the deleted spend is still counted
+/// for "deleted conversations" (#286).
+#[tokio::test]
+async fn delete_holds_at_the_checkpoint_when_the_clock_is_behind_it() -> anyhow::Result<()> {
+    for behind in [58_000, 6 * 86_400_000] {
+        let path = home();
+        let runtime = open(&path).await?;
+        seed(&runtime).await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let ahead = now + behind;
+        let store = AccountingStore::open(&runtime, ahead).await?;
+        // A conversation and its subagent, deleted together.
+        let child = ThreadId::from_string(&Uuid::from_u128(8).to_string())?;
+        let home = runtime.sqlite().home().to_path_buf();
+        runtime
+            .upsert_thread(&test_thread_metadata(&home, child, home.clone()))
+            .await?;
+        let mut owned = Vec::new();
+        for (id, owner) in [(1, None), (2, Some(child))] {
+            let mut a = serde_json::to_value(attempt(id))?;
+            a["dispatched_at_ms"] = json!(now);
+            if let Some(owner) = owner {
+                a["thread_id"] = json!(owner);
+            }
+            let a: Attempt = serde_json::from_value(a)?;
+            store.admit(a.thread_id, &a, &[], AsOf::Now).await?;
+            if owner.is_none() {
+                store
+                    .observe(a.thread_id, &a, &[row(/*revision*/ 1)], AsOf::Now)
+                    .await?;
+            }
+            owned.push(a);
+        }
+        let (a, owners) = (&owned[0], [owned[0].thread_id, child]);
+
+        runtime.preflight_delete_threads(&owners).await?;
+        assert_eq!(
+            runtime
+                .get_thread(a.thread_id)
+                .await?
+                .map(|thread| thread.id),
+            Some(a.thread_id),
+            "the preflight changes nothing"
+        );
+        assert_eq!(runtime.delete_threads_strict(&owners).await?, 2);
+
+        let checkpoint: i64 = sqlx::query_scalar(
+            "SELECT completed_as_of_ms FROM draft_accounting_retention_checkpoint",
+        )
+        .fetch_one(runtime.pool.as_ref())
+        .await?;
+        assert!(checkpoint >= ahead, "the checkpoint never moves backward");
+        let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM draft_accounting_attempts")
+            .fetch_one(runtime.pool.as_ref())
+            .await?;
+        let tombstones: Vec<(String, i64)> =
+            sqlx::query_as("SELECT attempt_id, expires_at_ms FROM draft_accounting_tombstones")
+                .fetch_all(runtime.pool.as_ref())
+                .await?;
+        assert_eq!(
+            (attempts, tombstones),
+            (
+                0,
+                owned
+                    .iter()
+                    .map(|a| (a.attempt_id.to_string(), now + 365 * 86_400_000_i64))
+                    .collect::<Vec<_>>()
+            )
+        );
+        let mut conn = runtime.pool.acquire().await?;
+        let mut work = InspectionWork::new(&mut conn).await?;
+        assert_eq!(
+            scope::deleted_attempts(&mut conn, now / 86_400_000, now, &mut work).await,
+            DeletedAttempts::Counted(2)
+        );
+        drop(conn);
+        for owner in owners {
+            assert!(runtime.get_thread(owner).await?.is_none());
+        }
+        runtime.close().await;
+    }
+    Ok(())
+}
+
+/// #308: a ledger that cannot be updated fails the preflight and the delete,
+/// and leaves every row as it was.
+#[tokio::test]
+async fn failed_delete_preflight_changes_nothing() -> anyhow::Result<()> {
+    let path = home();
+    let runtime = open(&path).await?;
+    seed(&runtime).await?;
+    let mut a = serde_json::to_value(attempt(/*id*/ 1))?;
+    a["dispatched_at_ms"] = json!(chrono::Utc::now().timestamp_millis());
+    let a: Attempt = serde_json::from_value(a)?;
+    AccountingStore::open(&runtime, AsOf::Now)
+        .await?
+        .admit(a.thread_id, &a, &[], AsOf::Now)
+        .await?;
+    sqlx::query("CREATE TRIGGER reject_tombstone BEFORE INSERT ON draft_accounting_tombstones BEGIN SELECT RAISE(ABORT, 'fixture-ledger-failure'); END")
+        .execute(runtime.pool.as_ref())
+        .await?;
+    let before = rows(&runtime).await?;
+    marker(
+        runtime
+            .preflight_delete_threads(&[a.thread_id])
+            .await
+            .unwrap_err(),
+        "fixture-ledger-failure",
+    );
+    assert_eq!(rows(&runtime).await?, before);
+    assert!(runtime.get_thread(a.thread_id).await?.is_some());
+    runtime.close().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn writes_read_their_clock_after_another_process_advanced_the_checkpoint()
 -> anyhow::Result<()> {
@@ -2825,4 +3215,17 @@ async fn expiry_interrupted_mid_sweep_resumes_to_the_full_sweeps_result() -> any
     assert_eq!(accounting_rows(&runtime).await?, expected);
     runtime.close().await;
     Ok(())
+}
+
+/// The unapplied-migration check reads object names from `CREATE` statements;
+/// a migration whose statements it cannot see would make that check vacuous.
+#[test]
+fn every_accounting_migration_creates_named_objects() {
+    for migration in crate::migrations::accounting_migrator().iter() {
+        assert!(
+            !super::created_objects(migration.sql.as_str()).is_empty(),
+            "migration {} names no objects",
+            migration.version
+        );
+    }
 }

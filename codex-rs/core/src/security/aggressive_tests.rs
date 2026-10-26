@@ -81,6 +81,7 @@ fn command() -> String {
 
 /// One narrow grant opens exactly its surface and operation, for its uses.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_23_s02_grant_opens_only_its_surface_operation_and_uses() {
     let thread = ThreadId::new();
     let lineage = chain(&["main"]);
@@ -121,6 +122,7 @@ fn pf_23_s02_grant_opens_only_its_surface_operation_and_uses() {
 /// Expiry, a policy epoch change, the kill switch, another level and a
 /// revocation each end a grant, and an ended grant never comes back.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_23_s02_grant_ends_with_expiry_policy_change_and_revocation() {
     let lineage = chain(&["main"]);
     let operation = command();
@@ -128,15 +130,30 @@ fn pf_23_s02_grant_ends_with_expiry_policy_change_and_revocation() {
     let ended = [
         (live.clone(), NOW + 60),
         (
-            state(SecurityLevel::Aggressive, lineage.clone(), 1, false),
+            state(
+                SecurityLevel::Aggressive,
+                lineage.clone(),
+                /*epoch*/ 1,
+                /*kill*/ false,
+            ),
             NOW,
         ),
         (
-            state(SecurityLevel::Aggressive, lineage.clone(), 0, true),
+            state(
+                SecurityLevel::Aggressive,
+                lineage.clone(),
+                /*epoch*/ 0,
+                /*kill*/ true,
+            ),
             NOW,
         ),
         (
-            state(SecurityLevel::Moderate, lineage.clone(), 0, false),
+            state(
+                SecurityLevel::Moderate,
+                lineage.clone(),
+                /*epoch*/ 0,
+                /*kill*/ false,
+            ),
             NOW,
         ),
         (
@@ -153,7 +170,12 @@ fn pf_23_s02_grant_ends_with_expiry_policy_change_and_revocation() {
         let thread = ThreadId::new();
         let held = grant(
             lineage.clone(),
-            scope(thread, Surface::UnprotectedCommand, &operation, None),
+            scope(
+                thread,
+                Surface::UnprotectedCommand,
+                &operation,
+                /*uses*/ None,
+            ),
             NOW + 60,
         );
         issue(thread, &live, held, NOW).unwrap();
@@ -180,7 +202,12 @@ fn pf_23_s02_grant_ends_with_expiry_policy_change_and_revocation() {
     let held = || {
         grant(
             lineage.clone(),
-            scope(thread, Surface::UnprotectedCommand, &operation, None),
+            scope(
+                thread,
+                Surface::UnprotectedCommand,
+                &operation,
+                /*uses*/ None,
+            ),
             NOW + 60,
         )
     };
@@ -195,8 +222,18 @@ fn pf_23_s02_grant_ends_with_expiry_policy_change_and_revocation() {
         Err(GrantRefusal::Expired)
     );
     for refused in [
-        state(SecurityLevel::Moderate, lineage.clone(), 0, false),
-        state(SecurityLevel::Permissive, lineage.clone(), 0, false),
+        state(
+            SecurityLevel::Moderate,
+            lineage.clone(),
+            /*epoch*/ 0,
+            /*kill*/ false,
+        ),
+        state(
+            SecurityLevel::Permissive,
+            lineage.clone(),
+            /*epoch*/ 0,
+            /*kill*/ false,
+        ),
     ] {
         assert_eq!(
             issue(thread, &refused, held(), NOW),
@@ -206,7 +243,12 @@ fn pf_23_s02_grant_ends_with_expiry_policy_change_and_revocation() {
     assert_eq!(
         issue(
             thread,
-            &state(SecurityLevel::Aggressive, lineage.clone(), 0, true),
+            &state(
+                SecurityLevel::Aggressive,
+                lineage.clone(),
+                /*epoch*/ 0,
+                /*kill*/ true
+            ),
             held(),
             NOW
         ),
@@ -226,6 +268,7 @@ fn pf_23_s02_grant_ends_with_expiry_policy_change_and_revocation() {
 /// A parent's grant never reaches a child agent: the child's lineage and
 /// session differ. A grant for the child must be derived, and no wider.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_23_s02_grants_are_not_inherited_and_derive_only_narrower() {
     let parent_thread = ThreadId::new();
     let child_thread = ThreadId::new();
@@ -234,7 +277,12 @@ fn pf_23_s02_grants_are_not_inherited_and_derive_only_narrower() {
     let operation = command();
     let parent_grant = grant(
         parent.clone(),
-        scope(parent_thread, Surface::UnprotectedCommand, &operation, None),
+        scope(
+            parent_thread,
+            Surface::UnprotectedCommand,
+            &operation,
+            /*uses*/ None,
+        ),
         NOW + 60,
     );
     issue(
@@ -284,14 +332,24 @@ fn pf_23_s02_grants_are_not_inherited_and_derive_only_narrower() {
     // Wider (later expiry, another surface) cannot be derived.
     assert!(
         derive(
-            scope(parent_thread, Surface::UnprotectedCommand, &operation, None),
+            scope(
+                parent_thread,
+                Surface::UnprotectedCommand,
+                &operation,
+                /*uses*/ None
+            ),
             NOW + 120
         )
         .is_err()
     );
     assert!(
         derive(
-            scope(parent_thread, Surface::UnconfinedProcess, &operation, None),
+            scope(
+                parent_thread,
+                Surface::UnconfinedProcess,
+                &operation,
+                /*uses*/ None
+            ),
             NOW + 30
         )
         .is_err()
@@ -299,7 +357,12 @@ fn pf_23_s02_grants_are_not_inherited_and_derive_only_narrower() {
     // A derived grant is bound to the parent's session context, so it never
     // names the child's session: the child cannot hold it either.
     let derived = derive(
-        scope(parent_thread, Surface::UnprotectedCommand, &operation, None),
+        scope(
+            parent_thread,
+            Surface::UnprotectedCommand,
+            &operation,
+            /*uses*/ None,
+        ),
         NOW + 30,
     )
     .unwrap();
@@ -310,7 +373,12 @@ fn pf_23_s02_grants_are_not_inherited_and_derive_only_narrower() {
     // The child gets its own grant from the human instead.
     let own = grant(
         child.clone(),
-        scope(child_thread, Surface::UnprotectedCommand, &operation, None),
+        scope(
+            child_thread,
+            Surface::UnprotectedCommand,
+            &operation,
+            /*uses*/ None,
+        ),
         NOW + 30,
     );
     issue(child_thread, &child_state, own.clone(), NOW).unwrap();
@@ -329,6 +397,7 @@ fn pf_23_s02_grants_are_not_inherited_and_derive_only_narrower() {
 /// Unknown surfaces, extra actions, destinations, other limits, other
 /// agents and tampered grants are refused when issued.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn pf_23_s02_unknown_or_malformed_grants_are_refused() {
     let thread = ThreadId::new();
     let lineage = chain(&["main"]);
@@ -349,7 +418,7 @@ fn pf_23_s02_unknown_or_malformed_grants_are_refused() {
         ProtectedResource::new(ResourceKind::VaultCredential, "anything").unwrap(),
         [PolicyAction::Use],
         context(),
-        None,
+        /*destination*/ None,
         BTreeMap::new(),
     )
     .unwrap();
@@ -361,7 +430,7 @@ fn pf_23_s02_unknown_or_malformed_grants_are_refused() {
         Surface::UnprotectedCommand.resource(),
         [PolicyAction::Execute, PolicyAction::Export],
         context(),
-        None,
+        /*destination*/ None,
         BTreeMap::new(),
     )
     .unwrap();
@@ -385,7 +454,7 @@ fn pf_23_s02_unknown_or_malformed_grants_are_refused() {
         Surface::UnprotectedCommand.resource(),
         [PolicyAction::Execute],
         context(),
-        None,
+        /*destination*/ None,
         [(text("bytes"), 10)].into_iter().collect(),
     )
     .unwrap();
@@ -395,7 +464,12 @@ fn pf_23_s02_unknown_or_malformed_grants_are_refused() {
     );
     assert_eq!(
         refused(
-            scope(thread, Surface::UnprotectedCommand, &command(), None),
+            scope(
+                thread,
+                Surface::UnprotectedCommand,
+                &command(),
+                /*uses*/ None
+            ),
             chain(&["other"])
         ),
         Err(GrantRefusal::OtherAgent)

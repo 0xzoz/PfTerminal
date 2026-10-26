@@ -70,7 +70,8 @@ fn pf_27_s02_unsandboxed_and_unhardened_launches_are_refused() {
             contract.check_sandbox(
                 SandboxType::None,
                 /*sandbox_requested*/ false,
-                /*exec_server*/ false
+                /*exec_server*/ false,
+                /*windows_elevated*/ false
             ),
             Err(LaunchDenied::Unsandboxed)
         );
@@ -78,7 +79,8 @@ fn pf_27_s02_unsandboxed_and_unhardened_launches_are_refused() {
             contract.check_sandbox(
                 SandboxType::None,
                 /*sandbox_requested*/ true,
-                /*exec_server*/ false
+                /*exec_server*/ false,
+                /*windows_elevated*/ false
             ),
             Err(LaunchDenied::Unsandboxed)
         );
@@ -87,7 +89,8 @@ fn pf_27_s02_unsandboxed_and_unhardened_launches_are_refused() {
             contract.check_sandbox(
                 SandboxType::None,
                 /*sandbox_requested*/ true,
-                /*exec_server*/ true
+                /*exec_server*/ true,
+                /*windows_elevated*/ false
             ),
             Err(LaunchDenied::RemoteEnvironment)
         );
@@ -100,20 +103,81 @@ fn pf_27_s02_unsandboxed_and_unhardened_launches_are_refused() {
             unhardened.check_sandbox(
                 SandboxType::MacosSeatbelt,
                 /*sandbox_requested*/ true,
-                /*exec_server*/ false
+                /*exec_server*/ false,
+                /*windows_elevated*/ false
             ),
             Err(LaunchDenied::ProcessHardening)
         );
-    } else {
-        assert_eq!(
-            contract.check_sandbox(
-                SandboxType::WindowsRestrictedToken,
-                /*sandbox_requested*/ true,
-                /*exec_server*/ false
-            ),
-            Err(LaunchDenied::UnsupportedPlatform)
-        );
     }
+}
+
+/// PF-27-S06: Windows passes only under the elevated sandbox backend.
+#[cfg(windows)]
+#[test]
+fn pf_27_s06_windows_requires_the_elevated_sandbox() {
+    let fixture = fixture();
+    let contract = &fixture.contract;
+    let check = |sandbox, requested, elevated| {
+        contract.check_sandbox(sandbox, requested, /*exec_server*/ false, elevated)
+    };
+    assert_eq!(
+        check(SandboxType::WindowsRestrictedToken, true, true),
+        Ok(())
+    );
+    assert_eq!(
+        check(SandboxType::WindowsRestrictedToken, true, false),
+        Err(LaunchDenied::WindowsUnelevatedSandbox)
+    );
+    assert_eq!(
+        check(SandboxType::None, true, true),
+        Err(LaunchDenied::Unsandboxed)
+    );
+    assert_eq!(
+        check(SandboxType::WindowsRestrictedToken, false, true),
+        Err(LaunchDenied::Unsandboxed)
+    );
+    let unhardened = LaunchContract::capture(
+        &fixture.codex_home,
+        std::iter::empty(),
+        /*hardened*/ false,
+    );
+    assert_eq!(
+        unhardened.check_sandbox(
+            SandboxType::WindowsRestrictedToken,
+            /*sandbox_requested*/ true,
+            /*exec_server*/ false,
+            /*windows_elevated*/ true
+        ),
+        Err(LaunchDenied::ProcessHardening)
+    );
+}
+
+/// PF-27-S06: the Windows sandbox drops skip-if-missing entries, so paths
+/// that exist are denied with plain entries there.
+#[cfg(windows)]
+#[test]
+fn pf_27_s06_existing_protected_paths_are_denied_outright_on_windows() {
+    use codex_protocol::permissions::FileSystemPath;
+    let fixture = fixture();
+    std::fs::write(fixture.codex_home.join("auth.json"), "{}").expect("auth");
+    let protected = fixture
+        .contract
+        .protect_permissions(
+            &workspace_profile(&fixture.workspace),
+            fixture.workspace.as_path(),
+        )
+        .expect("protected");
+    let entries = protected.file_system_sandbox_policy().entries;
+    let entry_for = |name: &str| {
+        let path = fixture.codex_home.join(name);
+        entries
+            .iter()
+            .find(|entry| entry.path == FileSystemPath::Path { path: path.clone() })
+            .cloned()
+            .unwrap_or_else(|| panic!("no entry for {name}"))
+    };
+    assert!(!entry_for("auth.json").skips_missing_path());
+    assert!(entry_for("provider_auth.json").skips_missing_path());
 }
 
 #[test]
@@ -239,14 +303,15 @@ fn pf_27_s02_environment_keeps_dummies_but_never_raw_values() {
         .contract
         .check_command(&["/bin/sh".to_string(), "-c".to_string()], &mut env)
         .expect("allowed");
-    assert_eq!(
-        env,
-        HashMap::from([
-            ("GITHUB_TOKEN".to_string(), dummy),
-            ("PATH".to_string(), "/usr/bin".to_string()),
-            ("ZDOTDIR".to_string(), PROTECTED_ZDOTDIR.to_string()),
-        ])
-    );
+    let mut expected = HashMap::from([
+        ("GITHUB_TOKEN".to_string(), dummy),
+        ("PATH".to_string(), "/usr/bin".to_string()),
+    ]);
+    // zsh's start-up folder is pinned on Unix only (`check_command`).
+    if cfg!(unix) {
+        expected.insert("ZDOTDIR".to_string(), PROTECTED_ZDOTDIR.to_string());
+    }
+    assert_eq!(env, expected);
 }
 
 #[test]
@@ -384,4 +449,212 @@ fn contained_external_agent_launch_gets_the_whole_contract() {
     assert!(!file_system.can_read_path_with_cwd(fixture.codex_home.join("secrets").as_path(), cwd));
     assert!(!file_system.can_write_path_with_cwd(fixture.codex_home.as_path(), cwd));
     assert!(file_system.can_write_path_with_cwd(&fixture.workspace.join("src.rs"), cwd));
+}
+
+#[test]
+fn pf_27_s06_protected_codex_home_dirs_are_protected_entries() {
+    for dir in super::PROTECTED_CODEX_HOME_DIRS {
+        assert!(super::PROTECTED_CODEX_HOME_ENTRIES.contains(dir), "{dir}");
+    }
+}
+
+/// #1107: what Corbanu keeps in the home besides its databases (recovery's
+/// `db-backups`, pending accounting records and the GPU controller's lock)
+/// is unreadable, as in a separate database folder; the folders are denied
+/// before they exist on Windows.
+#[test]
+fn issue_1107_the_homes_database_folder_entries_are_protected() {
+    let fixture = fixture();
+    let cwd = fixture.workspace.as_path();
+    let backup = fixture.codex_home.join("db-backups/1/state_5.sqlite");
+    std::fs::create_dir_all(backup.as_path().parent().expect("parent")).expect("backups");
+    std::fs::write(backup.as_path(), "db").expect("backup");
+    let pending = fixture.codex_home.join("accounting-pending/x.json");
+    std::fs::create_dir_all(pending.as_path().parent().expect("parent")).expect("pending");
+    std::fs::write(pending.as_path(), "{}").expect("record");
+    std::fs::write(fixture.codex_home.join("gpu-controller.lock"), "").expect("gpu lock");
+    let protected = fixture
+        .contract
+        .protect_permissions(&workspace_profile(&fixture.workspace), cwd)
+        .expect("protectable");
+    let file_system = protected.file_system_sandbox_policy();
+    for path in [
+        fixture.codex_home.join("db-backups"),
+        backup,
+        fixture.codex_home.join("accounting-pending"),
+        pending,
+        fixture.codex_home.join("gpu-controller.lock"),
+    ] {
+        assert!(
+            !file_system.can_read_path_with_cwd(path.as_path(), cwd),
+            "{}",
+            path.display()
+        );
+    }
+    assert_eq!(fixture.contract.verify_permissions(&protected, cwd), Ok(()));
+    for entry in super::super::preflight::DATABASE_FOLDER_ENTRIES {
+        assert!(
+            super::PROTECTED_CODEX_HOME_ENTRIES.contains(entry),
+            "{entry}"
+        );
+    }
+    for dir in ["db-backups", "accounting-pending"] {
+        assert!(super::PROTECTED_CODEX_HOME_DIRS.contains(&dir), "{dir}");
+    }
+}
+
+/// The Google Cloud CLI's folder (Windows only, so placed by hand here) and
+/// what is in it are told apart from CLI token files.
+#[test]
+fn the_google_cloud_cli_folder_is_its_own_kind_of_kept_file() {
+    let mut fixture = fixture();
+    let cwd = fixture.workspace.as_path();
+    // By its real location, as the deny matcher compares paths (macOS
+    // temporary folders are reached through `/var -> /private/var`).
+    let real_workspace = AbsolutePathBuf::from_absolute_path(
+        fixture
+            .workspace
+            .as_path()
+            .canonicalize()
+            .expect("real workspace"),
+    )
+    .expect("absolute");
+    let folder = real_workspace.join("AppData/Roaming/gcloud");
+    std::fs::create_dir_all(folder.as_path()).expect("gcloud folder");
+    std::fs::write(folder.join("credentials.db"), "").expect("credentials");
+    fixture.contract.protected_read_paths.push(folder.clone());
+    fixture
+        .contract
+        .google_cloud_cli_folders
+        .push(folder.clone());
+    let kept = |path: &Path| fixture.contract.kept_file(path, cwd);
+    assert_eq!(kept(folder.as_path()), Some(KeptFile::GoogleCloudCliFolder));
+    assert_eq!(
+        kept(folder.join("credentials.db").as_path()),
+        Some(KeptFile::InGoogleCloudCliFolder)
+    );
+    assert_eq!(kept(real_workspace.join("src.rs").as_path()), None);
+}
+
+/// On Windows the contract keeps `%APPDATA%\gcloud` as the Google Cloud
+/// CLI's folder, not as a CLI token file.
+#[cfg(windows)]
+#[test]
+fn the_google_cloud_cli_folder_is_kept_on_windows() {
+    let Some(app_data) = std::env::var_os("APPDATA") else {
+        return;
+    };
+    let fixture = fixture();
+    let folder = AbsolutePathBuf::from_absolute_path(app_data)
+        .expect("absolute APPDATA")
+        .join("gcloud");
+    assert_eq!(
+        fixture.contract.google_cloud_cli_folders,
+        vec![folder.clone()]
+    );
+    assert!(!fixture.contract.cli_token_paths.contains(&folder));
+    assert_eq!(
+        fixture
+            .contract
+            .kept_file(folder.as_path(), fixture.workspace.as_path()),
+        Some(KeptFile::GoogleCloudCliFolder)
+    );
+}
+
+/// #651: the contract also denies the home's database init lock and, once a
+/// config names a database folder set apart from the home, that folder's
+/// databases (its path escaped as a glob) and what Corbanu keeps there. A
+/// folder that is the home adds nothing.
+#[test]
+fn issue_651_a_separate_database_folder_is_protected() {
+    let fixture = fixture();
+    let cwd = fixture.workspace.as_path();
+    let databases_dir = tempfile::tempdir().expect("databases");
+    let databases = AbsolutePathBuf::from_absolute_path(databases_dir.path().join("db[1]{2"))
+        .expect("absolute");
+    std::fs::create_dir_all(databases.as_path()).expect("database folder");
+    fixture
+        .contract
+        .note_database_folder(fixture.codex_home.as_path());
+    assert_eq!(fixture.contract.database_folders(), Vec::new());
+    fixture.contract.note_database_folder(databases.as_path());
+    let protected = fixture
+        .contract
+        .protect_permissions(&workspace_profile(&fixture.workspace), cwd)
+        .expect("protectable");
+    let file_system = protected.file_system_sandbox_policy();
+    let globs = file_system.get_unreadable_globs_with_cwd(cwd);
+    // Built with the platform's separator, as the policy resolves globs.
+    let escaped = databases_dir
+        .path()
+        .join("db[[]1][{]2")
+        .join("*.sqlite*")
+        .display()
+        .to_string();
+    assert!(globs.contains(&escaped), "{globs:?}");
+    for path in [
+        fixture.codex_home.join("pfterminal_db_init.lock"),
+        databases.join("pfterminal_db_init.lock"),
+        databases.join("gpu-controller.lock"),
+        databases.join("accounting-pending"),
+        databases.join("db-backups"),
+    ] {
+        assert!(
+            !file_system.can_read_path_with_cwd(path.as_path(), cwd),
+            "{}",
+            path.display()
+        );
+    }
+    assert_eq!(fixture.contract.verify_permissions(&protected, cwd), Ok(()));
+}
+
+/// #651 item 7: a database folder missing at launch, in a folder the command
+/// could write, is made (private, with what Corbanu keeps there) on Linux,
+/// so bubblewrap holds no missing path with a placeholder file on the host;
+/// its entries are then denied as when it exists. Backups beside a folder
+/// are denied only when present on Linux (a missing one would get a
+/// placeholder there too), and before they exist elsewhere.
+#[cfg(unix)]
+#[test]
+fn issue_651_a_missing_database_folder_is_made_on_linux() {
+    let fixture = fixture();
+    let cwd = fixture.workspace.as_path();
+    let databases = fixture.workspace.join("data/db");
+    fixture.contract.note_database_folder(databases.as_path());
+    let protected = fixture
+        .contract
+        .protect_permissions(&workspace_profile(&fixture.workspace), cwd)
+        .expect("protectable");
+    let linux = cfg!(target_os = "linux");
+    assert_eq!(databases.as_path().is_dir(), linux);
+    assert_eq!(
+        databases.join("accounting-pending").as_path().is_dir(),
+        linux
+    );
+    let file_system = protected.file_system_sandbox_policy();
+    for path in [
+        databases.join("pfterminal_db_init.lock"),
+        databases.join("gpu-controller.lock"),
+        databases.join("accounting-pending/x.json"),
+    ] {
+        assert!(
+            !file_system.can_read_path_with_cwd(path.as_path(), cwd),
+            "{}",
+            path.display()
+        );
+    }
+    let backups = fixture.workspace.join("data/db.db-backups");
+    let denies_backups = |file_system: &FileSystemSandboxPolicy| {
+        file_system
+            .entries
+            .iter()
+            .any(|entry| matches!(&entry.path, FileSystemPath::Path { path } if *path == backups))
+    };
+    assert_eq!(denies_backups(&file_system), !linux);
+    std::fs::create_dir_all(backups.as_path()).expect("backups");
+    let protected = fixture
+        .contract
+        .protect_permissions(&workspace_profile(&fixture.workspace), cwd)
+        .expect("protectable");
+    assert!(denies_backups(&protected.file_system_sandbox_policy()));
 }

@@ -16,12 +16,15 @@ use super::protocol::HostBindingWire;
 use super::protocol::MAX_CONTROL_LINE_BYTES;
 use super::protocol::ModelBindingWire;
 use super::protocol::ProviderId;
+use super::protocol::StoredKeyAccount;
 use super::protocol::encode_hex;
 use super::protocol::valid_id;
 use crate::connect_policy::PinnedPeers;
 use crate::credential_broker::providers;
 use crate::upstream::UpstreamClient;
 use base64::Engine as _;
+#[cfg(windows)]
+use codex_process_hardening::ProtectedChild as Child;
 use codex_secret_broker::BrokerBinding;
 use codex_secret_broker::BrokerChannelMac;
 use codex_secret_broker::CredentialReference;
@@ -40,13 +43,19 @@ use std::io::BufRead as _;
 use std::io::BufReader;
 use std::io::Read as _;
 use std::io::Write as _;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::Child;
+#[cfg(unix)]
 use std::process::Command;
+#[cfg(unix)]
 use std::process::Stdio;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
@@ -157,22 +166,41 @@ pub(crate) enum IsolatedBrokerError {
     Unavailable,
     #[error("credential broker request carries no checked DNS answers")]
     Unpinned,
+    /// #390 (Windows): another process holds or serves the broker's pipe;
+    /// nothing was sent to it.
+    #[error("credential broker pipe is held or served by another process")]
+    PipeSquatted,
 }
 
 type LineReceiver = mpsc::Receiver<std::io::Result<Zeroizing<Vec<u8>>>>;
 
+/// The controller's end of the control channel: a Unix socket, or on
+/// Windows the broker's control pipe (PF-27-S06).
+#[cfg(unix)]
+type ControlStream = UnixStream;
+#[cfg(windows)]
+type ControlStream = super::pipe::ControlPipe;
+
 struct ControlChannel {
-    writer: Option<UnixStream>,
+    writer: Option<ControlStream>,
     lines: LineReceiver,
 }
 
 pub(crate) struct IsolatedBrokerClient {
     control: Mutex<ControlChannel>,
     child: Mutex<Option<Child>>,
-    mac: BrokerChannelMac,
+    mac: Arc<BrokerChannelMac>,
     controller_instance: String,
     broker_instance: String,
     socket_path: PathBuf,
+    /// The broker's process id; on Windows each data connection checks it.
+    #[cfg_attr(unix, allow(dead_code))]
+    broker_pid: u32,
+    /// #390: a handle to the broker process, held while this client lives
+    /// (the reaper may drop the `Child` earlier), so `broker_pid` cannot be
+    /// reused by a process that then claims the freed pipe names.
+    #[cfg(windows)]
+    _broker_process: std::os::windows::io::OwnedHandle,
     #[cfg_attr(not(test), allow(dead_code))]
     containment: String,
     run_generation: AtomicU64,
@@ -197,52 +225,58 @@ impl IsolatedBrokerClient {
             None => std::env::current_exe().map_err(|_| IsolatedBrokerError::Spawn)?,
         };
         let runtime_dir = prepare_runtime_dir(options.runtime_dir.as_deref());
-        let mut command = Command::new(program);
-        // PF-27-S02: no data ever crosses a descriptor created here. stdout
-        // carries only the broker's control socket path; the control channel
-        // is a socket the broker creates, so a process that inherits one of
-        // these pipes during the macOS close-on-exec window learns nothing.
-        command
-            .args(&launcher.args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        // Own process group: terminal hangups and interrupts aimed at the TUI
-        // must not kill the broker before it removes its socket directory.
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut command, 0);
         // Raw values reach the broker only through the private control socket.
-        for key in providers::credential_broker_env_keys() {
-            command.env_remove(key);
-        }
+        let mut removed: Vec<OsString> = providers::credential_broker_env_keys()
+            .map(OsString::from)
+            .collect();
+        removed.extend(launcher.removed_envs.iter().cloned());
+        let mut envs = launcher.envs.clone();
         match runtime_dir.as_ref() {
-            Some(dir) => command.env(BROKER_RUNTIME_DIR_ENV, dir),
-            None => command.env_remove(BROKER_RUNTIME_DIR_ENV),
-        };
-        for key in &launcher.removed_envs {
-            command.env_remove(key);
+            Some(dir) => envs.insert(
+                0,
+                (BROKER_RUNTIME_DIR_ENV.into(), dir.as_os_str().to_owned()),
+            ),
+            None => removed.push(BROKER_RUNTIME_DIR_ENV.into()),
         }
-        for (key, value) in &launcher.envs {
-            command.env(key, value);
-        }
-        let mut child = command.spawn().map_err(|_| IsolatedBrokerError::Spawn)?;
-        let Some(stdout) = child.stdout.take() else {
-            kill_and_reap(child);
-            return Err(IsolatedBrokerError::Spawn);
-        };
+        let (child, stdout) = start_broker_process(&program, &launcher.args, &removed, &envs)?;
+        let broker_pid = child.id();
         let Ok(bootstrap_lines) = spawn_line_reader("credential-broker-bootstrap", stdout) else {
             kill_and_reap(child);
             return Err(IsolatedBrokerError::Spawn);
         };
-        let control_stream =
-            receive_json::<BrokerBootstrap>(&bootstrap_lines, launcher.skip_harness_preamble)
-                .ok()
-                .and_then(|bootstrap| {
-                    connect_control(&bootstrap, runtime_dir.as_deref(), child.id())
+        #[cfg(windows)]
+        let broker_process = {
+            use std::os::windows::io::AsHandle as _;
+            match child.as_handle().try_clone_to_owned() {
+                Ok(handle) => handle,
+                Err(_) => {
+                    kill_and_reap(child);
+                    return Err(IsolatedBrokerError::Spawn);
+                }
+            }
+        };
+        let control_stream = receive_json::<BrokerBootstrap>(
+            &bootstrap_lines,
+            launcher.skip_harness_preamble,
+        )
+        .and_then(|bootstrap| {
+            if bootstrap.pipe_taken {
+                tracing::warn!(
+                    "isolated credential broker refused: another process holds its pipe name"
+                );
+                return Err(IsolatedBrokerError::PipeSquatted);
+            }
+            connect_control(&bootstrap, runtime_dir.as_deref(), child.id())
+        });
+        let control_stream = match control_stream {
+            Ok(control_stream) => control_stream,
+            Err(error) => {
+                kill_and_reap(child);
+                return Err(match error {
+                    IsolatedBrokerError::PipeSquatted => IsolatedBrokerError::PipeSquatted,
+                    _ => IsolatedBrokerError::Spawn,
                 });
-        let Some(control_stream) = control_stream else {
-            kill_and_reap(child);
-            return Err(IsolatedBrokerError::Spawn);
+            }
         };
         let lines = control_stream
             .try_clone()
@@ -300,11 +334,14 @@ impl IsolatedBrokerClient {
         tracing::info!(
             %containment,
             broker_dir = %socket_path.parent().unwrap_or(&socket_path).display(),
+            // Not secret: pipe names can be listed (#390 demo squatter).
+            data_endpoint = %socket_path.display(),
+            broker_pid,
             "isolated credential broker started"
         );
         if protocol_version != CONTROL_PROTOCOL_VERSION
             || !valid_id(&broker_instance)
-            || !socket_path.is_absolute()
+            || !valid_data_endpoint(&socket_path)
             || run_generation != 1
         {
             kill_and_reap_with_cleanup(child, Some(socket_path));
@@ -313,10 +350,13 @@ impl IsolatedBrokerClient {
         Ok(Self {
             control: Mutex::new(control),
             child: Mutex::new(Some(child)),
-            mac: BrokerChannelMac::from_secret(*key),
+            mac: Arc::new(BrokerChannelMac::from_secret(*key)),
             controller_instance,
             broker_instance,
             socket_path,
+            broker_pid,
+            #[cfg(windows)]
+            _broker_process: broker_process,
             containment,
             run_generation: AtomicU64::new(run_generation),
             next_sequence: AtomicU64::new(1),
@@ -332,6 +372,39 @@ impl IsolatedBrokerClient {
 
     pub(crate) fn socket_path(&self) -> &std::path::Path {
         &self.socket_path
+    }
+
+    /// PF-27-S09: HTTP over the broker's data pipe, every connection checked
+    /// to be served by the broker process (PF-27-S06).
+    #[cfg(all(test, windows))]
+    pub(crate) fn data_pipe_client(&self) -> UpstreamClient {
+        self.data_pipe_client_reporting().0
+    }
+
+    /// HTTP over the broker's data pipe, every connection checked to be
+    /// served by the broker process, and a flag set when a connection found
+    /// the pipe served only by another process (#390).
+    #[cfg(windows)]
+    fn data_pipe_client_reporting(&self) -> (UpstreamClient, Arc<AtomicBool>) {
+        let squatted = Arc::new(AtomicBool::new(false));
+        let client = UpstreamClient::named_pipe(
+            &self.socket_path.to_string_lossy(),
+            self.broker_pid,
+            self.mac.clone(),
+            squatted.clone(),
+        );
+        (client, squatted)
+    }
+
+    /// The error for a failed request to the broker.
+    fn send_error(&self, squatted: bool) -> IsolatedBrokerError {
+        if !self.is_alive() {
+            self.fail(IsolatedBrokerError::Unavailable)
+        } else if squatted {
+            IsolatedBrokerError::PipeSquatted
+        } else {
+            IsolatedBrokerError::Unavailable
+        }
     }
 
     /// OS containment the broker reported for itself (PF-27-S02).
@@ -391,11 +464,13 @@ impl IsolatedBrokerClient {
         binding: ModelBindingWire,
         provider_key_id: &str,
         env_names: &[String],
+        account: Option<&StoredKeyAccount>,
     ) -> Result<StoredRegistration, IsolatedBrokerError> {
         let response = self.call(&ControlRequest::RegisterModelStored {
             binding,
             provider_key_id: provider_key_id.to_string(),
             env_names: env_names.to_vec(),
+            account: account.cloned(),
         })?;
         match response {
             ControlResponse::Error {
@@ -560,17 +635,33 @@ impl IsolatedBrokerClient {
             HOST,
             HeaderValue::from_str(operation.host()).map_err(|_| IsolatedBrokerError::Rejected)?,
         );
-        let socket_path = self.socket_path.to_string_lossy().into_owned();
-        UpstreamClient::unix_socket(&socket_path)
+        #[cfg(unix)]
+        let (upstream, squatted) = (
+            UpstreamClient::unix_socket(&self.socket_path.to_string_lossy()),
+            Arc::new(AtomicBool::new(false)),
+        );
+        #[cfg(windows)]
+        let (upstream, squatted) = self.data_pipe_client_reporting();
+        upstream
             .serve(Request::from_parts(parts, body))
             .await
-            .map_err(|_| {
-                if self.is_alive() {
-                    IsolatedBrokerError::Unavailable
-                } else {
-                    self.fail(IsolatedBrokerError::Unavailable)
-                }
-            })
+            .map_err(|_| self.send_error(squatted.load(Ordering::Acquire)))
+    }
+
+    /// PF-27-S09: sends an already signed request over the data pipe.
+    #[cfg(windows)]
+    pub(crate) async fn send_signed(
+        &self,
+        request: Request,
+    ) -> Result<Response, IsolatedBrokerError> {
+        if !self.is_alive() {
+            return Err(IsolatedBrokerError::Unavailable);
+        }
+        let (upstream, squatted) = self.data_pipe_client_reporting();
+        upstream
+            .serve(request)
+            .await
+            .map_err(|_| self.send_error(squatted.load(Ordering::Acquire)))
     }
 
     /// Signs a frame for an arbitrary binding, for cross-run qualification.
@@ -595,6 +686,18 @@ impl IsolatedBrokerClient {
             .lock()
             .ok()
             .and_then(|child| child.as_ref().map(Child::id))
+    }
+
+    /// Writes raw bytes on the control channel, for broken-channel
+    /// qualification (#504).
+    #[cfg(all(test, unix))]
+    pub(crate) fn send_raw_control_for_test(&self, bytes: &[u8]) {
+        use std::io::Write as _;
+        if let Ok(mut control) = self.control.lock()
+            && let Some(writer) = control.writer.as_mut()
+        {
+            let _ = writer.write_all(bytes).and_then(|()| writer.flush());
+        }
     }
 
     /// Terminates the broker immediately. Used for crash qualification.
@@ -671,10 +774,15 @@ impl ControlChannel {
     }
 
     /// Shuts the socket down for every holder, so the broker sees EOF even if
-    /// another process inherited a duplicate of this descriptor.
+    /// another process inherited a duplicate of this descriptor. On Windows
+    /// the pipe handle is never inheritable: cancelling the reader's pending
+    /// read lets the last handle close, which the broker sees as EOF.
     fn close(&mut self) {
         if let Some(writer) = self.writer.take() {
+            #[cfg(unix)]
             let _ = writer.shutdown(std::net::Shutdown::Both);
+            #[cfg(windows)]
+            writer.shutdown();
         }
     }
 }
@@ -756,16 +864,33 @@ fn spawn_line_reader<R: std::io::Read + Send + 'static>(
     Ok(lines)
 }
 
-/// Seatbelt on macOS; seccomp (Landlock when the kernel has it) on Linux.
+/// Seatbelt on macOS; seccomp (Landlock when the kernel has it) on Linux;
+/// on Windows the broker token (PF-27-S08), the process DACL and the
+/// no-child-process job.
 fn containment_sufficient(containment: &str) -> bool {
+    let has = |wanted: &str| containment.split('+').any(|mechanism| mechanism == wanted);
     if cfg!(target_os = "macos") {
         containment == "seatbelt"
     } else if cfg!(target_os = "linux") {
-        containment
-            .split('+')
-            .any(|mechanism| mechanism == "seccomp")
+        has("seccomp")
+    } else if cfg!(windows) {
+        has("token") && has("dacl") && has("job")
     } else {
         false
+    }
+}
+
+/// The broker's data endpoint: an absolute socket path, or on Windows a
+/// broker data pipe name.
+fn valid_data_endpoint(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        path.to_str()
+            .is_some_and(|name| super::pipe::valid_pipe_name(name, /*control*/ false))
+    }
+    #[cfg(not(windows))]
+    {
+        path.is_absolute()
     }
 }
 
@@ -774,14 +899,22 @@ fn containment_sufficient(containment: &str) -> bool {
 /// directory outside the sandbox's writable roots (the Darwin user cache
 /// directory, or `$XDG_RUNTIME_DIR` on Linux). `None` falls back to the
 /// broker's temporary directory, where an agent could delete the socket.
+#[cfg(unix)]
 fn prepare_runtime_dir(configured: Option<&Path>) -> Option<PathBuf> {
     let configured = configured?;
     create_runtime_dir(configured)
         .or_else(|| user_runtime_dir().and_then(|dir| create_runtime_dir(&dir)))
 }
 
+/// PF-27-S06: named pipes live outside the file system; no directory.
+#[cfg(windows)]
+fn prepare_runtime_dir(_configured: Option<&Path>) -> Option<PathBuf> {
+    None
+}
+
 /// Creates `dir` (owner-only) when `<dir>/cbk-XXXXXX/c.sock` fits in a Unix
 /// socket address.
+#[cfg(unix)]
 fn create_runtime_dir(dir: &Path) -> Option<PathBuf> {
     const MAX_RUNTIME_DIR_BYTES: usize = 100 - "/cbk-XXXXXX/c.sock".len();
     if !dir.is_absolute() || dir.as_os_str().len() > MAX_RUNTIME_DIR_BYTES {
@@ -796,6 +929,10 @@ fn create_runtime_dir(dir: &Path) -> Option<PathBuf> {
 }
 
 pub(crate) fn user_runtime_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        None
+    }
     #[cfg(target_os = "macos")]
     {
         let mut buffer = [0 as libc::c_char; 1024];
@@ -815,7 +952,7 @@ pub(crate) fn user_runtime_dir() -> Option<PathBuf> {
         let dir = PathBuf::from(dir.to_str().ok()?);
         Some(dir.join("corbanu-run"))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
@@ -824,10 +961,45 @@ pub(crate) fn user_runtime_dir() -> Option<PathBuf> {
     }
 }
 
+/// PF-27-S06: opens the control pipe named in the bootstrap line, if it is a
+/// broker control pipe served by the broker process this controller spawned.
+/// A pipe served only by another process is [`IsolatedBrokerError::PipeSquatted`]
+/// (#390); nothing is written to it.
+#[cfg(windows)]
+fn connect_control(
+    bootstrap: &BrokerBootstrap,
+    _runtime_dir: Option<&Path>,
+    broker_pid: u32,
+) -> Result<ControlStream, IsolatedBrokerError> {
+    if bootstrap.protocol_version != CONTROL_PROTOCOL_VERSION {
+        return Err(IsolatedBrokerError::Spawn);
+    }
+    super::pipe::connect_control(&bootstrap.control_socket, broker_pid).map_err(|error| {
+        if super::pipe::is_squatted_pipe_error(&error) {
+            tracing::warn!(
+                "isolated credential broker refused: its control pipe is served by another process"
+            );
+            IsolatedBrokerError::PipeSquatted
+        } else {
+            IsolatedBrokerError::Spawn
+        }
+    })
+}
+
 /// Connects to the control socket named in the bootstrap line, but only if
 /// it lives in a broker directory under the expected runtime directory and
 /// its OS peer is the broker process this controller spawned.
+#[cfg(unix)]
 fn connect_control(
+    bootstrap: &BrokerBootstrap,
+    runtime_dir: Option<&Path>,
+    broker_pid: u32,
+) -> Result<UnixStream, IsolatedBrokerError> {
+    connect_unix_control(bootstrap, runtime_dir, broker_pid).ok_or(IsolatedBrokerError::Spawn)
+}
+
+#[cfg(unix)]
+fn connect_unix_control(
     bootstrap: &BrokerBootstrap,
     runtime_dir: Option<&Path>,
     broker_pid: u32,
@@ -853,6 +1025,7 @@ fn connect_control(
 }
 
 /// The process id of a connected Unix socket's peer.
+#[cfg(unix)]
 fn peer_pid(stream: &UnixStream) -> Option<u32> {
     use std::os::fd::AsRawFd as _;
     let fd = stream.as_raw_fd();
@@ -919,6 +1092,125 @@ fn read_control_line<R: std::io::Read>(
     Ok(Some(line))
 }
 
+/// Starts the broker with `args`, without the `removed` variables and with
+/// `envs` set (later entries win). Returns it and its stdout.
+#[cfg(unix)]
+fn start_broker_process(
+    program: &Path,
+    args: &[OsString],
+    removed: &[OsString],
+    envs: &[(OsString, OsString)],
+) -> Result<(Child, std::process::ChildStdout), IsolatedBrokerError> {
+    let mut command = Command::new(program);
+    // PF-27-S02: no data ever crosses a descriptor created here. stdout
+    // carries only the broker's control socket path; the control channel
+    // is a socket the broker creates, so a process that inherits one of
+    // these pipes during the macOS close-on-exec window learns nothing.
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    // Own process group: terminal hangups and interrupts aimed at the TUI
+    // must not kill the broker before it removes its socket directory.
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
+    for key in removed {
+        command.env_remove(key);
+    }
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().map_err(|_| IsolatedBrokerError::Spawn)?;
+    match child.stdout.take() {
+        Some(stdout) => Ok((child, stdout)),
+        None => {
+            kill_and_reap(child);
+            Err(IsolatedBrokerError::Spawn)
+        }
+    }
+}
+
+/// PF-27-S07: no other process of the user can open the broker at any point
+/// confines its writes and keeps it out of the user's other processes. No
+/// confines its writes and keeps it out of the user's other processes. No
+/// console, so console control events aimed at the TUI do not reach it
+/// either.
+#[cfg(windows)]
+fn start_broker_process(
+    program: &Path,
+    args: &[OsString],
+    removed: &[OsString],
+    envs: &[(OsString, OsString)],
+) -> Result<(Child, std::fs::File), IsolatedBrokerError> {
+    let same = |a: &OsString, b: &OsString| a.eq_ignore_ascii_case(b);
+    let mut env = inherited_env(|name| {
+        !removed.iter().any(|key| same(key, name)) && !envs.iter().any(|(key, _)| same(key, name))
+    });
+    for (key, value) in envs {
+        env.retain(|(name, _)| !same(name, key));
+        env.push((key.clone(), value.clone()));
+    }
+    codex_process_hardening::spawn_protected(program, args, &env)
+        .map_err(|_| IsolatedBrokerError::Spawn)
+}
+
+/// This process's environment variables whose names pass `keep`. Unlike
+/// `std::env::vars_os`, the value of a variable that is not kept (a provider
+/// key handed to the broker, PF-27-S09) is never copied: the snapshot is
+/// read in place and wiped before it is freed.
+#[cfg(windows)]
+fn inherited_env(keep: impl Fn(&OsString) -> bool) -> Vec<(OsString, OsString)> {
+    use std::os::windows::ffi::OsStringExt as _;
+    use windows_sys::Win32::System::Environment::FreeEnvironmentStringsW;
+    use windows_sys::Win32::System::Environment::GetEnvironmentStringsW;
+    let mut env = Vec::new();
+    // SAFETY: returns a private copy of the environment block (or null),
+    // freed below.
+    let block = unsafe { GetEnvironmentStringsW() };
+    if block.is_null() {
+        return env;
+    }
+    let mut offset = 0;
+    loop {
+        // SAFETY: the block is a sequence of NUL-terminated strings ended by
+        // an empty one; `offset` stays on an entry start.
+        let entry = unsafe {
+            let start = block.add(offset);
+            let mut len = 0;
+            while *start.add(len) != 0 {
+                len += 1;
+            }
+            std::slice::from_raw_parts_mut(start, len)
+        };
+        if entry.is_empty() {
+            break;
+        }
+        offset += entry.len() + 1;
+        // Hidden per-drive variables (`=C:=C:\...`) start with `=`.
+        let Some(split) = entry
+            .iter()
+            .skip(1)
+            .position(|unit| *unit == u16::from(b'='))
+            .map(|position| position + 1)
+        else {
+            entry.fill(0);
+            continue;
+        };
+        let name = OsString::from_wide(&entry[..split]);
+        if keep(&name) {
+            env.push((name, OsString::from_wide(&entry[split + 1..])));
+        }
+        // The private copy is wiped entry by entry before it is freed.
+        for unit in entry.iter_mut() {
+            // SAFETY: a valid element of the block.
+            unsafe { std::ptr::write_volatile(unit, 0) };
+        }
+    }
+    // SAFETY: from GetEnvironmentStringsW above.
+    unsafe { FreeEnvironmentStringsW(block) };
+    env
+}
+
 /// Gives the broker a short grace period to observe stdin EOF and remove its
 /// socket directory, then kills it.
 fn reap_after_grace(mut child: Child, socket_path: PathBuf) {
@@ -978,6 +1270,24 @@ fn random_hex<const N: usize>() -> String {
 }
 
 #[cfg(test)]
+#[cfg(windows)]
+mod pf_27_s08_tests {
+    use super::containment_sufficient;
+
+    /// Core refuses a Windows broker that reports no broker token, even with
+    /// its other two layers.
+    #[test]
+    fn pf_27_s08_core_refuses_a_broker_without_its_token() {
+        assert!(containment_sufficient("token+dacl+job"));
+        assert!(!containment_sufficient("dacl+job"));
+        assert!(!containment_sufficient("token+job"));
+        assert!(!containment_sufficient("token+dacl"));
+        assert!(!containment_sufficient("none"));
+    }
+}
+
+#[cfg(test)]
+#[cfg(unix)]
 mod pf_27_s02_tests {
     use super::*;
 
@@ -1005,7 +1315,7 @@ mod pf_27_s02_tests {
             prepare_runtime_dir(Some(&configured)),
             Some(configured.clone())
         );
-        assert_eq!(prepare_runtime_dir(None), None);
+        assert_eq!(prepare_runtime_dir(/*configured*/ None), None);
 
         let long = PathBuf::from("/").join("x".repeat(120)).join("run");
         let fallback = user_runtime_dir().and_then(|dir| create_runtime_dir(&dir));

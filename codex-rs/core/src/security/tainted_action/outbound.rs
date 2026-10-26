@@ -7,6 +7,7 @@
 use super::ProtectedActionKind;
 use super::shell::UNSEEN_OUTPUT;
 use super::shell::basename;
+use super::work;
 
 /// Commands that transfer value, with the words that make them do it.
 const VALUE_TRANSFER: &[(&str, &[&str])] = &[
@@ -129,7 +130,7 @@ const MAIL: &[&str] = &["mail", "mailx", "sendmail", "mutt", "msmtp"];
 
 /// Wrappers that run a command given later in their words, with or without
 /// options of their own (`proxychains -q curl`, `uv run solana`, `npx x`).
-const EXEC_WRAPPERS: &[&str] = &[
+pub(super) const EXEC_WRAPPERS: &[&str] = &[
     "proxychains",
     "proxychains4",
     "torsocks",
@@ -161,9 +162,9 @@ const EXEC_WRAPPERS: &[&str] = &[
 ];
 /// Places one command may start (an exec wrapper's words, exec markers);
 /// more fail closed.
-const MAX_JUDGED_POSITIONS: usize = 64;
+pub(super) const MAX_JUDGED_POSITIONS: usize = 64;
 /// Words after which the next word is run as a command (`find -exec curl`).
-const EXEC_MARKERS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir", "--"];
+pub(super) const EXEC_MARKERS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir", "--"];
 
 /// The protected kind of one simple command. `command` is the index of its
 /// command word (after assignments and plain wrappers); the command itself,
@@ -190,6 +191,7 @@ pub(super) fn classify(
     let mut found = None;
     let mut judged = 0;
     for index in command..words.len() {
+        work::step();
         if !(index == command || wrapped || EXEC_MARKERS.contains(&words[index - 1].as_str())) {
             continue;
         }
@@ -288,6 +290,7 @@ fn curl_sends_local_content(args: &[String], proxied: bool) -> bool {
     let mut destinations: Vec<&str> = Vec::new();
     let mut index = 0;
     while let Some(arg) = args.get(index) {
+        work::step();
         index += 1;
         let (flag, attached) = split_option(arg);
         let Some(flag) = flag else {
@@ -346,6 +349,7 @@ fn split_option(arg: &str) -> (Option<&str>, Option<&str>) {
     };
     // The first letter that takes a value ends the group; the rest is its value.
     for (at, letter) in group.char_indices() {
+        work::step();
         let candidate = format!("-{letter}");
         let known = CURL_DATA
             .iter()

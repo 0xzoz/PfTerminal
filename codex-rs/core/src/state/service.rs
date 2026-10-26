@@ -16,6 +16,7 @@ use crate::environment_selection::ThreadEnvironments;
 use crate::exec_policy::ExecPolicyManager;
 use crate::guardian::GuardianRejectionCircuitBreaker;
 use crate::mcp::McpManager;
+use crate::state::ActiveAuthManager;
 use crate::tools::ExecutedToolCallRecorder;
 use crate::tools::code_mode::CodeModeService;
 use crate::tools::handlers::ToolSearchHandlerCache;
@@ -58,7 +59,8 @@ pub(crate) struct SessionServices {
     pub(crate) user_shell: Arc<crate::shell::Shell>,
     pub(crate) show_raw_agent_reasoning: bool,
     pub(crate) exec_policy: Arc<ExecPolicyManager>,
-    pub(crate) auth_manager: Arc<AuthManager>,
+    /// The sign-in of the session's current provider; see [`ActiveAuthManager`].
+    pub(crate) active_auth: ActiveAuthManager,
     /// Upload-only clients shared across turns without logging signed blob URLs.
     pub(crate) openai_file_upload_client_pool: RouteAwareClientPool,
     pub(crate) models_manager: SharedModelsManager,
@@ -84,6 +86,10 @@ pub(crate) struct SessionServices {
     pub(crate) managed_network_requirements_configured: bool,
     pub(crate) network_approval: Arc<NetworkApprovalService>,
     pub(crate) state_db: Option<StateDbHandle>,
+    /// Ledger notices already given in this session (PF-60-S05).
+    pub(crate) accounting_notices: crate::accounting::SessionNotices,
+    /// Whether this session has said the state DB was busy or read-only (#351).
+    pub(crate) state_db_fallback_noticed: std::sync::atomic::AtomicBool,
     pub(crate) live_thread: Option<LiveThread>,
     pub(crate) thread_store: Arc<dyn ThreadStore>,
     pub(crate) attestation_provider: Option<Arc<dyn AttestationProvider>>,
@@ -97,6 +103,12 @@ pub(crate) struct SessionServices {
 }
 
 impl SessionServices {
+    /// The sign-in account-bound services use now (PF-84): it follows a
+    /// mid-session provider switch, so take it per use, not once.
+    pub(crate) fn auth_manager(&self) -> Arc<AuthManager> {
+        self.active_auth.get()
+    }
+
     pub(crate) fn model_client(&self) -> Arc<ModelClient> {
         self.model_client.load_full()
     }
@@ -115,6 +127,13 @@ impl SessionServices {
         self.agent_control
             .effective_security_policy()
             .authority_marker()
+    }
+
+    /// #945: whether a security transition was committed since `shown_under`,
+    /// the marker a prompt was shown under. A tree that was not initialized
+    /// then (no marker) has had no transition since.
+    pub(crate) fn transition_since(&self, shown_under: Option<(u64, u64)>) -> bool {
+        shown_under.is_some() && self.authority_marker() != shown_under
     }
 
     /// The "for session" approval cache, emptied first when a security

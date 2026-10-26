@@ -12,7 +12,7 @@
 //! and a grant for it must be derived narrower ([`BoundedGrant::derive_child`]).
 //!
 //! Issuing is host-only (the grant TUI, PF-25-S01); nothing a model can call
-//! reaches [`issue`].
+//! reaches [`issue_labelled`].
 
 use crate::security::tainted_action::PolicyBinding;
 use crate::security::tainted_action::PostTaintState;
@@ -51,7 +51,6 @@ pub(crate) enum Surface {
 }
 
 impl Surface {
-    #[cfg_attr(not(test), allow(dead_code))]
     const ALL: [Self; 2] = [Self::UnprotectedCommand, Self::UnconfinedProcess];
 
     fn resource_id(self) -> &'static str {
@@ -75,7 +74,6 @@ impl Surface {
         }
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     fn of(resource: &ProtectedResource) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -99,7 +97,6 @@ pub(crate) fn process_operation(process_id: i32, start: u64) -> String {
 }
 
 /// Why a grant was not taken.
-#[cfg_attr(not(test), allow(dead_code))] // issued by the grant TUI (PF-25-S01)
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum GrantRefusal {
     #[error("grants apply only under Aggressive with a live security policy")]
@@ -118,10 +115,14 @@ pub(crate) enum GrantRefusal {
     Expired,
     #[error("this session already holds {MAX_GRANTS} grants")]
     TooMany,
+    #[error("a grant for this exact operation is already held")]
+    Duplicate,
 }
 
 struct Entry {
     grant: BoundedGrant,
+    /// The command the human granted (PF-25-S01); shown in `/security`.
+    command: Vec<String>,
     epoch: u64,
     revocation_generation: u64,
     used: u64,
@@ -151,6 +152,35 @@ fn bounded(text: &str) -> BoundedText {
     BoundedText::new(text).expect("fixed policy text is bounded")
 }
 
+/// PF-41-S01: the grants `thread` holds now under the policy `epoch`, for
+/// the read-only inspector. Neither the grant id nor the operation is given.
+pub(crate) fn held_for_inspector(
+    thread: ThreadId,
+    epoch: u64,
+    revocation_generation: u64,
+    now_unix_seconds: i64,
+) -> Vec<crate::security::inspection::GrantFacts> {
+    let ledger = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    ledger
+        .get(&thread)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.live(epoch, revocation_generation, now_unix_seconds))
+        .map(|entry| crate::security::inspection::GrantFacts {
+            thread,
+            surface: Surface::of(&entry.grant.scope.resource).map_or("unknown", |surface| {
+                match surface {
+                    Surface::UnprotectedCommand => "one command may write hooks and start-up files",
+                    Surface::UnconfinedProcess => "typing into one unconfined process",
+                }
+            }),
+            expires_at: entry.grant.expires_at_unix_seconds,
+            used: entry.used,
+            limit: entry.use_limit(),
+        })
+        .collect()
+}
+
 /// The policy a grant is bound to, if grants can apply at all.
 fn aggressive_binding(state: &PostTaintState) -> Result<(u64, u64, &ActorChain), GrantRefusal> {
     match &state.policy {
@@ -170,15 +200,26 @@ fn aggressive_binding(state: &PostTaintState) -> Result<(u64, u64, &ActorChain),
     }
 }
 
-/// Host-only: hold `grant` for `thread` under the policy in `state`. The
-/// grant TUI (PF-25-S01) is the one caller; no model-reachable path is.
-#[cfg_attr(not(test), allow(dead_code))]
+/// [`issue_labelled`] without a label.
+#[cfg(test)]
 pub(crate) fn issue(
     thread: ThreadId,
     state: &PostTaintState,
     grant: BoundedGrant,
     now_unix_seconds: i64,
 ) -> Result<(), GrantRefusal> {
+    issue_labelled(thread, state, grant, Vec::new(), now_unix_seconds)
+}
+
+/// Whether `grant` may apply to `thread` under the policy in `state` now:
+/// Aggressive and live, this session and agent, a known surface, unexpired.
+/// Returns the policy epoch and revocation generation it binds to.
+pub(crate) fn check(
+    thread: ThreadId,
+    state: &PostTaintState,
+    grant: &BoundedGrant,
+    now_unix_seconds: i64,
+) -> Result<(u64, u64), GrantRefusal> {
     let (epoch, revocation_generation, actor_chain) = aggressive_binding(state)?;
     grant
         .validate()
@@ -214,14 +255,37 @@ pub(crate) fn issue(
     if grant.is_expired_at(now_unix_seconds) {
         return Err(GrantRefusal::Expired);
     }
+    Ok((epoch, revocation_generation))
+}
+
+/// Host-only: hold `grant` for `thread` under the policy in `state`. Only
+/// a grant the human confirmed in the grant review reaches it
+/// (`grant_offer`, PF-25-S01); no model-reachable path does. `command` is
+/// what the human saw.
+pub(crate) fn issue_labelled(
+    thread: ThreadId,
+    state: &PostTaintState,
+    grant: BoundedGrant,
+    command: Vec<String>,
+    now_unix_seconds: i64,
+) -> Result<(), GrantRefusal> {
+    let (epoch, revocation_generation) = check(thread, state, &grant, now_unix_seconds)?;
     let mut ledger = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
     let entries = ledger.entry(thread).or_default();
     entries.retain(|entry| entry.live(epoch, revocation_generation, now_unix_seconds));
+    // A live grant for the same operation already opens it.
+    if entries.iter().any(|entry| {
+        entry.grant.scope.resource == grant.scope.resource
+            && entry.grant.scope.context == grant.scope.context
+    }) {
+        return Err(GrantRefusal::Duplicate);
+    }
     if entries.len() >= MAX_GRANTS {
         return Err(GrantRefusal::TooMany);
     }
     entries.push(Entry {
         grant,
+        command,
         epoch,
         revocation_generation,
         used: 0,
@@ -277,6 +341,38 @@ pub(crate) fn admit(
     Some(grant_id)
 }
 
+/// PF-25-S02: drop the grant `grant_id`, wherever it is held. Returns
+/// whether one was.
+pub(crate) fn revoke_grant(grant_id: &str) -> bool {
+    let mut ledger = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut found = None;
+    for (thread, entries) in ledger.iter_mut() {
+        let before = entries.len();
+        entries.retain(|entry| entry.grant.grant_id.as_str() != grant_id);
+        if entries.len() != before {
+            found = Some(*thread);
+        }
+    }
+    ledger.retain(|_, entries| !entries.is_empty());
+    if let Some(thread) = found {
+        tracing::info!(
+            target: "codex_core::security::aggressive",
+            %thread,
+            grant_id,
+            "aggressive grant revoked by the human"
+        );
+    }
+    found.is_some()
+}
+
+/// PF-25-S02: drop every grant of this process (revoke all, kill switch).
+pub(crate) fn revoke_everything() {
+    LEDGER
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
+}
+
 /// Drop every grant `thread` holds (also a committed transition, PF-23-S03,
 /// and revocation, PF-25-S02).
 pub(crate) fn revoke_all(thread: ThreadId) {
@@ -284,6 +380,47 @@ pub(crate) fn revoke_all(thread: ThreadId) {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .remove(&thread);
+}
+
+/// A grant held now, as `/security` lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeldGrant {
+    pub thread: ThreadId,
+    pub grant_id: String,
+    /// The command, as one escaped line.
+    pub label: String,
+    pub command: Vec<String>,
+    pub uses_left: Option<u64>,
+    pub expires_at_unix_seconds: i64,
+}
+
+/// Every grant of this process that is unexpired and has uses left. A level
+/// change, revocation or kill switch removes grants from the ledger when it
+/// commits, so what is listed is what can still be used.
+pub(crate) fn held(now_unix_seconds: i64) -> Vec<HeldGrant> {
+    let ledger = LEDGER.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut held: Vec<HeldGrant> = ledger
+        .iter()
+        .flat_map(|(thread, entries)| {
+            entries.iter().filter_map(move |entry| {
+                let uses_left = entry
+                    .use_limit()
+                    .map(|limit| limit.saturating_sub(entry.used));
+                (!entry.grant.is_expired_at(now_unix_seconds) && uses_left != Some(0)).then(|| {
+                    HeldGrant {
+                        thread: *thread,
+                        grant_id: entry.grant.grant_id.as_str().to_string(),
+                        label: super::grant_offer::display_command(&entry.command),
+                        command: entry.command.clone(),
+                        uses_left,
+                        expires_at_unix_seconds: entry.grant.expires_at_unix_seconds,
+                    }
+                })
+            })
+        })
+        .collect();
+    held.sort_by_key(|grant| grant.expires_at_unix_seconds);
+    held
 }
 
 pub(crate) fn now_unix_seconds() -> i64 {

@@ -491,7 +491,8 @@ async fn native_two_real_writer_orders_and_joint_read_snapshots() -> anyhow::Res
                     StateRuntime::delete_threads_on_connection(
                         &mut tx,
                         &[owner(/*id*/ 7)],
-                        DETAIL_MS
+                        DETAIL_MS,
+                        /*validated_at_ms*/ None,
                     )
                     .await?,
                     1
@@ -615,7 +616,7 @@ async fn native_invalid_time_activation_and_late_import_roll_back() -> anyhow::R
         (
             attempt(/*id*/ 99, /*dispatch*/ 0),
             vec![],
-            "unsupported compact-only",
+            "compact-only late imports are unsupported",
         ),
         (attempt(/*id*/ 99, DETAIL_MS + 1), vec![], "future dispatch"),
         (

@@ -22,6 +22,21 @@ pub(crate) struct LaunchPlan {
     replaced_flags: Vec<&'static str>,
     /// PF-29-S01: credential paths denied to agent commands.
     isolated: Vec<PathBuf>,
+    /// PF-24-S02: another process enforcing Aggressive runs on this home, so
+    /// this Permissive launch left its rule file and registry entry alone.
+    shared_with_aggressive: bool,
+}
+
+/// Held while this process enforces Aggressive (see
+/// [`level::hold_aggressive_lock`]); released when it exits or restarts.
+static AGGRESSIVE_LOCK: std::sync::Mutex<Option<std::fs::File>> = std::sync::Mutex::new(None);
+
+/// Before "restart now" starts the next process.
+pub(crate) fn release_aggressive_lock() {
+    AGGRESSIVE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
 }
 
 impl LaunchPlan {
@@ -32,7 +47,22 @@ impl LaunchPlan {
         cli_kv_overrides: &mut Vec<(String, toml::Value)>,
     ) -> Result<Self, String> {
         let stored = level::load(codex_home);
-        if stored != StoredLevel::Absent {
+        // A Permissive launch must not remove the rule file (or the registry
+        // entry) another process on this home still enforces Aggressive with.
+        let shared_with_aggressive = stored.enforced() != ChosenLevel::Aggressive
+            && stored != StoredLevel::Absent
+            && level::aggressive_running(codex_home);
+        if stored.enforced() == ChosenLevel::Aggressive {
+            match level::hold_aggressive_lock(codex_home) {
+                Ok(lock) => {
+                    *AGGRESSIVE_LOCK
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(lock);
+                }
+                Err(err) => tracing::warn!("could not hold the Aggressive lock: {err}"),
+            }
+        }
+        if stored != StoredLevel::Absent && !shared_with_aggressive {
             level::sync_rules(codex_home, stored.enforced()).map_err(|err| {
                 format!(
                     "Could not apply the stored security level ({}): {err}",
@@ -45,6 +75,7 @@ impl LaunchPlan {
             stored,
             replaced_flags: Vec::new(),
             isolated: Vec::new(),
+            shared_with_aggressive,
         };
         if plan.aggressive() && codex_home.to_str().is_none() {
             return Err(format!(
@@ -75,6 +106,15 @@ impl LaunchPlan {
                 crate::legacy_core::protected_preflight::home_dir().as_deref(),
                 cwd.as_deref(),
             );
+            // #651: also a database folder given with `-c sqlite_home=…`.
+            if !plan.isolated.is_empty() {
+                let given = preflight::override_database_isolation(
+                    codex_home,
+                    cli_kv_overrides,
+                    cwd.as_deref(),
+                );
+                plan.isolated.extend(given);
+            }
             aggressive::deny_reads(cli_kv_overrides, &plan.isolated);
         }
         Ok(plan)
@@ -84,19 +124,60 @@ impl LaunchPlan {
     /// nested-launch detection (`Some(true)`), forgotten (`Some(false)`), or
     /// left alone because the level was never chosen.
     pub(crate) fn origin_registry_update(&self) -> Option<bool> {
-        (self.stored != StoredLevel::Absent).then(|| self.aggressive())
+        (self.stored != StoredLevel::Absent && !self.shared_with_aggressive)
+            .then(|| self.aggressive())
     }
 
     fn aggressive(&self) -> bool {
         self.stored.enforced() == ChosenLevel::Aggressive
     }
 
-    /// A remote app server does not load these overrides; refuse rather than
-    /// show Aggressive over a server that does not enforce it.
+    /// #750: what this process enforces. Moderate is Core's level (D1: no
+    /// launch-time overrides), so it is active only where the loaded config
+    /// enforces it: saved in `/security` with Core's record, or set as
+    /// `[security] level` (#749: the inspector and picker no longer say
+    /// Permissive next to Moderate in force). Records the Moderate warnings.
+    pub(super) fn active_level(&self, config: &mut Config) -> ChosenLevel {
+        use crate::legacy_core::security_level_change::SecurityLevel;
+        let core = config.security_level;
+        match self.stored.enforced() {
+            ChosenLevel::Aggressive => return ChosenLevel::Aggressive,
+            ChosenLevel::Moderate if core < SecurityLevel::Moderate => {
+                config.startup_warnings.push(
+                    "Security level Moderate was saved, but Core's level was not confirmed with it, so Moderate's protections are not on. Choose Moderate again in /security.".to_string(),
+                );
+                return ChosenLevel::Permissive;
+            }
+            ChosenLevel::Moderate => {}
+            ChosenLevel::Permissive if core == SecurityLevel::Moderate => {}
+            ChosenLevel::Permissive => return ChosenLevel::Permissive,
+        }
+        // D2: the credential broker is on by default where it runs; only an
+        // explicit setting keeps it off.
+        if cfg!(any(target_os = "macos", target_os = "linux", windows))
+            && !config.features.enabled(Feature::BrokerModelAuth)
+        {
+            config.startup_warnings.push(
+                "Security level Moderate: broker_model_auth is off (set in your configuration or by policy), so Corbanu reads provider keys itself instead of the credential broker.".to_string(),
+            );
+        }
+        if !config.features.enabled(Feature::SourceEnvelopes) {
+            config.startup_warnings.push(
+                "Security level Moderate needs the source_envelopes feature: without it Corbanu refuses every model request. Turn it on, or choose Permissive in /security.".to_string(),
+            );
+        }
+        ChosenLevel::Moderate
+    }
+
+    /// A remote app server does not load these overrides (nor, for
+    /// Moderate, this home's Core record); refuse rather than show a level
+    /// over a server that does not enforce it.
     pub(crate) fn check_target(&self, uses_remote_app_server: bool) -> Result<(), String> {
-        if self.aggressive() && uses_remote_app_server {
+        let stored = self.stored.enforced();
+        if stored != ChosenLevel::Permissive && uses_remote_app_server {
             return Err(format!(
-                "Security level Aggressive cannot be enforced on a remote app server. Start locally, or choose Permissive in /security first ({}).",
+                "Security level {} cannot be enforced on a remote app server. Start locally, or choose Permissive in /security first ({}).",
+                stored.name(),
                 level::state_path(&self.codex_home).display()
             ));
         }
@@ -129,7 +210,11 @@ impl LaunchPlan {
         let mut boundary = None;
         if self.aggressive() {
             verify_aggressive(&self.codex_home, &self.codex_home, config).await?;
-            let unisolated = preflight::verify_isolation(config, &self.isolated);
+            let mut unisolated = preflight::verify_isolation(config, &self.isolated);
+            // #651: with a preflight, also a database folder set apart.
+            if !self.isolated.is_empty() {
+                unisolated.extend(preflight::verify_database_folder(config));
+            }
             if !unisolated.is_empty() {
                 return Err(format!(
                     "Security level Aggressive could not be fully applied:\n  {}\nChoose Permissive by editing {}.",
@@ -166,8 +251,28 @@ impl LaunchPlan {
             }
             if let Some(reason) = &launch_warning {
                 config.startup_warnings.push(format!(
-                    "Stored security level is unreadable ({reason}). Aggressive is enforced; choose a level in /security to repair it."
+                    "Stored security level is unreadable or was changed outside /security ({reason}). Aggressive is enforced; choose a level in /security to repair it."
                 ));
+            }
+            // PF-24-S02: a save that raised Core's level writes both records;
+            // one missing means it did not finish. Nothing weaker applies.
+            if preflight_enabled
+                && preflight::receipt_path(&self.codex_home).exists()
+                && level::load_confirmed(&self.codex_home)
+                    != level::ConfirmedLevel::Level("aggressive".to_string())
+            {
+                config.startup_warnings.push(
+                    "Security level Aggressive was saved, but Core's level was not confirmed with it, so Core's protections are not on. Choose Aggressive again in /security.".to_string(),
+                );
+            }
+            // #391: Aggressive turns broker_model_auth on where the broker
+            // runs; only an explicit setting keeps it off.
+            if cfg!(any(target_os = "macos", target_os = "linux", windows))
+                && !config.features.enabled(Feature::BrokerModelAuth)
+            {
+                config.startup_warnings.push(
+                    "Security level Aggressive: broker_model_auth is off (set in your configuration or by policy), so Corbanu reads provider keys itself instead of the credential broker.".to_string(),
+                );
             }
             if !self.replaced_flags.is_empty() {
                 config.startup_warnings.push(format!(
@@ -175,6 +280,12 @@ impl LaunchPlan {
                     self.replaced_flags.join(", ")
                 ));
             }
+        }
+        let active = self.active_level(config);
+        if self.shared_with_aggressive {
+            config.startup_warnings.push(
+                "Another Corbanu Terminal using this Corbanu home still enforces Aggressive; its vault rule file stays until it exits.".to_string(),
+            );
         }
         crate::claude_panes::containment::install(
             crate::claude_panes::containment::ContainmentSettings {
@@ -190,7 +301,7 @@ impl LaunchPlan {
                     self.stored,
                     StoredLevel::Absent | StoredLevel::Chosen(ChosenLevel::Permissive)
                 ),
-            active: self.stored.enforced(),
+            active,
             preflight_enabled,
             boundary,
         });
@@ -206,7 +317,9 @@ pub(crate) async fn verify_aggressive(
     config: &Config,
 ) -> Result<(), String> {
     let rules_present = std::fs::read_to_string(level::rules_path(codex_home))
-        .is_ok_and(|contents| contents == level::rules_contents());
+        // Either nested-launch form: a session that saved another level
+        // keeps the file it was started with until the next launch.
+        .is_ok_and(|contents| codex_security_level::level::is_rules_contents(&contents));
     let mut failures = aggressive::verify(config, rules_present, origin);
     failures.extend(aggressive::verify_exec_policy(config).await);
     if failures.is_empty() {

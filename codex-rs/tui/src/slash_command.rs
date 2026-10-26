@@ -4,6 +4,10 @@ use strum_macros::EnumIter;
 use strum_macros::EnumString;
 use strum_macros::IntoStaticStr;
 
+/// The forms `/cost` accepts; the full rules are in its usage message.
+pub(crate) const COST_ARGUMENT_HINT: &str =
+    "[YYYY-MM-DD]  or  START END hour|day|week|month  (UTC)";
+
 /// Commands that can be invoked by starting a message with a leading slash.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, EnumIter, AsRefStr, IntoStaticStr,
@@ -118,9 +122,10 @@ impl SlashCommand {
             SlashCommand::Import => "import setup, this project, and recent chats from Claude Code",
             SlashCommand::Hooks => "view and manage lifecycle hooks",
             SlashCommand::Status => "show current session configuration and token usage",
-            SlashCommand::Usage => {
+            SlashCommand::Usage if cfg!(feature = "developer-accounting") => {
                 "view recorded request cost, account usage, or use a rate-limit reset"
             }
+            SlashCommand::Usage => "view account usage or use a rate-limit reset",
             SlashCommand::Cost => "what your turns cost, on whichever provider served them",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
             SlashCommand::Title => "configure which items appear in the terminal title",
@@ -208,6 +213,15 @@ impl SlashCommand {
                 | SlashCommand::Telegram
                 | SlashCommand::Gpu
         )
+    }
+
+    /// A short, dimmed hint of the accepted arguments, shown in the composer
+    /// after the command and a space until the user types an argument.
+    pub fn argument_hint(self) -> Option<&'static str> {
+        match self {
+            SlashCommand::Cost => Some(COST_ARGUMENT_HINT),
+            _ => None,
+        }
     }
 
     /// Whether this command remains available inside an active side conversation.
@@ -312,9 +326,9 @@ impl SlashCommand {
             SlashCommand::Rollout | SlashCommand::TestApproval => cfg!(debug_assertions),
             // The recorded-request view is held: collection cannot exist in a
             // shipped binary, and advertising the view there was never
-            // authorised. Listing it is gated on the same build that can
-            // collect. Typing it still works, exactly as `/usage requests`
-            // already did, so nothing new is reachable in a shipped build.
+            // authorised. It is gated on the same build that can collect: in
+            // any other build typing it is an unrecognized command, and
+            // `/usage requests` says the history is not part of the build.
             SlashCommand::Cost => cfg!(feature = "developer-accounting"),
             _ => true,
         }

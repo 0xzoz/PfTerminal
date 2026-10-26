@@ -307,14 +307,24 @@ pub(crate) enum PermissionConfirmationResult {
     Uncertain(String),
 }
 
+/// PF-84: only `Confirmed { Applied }` says core applied the update before
+/// replying; `Uncertain` (deadline passed, listener lost) and `Accepted` (a
+/// server that ignores `confirm`) do not.
+pub(crate) fn applied_before_reply(response: &ThreadSettingsUpdateResponse) -> bool {
+    matches!(
+        response,
+        ThreadSettingsUpdateResponse::Confirmed {
+            outcome: codex_app_server_protocol::ThreadSettingsUpdateOutcome::Applied,
+        }
+    )
+}
+
 impl PermissionConfirmationResult {
     fn from_reply(
         reply: std::result::Result<ThreadSettingsUpdateResponse, TypedRequestError>,
     ) -> Self {
         match reply {
-            Ok(ThreadSettingsUpdateResponse::Confirmed {
-                outcome: codex_app_server_protocol::ThreadSettingsUpdateOutcome::Applied,
-            }) => Self::Applied,
+            Ok(response) if applied_before_reply(&response) => Self::Applied,
             Ok(ThreadSettingsUpdateResponse::Accepted {}) => Self::Unsupported,
             Err(TypedRequestError::Server { source, .. }) => {
                 if is_thread_settings_update_unsupported(&source) {
@@ -452,6 +462,29 @@ impl AppServerSession {
         client.server_version()
     }
 
+    /// The app server's current `model/list` (hidden models included), as
+    /// at bootstrap. PF-84: it follows the account the session uses.
+    pub(crate) async fn list_models(&mut self) -> Result<Vec<ModelPreset>> {
+        let request_id = self.next_request_id();
+        let models = self
+            .client
+            .request_typed::<ModelListResponse>(ClientRequest::ModelList {
+                request_id,
+                params: ModelListParams {
+                    cursor: None,
+                    limit: None,
+                    include_hidden: Some(true),
+                },
+            })
+            .await
+            .map_err(|err| bootstrap_request_error("model/list failed", err))?;
+        Ok(models
+            .data
+            .into_iter()
+            .map(model_preset_from_api_model)
+            .collect())
+    }
+
     pub(crate) async fn bootstrap(&mut self, config: &Config) -> Result<AppServerBootstrap> {
         let started_at = Instant::now();
         let account = self.read_account().await?;
@@ -530,10 +563,10 @@ impl AppServerSession {
             feedback_audience,
             account_has_chatgpt_account,
         ) = match account.account {
-            Some(Account::ApiKey {}) => (
+            Some(Account::ApiKey { env_var }) => (
                 None,
                 Some(TelemetryAuthMode::ApiKey),
-                Some(StatusAccountDisplay::ApiKey),
+                Some(StatusAccountDisplay::ApiKey { env_var }),
                 None,
                 FeedbackAudience::External,
                 false,
@@ -715,19 +748,42 @@ impl AppServerSession {
         config: &Config,
         session_start_source: Option<ThreadStartSource>,
     ) -> Result<AppServerStartedThread> {
+        self.start_thread_with_params(config, session_start_source, /*prompt_edit*/ false)
+            .await
+    }
+
+    /// #1038: editing the first message of a conversation continues in a new
+    /// thread with no history; the server is told it is a reopen all the same.
+    pub(crate) async fn start_thread_for_first_prompt_edit(
+        &mut self,
+        config: &Config,
+    ) -> Result<AppServerStartedThread> {
+        self.start_thread_with_params(
+            config, /*session_start_source*/ None, /*prompt_edit*/ true,
+        )
+        .await
+    }
+
+    async fn start_thread_with_params(
+        &mut self,
+        config: &Config,
+        session_start_source: Option<ThreadStartSource>,
+        prompt_edit: bool,
+    ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(config);
+        let params = ThreadStartParams {
+            reopened_by_prompt_edit: prompt_edit,
+            ..thread_start_params_from_config(
+                &session_config,
+                self.thread_params_mode(),
+                self.remote_cwd_override.as_deref(),
+                session_start_source,
+            )
+        };
         let response: ThreadStartResponse = self
             .client
-            .request_typed(ClientRequest::ThreadStart {
-                request_id,
-                params: thread_start_params_from_config(
-                    &session_config,
-                    self.thread_params_mode(),
-                    self.remote_cwd_override.as_deref(),
-                    session_start_source,
-                ),
-            })
+            .request_typed(ClientRequest::ThreadStart { request_id, params })
             .await
             .map_err(|err| {
                 bootstrap_request_error("thread/start failed during TUI bootstrap", err)
@@ -1010,24 +1066,28 @@ impl AppServerSession {
         }
         let request_id = self.next_request_id();
         let session_config = self.session_config_with_effective_service_tier(&config);
+        let mut params = ThreadForkParams {
+            last_turn_id,
+            before_turn_id,
+            defer_goal_continuation: goal_continuation == ForkGoalContinuation::DeferUntilNextTurn,
+            exclude_turns: presentation == ForkPresentation::SideConversation,
+            ..thread_fork_params_from_config(
+                session_config,
+                thread_id,
+                self.thread_params_mode(),
+                self.remote_cwd_override.as_deref(),
+            )
+        };
+        if presentation == ForkPresentation::SideConversation {
+            // PF-60-S06: developer accounting labels `/side` work `side:` and
+            // every other temporary fork `fork:`.
+            params.thread_source = Some(ThreadSource::Feature(
+                codex_protocol::protocol::ThreadSource::SIDE_CONVERSATION.to_string(),
+            ));
+        }
         let response: ThreadForkResponse = self
             .client
-            .request_typed(ClientRequest::ThreadFork {
-                request_id,
-                params: ThreadForkParams {
-                    last_turn_id,
-                    before_turn_id,
-                    defer_goal_continuation: goal_continuation
-                        == ForkGoalContinuation::DeferUntilNextTurn,
-                    exclude_turns: presentation == ForkPresentation::SideConversation,
-                    ..thread_fork_params_from_config(
-                        session_config,
-                        thread_id,
-                        self.thread_params_mode(),
-                        self.remote_cwd_override.as_deref(),
-                    )
-                },
-            })
+            .request_typed(ClientRequest::ThreadFork { request_id, params })
             .await
             .map_err(|err| {
                 bootstrap_request_error("thread/fork failed during TUI bootstrap", err)
@@ -1213,12 +1273,16 @@ impl AppServerSession {
             .wrap_err("thread/metadata/update failed while syncing git branch")
     }
 
+    /// Returns whether core applied the update before replying (a
+    /// `confirm` request answered `Confirmed { Applied }`); `false` when it
+    /// was only accepted, the outcome is uncertain, or the server does not
+    /// support the method.
     pub(crate) async fn thread_settings_update(
         &mut self,
         params: ThreadSettingsUpdateParams,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if !self.thread_settings_update_supported {
-            return Ok(());
+            return Ok(false);
         }
         let request_id = self.next_request_id();
         match self
@@ -1229,7 +1293,7 @@ impl AppServerSession {
             })
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(response) => Ok(applied_before_reply(&response)),
             Err(TypedRequestError::Server { source, .. })
                 if is_thread_settings_update_unsupported(&source) =>
             {
@@ -1240,7 +1304,7 @@ impl AppServerSession {
                 // of showing an error every time the user changes model, effort,
                 // personality, or mode.
                 self.thread_settings_update_supported = false;
-                Ok(())
+                Ok(false)
             }
             Err(err) => Err(err).wrap_err("thread/settings/update failed in TUI"),
         }
@@ -1309,6 +1373,59 @@ impl AppServerSession {
             })
             .await
             .wrap_err("thread/inject_items failed during TUI side conversation setup")
+    }
+
+    /// D95 (#1146): starts a turn with the person's `items` that sends no
+    /// settings at all (no cwd, model, approval, sandbox, permissions,
+    /// effort, mode or personality), so the thread keeps the settings Core
+    /// holds for it, as a turn its mailbox starts does.
+    pub(crate) async fn turn_start_keeping_thread_settings(
+        &mut self,
+        thread_id: ThreadId,
+        items: Vec<UserInput>,
+        additional_context: Option<
+            HashMap<String, codex_app_server_protocol::AdditionalContextEntry>,
+        >,
+    ) -> Result<TurnStartOutcome> {
+        let client_user_message_id = Uuid::now_v7().to_string();
+        let request_handle = self.request_handle();
+        let mut requests = Vec::with_capacity(PER_THREAD_REQUEST_ATTEMPTS);
+        for _ in 0..PER_THREAD_REQUEST_ATTEMPTS {
+            let request_id = self.next_request_id();
+            requests.push(ClientRequest::TurnStart {
+                request_id,
+                params: TurnStartParams {
+                    thread_id: thread_id.to_string(),
+                    client_user_message_id: Some(client_user_message_id.clone()),
+                    input: items.clone(),
+                    responsesapi_client_metadata: None,
+                    additional_context: additional_context.clone(),
+                    environments: None,
+                    cwd: None,
+                    runtime_workspace_roots: None,
+                    approval_policy: None,
+                    approvals_reviewer: None,
+                    sandbox_policy: None,
+                    permissions: None,
+                    model: None,
+                    service_tier: None,
+                    effort: None,
+                    summary: None,
+                    personality: None,
+                    output_schema: None,
+                    collaboration_mode: None,
+                    multi_agent_mode: None,
+                },
+            });
+        }
+        tokio::spawn(run_turn_start_requests(
+            request_handle,
+            thread_id,
+            requests,
+            /*injected_failures*/ 0,
+        ))
+        .await
+        .map_err(|error| color_eyre::eyre::eyre!("turn/start worker panicked: {error}"))?
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1829,9 +1946,12 @@ pub(crate) async fn start_thread_with_request_handle(
 pub(crate) fn status_account_display_from_auth_mode(
     auth_mode: Option<AuthMode>,
     plan_type: Option<codex_protocol::account::PlanType>,
+    api_key_env_var: Option<String>,
 ) -> Option<StatusAccountDisplay> {
     match auth_mode {
-        Some(AuthMode::ApiKey) => Some(StatusAccountDisplay::ApiKey),
+        Some(AuthMode::ApiKey) => Some(StatusAccountDisplay::ApiKey {
+            env_var: api_key_env_var,
+        }),
         Some(AuthMode::Chatgpt)
         | Some(AuthMode::ChatgptAuthTokens)
         | Some(AuthMode::AgentIdentity)
@@ -2102,6 +2222,7 @@ fn thread_start_params_from_config(
     ThreadStartParams {
         model: config.model.clone(),
         model_provider: thread_params_mode.model_provider_from_config(config),
+        provider_account: config.provider_account_override.clone(),
         // Interactive sessions tolerate model/provider pairs persisted by older
         // releases: keep the provider, let its catalog choose a valid default.
         allow_provider_model_fallback: true,
@@ -2167,6 +2288,7 @@ fn thread_resume_params_from_config(
         thread_id: thread_id.to_string(),
         model,
         model_provider,
+        provider_account: config.provider_account_override.clone(),
         service_tier: resume_service_tier_override(&config, model_settings),
         cwd: thread_cwd_from_config(&config, thread_params_mode, remote_cwd_override),
         runtime_workspace_roots: Some(config.workspace_roots.clone()),
@@ -2205,6 +2327,7 @@ fn thread_fork_params_from_config(
         thread_id: thread_id.to_string(),
         model: config.model.clone(),
         model_provider: thread_params_mode.model_provider_from_config(&config),
+        provider_account: config.provider_account_override.clone(),
         service_tier: service_tier_override_from_config(&config),
         cwd: thread_cwd_from_config(&config, thread_params_mode, remote_cwd_override),
         runtime_workspace_roots: Some(config.workspace_roots.clone()),
@@ -2365,7 +2488,7 @@ async fn thread_session_state_from_thread_resume_response(
             thread_params_mode,
         )
     };
-    thread_session_state_from_thread_response(
+    let mut session = thread_session_state_from_thread_response(
         &response.thread.id,
         response.thread.forked_from_id.clone(),
         response.thread.name.clone(),
@@ -2383,7 +2506,9 @@ async fn thread_session_state_from_thread_resume_response(
         response.reasoning_effort.clone(),
         config,
     )
-    .await
+    .await?;
+    session.provider_account = response.provider_account.clone();
+    Ok(session)
 }
 
 async fn thread_session_state_from_thread_fork_response(
@@ -2397,7 +2522,7 @@ async fn thread_session_state_from_thread_fork_response(
         config,
         thread_params_mode,
     );
-    thread_session_state_from_thread_response(
+    let mut session = thread_session_state_from_thread_response(
         &response.thread.id,
         response.thread.forked_from_id.clone(),
         response.thread.name.clone(),
@@ -2415,7 +2540,10 @@ async fn thread_session_state_from_thread_fork_response(
         response.reasoning_effort.clone(),
         config,
     )
-    .await
+    .await?;
+    // PF-84 (#555): the account the fork runs on (its source thread's).
+    session.provider_account = response.provider_account.clone();
+    Ok(session)
 }
 
 fn display_permission_profile_from_thread_response(
@@ -2488,6 +2616,7 @@ async fn thread_session_state_from_thread_response(
         }),
         network_proxy: None,
         rollout_path,
+        provider_account: None,
     })
 }
 
@@ -3427,6 +3556,7 @@ requires_openai_auth = false
         let mut config = build_config(&temp_dir).await;
         config.base_instructions = Some("Base override.".to_string());
         config.developer_instructions = Some("Developer override.".to_string());
+        config.provider_account_override = Some("zai:personal".to_string());
         let thread_id = ThreadId::new();
 
         let params = thread_fork_params_from_config(
@@ -3441,6 +3571,8 @@ requires_openai_auth = false
             params.developer_instructions.as_deref(),
             Some("Developer override.")
         );
+        // PF-84 (#555): `--account` beats the source thread's account.
+        assert_eq!(params.provider_account.as_deref(), Some("zai:personal"));
     }
 
     #[tokio::test]
@@ -3461,8 +3593,13 @@ requires_openai_auth = false
         )?;
         let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
 
+        let provider_account = Some(format!("{}:default", config.model_provider_id));
         let regular = app_server.fork_thread(config.clone(), thread_id).await?;
         let side = app_server.fork_side_thread(config, thread_id).await?;
+
+        // PF-84 (#555): each fork reports the account it runs on.
+        assert_eq!(regular.session.provider_account, provider_account);
+        assert_eq!(side.session.provider_account, provider_account);
 
         assert_eq!(regular.turns.len(), 1);
         assert!(matches!(
@@ -3474,6 +3611,20 @@ requires_openai_auth = false
                 }]
         ));
         assert_eq!(side.turns, Vec::<Turn>::new());
+
+        // PF-60-S06: only the side fork is marked as `/side`, so developer
+        // accounting labels its work `side:` and the regular fork's `fork:`.
+        let side_thread = app_server
+            .thread_read(side.session.thread_id, /*include_turns*/ false)
+            .await?;
+        assert_eq!(
+            side_thread.thread_source,
+            Some(ThreadSource::Feature("side".to_string()))
+        );
+        let regular_thread = app_server
+            .thread_read(regular.session.thread_id, /*include_turns*/ false)
+            .await?;
+        assert_eq!(regular_thread.thread_source, Some(ThreadSource::User));
         app_server.shutdown().await?;
         Ok(())
     }
@@ -3638,6 +3789,7 @@ requires_openai_auth = false
             initial_turns_page: None,
             turns_backwards_cursor: None,
             items_backwards_cursor: None,
+            provider_account: Some("openai:default".to_string()),
         };
 
         let started = started_thread_from_resume_response(
@@ -3648,6 +3800,10 @@ requires_openai_auth = false
         .await
         .expect("resume response should map");
         assert_eq!(started.session.forked_from_id, Some(forked_from_id));
+        assert_eq!(
+            started.session.provider_account.as_deref(),
+            Some("openai:default")
+        );
         assert_eq!(
             started.session.runtime_workspace_roots,
             response.runtime_workspace_roots
@@ -3817,6 +3973,7 @@ requires_openai_auth = false
         let business = status_account_display_from_auth_mode(
             Some(AuthMode::Chatgpt),
             Some(codex_protocol::account::PlanType::EnterpriseCbpUsageBased),
+            /*api_key_env_var*/ None,
         );
         assert!(matches!(
             business,
@@ -3829,6 +3986,7 @@ requires_openai_auth = false
         let team = status_account_display_from_auth_mode(
             Some(AuthMode::Chatgpt),
             Some(codex_protocol::account::PlanType::SelfServeBusinessUsageBased),
+            /*api_key_env_var*/ None,
         );
         assert!(matches!(
             team,
@@ -3841,6 +3999,7 @@ requires_openai_auth = false
         let business_prolite = status_account_display_from_auth_mode(
             Some(AuthMode::Chatgpt),
             Some(codex_protocol::account::PlanType::SelfServeBusinessProLite),
+            /*api_key_env_var*/ None,
         );
         assert!(matches!(
             business_prolite,
@@ -3849,5 +4008,19 @@ requires_openai_auth = false
                 plan: Some(ref plan),
             }) if plan == "Business"
         ));
+    }
+
+    #[test]
+    fn status_account_display_from_auth_mode_keeps_the_api_key_source() {
+        assert_eq!(
+            status_account_display_from_auth_mode(
+                Some(AuthMode::ApiKey),
+                /*plan_type*/ None,
+                Some("OPENAI_API_KEY".to_string()),
+            ),
+            Some(StatusAccountDisplay::ApiKey {
+                env_var: Some("OPENAI_API_KEY".to_string()),
+            })
+        );
     }
 }

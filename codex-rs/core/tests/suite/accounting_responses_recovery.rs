@@ -75,13 +75,16 @@ async fn accounting_responses_native_api_key_401() -> anyhow::Result<()> {
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
     let db = test.codex.state_db().unwrap();
     assert_eq!(attempts(&db).await?.len(), 1);
-    assert!(observations(&db).await?.is_empty());
+    // #475: the refusal is recorded; the attempt used no tokens.
+    let recorded = observations(&db).await?;
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].patch.refused_status, Some(401));
     stop(&test).await;
     Ok(())
 }
 
 #[tokio::test]
-async fn accounting_responses_native_redirects() -> anyhow::Result<()> {
+async fn accounting_responses_native_redirects_are_resent_unrecorded() -> anyhow::Result<()> {
     for status in [301, 302, 303, 307, 308] {
         for on in [true, false] {
             let origin = MockServer::start().await;
@@ -108,12 +111,17 @@ async fn accounting_responses_native_redirects() -> anyhow::Result<()> {
             };
             let test = builder(endpoint, mode).build_with_auto_env(&origin).await?;
             submit(&test).await?;
-            terminal(&test).await?;
-            assert_eq!(origin.received_requests().await.unwrap().len(), 1);
+            let events = terminal(&test).await?;
+            if on {
+                core_test_support::assert_accounting_gap(&events);
+            }
+            // Recorded or not, the request reaches the redirect target once;
+            // with accounting on the refused no-redirect send comes first.
             assert_eq!(
-                target.received_requests().await.unwrap().len(),
-                usize::from(!on)
+                origin.received_requests().await.unwrap().len(),
+                1 + usize::from(on)
             );
+            assert_eq!(target.received_requests().await.unwrap().len(), 1);
             let db = test.codex.state_db().unwrap();
             if on {
                 assert_eq!(attempts(&db).await?.len(), 1);
@@ -156,7 +164,7 @@ async fn accounting_responses_native_outer_retry_prefix() -> anyhow::Result<()> 
     let patches = observations(&db).await?;
     assert_ne!(patches[0].source, patches[1].source);
     let day = totals(&db, &records[0]).await?;
-    assert_eq!(day.known_usd, "0.00322".to_string().try_into()?);
+    assert_eq!(day.known_usd, "0.001288".to_string().try_into()?);
     assert_eq!(
         day.measured[6],
         Metric {
@@ -189,14 +197,52 @@ async fn accounting_responses_native_observation_failure() -> anyhow::Result<()>
     sqlx::query("CREATE TRIGGER reject_responses_observation BEFORE INSERT ON draft_accounting_observations BEGIN SELECT RAISE(ABORT, 'fixture'); END")
         .execute(&mut connection(&db).await?).await?;
     held.chunks.send(success(usage(Some(0)))).await?;
-    assert!(
-        terminal(&test)
-            .await?
-            .iter()
-            .any(|e| matches!(e, EventMsg::Error(_)))
-    );
+    core_test_support::assert_accounting_gap(&terminal(&test).await?);
     assert_eq!(observations(&db).await?, before);
     assert_eq!(attempts(&db).await?.len(), 1);
+    gate.no_pending();
+    stop(&test).await;
+    Ok(())
+}
+
+/// #287 on the Responses route: a clock behind the ledger checkpoint still
+/// runs and records the turn.
+#[tokio::test]
+async fn accounting_responses_native_clock_behind_checkpoint_still_runs_and_records()
+-> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let mut gate = Gate::start().await?;
+    let test = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
+        .build_with_auto_env(&server)
+        .await?;
+    let db = test.codex.state_db().unwrap();
+    submit(&test).await?;
+    gate.next()
+        .await?
+        .chunks
+        .send(success(usage(Some(0))))
+        .await?;
+    terminal(&test).await?;
+    let ahead = chrono::Utc::now().timestamp_millis() + 6 * 86_400_000;
+    sqlx::query("UPDATE draft_accounting_retention_checkpoint SET completed_as_of_ms = ?")
+        .bind(ahead)
+        .execute(&mut connection(&db).await?)
+        .await?;
+    submit(&test).await?;
+    gate.next()
+        .await?
+        .chunks
+        .send(success(usage(Some(0))))
+        .await?;
+    let events = terminal(&test).await?;
+    assert!(
+        !events.iter().any(|e| matches!(e, EventMsg::Error(_))
+            || matches!(e, EventMsg::Warning(w) if w.message.contains("accounting"))),
+        "{events:?}"
+    );
+    let records = attempts(&db).await?;
+    assert_eq!(records.len(), 2);
+    assert!(i64::from(records[1].dispatched_at_ms) < ahead);
     gate.no_pending();
     stop(&test).await;
     Ok(())
@@ -224,13 +270,11 @@ async fn accounting_responses_native_admission_barrier() -> anyhow::Result<()> {
     held.chunks.send(success(usage(Some(0)))).await?;
     terminal(&test).await?;
     sqlx::query("CREATE TRIGGER reject_responses_attempt BEFORE INSERT ON draft_accounting_attempts BEGIN SELECT RAISE(ABORT, 'fixture'); END").execute(&mut lock).await?;
+    // A failed admission sends the request unrecorded.
     submit(&test).await?;
-    assert!(
-        terminal(&test)
-            .await?
-            .iter()
-            .any(|e| matches!(e, EventMsg::Error(_)))
-    );
+    let held = gate.next().await?;
+    held.chunks.send(success(usage(Some(0)))).await?;
+    core_test_support::assert_accounting_gap(&terminal(&test).await?);
     assert_eq!(attempts(&db).await?.len(), 1);
     gate.no_pending();
     stop(&test).await;

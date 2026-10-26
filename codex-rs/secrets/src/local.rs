@@ -88,12 +88,21 @@ impl SecretsFile {
 #[derive(Debug, Clone)]
 struct CachedSecretsFile {
     file: SecretsFile,
-    fingerprint: Option<(u64, std::time::SystemTime)>,
+    fingerprint: Option<FileFingerprint>,
 }
 
-fn file_fingerprint(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+/// Size, modification time and (on Unix) inode. The store is rewritten by an
+/// atomic rename, so a rewrite of the same size within the clock's precision
+/// still changes the inode (#434).
+type FileFingerprint = (u64, std::time::SystemTime, u64);
+
+fn file_fingerprint(path: &Path) -> Option<FileFingerprint> {
     let metadata = fs::metadata(path).ok()?;
-    Some((metadata.len(), metadata.modified().ok()?))
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&metadata);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some((metadata.len(), metadata.modified().ok()?, inode))
 }
 
 #[derive(Debug, Clone)]
@@ -168,6 +177,15 @@ impl LocalSecretsBackend {
         let canonical_key = scope.canonical_key(name);
         let file = self.load_file()?;
         Ok(file.secrets.get(&canonical_key).cloned())
+    }
+
+    /// Several values from one read of the store, in the order asked.
+    pub fn get_many(&self, entries: &[(SecretScope, SecretName)]) -> Result<Vec<Option<String>>> {
+        let file = self.load_file()?;
+        Ok(entries
+            .iter()
+            .map(|(scope, name)| file.secrets.get(&scope.canonical_key(name)).cloned())
+            .collect())
     }
 
     pub fn delete(&self, scope: &SecretScope, name: &SecretName) -> Result<bool> {
@@ -622,6 +640,10 @@ impl SecretsBackend for LocalSecretsBackend {
 
     fn delete(&self, scope: &SecretScope, name: &SecretName) -> Result<bool> {
         LocalSecretsBackend::delete(self, scope, name)
+    }
+
+    fn get_many(&self, entries: &[(SecretScope, SecretName)]) -> Result<Vec<Option<String>>> {
+        LocalSecretsBackend::get_many(self, entries)
     }
 
     fn delete_many(&self, entries: &[(SecretScope, SecretName)]) -> Result<usize> {

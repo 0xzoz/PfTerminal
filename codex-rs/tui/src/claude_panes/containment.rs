@@ -27,12 +27,14 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSandboxKind;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::secretless_launch;
 use codex_sandboxing::SandboxCommand;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxTransformRequest;
+use codex_sandboxing::SandboxType;
 use codex_sandboxing::get_platform_sandbox;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
@@ -127,8 +129,9 @@ pub(crate) fn contained_launch_ready() -> bool {
 /// How one contained turn is launched.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClaudeContainment {
-    /// The pane's own Claude state (`CLAUDE_CONFIG_DIR` and `TMPDIR`), the
-    /// only writable place besides the pane's folder.
+    /// The pane's own Claude state (`CLAUDE_CONFIG_DIR` and
+    /// `CLAUDE_CODE_TMPDIR`), the only writable place besides the pane's
+    /// folder.
     pub(crate) state_dir: PathBuf,
     /// `CODEX_HOME/panes`: every pane's transcripts and audits, unreadable
     /// to a contained pane, like the contract's `sessions`.
@@ -148,6 +151,33 @@ impl ClaudeContainment {
 
     pub(crate) fn tmp_dir(&self) -> PathBuf {
         self.state_dir.join("tmp")
+    }
+
+    /// What a contained Claude Code gets on top of the launch environment
+    /// (besides the bridge as its proxy): its own config and temporary
+    /// folders, and no updater or other traffic.
+    ///
+    /// #743 (Travis, 2026-10-14, option a): `TMPDIR` stays the session's.
+    /// The Linux sandbox keeps the placeholders it shares between runs (for
+    /// missing protected paths in the home, such as `~/.aws`) in a registry
+    /// under `TMPDIR`; a pane with its own `TMPDIR` could not see the main
+    /// session's placeholders, and a command in either could fail to start.
+    /// Claude Code keeps its own files under `CLAUDE_CODE_TMPDIR`. On Linux
+    /// it starts inside the sandbox with the pane's `TMPDIR` (see
+    /// [`pane_command`]); on macOS its Bash commands see the session's
+    /// `TMPDIR`, which the pane cannot write.
+    pub(crate) fn claude_env(&self) -> BTreeMap<String, String> {
+        let config = self.config_dir().to_string_lossy().into_owned();
+        let tmp = self.tmp_dir().to_string_lossy().into_owned();
+        BTreeMap::from([
+            ("CLAUDE_CONFIG_DIR".to_string(), config),
+            ("CLAUDE_CODE_TMPDIR".to_string(), tmp),
+            (
+                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_string(),
+                "1".to_string(),
+            ),
+            ("DISABLE_AUTOUPDATER".to_string(), "1".to_string()),
+        ])
     }
 }
 
@@ -258,8 +288,15 @@ pub(crate) fn base_profile(containment: &ClaudeContainment) -> Result<Permission
 #[derive(Debug)]
 pub(crate) struct ContainedCommand {
     pub(crate) argv: Vec<String>,
+    #[cfg_attr(
+        not(unix),
+        allow(dead_code, reason = "argv[0] is only overridden on Unix")
+    )]
     pub(crate) arg0: Option<String>,
     pub(crate) env: HashMap<String, String>,
+    /// #891: the security level ("Moderate" or "Aggressive") under which
+    /// the launch denies creating user namespaces (Linux), if it does.
+    pub(crate) user_namespaces_denied: Option<&'static str>,
 }
 
 /// Wrap `executable args` in the platform sandbox under the armed contract.
@@ -291,6 +328,125 @@ pub(crate) fn contain(
         cwd,
     )
     .map_err(|err| anyhow!(err))?;
+    let (program, program_args) = pane_command(sandbox, &containment.tmp_dir(), executable, args);
+    let user_namespaces = user_namespaces_denied();
+    let mut command = sandboxed(
+        containment,
+        &program,
+        &program_args,
+        env,
+        cwd,
+        bridge_port,
+        &rules_at(
+            profile,
+            crate::security::level::aggressive_active(),
+            user_namespaces.is_some(),
+        ),
+    )?;
+    command.user_namespaces_denied = user_namespaces;
+    Ok(command)
+}
+
+/// #891 (Travis, 2026-10-16, D12 option a): on Linux, under Moderate and
+/// Aggressive (the stricter of the active and the saved level), a contained
+/// pane may not create user namespaces either, as agent commands may not
+/// (#826): `unshare -Ur` could otherwise open what the sandbox hides and
+/// defeat nested-launch detection. Claude Code's own Bash sandbox
+/// (bubblewrap) needs one, so it cannot start in such a pane; the pane says
+/// so when a command reports the refusal ([`super::output_parse`]).
+/// Corbanu's sandbox still applies. Permissive, macOS and Windows keep the
+/// profile.
+pub(crate) fn user_namespaces_denied() -> Option<&'static str> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    crate::security::level::protected_level_for_panes()
+        .map(crate::security::level::ChosenLevel::name)
+}
+
+/// The program and arguments run inside the sandbox for `executable args`.
+///
+/// #743 follow-up (Travis, 2026-10-14, option b): on Linux, Claude Code
+/// starts inside the sandbox with `TMPDIR` set to the pane's own temporary
+/// folder `tmp_dir`, through `/usr/bin/env`, so `mktemp` and here-documents
+/// in its Bash commands work. The sandbox itself keeps the session's
+/// `TMPDIR`, under which it keeps the placeholder registry it shares with the
+/// main session, so that bookkeeping and the sandbox policy are unchanged.
+/// macOS is unchanged. `env` would take an `executable` containing `=` as an
+/// assignment; such a path then fails the `--version` check and the launch is
+/// refused.
+pub(crate) fn pane_command(
+    sandbox: SandboxType,
+    tmp_dir: &Path,
+    executable: &str,
+    args: &[String],
+) -> (String, Vec<String>) {
+    if sandbox != SandboxType::LinuxSeccomp {
+        return (executable.to_string(), args.to_vec());
+    }
+    let mut env_args = vec![
+        format!("TMPDIR={}", tmp_dir.to_string_lossy()),
+        executable.to_string(),
+    ];
+    env_args.extend(args.iter().cloned());
+    ("/usr/bin/env".to_string(), env_args)
+}
+
+/// #758: under Aggressive a contained pane may not reach the macOS keychain
+/// services either, although its bridge port selects Seatbelt's network
+/// rules, which allow `com.apple.SecurityServer` (Travis, 2026-10-14). Claude
+/// Code reaches the bridge over plain HTTP with the bridge's token, so it
+/// needs neither TLS nor the keychain. #891: on Linux, under Moderate and
+/// Aggressive, no user namespaces ([`user_namespaces_denied`]). Otherwise
+/// the profile is kept. [`contain`] applies them.
+fn rules_at(
+    profile: PermissionProfile,
+    deny_keychain: bool,
+    deny_user_namespaces: bool,
+) -> PermissionProfile {
+    if !deny_keychain && !deny_user_namespaces {
+        return profile;
+    }
+    let (mut file_system, network) = profile.to_runtime_permissions();
+    if !matches!(file_system.kind, FileSystemSandboxKind::Restricted) {
+        return profile;
+    }
+    if deny_keychain {
+        file_system
+            .entries
+            .push(FileSystemSandboxEntry::deny_keychain_services());
+    }
+    if deny_user_namespaces {
+        file_system
+            .entries
+            .push(FileSystemSandboxEntry::deny_user_namespaces());
+    }
+    PermissionProfile::from_runtime_permissions(&file_system, network)
+}
+
+/// The level rules [`contain`] applies, at the current levels.
+#[cfg(test)]
+pub(crate) fn level_rules(profile: PermissionProfile) -> PermissionProfile {
+    rules_at(
+        profile,
+        crate::security::level::aggressive_active(),
+        user_namespaces_denied().is_some(),
+    )
+}
+
+/// `executable args` wrapped in the platform sandbox under `profile`, with
+/// network only to `bridge_port` (`enforce_managed_network`).
+pub(crate) fn sandboxed(
+    containment: &ClaudeContainment,
+    executable: &str,
+    args: &[String],
+    env: HashMap<String, String>,
+    cwd: &Path,
+    bridge_port: u16,
+    profile: &PermissionProfile,
+) -> Result<ContainedCommand> {
+    let sandbox = get_platform_sandbox(/*windows_sandbox_enabled*/ false)
+        .ok_or_else(|| anyhow!("contained Claude panes need macOS or Linux"))?;
     let cwd = AbsolutePathBuf::from_absolute_path(cwd).context("pane folder is not absolute")?;
     let cwd = PathUri::from_abs_path(&cwd);
     let request = SandboxManager::new()
@@ -306,7 +462,7 @@ pub(crate) fn contain(
                 }),
                 additional_permissions: None,
             },
-            permissions: &profile,
+            permissions: profile,
             sandbox,
             enforce_managed_network: true,
             environment_id: None,
@@ -322,6 +478,7 @@ pub(crate) fn contain(
         argv: request.command,
         arg0: request.arg0,
         env: request.env,
+        user_namespaces_denied: None,
     })
 }
 

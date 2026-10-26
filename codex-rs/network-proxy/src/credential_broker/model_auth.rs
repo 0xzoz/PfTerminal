@@ -2,8 +2,10 @@
 //!
 //! Core registers a key once and keeps only a [`ModelCredential`]: an opaque
 //! reference plus the channel to sign requests for it. Each model request is
-//! sent over the broker's private Unix socket with a signed frame naming its
-//! exact origin, method and path; the broker attaches the key and performs the
+//! sent over the broker's private Unix socket (on Windows, PF-27-S09, its data
+//! pipe, every connection checked to be served by the broker process: see
+//! [`ModelCredentialBroker::send`]) with a signed frame naming its exact
+//! origin, method and path; the broker attaches the key and performs the
 //! HTTPS request. There is no API that returns the key.
 //!
 //! Keys Core never needs to read are named instead of passed: provider-key
@@ -21,6 +23,7 @@ use super::isolated::protocol::BROKER_STORE_HOME_ENV;
 use super::isolated::protocol::FRAME_HEADER;
 pub use super::isolated::protocol::ModelAuthHeader;
 use super::isolated::protocol::ModelBindingWire;
+pub use super::isolated::protocol::StoredKeyAccount;
 use codex_secret_broker::CredentialReference;
 use codex_secret_broker::ProviderRequestOperation;
 use std::fmt;
@@ -42,6 +45,13 @@ pub enum ModelCredentialBrokerError {
     /// vault or the OS keyring is unavailable).
     #[error("credential broker could not read the stored provider key")]
     StoreUnavailable,
+    /// #390 (Windows): another process holds or serves the broker's named
+    /// pipe; Core refused it and sent it nothing.
+    #[error(
+        "another process holds or serves the credential broker's named pipe (possible pipe \
+         squatting); it was refused and nothing was sent to it"
+    )]
+    PipeSquatted,
 }
 
 impl From<IsolatedBrokerError> for ModelCredentialBrokerError {
@@ -51,6 +61,7 @@ impl From<IsolatedBrokerError> for ModelCredentialBrokerError {
             IsolatedBrokerError::Spawn
             | IsolatedBrokerError::Control
             | IsolatedBrokerError::Unavailable => Self::Unavailable,
+            IsolatedBrokerError::PipeSquatted => Self::PipeSquatted,
         }
     }
 }
@@ -118,7 +129,15 @@ impl ModelCredentialBroker {
         launcher: IsolatedBrokerLauncher,
     ) -> Result<Self, ModelCredentialBrokerError> {
         let mut launcher = match options.store_home.as_ref() {
-            Some(home) if home.is_absolute() => launcher.with_env(BROKER_STORE_HOME_ENV, home),
+            Some(home) if home.is_absolute() => {
+                // PF-27-S09: the Windows broker token cannot create the vault
+                // lock, which every vault read locks; Core creates it.
+                #[cfg(windows)]
+                if super::isolated::prepare_vault_lock(home).is_none() {
+                    tracing::warn!("credential broker: the vault lock could not be prepared");
+                }
+                launcher.with_env(BROKER_STORE_HOME_ENV, home)
+            }
             _ => launcher,
         };
         for name in &options.withheld_env {
@@ -200,14 +219,17 @@ impl ModelCredentialBroker {
         binding: ModelCredentialBinding,
         provider_key_id: &str,
         env_names: &[String],
+        account: Option<&StoredKeyAccount>,
     ) -> Result<Option<ModelCredential>, ModelCredentialBrokerError> {
         if !self.client.is_alive() {
             return Err(ModelCredentialBrokerError::Unavailable);
         }
-        match self
-            .client
-            .register_model_stored(binding.wire(), provider_key_id, env_names)?
-        {
+        match self.client.register_model_stored(
+            binding.wire(),
+            provider_key_id,
+            env_names,
+            account,
+        )? {
             StoredRegistration::Registered(reference) => Ok(Some(ModelCredential {
                 client: self.client.clone(),
                 reference,
@@ -229,10 +251,78 @@ impl ModelCredentialBroker {
         self.client.socket_path()
     }
 
+    /// PF-27-S09 (Windows): sends one request signed with
+    /// [`ModelCredential::sign`] to the broker over its data pipe. Every
+    /// connection is checked to be served by the broker process (PF-27-S06),
+    /// so the request reaches no other pipe server, whatever claims the name.
+    #[cfg(windows)]
+    pub async fn send(
+        &self,
+        request: ModelBrokerRequest,
+    ) -> Result<ModelBrokerResponse, ModelCredentialBrokerError> {
+        use rama_core::futures::StreamExt as _;
+        let ModelBrokerRequest {
+            method,
+            host,
+            path_and_query,
+            headers,
+            body,
+        } = request;
+        let mut request = rama_http::Request::builder()
+            .method(method)
+            .uri(path_and_query)
+            .version(rama_http::Version::HTTP_11)
+            .body(rama_http::Body::from(body))
+            .map_err(|_| ModelCredentialBrokerError::Rejected)?;
+        *request.headers_mut() = headers;
+        request.headers_mut().insert(
+            rama_http::header::HOST,
+            rama_http::HeaderValue::from_str(&host)
+                .map_err(|_| ModelCredentialBrokerError::Rejected)?,
+        );
+        let response = self.client.send_signed(request).await?;
+        let (parts, body) = response.into_parts();
+        Ok(ModelBrokerResponse {
+            status: parts.status,
+            headers: parts.headers,
+            body: body
+                .into_data_stream()
+                .map(|chunk| chunk.map_err(std::io::Error::other))
+                .boxed(),
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn kill_for_test(&self) {
         self.client.kill_for_test();
     }
+
+    #[cfg(all(test, windows))]
+    pub(crate) fn pid_for_test(&self) -> Option<u32> {
+        self.client.pid_for_test()
+    }
+}
+
+/// PF-27-S09: one signed model request for [`ModelCredentialBroker::send`].
+#[cfg(windows)]
+pub struct ModelBrokerRequest {
+    pub method: rama_http::Method,
+    /// The `Host` header (the broker reads the destination from the frame).
+    pub host: String,
+    /// Origin form, as signed.
+    pub path_and_query: String,
+    /// Must carry [`MODEL_BROKER_FRAME_HEADER`].
+    pub headers: rama_http::HeaderMap,
+    pub body: rama_core::bytes::Bytes,
+}
+
+/// PF-27-S09: the broker's response; the body streams.
+#[cfg(windows)]
+pub struct ModelBrokerResponse {
+    pub status: rama_http::StatusCode,
+    pub headers: rama_http::HeaderMap,
+    pub body:
+        rama_core::futures::stream::BoxStream<'static, std::io::Result<rama_core::bytes::Bytes>>,
 }
 
 /// An opaque reference to a key held by the broker.
@@ -290,6 +380,12 @@ impl ModelCredential {
         let operation = ProviderRequestOperation::new(host, port, method, path_and_query)
             .map_err(|_| ModelCredentialBrokerError::Rejected)?;
         Ok(self.client.sign_frame(&self.reference, &operation)?)
+    }
+
+    /// HTTP over the broker's data pipe, checked to be served by the broker.
+    #[cfg(all(test, windows))]
+    pub(crate) fn data_pipe_client_for_test(&self) -> crate::upstream::UpstreamClient {
+        self.client.data_pipe_client()
     }
 
     /// Signs without the local binding check, to qualify the broker's own.

@@ -44,10 +44,12 @@ async fn accounting_inspect_command_without_account_auth() {
     let (mut chat, mut rx, mut ops) = make_chatwidget_manual(/*model_override*/ None).await;
     assert!(!chat.has_codex_backend_auth());
     chat.dispatch_command_with_args(SlashCommand::Usage, "requests".into(), Vec::new());
-    assert_matches!(rx.try_recv(), Ok(AppEvent::LoadAccountingInspector { .. }));
-    assert!(rx.try_recv().is_err());
+    if cfg!(feature = "developer-accounting") {
+        assert_matches!(rx.try_recv(), Ok(AppEvent::LoadAccountingInspector { .. }));
+        assert!(rx.try_recv().is_err());
+        assert!(render_bottom_popup(&chat, /*width*/ 80).contains("Loading recorded requests"));
+    }
     assert!(ops.try_recv().is_err());
-    assert!(render_bottom_popup(&chat, /*width*/ 80).contains("Loading recorded requests"));
     chat.clear_pending_token_activity_refreshes();
     chat.dispatch_command_with_args(SlashCommand::Usage, "weekly".into(), Vec::new());
     let cells = drain_insert_history(&mut rx);
@@ -58,6 +60,40 @@ async fn accounting_inspect_command_without_account_auth() {
             .collect::<String>()
             .contains("Sign in with ChatGPT")
     );
+}
+
+// Criterion 13b (PF-60-S03): `/cost` is developer-only, so a build that
+// records no costs answers every `/usage requests` form with one plain line
+// and never opens a cost page it could not fill.
+#[tokio::test]
+async fn usage_requests_in_default_build_says_cost_history_is_absent() {
+    if cfg!(feature = "developer-accounting") {
+        return;
+    }
+    for args in [
+        "requests",
+        "requests 2026-09-15",
+        "requests 2999-01-01",
+        "requests 2026-09-01 2026-10-01 week",
+        "requests junk",
+    ] {
+        let (mut chat, mut rx, mut ops) = make_chatwidget_manual(/*model_override*/ None).await;
+        chat.dispatch_command_with_args(SlashCommand::Usage, args.into(), Vec::new());
+        let cells = drain_insert_history(&mut rx);
+        let rendered = cells
+            .iter()
+            .map(|cell| lines_to_single_string(cell))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            rendered.trim(),
+            "• Per-request cost history is not part of this build.",
+            "{args}"
+        );
+        assert!(chat.accounting_inspector.is_none(), "{args}");
+        assert!(rx.try_recv().is_err(), "{args}");
+        assert!(ops.try_recv().is_err(), "{args}");
+    }
 }
 
 #[tokio::test]
@@ -1436,9 +1472,14 @@ async fn signed_out_usage_command_reports_chatgpt_login_requirement() {
         .map(|cell| lines_to_single_string(cell))
         .collect::<Vec<_>>()
         .join("\n");
+    // Pin the shipped wording; the developer-accounting build adds a pointer
+    // to `/cost`, which only it has.
     assert_chatwidget_snapshot!(
         "signed_out_usage_command_reports_chatgpt_login_requirement",
-        rendered
+        rendered.replace(
+            " For what your turns cost on this provider, run `/cost`.",
+            ""
+        )
     );
     assert_eq!(recall_latest_after_clearing(&mut chat), "/usage");
 }
@@ -1459,12 +1500,42 @@ async fn signed_out_usage_command_with_args_reports_chatgpt_login_requirement() 
         rendered.contains("Sign in with ChatGPT to view OpenAI account usage."),
         "expected ChatGPT login requirement, got: {rendered:?}"
     );
-    // The account view needs that sign-in; what a turn cost does not, and an
-    // operator on another provider must be told where to look instead of being
-    // left to conclude the feature does not exist.
+    // The account view needs that sign-in; what a turn cost does not, so
+    // where costs are recorded the operator is told where to look. A build
+    // that records none has no such view and names none.
+    if !cfg!(feature = "developer-accounting") {
+        assert!(!rendered.contains("/usage requests"), "{rendered:?}");
+        assert!(!rendered.contains("/cost"), "{rendered:?}");
+        assert_eq!(recall_latest_after_clearing(&mut chat), "/usage weekly");
+        return;
+    }
+    let command = crate::chatwidget::cost_command();
     assert!(
-        rendered.contains("/usage requests"),
+        rendered.contains(&format!("run `{command}`")),
         "expected the recorded-cost view to be named, got: {rendered:?}"
+    );
+    let name = command
+        .trim_start_matches('/')
+        .split_whitespace()
+        .next()
+        .unwrap();
+    assert!(
+        crate::bottom_pane::slash_commands::find_builtin_command(
+            name,
+            crate::bottom_pane::slash_commands::BuiltinCommandFlags {
+                collaboration_modes_enabled: true,
+                connectors_enabled: true,
+                plugins_command_enabled: true,
+                token_activity_command_enabled: false,
+                service_tier_commands_enabled: true,
+                goal_command_enabled: true,
+                personality_command_enabled: true,
+                allow_elevate_sandbox: true,
+                side_conversation_active: false,
+            },
+        )
+        .is_some(),
+        "the hint names `{command}`, which this build does not resolve"
     );
     assert_eq!(recall_latest_after_clearing(&mut chat), "/usage weekly");
 }
@@ -1481,7 +1552,18 @@ async fn usage_command_with_invalid_view_reports_usage_snapshot() {
         .map(|cell| lines_to_single_string(cell))
         .collect::<Vec<_>>()
         .join("\n");
-    assert_chatwidget_snapshot!("usage_command_with_invalid_view_reports_usage", rendered);
+    // Pin the shipped wording; only the developer-accounting build, which has
+    // the recorded-request view, names `/usage requests`.
+    assert_chatwidget_snapshot!(
+        "usage_command_with_invalid_view_reports_usage",
+        rendered.replace(" or /usage requests [YYYY-MM-DD]", "")
+    );
+    assert_eq!(
+        rendered
+            .contains("Usage: /usage [daily|weekly|cumulative] or /usage requests [YYYY-MM-DD]"),
+        cfg!(feature = "developer-accounting"),
+        "{rendered}"
+    );
     assert_eq!(recall_latest_after_clearing(&mut chat), "/usage monthly");
 }
 
@@ -3479,5 +3561,59 @@ async fn cost_command_is_listed_and_runs_without_chatgpt_auth() {
     assert!(
         !rendered.contains("Sign in with ChatGPT"),
         "`/cost` never demands a ChatGPT sign-in, got: {rendered:?}"
+    );
+}
+
+// Current command: `/cost` takes the same arguments as `/usage requests`, and
+// its errors name `/cost`, the command the user typed.
+#[tokio::test]
+async fn cost_command_arguments_and_errors_name_cost() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    for (args, expected) in [
+        ("yesterday", "Usage: /cost [YYYY-MM-DD]"),
+        (
+            "2026-09-02 2026-09-01 day",
+            "Usage: /cost START END hour|day|week|month",
+        ),
+    ] {
+        chat.dispatch_command_with_args(SlashCommand::Cost, args.to_string(), Vec::new());
+        let rendered = drain_insert_history(&mut rx)
+            .iter()
+            .map(|cell| lines_to_single_string(cell))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains(expected), "{args}: {rendered}");
+        assert!(!rendered.contains("/usage requests"), "{args}: {rendered}");
+        assert!(chat.accounting_inspector.is_none());
+    }
+    let day = |date: &str| {
+        chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp()
+            / 86_400
+    };
+    chat.dispatch_command_with_args(SlashCommand::Cost, "2026-09-15".to_string(), Vec::new());
+    let event = std::iter::from_fn(|| rx.try_recv().ok())
+        .find(|event| matches!(event, AppEvent::LoadAccountingInspector { .. }));
+    assert!(
+        matches!(event, Some(AppEvent::LoadAccountingInspector { day: opened, range: None, .. }) if opened == day("2026-09-15")),
+        "{event:?}"
+    );
+    chat.dispatch_command_with_args(
+        SlashCommand::Cost,
+        "2026-09-01 2026-09-15 week".to_string(),
+        Vec::new(),
+    );
+    let event = std::iter::from_fn(|| rx.try_recv().ok())
+        .find(|event| matches!(event, AppEvent::LoadAccountingInspector { .. }));
+    assert!(
+        matches!(&event, Some(AppEvent::LoadAccountingInspector { range: Some(range), .. })
+            if range.start_ms == day("2026-09-01") * 86_400_000
+                && range.end_ms == day("2026-09-15") * 86_400_000
+                && range.grouping == codex_state::accounting::InspectionGrouping::Week),
+        "{event:?}"
     );
 }

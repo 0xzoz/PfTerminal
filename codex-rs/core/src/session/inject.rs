@@ -110,6 +110,14 @@ impl Session {
         if input.is_empty() {
             return Ok(());
         }
+        // #507: no automatic idle turn while the kill switch is on; turning
+        // it off starts nothing either (nothing here watches for that).
+        if self.services.model_client().kill_switch_on() {
+            return Err(TryStartTurnIfIdleError::new(
+                TryStartTurnIfIdleRejectionReason::KillSwitch,
+                input,
+            ));
+        }
         if self.input_queue.has_trigger_turn_mailbox_items().await {
             return Err(TryStartTurnIfIdleError::new(
                 TryStartTurnIfIdleRejectionReason::PendingTriggerTurn,

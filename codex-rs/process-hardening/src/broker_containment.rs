@@ -44,7 +44,12 @@ pub fn contain_credential_broker_with_files(
     {
         linux::contain(writable_dir, writable_files)
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
+    {
+        let _ = (writable_dir, writable_files);
+        windows::contain()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
     {
         let _ = (writable_dir, writable_files);
         BrokerContainment::none()
@@ -133,7 +138,9 @@ mod macos {
         let mut error: *mut c_char = std::ptr::null_mut();
         // SAFETY: `profile` is a valid NUL-terminated string; `error` receives
         // an allocation we free below.
-        let result = unsafe { sandbox_init(profile.as_ptr(), 0, &mut error) };
+        let result = unsafe {
+            sandbox_init(profile.as_ptr(), /*flags*/ 0, &mut error)
+        };
         if !error.is_null() {
             // SAFETY: `error` was allocated by sandbox_init.
             unsafe { sandbox_free_error(error) };
@@ -273,6 +280,119 @@ mod linux {
         seccompiler::apply_filter_all_threads(&clone3)?;
         seccompiler::apply_filter_all_threads(&program)?;
         Ok(())
+    }
+}
+
+/// PF-27-S06: Windows has no per-process file sandbox the broker can apply
+/// to itself, so it applies what it can: a process and thread DACL, and a
+/// token default DACL that protects every thread it starts from creation
+/// (PF-27-S07), that keep other processes out of its memory (`dacl`), and a
+/// job (`job`) that allows no child processes and denies the desktop,
+/// clipboard, global atoms, other processes' USER handles and system
+/// settings. PF-27-S08: Core starts it under the broker token (`token`: low
+/// integrity, write-restricted to a capability SID, no privileges), which
+/// confines its file writes, keeps it out of the user's other processes,
+/// and keeps it from asking WMI, Task Scheduler or an out-of-process COM
+/// server to run something. The token cannot be applied from inside; this
+/// only checks it.
+#[cfg(windows)]
+mod windows {
+    use super::BrokerContainment;
+    use std::io;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+    use windows_sys::Win32::System::JobObjects::CreateJobObjectW;
+    use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+    use windows_sys::Win32::System::JobObjects::JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+    use windows_sys::Win32::System::JobObjects::JOB_OBJECT_UILIMIT_DESKTOP;
+    use windows_sys::Win32::System::JobObjects::JOB_OBJECT_UILIMIT_DISPLAYSETTINGS;
+    use windows_sys::Win32::System::JobObjects::JOB_OBJECT_UILIMIT_EXITWINDOWS;
+    use windows_sys::Win32::System::JobObjects::JOB_OBJECT_UILIMIT_GLOBALATOMS;
+    use windows_sys::Win32::System::JobObjects::JOB_OBJECT_UILIMIT_HANDLES;
+    use windows_sys::Win32::System::JobObjects::JOB_OBJECT_UILIMIT_READCLIPBOARD;
+    use windows_sys::Win32::System::JobObjects::JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS;
+    use windows_sys::Win32::System::JobObjects::JOB_OBJECT_UILIMIT_WRITECLIPBOARD;
+    use windows_sys::Win32::System::JobObjects::JOBOBJECT_BASIC_UI_RESTRICTIONS;
+    use windows_sys::Win32::System::JobObjects::JOBOBJECT_EXTENDED_LIMIT_INFORMATION;
+    use windows_sys::Win32::System::JobObjects::JobObjectBasicUIRestrictions;
+    use windows_sys::Win32::System::JobObjects::JobObjectExtendedLimitInformation;
+    use windows_sys::Win32::System::JobObjects::SetInformationJobObject;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    pub(super) fn contain() -> BrokerContainment {
+        let mut mechanisms = Vec::new();
+        if crate::current_token_is_broker_token().is_ok() {
+            mechanisms.push("token");
+        }
+        // PF-27-S07: every object the broker creates from now on, threads
+        // included, is protected at creation (already so when Core started
+        // it with `spawn_protected`, whose broker token cannot change its
+        // own default DACL, so there it is checked instead). Both always
+        // run; `dacl` needs both (Core refuses a broker without it).
+        let default_dacl = crate::protect_new_objects_by_default().is_ok()
+            || crate::windows_broker_token::default_dacl_is_protected().unwrap_or(false);
+        let process_dacl = crate::restrict_current_process_access();
+        if default_dacl && process_dacl.is_ok() {
+            mechanisms.push("dacl");
+        }
+        if forbid_child_processes().is_ok() {
+            mechanisms.push("job");
+        }
+        if mechanisms.is_empty() {
+            return BrokerContainment::none();
+        }
+        BrokerContainment {
+            mechanism: mechanisms.join("+"),
+        }
+    }
+
+    /// Puts this process in a job that allows one active process: itself.
+    /// The job handle stays open for the life of the process.
+    fn forbid_child_processes() -> io::Result<()> {
+        // SAFETY: an anonymous job with default security.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+        if job == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: zeroed POD; the fields set below are the only limits.
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_ACTIVE_PROCESS | JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION;
+        limits.BasicLimitInformation.ActiveProcessLimit = 1;
+        let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS {
+            UIRestrictionsClass: JOB_OBJECT_UILIMIT_DESKTOP
+                | JOB_OBJECT_UILIMIT_HANDLES
+                | JOB_OBJECT_UILIMIT_READCLIPBOARD
+                | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
+                | JOB_OBJECT_UILIMIT_GLOBALATOMS
+                | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS
+                | JOB_OBJECT_UILIMIT_DISPLAYSETTINGS
+                | JOB_OBJECT_UILIMIT_EXITWINDOWS,
+        };
+        // SAFETY: `limits` and `ui` are valid for the sizes passed; `job` is open.
+        let applied = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            ) != 0
+                && SetInformationJobObject(
+                    job,
+                    JobObjectBasicUIRestrictions,
+                    (&ui as *const JOBOBJECT_BASIC_UI_RESTRICTIONS).cast(),
+                    std::mem::size_of::<JOBOBJECT_BASIC_UI_RESTRICTIONS>() as u32,
+                ) != 0
+                && AssignProcessToJobObject(job, GetCurrentProcess()) != 0
+        };
+        if applied {
+            Ok(())
+        } else {
+            let error = io::Error::last_os_error();
+            // SAFETY: opened above; not assigned, so closing it is safe.
+            unsafe { CloseHandle(job) };
+            Err(error)
+        }
     }
 }
 

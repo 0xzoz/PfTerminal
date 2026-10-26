@@ -399,12 +399,26 @@ impl RevocationState {
         self.validate()
     }
 
+    /// When the kill-switch event in force was made, if any. A later change
+    /// of the switch must be newer to take effect.
+    pub fn kill_switch_event_at_unix_seconds(&self) -> Option<i64> {
+        self.last_kill_switch_event
+            .as_ref()
+            .map(|event| event.created_at_unix_seconds)
+    }
+
     /// The kill-switch event in force, if any. A release is only valid
     /// against the one the human saw.
     pub fn kill_switch_event_id(&self) -> Option<&BoundedText> {
         self.last_kill_switch_event
             .as_ref()
             .map(|event| &event.event_id)
+    }
+
+    /// Whether the event `event_id` is part of this history (applied here or
+    /// merged in), e.g. whether a released kill switch was the one seen.
+    pub fn has_applied(&self, event_id: &BoundedText) -> bool {
+        self.applied_event_ids.contains(event_id)
     }
 
     pub fn validate(&self) -> Result<(), RevocationError> {

@@ -49,6 +49,7 @@ pub(crate) use test_environment::test_environment;
 pub use test_environment::test_target_os;
 
 static TEST_ARG0_PATH_ENTRY: OnceLock<Option<Arg0PathEntryGuard>> = OnceLock::new();
+#[cfg(target_os = "linux")]
 static LINUX_SANDBOX_SKIP_REASON: OnceLock<Option<String>> = OnceLock::new();
 
 // Keep macOS test constructors in regular text so large test binaries can use branch islands.
@@ -60,6 +61,10 @@ static LINUX_SANDBOX_SKIP_REASON: OnceLock<Option<String>> = OnceLock::new();
 fn enable_deterministic_unified_exec_process_ids_for_tests() {
     codex_core::test_support::set_thread_manager_test_mode(/*enabled*/ true);
     codex_core::test_support::set_deterministic_process_ids(/*enabled*/ true);
+    // #888: never read the developer's own `$HOME/.agents/skills`.
+    codex_core::test_support::ignore_user_home_skills(/*ignore*/ true);
+    // #902: a loaded machine must not make the security path lookups give up.
+    codex_core::test_support::unhurried_security_lookups(/*enabled*/ true);
 }
 
 #[cfg_attr(
@@ -206,27 +211,28 @@ pub fn fetch_dotslash_file(
     Ok(fetched_path)
 }
 
-/// Returns a default `Config` whose on-disk state is confined to the provided
-/// temporary directory. Using a per-test directory keeps tests hermetic and
-/// avoids clobbering a developer’s real `~/.codex`.
-pub async fn load_default_config_for_test(codex_home: &TempDir) -> Config {
-    load_default_config_for_test_with_cloud_config_bundle(
-        codex_home,
-        CloudConfigBundleLoader::default(),
-    )
-    .await
-}
-
-/// Returns a default `Config` with test-provided cloud bundle requirements applied.
-/// during config construction.
-pub async fn load_default_config_for_test_with_cloud_config_bundle(
+/// Returns a default `Config` whose on-disk state is confined to the temporary
+/// `codex_home` (never a developer's real `~/.codex`), with the test-provided
+/// cloud bundle requirements applied, built for the working folder `cwd`.
+///
+/// `cwd` becomes the session's folder and its workspace root, a writable root
+/// of sandboxed commands, as for a real session started there. Pass a
+/// temporary folder. There is deliberately no variant without one: the config
+/// would then be built for the test process's own working folder (the crate's
+/// source tree, e.g. `codex-rs/core`), and sandboxed commands could write into
+/// it (#1120).
+pub async fn load_default_config_for_test_in(
     codex_home: &TempDir,
     cloud_config_bundle: CloudConfigBundleLoader,
+    cwd: &Path,
 ) -> Config {
     ConfigBuilder::default()
         .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
         .codex_home(codex_home.path().to_path_buf())
-        .harness_overrides(default_test_overrides())
+        .harness_overrides(ConfigOverrides {
+            cwd: Some(cwd.to_path_buf()),
+            ..default_test_overrides()
+        })
         .cloud_config_bundle(cloud_config_bundle)
         .build()
         .await
@@ -783,4 +789,26 @@ macro_rules! skip_if_host_windows {
             return $return_value;
         }
     }};
+}
+
+/// Assert a turn ran on unrecorded after developer accounting failed: no error,
+/// and the one warning that says recording stopped. Accounting never stops a
+/// model request.
+#[track_caller]
+pub fn assert_accounting_gap(events: &[codex_protocol::protocol::EventMsg]) {
+    use codex_protocol::protocol::EventMsg;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, EventMsg::Error(_))),
+        "an accounting failure must not fail the turn: {events:?}"
+    );
+    let warnings = events
+        .iter()
+        .filter(|event| {
+            matches!(event, EventMsg::Warning(warning)
+            if warning.message.starts_with("Developer accounting could not record"))
+        })
+        .count();
+    assert_eq!(warnings, 1, "one accounting-gap warning: {events:?}");
 }

@@ -45,7 +45,7 @@ fn labelled() -> NativeIngress {
 /// A labelled-mode registry belonging to the home that holds `key`.
 fn labelled_in(key: [u8; 32]) -> NativeIngress {
     let mut ingress = NativeIngress::default();
-    ingress.set_labelled_mode(true);
+    ingress.set_labelled_mode(/*enabled*/ true);
     ingress.set_origin_key(super::super::OriginKey::from_bytes(key));
     ingress
 }
@@ -360,7 +360,7 @@ fn pf_30_s02_records_from_another_home_or_edited_do_not_verify() {
         (
             {
                 let mut keyless = NativeIngress::default();
-                keyless.set_labelled_mode(true);
+                keyless.set_labelled_mode(/*enabled*/ true);
                 keyless
             },
             record.clone(),
@@ -383,7 +383,7 @@ fn pf_30_s02_records_from_another_home_or_edited_do_not_verify() {
 #[test]
 fn pf_30_s02_a_home_without_a_key_writes_no_records() {
     let mut keyless = NativeIngress::default();
-    keyless.set_labelled_mode(true);
+    keyless.set_labelled_mode(/*enabled*/ true);
     keyless.register_messages(&[message("user", "hi")], MessageOrigin::Human);
     assert!(keyless.take_origin_record().is_none());
     // The registration still holds for the live session.

@@ -30,6 +30,7 @@ use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::approval_typing_guard::Confirm;
 use crate::bottom_pane::approval_typing_guard::Notice;
 use crate::bottom_pane::approval_typing_guard::TypingGuard;
+use crate::bottom_pane::bottom_pane_view::next_shown_request_generation;
 use crate::bottom_pane::list_selection_view::ListSelectionView;
 use crate::bottom_pane::list_selection_view::SelectionItem;
 use crate::bottom_pane::list_selection_view::SelectionViewParams;
@@ -47,6 +48,7 @@ use crate::keymap::primary_binding;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
+use crate::security::grant_view::GrantReview;
 use codex_app_server_protocol::AdditionalPermissionProfile;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::FileChangeApprovalDecision;
@@ -59,6 +61,7 @@ use codex_app_server_protocol::NetworkApprovalContext;
 use codex_app_server_protocol::NetworkApprovalProtocol;
 use codex_app_server_protocol::NetworkPolicyRuleAction;
 use codex_app_server_protocol::RequestId;
+use codex_features::Feature;
 use codex_features::Features;
 use codex_protocol::ThreadId;
 use codex_protocol::request_permissions::PermissionGrantScope;
@@ -194,6 +197,11 @@ pub(crate) struct ApprovalOverlay {
     /// The user navigated the list since the current request appeared, so
     /// the highlighted row may be an option that lasts beyond it.
     navigated: bool,
+    /// PF-25-S01: the grant review of the current command, when open.
+    grant_review: Option<GrantReview>,
+    /// #787: counts the requests shown here (see
+    /// [`BottomPaneView::shown_request_generation`]).
+    shown_generation: u64,
 }
 
 impl ApprovalOverlay {
@@ -217,18 +225,13 @@ impl ApprovalOverlay {
             list_keymap,
             typing_guard: TypingGuard::default(),
             navigated: false,
+            grant_review: None,
+            shown_generation: 0,
         };
         view.set_current(request);
         // The first request has not replaced anything.
         view.typing_guard.reset();
         view
-    }
-
-    /// Require a fresh choice before Enter confirms. Used for a prompt that
-    /// was held back while the user typed, whose next Enter may be meant to
-    /// send their draft.
-    pub(crate) fn require_fresh_choice(&mut self) {
-        self.typing_guard.on_request_changed();
     }
 
     pub fn enqueue_request(&mut self, req: ApprovalRequest) {
@@ -255,7 +258,9 @@ impl ApprovalOverlay {
     fn set_current(&mut self, request: ApprovalRequest) {
         self.current_complete = false;
         self.navigated = false;
-        self.typing_guard.on_request_changed();
+        self.grant_review = None;
+        self.shown_generation = next_shown_request_generation();
+        self.typing_guard.on_new_request();
         let header = build_header(&request);
         let (options, params) = Self::build_options(
             &request,
@@ -273,18 +278,24 @@ impl ApprovalOverlay {
     fn build_options(
         request: &ApprovalRequest,
         header: Box<dyn Renderable>,
-        _features: &Features,
+        features: &Features,
         approval_keymap: &ApprovalKeymap,
         list_keymap: &ListKeymap,
     ) -> (Vec<ApprovalOption>, SelectionViewParams) {
         let (options, title) = match request {
             ApprovalRequest::Exec(request) => (
-                exec_options(
-                    &request.available_decisions,
-                    request.network_approval_context.as_ref(),
-                    request.additional_permissions.as_ref(),
-                    approval_keymap,
-                ),
+                {
+                    let mut options = exec_options(
+                        &request.available_decisions,
+                        request.network_approval_context.as_ref(),
+                        request.additional_permissions.as_ref(),
+                        approval_keymap,
+                    );
+                    if grant_offer(request, features).is_some() {
+                        options.push(grant_option());
+                    }
+                    options
+                },
                 request.network_approval_context.as_ref().map_or_else(
                     || "Would you like to run the following command?".to_string(),
                     |network_approval_context| {
@@ -328,10 +339,10 @@ impl ApprovalOverlay {
 
         // Enter on an untouched prompt must never choose a persistent option.
         let initial_selected_idx = options.iter().position(|opt| !opt.persistent);
-        let footer_note = options
-            .iter()
-            .any(|opt| opt.persistent)
-            .then(|| persistent_options_hint(list_keymap));
+        let footer_note = Some(options_hint(
+            list_keymap,
+            options.iter().any(|opt| opt.persistent),
+        ));
         let params = SelectionViewParams {
             footer_note,
             footer_hint: Some(approval_footer_hint(request, approval_keymap, list_keymap)),
@@ -353,6 +364,19 @@ impl ApprovalOverlay {
         };
         if let Some(request) = self.current_request.as_ref() {
             match (request, &option.decision) {
+                (ApprovalRequest::Exec(request), ApprovalDecision::SecurityGrant) => {
+                    // Open the review; the request stays open until the
+                    // person confirms there or answers here.
+                    match grant_offer(request, &self.features) {
+                        Some(offer) => self.grant_review = Some(GrantReview::new(offer)),
+                        None => self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                            history_cell::new_error_event(
+                                "This grant is no longer offered (the request ended or the security state changed). Nothing was granted.".to_string(),
+                            ),
+                        ))),
+                    }
+                    return;
+                }
                 (ApprovalRequest::Exec(request), ApprovalDecision::Command(decision)) => {
                     self.handle_exec_decision(&request.id, &request.command, decision.clone());
                 }
@@ -748,13 +772,16 @@ impl ApprovalOverlay {
                  to answer, or {cancel} to cancel. Slash commands such as /permissions work \
                  after you answer."
             ),
-            Notice::ChooseFirst => format!(
-                "This is a new request. Choose an option with {up}/{down} or its key, then \
-                 {accept}; {cancel} cancels."
-            ),
+            Notice::NavigateFirst => {
+                format!("Choose an option with {up}/{down}, then {accept}; {cancel} cancels.")
+            }
             Notice::PersistentNeedsArrows => format!(
                 "That option lasts beyond this request, so its key does not choose it. \
                  Highlight it with {up}/{down}, then press {accept}; {cancel} cancels."
+            ),
+            Notice::EarlyKeys => format!(
+                "Keys pressed as this request appeared were ignored. Choose an option with \
+                 {up}/{down}, then {accept}; {cancel} cancels."
             ),
         };
         let wrap_width = usize::from(width.saturating_sub(4)).max(1);
@@ -768,9 +795,101 @@ impl ApprovalOverlay {
     }
 }
 
+impl ApprovalOverlay {
+    /// PF-25-S01: keys while the grant review is open. Arrow keys move
+    /// between "Back" and "Grant and run"; Enter on "Grant and run" records
+    /// the grant shown and approves the command; Enter on "Back" and Esc go
+    /// back to the approval. A held key never confirms.
+    fn handle_grant_review_key(&mut self, key_event: KeyEvent) {
+        if key_event.kind != KeyEventKind::Press {
+            return;
+        }
+        if self.list_keymap.cancel.is_pressed(key_event) {
+            self.close_grant_review();
+            return;
+        }
+        let navigate = matches!(key_event.code, KeyCode::Up | KeyCode::Down)
+            && key_event.modifiers == KeyModifiers::NONE;
+        let accept = self.is_accept(key_event);
+        let Some(review) = self.grant_review.as_mut() else {
+            return;
+        };
+        if key_event.code == KeyCode::Char('u') && key_event.modifiers == KeyModifiers::NONE {
+            review.toggle_uses();
+            return;
+        }
+        if navigate {
+            review.toggle_row();
+            return;
+        }
+        if !accept {
+            return;
+        }
+        if !review.grant_selected() {
+            self.close_grant_review();
+            return;
+        }
+        // The request first: a grant is recorded only for the approval
+        // that is answered here.
+        let Some(ApprovalRequest::Exec(request)) = self.current_request.clone() else {
+            return;
+        };
+        let Some(confirmed) = review.confirm() else {
+            return;
+        };
+        let command = review.command().to_vec();
+        let expires = chrono::DateTime::from_timestamp(confirmed.expires_at_unix_seconds, 0)
+            .map(|time| {
+                time.with_timezone(&chrono::Local)
+                    .format("%H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
+        self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+            history_cell::PlainHistoryCell::new(vec![
+                vec![
+                    "✔ ".green(),
+                    "You granted ".into(),
+                    crate::legacy_core::security_grant::escape_controls(&strip_bash_lc_and_escape(
+                        &command,
+                    ))
+                    .bold(),
+                    format!(" permission to write hooks and start-up files (expires {expires})")
+                        .into(),
+                ]
+                .into(),
+            ]),
+        )));
+        self.handle_exec_decision(
+            &request.id,
+            &request.command,
+            CommandExecutionApprovalDecision::Accept,
+        );
+        self.grant_review = None;
+        self.current_complete = true;
+        self.advance_queue();
+    }
+
+    /// Back to the approval, nothing granted. #817: it shows anew, so the
+    /// bottom pane drops keys for its first second (#787).
+    fn close_grant_review(&mut self) {
+        self.grant_review = None;
+        self.shown_generation = next_shown_request_generation();
+        self.typing_guard.on_request_changed();
+    }
+}
+
 impl BottomPaneView for ApprovalOverlay {
+    fn answers_request(&self) -> bool {
+        true
+    }
+
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         if key_event.kind == KeyEventKind::Release {
+            return;
+        }
+        if self.grant_review.is_some() {
+            self.handle_grant_review_key(key_event);
             return;
         }
         if self.is_accept(key_event) {
@@ -820,9 +939,37 @@ impl BottomPaneView for ApprovalOverlay {
         true
     }
 
+    /// #523: back from under another prompt or view. #817: the bottom pane
+    /// drops keys until it is drawn again and for a second after (#787),
+    /// so a double or held Enter meant for that view answers nothing; a
+    /// later Enter does.
+    fn on_revealed(&mut self) {
+        // An open grant review goes back to the approval: keys meant for the
+        // view above must not reach it.
+        self.grant_review = None;
+        self.typing_guard.on_request_changed();
+    }
+
+    fn shown_request_generation(&self) -> u64 {
+        self.shown_generation
+    }
+
+    /// #787: as when revealed, and an open grant review goes back to the
+    /// approval: the dropped keys may have been meant to answer it.
+    fn on_early_input(&mut self) {
+        self.grant_review = None;
+        self.typing_guard.on_early_input();
+    }
+
     fn on_ctrl_c(&mut self) -> CancellationEvent {
         self.cancel_current_request();
         CancellationEvent::Handled
+    }
+
+    /// Esc in the grant review goes back to the approval; it must not reach
+    /// the pane's cancel path, which would decline the command.
+    fn prefer_esc_to_handle_key_event(&self) -> bool {
+        self.grant_review.is_some()
     }
 
     fn is_complete(&self) -> bool {
@@ -848,6 +995,10 @@ impl BottomPaneView for ApprovalOverlay {
 
 impl Renderable for ApprovalOverlay {
     fn desired_height(&self, width: u16) -> u16 {
+        if let Some(review) = &self.grant_review {
+            return u16::try_from(review.lines(width.saturating_sub(2)).len() + 1)
+                .unwrap_or(u16::MAX);
+        }
         let notice_height = u16::try_from(self.typed_text_notice(width).len()).unwrap_or(u16::MAX);
         self.list
             .desired_height(width)
@@ -855,6 +1006,17 @@ impl Renderable for ApprovalOverlay {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
+        if let Some(review) = &self.grant_review {
+            let area = Rect {
+                x: area.x.saturating_add(1),
+                y: area.y.saturating_add(1),
+                width: area.width.saturating_sub(2),
+                height: area.height.saturating_sub(1),
+            };
+            review.set_visible_height(area.width, area.height);
+            Widget::render(Paragraph::new(review.lines(area.width)), area, buf);
+            return;
+        }
         let notice = self.typed_text_notice(area.width);
         let notice_height = u16::try_from(notice.len())
             .unwrap_or(u16::MAX)
@@ -875,6 +1037,9 @@ impl Renderable for ApprovalOverlay {
     }
 
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if self.grant_review.is_some() {
+            return None;
+        }
         self.list.cursor_pos(area)
     }
 }
@@ -891,14 +1056,21 @@ fn non_text_key_label(bindings: &[KeyBinding], fallback: &str) -> String {
         .map_or_else(|| fallback.to_string(), KeyBinding::display_label)
 }
 
-fn persistent_options_hint(list_keymap: &ListKeymap) -> Line<'static> {
+/// #444: a letter shown in brackets, such as "(y)", only highlights its
+/// option (contract 3), so "Yes, proceed (y)" must not read as if y answers.
+/// Esc and chord shortcuts still answer at once; they are not letters.
+fn options_hint(list_keymap: &ListKeymap, persistent: bool) -> Line<'static> {
     let up = non_text_key_label(&list_keymap.move_up, "↑");
     let down = non_text_key_label(&list_keymap.move_down, "↓");
     let accept = non_text_key_label(&list_keymap.accept, "enter");
-    Line::from(format!(
-        "Options that last beyond this request: choose with {up}/{down}, then {accept}."
-    ))
-    .dim()
+    let mut hint =
+        format!("A letter in brackets only highlights its option; {accept} confirms it.");
+    if persistent {
+        hint.push_str(&format!(
+            " Options that last beyond this request: choose with {up}/{down}, then {accept}."
+        ));
+    }
+    Line::from(hint).dim()
 }
 
 fn approval_footer_hint(
@@ -1071,6 +1243,8 @@ fn build_header(request: &ApprovalRequest) -> Box<dyn Renderable> {
 #[derive(Clone)]
 enum ApprovalDecision {
     Command(CommandExecutionApprovalDecision),
+    /// PF-25-S01: open the grant review of this command.
+    SecurityGrant,
     FileChange(FileChangeApprovalDecision),
     Permissions(PermissionsDecision),
     McpElicitation(McpServerElicitationAction),
@@ -1120,6 +1294,48 @@ fn command_decision_to_review_decision(
         },
         CommandExecutionApprovalDecision::Decline => ReviewDecision::Denied,
         CommandExecutionApprovalDecision::Cancel => ReviewDecision::Abort,
+    }
+}
+
+/// PF-25-S01: the grant Core offers for this command approval, if any. Only
+/// with `security_levels` on, under a live Aggressive policy in this process.
+fn grant_offer(
+    request: &ExecApprovalRequest,
+    features: &Features,
+) -> Option<crate::legacy_core::security_grant::GrantOffer> {
+    if !features.enabled(Feature::SecurityLevels)
+        || !request
+            .available_decisions
+            .contains(&CommandExecutionApprovalDecision::Accept)
+    {
+        return None;
+    }
+    #[cfg(test)]
+    let offer = grant_tests::TEST_OFFER
+        .with(|offer| offer.borrow().clone())
+        .or_else(|| crate::legacy_core::security_grant::offer(request.thread_id, &request.id));
+    #[cfg(not(test))]
+    let offer = crate::legacy_core::security_grant::offer(request.thread_id, &request.id);
+    // The review shows Core's copy of the command; it must be the one this
+    // approval shows.
+    offer.filter(|offer| same_command(&offer.command, &request.command))
+}
+
+/// Whether `shown` (from the approval request, possibly re-split from one
+/// string) is Core's `command`.
+fn same_command(command: &[String], shown: &[String]) -> bool {
+    command == shown
+        || shown
+            == [shlex::try_join(command.iter().map(String::as_str))
+                .unwrap_or_else(|_| command.join(" "))]
+}
+
+fn grant_option() -> ApprovalOption {
+    ApprovalOption {
+        label: "Grant once: also let it write hooks and start-up files (review first)".to_string(),
+        decision: ApprovalDecision::SecurityGrant,
+        shortcuts: vec![key_hint::plain(KeyCode::Char('g'))],
+        persistent: false,
     }
 }
 
@@ -1416,6 +1632,10 @@ fn elicitation_options(keymap: &ApprovalKeymap) -> Vec<ApprovalOption> {
         },
     ]
 }
+
+#[cfg(test)]
+#[path = "approval_overlay_grant_tests.rs"]
+mod grant_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2085,6 +2305,9 @@ mod tests {
         assert_eq!(exec_decisions(&mut rx), vec!["Cancel".to_string()]);
     }
 
+    /// A key armed on one request does not carry over to the next: its Enter
+    /// confirms the next request's own highlighted row. #817: the next one
+    /// shows anew, so the bottom pane drops keys in its first second (#787).
     #[test]
     fn armed_key_does_not_carry_over_to_the_next_request() {
         let (tx, mut rx) = unbounded_channel::<AppEvent>();
@@ -2098,21 +2321,27 @@ mod tests {
         };
         second.id = "second".to_string();
         view.enqueue_request(ApprovalRequest::Exec(second));
+        let first = view.shown_request_generation();
 
-        press(&mut view, KeyCode::Char('y'), KeyModifiers::NONE);
+        press(&mut view, KeyCode::Char('3'), KeyModifiers::NONE);
         // Another client resolves the first request before Enter arrives.
         assert!(
             view.dismiss_resolved_request(&ResolvedAppServerRequest::ExecApproval {
                 id: "test".to_string(),
             })
         );
+        assert_ne!(view.shown_request_generation(), first);
+        assert!(render_overlay_lines(&view, /*width*/ 80).contains("› 1. Yes"));
         press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
 
-        assert_eq!(exec_decisions(&mut rx), Vec::<String>::new());
+        assert_eq!(exec_decisions(&mut rx), vec!["Accept".to_string()]);
     }
 
+    /// A held Enter never answers the next request. #817: a double Enter is
+    /// the bottom pane's to drop, since the next request shows anew (#787);
+    /// the prompt asks for nothing more.
     #[test]
-    fn double_or_held_enter_does_not_answer_the_next_request() {
+    fn held_enter_does_not_answer_the_next_request() {
         let (tx, mut rx) = unbounded_channel::<AppEvent>();
         let mut view = make_overlay(
             make_prefix_exec_request(),
@@ -2124,6 +2353,7 @@ mod tests {
         };
         second.id = "second".to_string();
         view.enqueue_request(ApprovalRequest::Exec(second));
+        let first = view.shown_request_generation();
 
         press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
         view.handle_key_event(KeyEvent::new_with_kind(
@@ -2131,13 +2361,11 @@ mod tests {
             KeyModifiers::NONE,
             KeyEventKind::Repeat,
         ));
-        press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
 
         assert_eq!(exec_decisions(&mut rx), vec!["Accept".to_string()]);
-        assert_snapshot!(
-            "approval_overlay_next_request_notice",
-            render_overlay_lines(&view, /*width*/ 80)
-        );
+        assert_ne!(view.shown_request_generation(), first);
+        let lines = render_overlay_lines(&view, /*width*/ 80);
+        assert!(!lines.contains("new request"), "{lines}");
         press(&mut view, KeyCode::Char('3'), KeyModifiers::NONE);
         press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(exec_decisions(&mut rx), vec!["Cancel".to_string()]);
@@ -2251,25 +2479,6 @@ mod tests {
         press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
 
         assert_eq!(exec_decisions(&mut rx), Vec::<String>::new());
-    }
-
-    #[test]
-    fn prompt_held_back_while_typing_needs_a_choice_before_enter() {
-        let (tx, mut rx) = unbounded_channel::<AppEvent>();
-        let mut view = make_overlay(
-            make_prefix_exec_request(),
-            AppEventSender::new(tx),
-            Features::with_defaults(),
-        );
-        view.require_fresh_choice();
-
-        // The Enter meant to send the user's draft.
-        press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(exec_decisions(&mut rx), Vec::<String>::new());
-
-        press(&mut view, KeyCode::Char('1'), KeyModifiers::NONE);
-        press(&mut view, KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(exec_decisions(&mut rx), vec!["Accept".to_string()]);
     }
 
     #[test]
@@ -2610,6 +2819,10 @@ mod tests {
         assert!(render_overlay_lines(&view, /*width*/ 80).contains("› 1. Yes"));
     }
 
+    /// A persistent option's key pressed for one request does not carry over
+    /// to the next. Typing that goes on across the swap ("py") is the bottom
+    /// pane's to drop, since the next request shows anew (#787, #817:
+    /// `tests/issue_817.rs`).
     #[test]
     fn persistent_key_then_request_dismissed_does_not_carry_over() {
         let (tx, mut rx) = unbounded_channel::<AppEvent>();
@@ -2619,16 +2832,18 @@ mod tests {
             Features::with_defaults(),
         );
         view.enqueue_request(second_prefix_request());
+        let first = view.shown_request_generation();
 
         press(&mut view, KeyCode::Char('p'), KeyModifiers::NONE);
-        // Another client answers the first request; the user keeps typing "py".
+        // Another client answers the first request.
         assert!(
             view.dismiss_resolved_request(&ResolvedAppServerRequest::ExecApproval {
                 id: "test".to_string(),
             })
         );
-        press_and_confirm(&mut view, KeyCode::Char('y'));
-        assert_eq!(exec_decisions(&mut rx), Vec::<String>::new());
+        assert_ne!(view.shown_request_generation(), first);
+        let lines = render_overlay_lines(&view, /*width*/ 80);
+        assert!(!lines.contains("lasts beyond this request"), "{lines}");
 
         // Navigation then Enter answers the request now shown.
         press(&mut view, KeyCode::Down, KeyModifiers::NONE);

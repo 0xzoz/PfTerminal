@@ -23,6 +23,7 @@
 //! WebSocket prewarm is treated as the first websocket connection attempt for a turn. If it
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -278,6 +279,10 @@ struct ModelClientState {
     /// Set once a provider rejects a tool continuation that ends in tool output after an
     /// assistant message. The session then restores the legacy synthetic `Continue.` turn.
     legacy_synthetic_continuation: AtomicBool,
+    /// #578: item IDs a Responses host reported it could not find (`store:
+    /// false` keeps nothing to look up). Later requests of this client send
+    /// none of them as a reference.
+    unresolvable_item_ids: StdMutex<HashSet<String>>,
 }
 
 /// Resolved API client setup for a single request attempt.
@@ -301,6 +306,9 @@ impl RequestRouteTelemetry {
         Self { endpoint }
     }
 }
+
+/// Issue #445: why a model request was not sent while the kill switch is on.
+pub const KILL_SWITCH_REFUSAL: &str = "Not sent: the security kill switch is on, so Corbanu sends nothing to the model, and this message was not kept. To turn it off, open /security, press g, choose \"Turn the kill switch off\" and confirm.";
 
 /// A session-scoped client for model-provider API calls.
 ///
@@ -373,9 +381,63 @@ struct ServerConversationState {
 
 type SharedServerConversationState = Arc<StdMutex<Option<ServerConversationState>>>;
 
+/// #1311 (D171): who a websocket connection was opened as (the ChatGPT
+/// account and user, or the API key), as a digest, never the credential. A
+/// session whose sign-in was replaced by another user's or another key never
+/// reuses a connection opened with the old one; a refreshed token of the same
+/// sign-in keeps it. Providers without a `CodexAuth` identity use a digest of
+/// their resolved API auth headers instead (#1326).
+#[derive(Clone, PartialEq, Eq)]
+struct ConnectionIdentity([u8; 32]);
+
+impl std::fmt::Debug for ConnectionIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ConnectionIdentity(..)")
+    }
+}
+
+impl ConnectionIdentity {
+    fn of(auth: Option<&CodexAuth>, api_auth: &dyn AuthProvider) -> Self {
+        use sha2::Digest;
+        let mut digest = sha2::Sha256::new();
+        let mut field = |value: Option<&str>| match value {
+            Some(value) => {
+                digest.update([1]);
+                digest.update((value.len() as u64).to_le_bytes());
+                digest.update(value.as_bytes());
+            }
+            None => digest.update([0]),
+        };
+        let mode = auth.map(|auth| format!("{:?}", auth.auth_mode()));
+        field(mode.as_deref());
+        field(auth.and_then(CodexAuth::get_account_id).as_deref());
+        field(auth.and_then(CodexAuth::get_chatgpt_user_id).as_deref());
+        field(auth.and_then(CodexAuth::api_key));
+        if auth.is_none() {
+            // No semantic sign-in identity is available for this provider.
+            // Hash the actual resolved header bytes, not the auth object's
+            // address or Debug output. Keep duplicate-value order, but ignore
+            // insertion order between different header names.
+            let headers = api_auth.to_auth_headers();
+            let mut fields = headers.iter().collect::<Vec<_>>();
+            fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+            digest.update(b"api-auth-headers");
+            for (name, value) in fields {
+                digest.update((name.as_str().len() as u64).to_le_bytes());
+                digest.update(name.as_str().as_bytes());
+                digest.update((value.as_bytes().len() as u64).to_le_bytes());
+                digest.update(value.as_bytes());
+            }
+        }
+        Self(digest.finalize().into())
+    }
+}
+
 #[derive(Debug, Default)]
 struct WebsocketSession {
     connection: Option<ApiWebSocketConnection>,
+    /// Who `connection` was opened as.
+    identity: Option<ConnectionIdentity>,
     provenance: Option<crate::accounting::websocket::Provenance>,
     last_request: Option<ResponsesApiRequest>,
     last_response_rx: Option<oneshot::Receiver<LastResponse>>,
@@ -760,6 +822,7 @@ pub(crate) struct RealtimeWebrtcCallStart {
     pub(crate) sdp: String,
     pub(crate) call_id: String,
     pub(crate) sideband_headers: ApiHeaderMap,
+    pub(crate) record: Option<crate::accounting::realtime::RealtimeSessionRecord>,
 }
 
 /// Reuses the API-auth material that created the WebRTC call for the sideband WebSocket join.
@@ -825,6 +888,7 @@ impl ModelClient {
                 http_server_state_rejected: AtomicBool::new(false),
                 vercel_vendor_pin_rejected: AtomicBool::new(false),
                 legacy_synthetic_continuation: AtomicBool::new(false),
+                unresolvable_item_ids: StdMutex::new(HashSet::new()),
             }),
             agent_identity_policy,
             prompt_cache_key_override: None,
@@ -891,7 +955,53 @@ impl ModelClient {
         Ok(level)
     }
 
+    /// Issue #443: whether Aggressive is in force for this session now: in
+    /// its config, or in the live policy (also right after a person confirms
+    /// Aggressive in `/security`, before a restart). A bound policy that
+    /// cannot be read counts as Aggressive, as for source admission.
+    pub(crate) fn live_level_is_aggressive(&self) -> bool {
+        self.live_level() == codex_security_policy::SecurityLevel::Aggressive
+    }
+
+    /// The level in force for this session now: its config, or the live
+    /// policy (also right after a person confirms a level in `/security`).
+    /// A bound policy that cannot be read counts as Aggressive. Unlike the
+    /// post-taint state, this does not depend on `source_envelopes`.
+    pub(crate) fn live_level(&self) -> codex_security_policy::SecurityLevel {
+        live_level_of(
+            self.ingress_level,
+            self.ingress_policy.as_ref().map(|policy| &policy.0),
+            self.state.thread_id,
+        )
+    }
+
+    /// Issue #445: whether the security kill switch a person turned on in
+    /// `/security` is on for this session. Only that switch: a session
+    /// started from unreadable state or a cold-resumed child agent is denied
+    /// protected actions too, but its turns still run.
+    pub(crate) fn kill_switch_on(&self) -> bool {
+        self.ingress_policy.as_ref().is_some_and(|policy| {
+            policy
+                .0
+                .snapshot_for_agent(self.state.thread_id)
+                .is_ok_and(|snapshot| snapshot.authority_kill_switch_active)
+        })
+    }
+
+    /// Issue #445: with the kill switch on, no model request is sent (a
+    /// turn, compaction, memory summary or realtime call); a turn is also
+    /// refused before its input is recorded (`session::turn`). A policy that
+    /// cannot be read is refused by the source admission check instead.
+    pub(crate) fn refuse_under_kill_switch(&self) -> Result<()> {
+        if self.kill_switch_on() {
+            Err(CodexErr::InvalidRequest(KILL_SWITCH_REFUSAL.to_string()))
+        } else {
+            Ok(())
+        }
+    }
+
     pub(crate) fn check_source_admission(&self, prompt: &Prompt) -> Result<()> {
+        self.refuse_under_kill_switch()?;
         crate::security::ingress::check_native_request(
             self.source_admission_level()?,
             &prompt.input,
@@ -904,6 +1014,7 @@ impl ModelClient {
         prompt: &Prompt,
         use_responses_lite: bool,
     ) -> Result<Vec<ResponseItem>> {
+        self.refuse_under_kill_switch()?;
         if self.source_admission_level()? == codex_security_policy::SecurityLevel::Permissive {
             return Ok(prompt.get_formatted_input_for_request(use_responses_lite));
         }
@@ -939,6 +1050,8 @@ impl ModelClient {
         if let Ok(mut ingress) = self.ingress_items.lock() {
             ingress.set_labelled_mode(enabled);
         }
+        // PF-41-S01: the inspector reads this thread's taint from here.
+        crate::security::inspection::register_ingress(self.state.thread_id, &self.ingress_items);
         self
     }
 
@@ -1339,6 +1452,7 @@ impl ModelClient {
                 http_server_state_rejected: AtomicBool::new(false),
                 vercel_vendor_pin_rejected: AtomicBool::new(false),
                 legacy_synthetic_continuation: AtomicBool::new(false),
+                unresolvable_item_ids: StdMutex::new(HashSet::new()),
             }),
             agent_identity_policy: self.agent_identity_policy,
             prompt_cache_key_override: self.prompt_cache_key_override.clone(),
@@ -1452,6 +1566,17 @@ impl ModelClient {
         // streaming paths build a no-redirect client whenever evidence exists,
         // so that a response from somewhere else can never be attributed to the
         // approved endpoint. This endpoint needs the same rule.
+        let follow = if evidence.is_some() {
+            Some(
+                self.redirect_fallback(
+                    &client_setup
+                        .api_provider
+                        .url_for_path(RESPONSES_COMPACT_ENDPOINT),
+                )?,
+            )
+        } else {
+            None
+        };
         let transport = if evidence.is_some() {
             let client = self.api_client_without_redirects(
                 &client_setup
@@ -1541,6 +1666,7 @@ impl ModelClient {
                 evidence.clone(),
                 model.clone(),
             )
+            .with_redirect_fallback(follow)
             .with_tier(service_tier.clone())
         });
         let client =
@@ -1605,6 +1731,11 @@ impl ModelClient {
             None => None,
         };
         let evidence = sampling.map(crate::accounting::transport::ResponseEvidence::new);
+        let follow = if evidence.is_some() {
+            Some(self.redirect_fallback(&call_url)?)
+        } else {
+            None
+        };
         let transport = if evidence.is_some() {
             let client = self.api_client_without_redirects(&call_url)?;
             crate::memory_stage_one::StageOneGuardedTransport::new(
@@ -1620,6 +1751,7 @@ impl ModelClient {
                 evidence.clone(),
                 session_config.model.clone().unwrap_or_default(),
             )
+            .with_redirect_fallback(follow)
         });
         let response = ApiRealtimeCallClient::new(transport, api_provider, client_setup.api_auth)
             .create_with_session_and_headers(sdp, session_config, extra_headers)
@@ -1629,7 +1761,74 @@ impl ModelClient {
             sdp: response.sdp,
             call_id: response.call_id,
             sideband_headers,
+            record: evidence
+                .as_deref()
+                .and_then(crate::accounting::transport::ResponseEvidence::realtime_session_record),
         })
+    }
+
+    /// #824: record a realtime WebSocket session that has just opened under
+    /// `base_url` as one request. A session is billed but this client never
+    /// sees its token usage, so the record states the route, model, provider
+    /// and start time now, the end time when the session closes
+    /// (`RealtimeSessionRecord::end`), and no token counts. `credential` is
+    /// the API key the session sends. `None` leaves the session unrecorded; it
+    /// is never refused.
+    pub(crate) async fn begin_realtime_session_record(
+        &self,
+        base_url: &str,
+        session_config: &ApiRealtimeSessionConfig,
+        accounting: &crate::accounting::responses::Slot,
+        credential: Option<&codex_login::CodexAuth>,
+    ) -> Option<crate::accounting::realtime::RealtimeSessionRecord> {
+        // Nothing collects this session: say nothing.
+        let deferred = crate::accounting::responses::read(accounting)
+            .ok()
+            .flatten()?;
+        let unrecorded = |cause: &dyn std::fmt::Display| {
+            deferred.reject();
+            crate::accounting::gap("realtime session route", cause);
+        };
+        let route = match codex_api::realtime_websocket_route(base_url, session_config) {
+            Ok(route) => route,
+            Err(error) => {
+                unrecorded(&error);
+                return None;
+            }
+        };
+        let Some(path) = route.route else {
+            unrecorded(&"the session URL is not under its base URL");
+            return None;
+        };
+        // The provider's configured query parameters ride on the session URL
+        // as on every other request; the pin adds them the same way.
+        let provider = self.state.provider.info();
+        let url = match crate::accounting::canonical_query(provider) {
+            Some(query) if route.url.contains('?') => format!("{}&{query}", route.url),
+            Some(query) => format!("{}?{query}", route.url),
+            None => route.url,
+        };
+        let model = session_config.model.as_deref().unwrap_or_default();
+        crate::accounting::realtime::RealtimeSessionRecord::begin(
+            &deferred, provider, credential, &url, &path, model,
+        )
+        .await
+    }
+
+    /// Leave a realtime WebSocket session that opened unrecorded, with the
+    /// `cause` logged as a gap (#889). Nothing is said when nothing collects.
+    pub(crate) fn leave_realtime_session_unrecorded(
+        &self,
+        accounting: &crate::accounting::responses::Slot,
+        cause: &'static str,
+    ) {
+        if let Some(deferred) = crate::accounting::responses::read(accounting)
+            .ok()
+            .flatten()
+        {
+            deferred.reject();
+            crate::accounting::gap("realtime session account", cause);
+        }
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1687,6 +1886,17 @@ impl ModelClient {
         let evidence = sampling.map(crate::accounting::transport::ResponseEvidence::new);
         // A collected request must not be able to follow a redirect, for the
         // same reason every other collected route may not.
+        let follow = if evidence.is_some() {
+            Some(
+                self.redirect_fallback(
+                    &client_setup
+                        .api_provider
+                        .url_for_path(MEMORIES_SUMMARIZE_ENDPOINT),
+                )?,
+            )
+        } else {
+            None
+        };
         let transport = if evidence.is_some() {
             let client = self.api_client_without_redirects(
                 &client_setup
@@ -1706,6 +1916,7 @@ impl ModelClient {
                 evidence.clone(),
                 model_info.slug.clone(),
             )
+            .with_redirect_fallback(follow)
         });
         let request_telemetry = Self::build_request_telemetry(
             session_telemetry,
@@ -2092,6 +2303,11 @@ impl ModelClient {
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<ResponsesApiRequest> {
         let mut input = self.source_admitted_input(prompt, model_info.use_responses_lite)?;
+        // #578: after labelling, which looks items up by their recorded bytes.
+        if let Some(producer) = prompt.producer.as_deref() {
+            crate::context_manager::provider_items::strip_foreign_references(&mut input, producer);
+        }
+        self.drop_unresolvable_item_references(&mut input);
         let is_openai = self.state.provider.info().is_openai();
         if !is_openai {
             retain_latest_contextual_developer_fragments(&mut input);
@@ -2247,6 +2463,7 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             retain_latest_contextual_developer_fragments(&mut input);
         }
+        flatten_namespaced_history(&mut input, &prompt.tools, &prompt.flat_tool_names);
         let mut skipped_tool_call_ids = HashSet::new();
         append_chat_messages_for_response_items(
             input,
@@ -2433,6 +2650,7 @@ impl ModelClient {
         if !self.state.provider.info().is_openai() {
             retain_latest_contextual_developer_fragments(&mut input);
         }
+        flatten_namespaced_history(&mut input, &prompt.tools, &prompt.flat_tool_names);
         let mut messages = Vec::new();
         let mut skipped_tool_call_ids = HashSet::new();
         for item in input {
@@ -2495,10 +2713,17 @@ impl ModelClient {
             tool_choice,
             stream: true,
             max_tokens: model_info.max_output_tokens.ok_or_else(|| {
-                CodexErr::InvalidRequest(format!(
-                    "model `{}` has no catalogued maximum output token limit",
-                    model_info.slug
-                ))
+                CodexErr::InvalidRequest(if model_info.used_fallback_model_metadata {
+                    format!(
+                        "model `{}` is not in this provider's model catalog, so its maximum output length is unknown; choose another model with /model or change `model` in config.toml",
+                        model_info.slug
+                    )
+                } else {
+                    format!(
+                        "model `{}` has no catalogued maximum output token limit",
+                        model_info.slug
+                    )
+                })
             })?,
             thinking,
             output_config,
@@ -2550,6 +2775,42 @@ impl ModelClient {
         }
 
         ChatCachePolicy::default()
+    }
+
+    /// #578: records the item a Responses host reported missing (`Item with
+    /// id '…' not found`). Returns the ID when it is new, so the caller can
+    /// retry once without it; `None` for any other error or an ID already
+    /// dropped (the retry did not help).
+    pub(crate) fn note_unresolvable_item_reference(&self, err: &CodexErr) -> Option<String> {
+        if self.state.provider.info().wire_api != WireApi::Responses {
+            return None;
+        }
+        let id = unresolvable_item_id(&err.to_string())?;
+        let mut ids = self.state.unresolvable_item_ids.lock().ok()?;
+        ids.insert(id.clone()).then_some(id)
+    }
+
+    /// Leaves the items in [`ModelClientState::unresolvable_item_ids`] out of
+    /// a Responses request as references: reasoning is dropped (without the
+    /// stored item it carries nothing the host can read), other items are
+    /// sent inline without their ID.
+    fn drop_unresolvable_item_references(&self, input: &mut Vec<ResponseItem>) {
+        let Ok(ids) = self.state.unresolvable_item_ids.lock() else {
+            return;
+        };
+        if ids.is_empty() {
+            return;
+        }
+        input.retain_mut(|item| {
+            if !item.id().is_some_and(|id| ids.contains(id.as_str())) {
+                return true;
+            }
+            if matches!(item, ResponseItem::Reasoning { .. }) {
+                return false;
+            }
+            item.set_id(/*new_id*/ None);
+            true
+        });
     }
 
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
@@ -2639,15 +2900,16 @@ impl ModelClient {
     async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
         let auth = self.state.provider.auth().await;
         let api_provider = self.state.provider.api_provider().await?;
-        let resolved_auth = self
-            .state
-            .provider
-            .api_auth_for_scope(ProviderAuthScope {
+        // #878: a broker refusal of this auth is this session's.
+        let resolved_auth = crate::model_broker_auth::refusals::owned_by(
+            self.state.thread_id,
+            self.state.provider.api_auth_for_scope(ProviderAuthScope {
                 agent_identity_policy: self.agent_identity_policy,
                 session_source: self.state.session_source.clone(),
                 agent_identity_session_fallback: self.state.agent_identity_session_fallback.clone(),
-            })
-            .await?;
+            }),
+        )
+        .await?;
         // PF-27-S05: with a credential broker installed, `api_auth` signs for
         // it and the transport sends the request only to its socket.
         Ok(CurrentClientSetup {
@@ -2656,6 +2918,19 @@ impl ModelClient {
             api_auth: resolved_auth.auth,
             agent_identity_telemetry: resolved_auth.agent_identity_telemetry,
         })
+    }
+
+    /// The ordinary, redirect-following transport a recorded request is
+    /// resent on when its provider redirects it (see
+    /// `AccountingTransport::with_redirect_fallback`).
+    fn redirect_fallback(&self, request_url: &str) -> Result<ReqwestTransport> {
+        let client = create_client_for_route(
+            &self.http_client_factory,
+            request_url,
+            ClientRouteClass::Api,
+        )
+        .map_err(std::io::Error::from)?;
+        Ok(ReqwestTransport::from_http_client(client))
     }
 
     /// No-redirect client for one model request.
@@ -2903,8 +3178,19 @@ impl ModelClientSession {
         Ok(body.len())
     }
 
+    /// #1311 (D171): drops a connection (and the conversation state on it)
+    /// opened as another sign-in than the one this request uses.
+    fn drop_websocket_of_another_sign_in(&mut self, identity: &ConnectionIdentity) {
+        if self.websocket_session.connection.is_some()
+            && self.websocket_session.identity.as_ref() != Some(identity)
+        {
+            self.reset_websocket_session();
+        }
+    }
+
     fn reset_websocket_session(&mut self) {
         self.websocket_session.connection = None;
+        self.websocket_session.identity = None;
         self.websocket_session.provenance = None;
         self.websocket_session.last_request = None;
         self.websocket_session.last_response_rx = None;
@@ -3055,6 +3341,17 @@ impl ModelClientSession {
             );
             let evidence = crate::accounting::read_slot(&self.accounting)?
                 .map(crate::accounting::transport::ResponseEvidence::new);
+            let follow = if evidence.is_some() {
+                Some(
+                    self.client.redirect_fallback(
+                        &client_setup
+                            .api_provider
+                            .url_for_path(ANTHROPIC_MESSAGES_ENDPOINT),
+                    )?,
+                )
+            } else {
+                None
+            };
             let transport = if evidence.is_some() {
                 let client = self.client.api_client_without_redirects(
                     &client_setup
@@ -3127,6 +3424,7 @@ impl ModelClientSession {
                     evidence.clone(),
                     accounting_model_identity(&model_info.slug),
                 )
+                .with_redirect_fallback(follow)
                 .with_configured_routing(
                     self.client
                         .state
@@ -3443,6 +3741,8 @@ impl ModelClientSession {
         if !self.client.responses_websocket_enabled() {
             return Ok(());
         }
+        // A connection opened as another sign-in is replaced at the turn's
+        // first request (#1311).
         if self.websocket_session.connection.is_some() {
             return Ok(());
         }
@@ -3452,6 +3752,8 @@ impl ModelClientSession {
                 "failed to build websocket prewarm client setup: {err}"
             ))
         })?;
+        let identity =
+            ConnectionIdentity::of(client_setup.auth.as_ref(), client_setup.api_auth.as_ref());
         let auth_context = AuthRequestTelemetryContext::new(
             client_setup.auth.as_ref().map(CodexAuth::auth_mode),
             client_setup.api_auth.as_ref(),
@@ -3475,6 +3777,7 @@ impl ModelClientSession {
             )
             .await?;
         self.websocket_session.connection = Some(connection);
+        self.websocket_session.identity = Some(identity);
         self.websocket_session.provenance = Some(provenance);
         self.websocket_session
             .set_connection_reused(/*connection_reused*/ false);
@@ -3498,6 +3801,7 @@ impl ModelClientSession {
         params: WebsocketConnectParams<'_>,
     ) -> std::result::Result<&ApiWebSocketConnection, ApiError> {
         let WebsocketConnectParams {
+            identity,
             provenance,
             session_telemetry,
             api_provider,
@@ -3507,7 +3811,10 @@ impl ModelClientSession {
             request_route_telemetry,
         } = params;
         let needs_new = match self.websocket_session.connection.as_ref() {
-            Some(conn) => conn.is_closed().await,
+            Some(conn) => {
+                self.websocket_session.identity.as_ref() != Some(&identity)
+                    || conn.is_closed().await
+            }
             None => true,
         };
 
@@ -3536,6 +3843,7 @@ impl ModelClientSession {
                 }
             };
             self.websocket_session.connection = Some(new_conn);
+            self.websocket_session.identity = Some(identity);
             self.websocket_session.provenance = Some(provenance);
             self.websocket_session
                 .set_connection_reused(/*connection_reused*/ false);
@@ -3657,6 +3965,17 @@ impl ModelClientSession {
                 None => None,
             };
             let evidence = sampling.map(crate::accounting::transport::ResponseEvidence::new);
+            let follow = if evidence.is_some() {
+                Some(
+                    self.client.redirect_fallback(
+                        &client_setup
+                            .api_provider
+                            .url_for_path(CHAT_COMPLETIONS_ENDPOINT),
+                    )?,
+                )
+            } else {
+                None
+            };
             let transport = if evidence.is_some() {
                 let client = self.client.api_client_without_redirects(
                     &client_setup
@@ -3677,6 +3996,7 @@ impl ModelClientSession {
                     evidence.clone(),
                     accounting_model_identity(&model_info.slug),
                 )
+                .with_redirect_fallback(follow)
                 .with_configured_routing(
                     self.client
                         .state
@@ -3867,6 +4187,13 @@ impl ModelClientSession {
                 None => None,
             };
             let evidence = sampling.map(crate::accounting::transport::ResponseEvidence::new);
+            let follow = if evidence.is_some() {
+                Some(self.client.redirect_fallback(
+                    &client_setup.api_provider.url_for_path(RESPONSES_ENDPOINT),
+                )?)
+            } else {
+                None
+            };
             let transport = if evidence.is_some() {
                 let client = self.client.api_client_without_redirects(
                     &client_setup.api_provider.url_for_path(RESPONSES_ENDPOINT),
@@ -3947,6 +4274,7 @@ impl ModelClientSession {
                     evidence.clone(),
                     accounting_model_identity(&model_info.slug),
                 )
+                .with_redirect_fallback(follow)
                 .with_configured_routing(
                     self.client
                         .state
@@ -4159,6 +4487,9 @@ impl ModelClientSession {
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
             let client_setup = self.client.current_client_setup().await?;
+            let identity =
+                ConnectionIdentity::of(client_setup.auth.as_ref(), client_setup.api_auth.as_ref());
+            self.drop_websocket_of_another_sign_in(&identity);
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                 client_setup.api_auth.as_ref(),
@@ -4185,21 +4516,17 @@ impl ModelClientSession {
                 &client_setup.api_provider,
             );
             let sampling = if let Some(deferred) = &deferred {
-                let cached = if self.websocket_session.connection.is_some() {
-                    Some(self.websocket_session.provenance.as_ref().ok_or_else(|| {
-                        deferred.reject();
-                        CodexErr::Fatal(
-                            crate::accounting::failure(
-                                "websocket admission",
-                                "open connection has no recorded provenance",
-                            )
-                            .into(),
-                        )
-                    })?)
-                } else {
+                let open = self.websocket_session.connection.is_some();
+                let cached = self.websocket_session.provenance.as_ref().filter(|_| open);
+                if open && cached.is_none() {
+                    // Not attributable: send it unrecorded.
+                    deferred.reject();
+                    crate::accounting::gap(
+                        "websocket admission",
+                        "open connection has no recorded provenance",
+                    );
                     None
-                };
-                if provenance.validate(deferred, cached)? {
+                } else if provenance.validate(deferred, cached)? {
                     deferred
                         .resolve(
                             self.client.state.provider.info(),
@@ -4227,6 +4554,7 @@ impl ModelClientSession {
             }
             match self
                 .websocket_connection(WebsocketConnectParams {
+                    identity,
                     provenance,
                     session_telemetry,
                     api_provider: client_setup.api_provider,
@@ -4240,19 +4568,19 @@ impl ModelClientSession {
                 .await
             {
                 Ok(_) => {}
-                Err(ApiError::Transport(TransportError::Http { status, .. }))
+                // A websocket connection never follows a redirect, recorded
+                // or not; accounting only stops recording this turn.
+                Err(err @ ApiError::Transport(TransportError::Http { status, .. }))
                     if status.is_redirection() && sampling.is_some() =>
                 {
                     if let Some(deferred) = &deferred {
                         deferred.reject();
                     }
-                    return Err(CodexErr::Fatal(
-                        crate::accounting::failure(
-                            "websocket connect",
-                            format_args!("provider redirected the connection ({status})"),
-                        )
-                        .into(),
-                    ));
+                    crate::accounting::gap(
+                        "websocket connect",
+                        format_args!("provider redirected the connection ({status})"),
+                    );
+                    return Err(self.client.state.provider.map_api_error(err));
                 }
                 Err(ApiError::Transport(TransportError::Http { status, .. }))
                     if status == StatusCode::UPGRADE_REQUIRED =>
@@ -4340,33 +4668,32 @@ impl ModelClientSession {
             }
             let admission = match (sampling, deferred.as_ref()) {
                 (Some(sampling), Some(deferred)) => {
-                    let established =
-                        self.websocket_session.provenance.clone().ok_or_else(|| {
+                    match (
+                        self.websocket_session.provenance.clone(),
+                        deferred.websocket_endpoint()?,
+                    ) {
+                        (Some(established), Some(expected)) => {
+                            Some(crate::accounting::websocket::Admission::new(
+                                sampling,
+                                established,
+                                expected,
+                                self.client.stage_one_memory_binding.clone(),
+                            ))
+                        }
+                        // Not attributable: send it unrecorded.
+                        (established, _) => {
                             deferred.reject();
-                            CodexErr::Fatal(
-                                crate::accounting::failure(
-                                    "websocket admission",
-                                    "connection has no recorded provenance",
-                                )
-                                .into(),
-                            )
-                        })?;
-                    let expected = deferred.websocket_endpoint()?.ok_or_else(|| {
-                        deferred.reject();
-                        CodexErr::Fatal(
-                            crate::accounting::failure(
+                            crate::accounting::gap(
                                 "websocket admission",
-                                "turn has no approved websocket endpoint",
-                            )
-                            .into(),
-                        )
-                    })?;
-                    Some(crate::accounting::websocket::Admission::new(
-                        sampling,
-                        established,
-                        expected,
-                        self.client.stage_one_memory_binding.clone(),
-                    ))
+                                if established.is_none() {
+                                    "connection has no recorded provenance"
+                                } else {
+                                    "turn has no approved websocket endpoint"
+                                },
+                            );
+                            None
+                        }
+                    }
                 }
                 _ => None,
             };
@@ -4440,6 +4767,12 @@ impl ModelClientSession {
         ));
         let websocket_telemetry: Arc<dyn WebsocketTelemetry> = telemetry;
         websocket_telemetry
+    }
+
+    /// Whether this session has sent a request over its WebSocket, such as a
+    /// completed warm-up. A warm-up that fell back to HTTP sent nothing.
+    pub(crate) fn sent_websocket_request(&self) -> bool {
+        self.websocket_session.last_request.is_some()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4610,6 +4943,11 @@ impl ModelClientSession {
         }
     }
 
+    /// See [`ModelClient::note_unresolvable_item_reference`].
+    pub(crate) fn note_unresolvable_item_reference(&self, err: &CodexErr) -> Option<String> {
+        self.client.note_unresolvable_item_reference(err)
+    }
+
     /// Permanently disables WebSockets for this Codex session and resets WebSocket state.
     ///
     /// This is used after exhausting the provider retry budget, to force subsequent requests onto
@@ -4746,6 +5084,65 @@ fn chat_replay_function_arguments(arguments: String) -> String {
         ));
     }
     json!({ "malformed_arguments": raw }).to_string()
+}
+
+/// Chat Completions and Anthropic Messages have no namespaces. A namespaced
+/// call recorded on the Responses wire (before a provider switch or in forked
+/// history) replays under the flat name this request offers for that exact
+/// tool (`flat_tool_names`, the request's own mapping), such as an MCP tool's
+/// `mcp__server__tool`, or the offered `*_v1` alias for a V1 agent tool;
+/// otherwise under its bare name, as before. A tool whose
+/// preferred flat name a plain tool already takes is offered under a hashed
+/// name, so its earlier calls never appear as calls of the plain tool (#688).
+fn flatten_namespaced_history(
+    input: &mut [ResponseItem],
+    tools: &[ToolSpec],
+    flat_tool_names: &crate::tools::flat_tool_names::FlatToolNames,
+) {
+    let offered: HashSet<&str> = tools
+        .iter()
+        .filter(|tool| matches!(tool, ToolSpec::Function(_) | ToolSpec::Freeform(_)))
+        .map(ToolSpec::name)
+        .collect();
+    for item in input {
+        let (ResponseItem::FunctionCall {
+            name, namespace, ..
+        }
+        | ResponseItem::CustomToolCall {
+            name, namespace, ..
+        }) = item
+        else {
+            continue;
+        };
+        let Some(namespace) = namespace.take() else {
+            continue;
+        };
+        let tool_name = codex_tools::ToolName::namespaced(namespace, name.clone());
+        let flat = flat_tool_names
+            .flat_name_for(&tool_name)
+            .filter(|flat| offered.contains(flat))
+            .or_else(|| {
+                // V1 tools use explicit plain aliases on these wires, so they
+                // are not present in the namespaced-tools flat-name mapping.
+                if tool_name.namespace.as_deref()
+                    != Some(crate::tools::handlers::multi_agents_spec::MULTI_AGENT_V1_NAMESPACE)
+                {
+                    return None;
+                }
+                let alias = match tool_name.name.as_str() {
+                    "spawn_agent" => "spawn_agent_v1",
+                    "send_input" => "send_input_v1",
+                    "wait_agent" => "wait_agent_v1",
+                    "close_agent" => "close_agent_v1",
+                    "resume_agent" => "resume_agent_v1",
+                    _ => return None,
+                };
+                offered.contains(alias).then_some(alias)
+            });
+        if let Some(flat) = flat {
+            *name = flat.to_string();
+        }
+    }
 }
 
 fn push_chat_tool_call(
@@ -5245,7 +5642,7 @@ fn append_anthropic_message_for_response_item(
                 "assistant",
                 json!({
                     "type": "tool_use",
-                    "id": call_id,
+                    "id": anthropic_tool_use_id(&call_id),
                     "name": name,
                     "input": input,
                 }),
@@ -5269,7 +5666,7 @@ fn append_anthropic_message_for_response_item(
                 "user",
                 json!({
                     "type": "tool_result",
-                    "tool_use_id": call_id,
+                    "tool_use_id": anthropic_tool_use_id(&call_id),
                     "content": anthropic_tool_result_content(&output),
                 }),
             );
@@ -5298,6 +5695,38 @@ fn append_anthropic_message_for_response_item(
         | ResponseItem::ContextCompaction { .. }
         | ResponseItem::Other => {}
     }
+}
+
+/// Anthropic accepts only `tool_use` IDs matching `^[a-zA-Z0-9_-]+$`. Another
+/// provider's call IDs (a Chat host's `functions.shell:0`) are mapped onto
+/// that alphabet, the same way for a call and its result (#578), with a hash
+/// of the original so two IDs that differ only in other characters stay
+/// distinct. Valid IDs, Anthropic's own included, are unchanged.
+fn anthropic_tool_use_id(call_id: &str) -> Cow<'_, str> {
+    let valid = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    if call_id.chars().all(valid) {
+        return Cow::Borrowed(call_id);
+    }
+    let mapped: String = call_id
+        .chars()
+        .map(|c| if valid(c) { c } else { '_' })
+        .collect();
+    // FNV-1a: stable across builds, so a replayed history maps the same way.
+    let hash = call_id
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    Cow::Owned(format!("{mapped}_{hash:016x}"))
+}
+
+/// The item ID in a Responses `Item with id '<id>' not found` error (#578).
+fn unresolvable_item_id(message: &str) -> Option<String> {
+    const PREFIX: &str = "Item with id '";
+    let start = message.find(PREFIX)? + PREFIX.len();
+    let (id, rest) = message[start..].split_once('\'')?;
+    (rest.starts_with(" not found") && !id.is_empty() && !id.contains(char::is_whitespace))
+        .then(|| id.to_string())
 }
 
 fn push_anthropic_message(messages: &mut Vec<Value>, role: &str, block: Value) {
@@ -6429,6 +6858,7 @@ impl AuthRequestTelemetryContext {
 }
 
 struct WebsocketConnectParams<'a> {
+    identity: ConnectionIdentity,
     provenance: crate::accounting::websocket::Provenance,
     session_telemetry: &'a SessionTelemetry,
     api_provider: codex_api::Provider,
@@ -6439,6 +6869,36 @@ struct WebsocketConnectParams<'a> {
 }
 
 async fn handle_unauthorized(
+    transport: TransportError,
+    auth_recovery: &mut Option<UnauthorizedRecovery>,
+    session_telemetry: &SessionTelemetry,
+    provider: &SharedModelProvider,
+) -> Result<UnauthorizedRecoveryExecution> {
+    match try_unauthorized_recovery(transport, auth_recovery, session_telemetry, provider).await {
+        Err(error) => Err(named_sign_in_revoked(provider).await.unwrap_or(error)),
+        recovered => recovered,
+    }
+}
+
+/// D171 (#1311): a named ChatGPT account removed or signed out while a
+/// request on it was in flight (its tokens were revoked, so the request got a
+/// 401) is reported with the account's recovery, as the next request would
+/// be, instead of a generic unauthorized error. The vault is read off the
+/// async workers.
+async fn named_sign_in_revoked(provider: &SharedModelProvider) -> Option<CodexErr> {
+    codex_model_provider::named_sign_in_account(provider.info())?;
+    let manager = provider.auth_manager()?;
+    let reason = tokio::task::spawn_blocking(move || manager.named_sign_in_unavailable())
+        .await
+        .ok()
+        .flatten()?;
+    Some(CodexErr::Fatal(format!(
+        "{}: {reason}",
+        provider.info().name
+    )))
+}
+
+async fn try_unauthorized_recovery(
     transport: TransportError,
     auth_recovery: &mut Option<UnauthorizedRecovery>,
     session_telemetry: &SessionTelemetry,
@@ -6552,7 +7012,52 @@ async fn handle_unauthorized(
         debug.auth_error_code.as_deref(),
     );
 
-    Err(provider.map_api_error(ApiError::Transport(transport)))
+    Err(with_missing_openai_credentials_hint(
+        provider.map_api_error(ApiError::Transport(transport)),
+        provider,
+    ))
+}
+
+/// Names what to set when OpenAI rejects a request that carried no credential (#365).
+const MISSING_OPENAI_CREDENTIALS_MESSAGE: &str = "OpenAI rejected the request because no OpenAI \
+    credential was found. Set OPENAI_API_KEY (`corbanu exec` also reads CODEX_API_KEY, which \
+    takes precedence), or sign in with `corbanu login`";
+/// The same, when `forced_login_method = "chatgpt"` turns the key variables off.
+const MISSING_OPENAI_SIGN_IN_MESSAGE: &str = "OpenAI rejected the request because no ChatGPT \
+    sign-in was found. This configuration requires one: run `corbanu login`";
+
+fn with_missing_openai_credentials_hint(err: CodexErr, provider: &SharedModelProvider) -> CodexErr {
+    let info = provider.info();
+    let uses_openai_login_only = info.requires_openai_auth
+        && info.env_key.is_none()
+        && info.experimental_bearer_token.is_none()
+        && info.auth.is_none()
+        && info.aws.is_none();
+    let manager = provider.auth_manager();
+    let has_auth = manager
+        .as_ref()
+        .is_some_and(|manager| manager.auth_cached().is_some());
+    let message = if manager
+        .as_ref()
+        .is_some_and(|manager| !manager.openai_api_key_env_enabled())
+    {
+        MISSING_OPENAI_SIGN_IN_MESSAGE
+    } else {
+        MISSING_OPENAI_CREDENTIALS_MESSAGE
+    };
+    match err.details() {
+        codex_protocol::error::CodexErrorDetails::UnexpectedStatus(unexpected)
+            if uses_openai_login_only
+                && !has_auth
+                && unexpected.status == StatusCode::UNAUTHORIZED
+                && unexpected.user_message.is_none() =>
+        {
+            let mut unexpected = unexpected.clone();
+            unexpected.user_message = Some(message.to_string());
+            CodexErr::UnexpectedStatus(unexpected)
+        }
+        _ => err,
+    }
 }
 
 fn api_error_http_status(error: &ApiError) -> Option<u16> {
@@ -6711,3 +7216,21 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+/// The level in force for `thread_id`: the session's own level or the
+/// stricter one its policy tree holds (Aggressive when that is unreadable).
+/// See [`ModelClient::live_level`].
+pub(crate) fn live_level_of(
+    ingress_level: codex_security_policy::SecurityLevel,
+    policy: Option<&crate::security::EffectivePolicyView>,
+    thread_id: ThreadId,
+) -> codex_security_policy::SecurityLevel {
+    use codex_security_policy::SecurityLevel;
+    let live = match policy {
+        None => SecurityLevel::Permissive,
+        Some(policy) => policy
+            .snapshot_for_agent(thread_id)
+            .map_or(SecurityLevel::Aggressive, |snapshot| snapshot.level),
+    };
+    ingress_level.max(live)
+}

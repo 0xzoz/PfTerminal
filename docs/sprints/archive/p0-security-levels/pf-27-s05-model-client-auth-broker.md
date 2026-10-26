@@ -2,7 +2,7 @@
 sprint_id: "PF-27-S05"
 title: "Core model-client auth and vault labels through the broker"
 status: completed
-plan_file: "docs/plans/active/p0-security-levels.md"
+plan_file: "docs/plans/completed/main-2026-10-08-p0-security-levels.md"
 plan_feature: "PF-27"
 execution_order: 46
 owner: "broker lane worker round 6 (2026-10-06)"
@@ -33,7 +33,7 @@ Known limits below are follow-ups for the plan worker; the main one is the in-pr
 
 ## Plan linkage
 
-- Plan: [P0 `/security` levels](../../../plans/active/p0-security-levels.md#pf-27); feature `PF-27`.
+- Plan: [P0 `/security` levels](../../../plans/completed/main-2026-10-08-p0-security-levels.md#pf-27); feature `PF-27`.
 - Product citation: **Required trust boundaries** — “Credentials are referenced by label and resolved only inside a trusted execution boundary.”
 - Acceptance advanced: raw credentials exist only in the trusted broker, including the ones Core uses itself.
 
@@ -84,7 +84,8 @@ Known limits below are follow-ups for the plan worker; the main one is the in-pr
   encrypted vault in-process, which decrypts the file in Core memory; only the provider key *for requests* is read
   by the broker alone. Follow-up: split the vault index from values or serve metadata through the broker. These
   features no longer see an env-only provider key.
-- Env scrubbing runs at session start (races C-level `getenv`; a launch value `.env` replaced keeps its bytes);
+- Env scrubbing runs at session start (races C-level `getenv` and `setenv` from outside `codex-network-proxy`,
+  whose own writers share its lock since #222; a launch value `.env` replaced keeps its bytes);
   moving it before `main` needs the flag decided at process start. Only the first enabling config's key variables
   are handed over; pre-session uses (first catalog refresh, `corbanu doctor`) fail closed.
 - Core still holds and refreshes ChatGPT sign-in tokens; agent-identity registration sends the access token

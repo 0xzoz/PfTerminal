@@ -84,19 +84,70 @@ supports a narrow split-filesystem subset: full-read split policies whose
 writable roots still match the legacy `WorkspaceWrite` root set, but add extra
 read-only carveouts under those writable roots.
 
-Known limitation (#158): the unelevated backend does not confine deletes
-outside its writable roots. Its write-restricted token checks the writable-root
-capability SIDs for write accesses, including `DELETE`, but Windows does not
-treat `FILE_DELETE_CHILD` as a write. NTFS lets a caller delete or move a file
-it has no `DELETE` right on when the parent directory grants
-`FILE_DELETE_CHILD`. A sandboxed command can therefore delete any file or
-directory whose parent grants that right to the user's non-administrator
-identity (Administrators is deny-only in the sandbox token), which in practice
-covers most of the user profile. This applies in both `ReadOnly` and
-`WorkspaceWrite` modes. In `WorkspaceWrite` the command can also move such
-files into a writable root. Creating or writing files outside writable roots
-is still blocked. Note that a `ReadOnly` session can therefore delete the
-workspace, including `.git`.
+Deletes in the unelevated backend (#158): its write-restricted token checks
+the writable-root capability SIDs for write accesses, including `DELETE`, but
+Windows does not treat `FILE_DELETE_CHILD` as a write. NTFS lets a caller delete
+or move a file it has no `DELETE` right on when the parent directory grants
+`FILE_DELETE_CHILD`, so on its own the token let a sandboxed command delete
+most of the user profile, in both `ReadOnly` and `WorkspaceWrite` modes.
+Commands therefore run at Low integrity: a Low-integrity process cannot delete,
+move or write an object labelled Medium (the default for unlabelled objects).
+Each writable root gets an inheritable Low no-write-up label while a session
+uses it, so writes and deletes inside it keep working (option (b), security
+sign-off by Travis on 2026-10-13):
+
+- Every legacy command takes a lease on its writable roots. The first lease on
+  a root records the root's own label and labels it Low; when the last lease
+  ends (once the command and what it left running have exited), the recorded
+  label is put back and propagates to the folder's children again. So once no
+  session runs, a `ReadOnly` session, the PF-27-S08 credential broker or
+  another Low-integrity program cannot delete in a workspace or `%TEMP%` an
+  earlier `WorkspaceWrite` session used.
+- The records are per Windows user, in
+  `%LOCALAPPDATA%\CorbanuTerminalSandbox\integrity-labels` (labelled Medium,
+  no write-up, no read-up and no execute-up, so no Low-integrity process can
+  open anything there). Each live session holds a session file open; a
+  session that was killed leaves a file that can be deleted, and every lease,
+  the end of every lease and the start of the TUI and app server put back the
+  labels only such sessions held. A writable root that holds the records
+  protects them like `.git`.
+- While a command runs, its roots are Low: other Low-integrity programs of the
+  user can delete there (a `ReadOnly` session running at the same time and
+  the credential broker included, so the broker's confinement holds for
+  `%TEMP%` only while no legacy session uses it), and programs that are not
+  write-restricted can write there.
+- Labelling and putting the label back each walk the whole folder tree, once
+  per command when no other session holds the root, which can be slow for
+  large trees (or a large `%TEMP%`). Objects a command itself labels Low (with
+  `icacls`, say) keep that label. The records are kept by path: a nested root
+  that another session's command moves keeps its Low label at the new place,
+  and a root swapped for a link between the host resolving it and labelling it
+  gets the label at the link's target (as the root's write grant does). Roots
+  shared with another Windows account's sessions are not tracked across
+  accounts; such a root can stay Low for good, since the other account records
+  the Low label as the original.
+- Labelling needs permission to change the folder's owner settings
+  (`WRITE_OWNER`) and a file system that holds integrity labels. A root
+  without them is left as it is: commands can't write there, and the sandbox
+  log says why. If propagation stops partway, files below the root may stay
+  unwritable (or, when the label is put back, Low).
+- Processes a command leaves running (a server, say) keep the lease until the
+  last of them exits. When Core exits first (or exits while a session runs),
+  the labels stay Low until the next TUI or app-server start, or the next
+  legacy command, puts them back. If the records are damaged, legacy commands
+  that write stop with an error that says how to recover.
+- Protected paths inside writable roots (and other read-only carve-outs) get
+  an explicit Medium label, once, so they don't inherit the Low label and
+  other Low-integrity programs can't write them. If that label can't be set
+  while the path is Low, the command does not start. Paths that are links, or
+  that resolve outside the writable roots (a `.git` file's `gitdir:` target,
+  for example), are left alone.
+- Commands can no longer write outside writable roots to objects that grant
+  Everyone or the logon SID write access, or open other programs' named pipes
+  and other IPC endpoints for writing, unless those are labelled Low.
+- The desktop commands start on is labelled Low: the per-command private
+  desktop, or Core's own desktop when Core runs off the interactive window
+  station with `sandbox_private_desktop = false`.
 
 Protected paths that already exist inside writable roots when a session
 starts, such as `.git`, `.codex`, and `.agents`, also get an Everyone deny of

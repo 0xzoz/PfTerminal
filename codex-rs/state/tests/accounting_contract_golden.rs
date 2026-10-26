@@ -87,6 +87,8 @@ impl Fixture {
                 source_kind: SourceKind::NativeCatalog,
                 basis: Basis::Billed,
                 plan_burn_millis: None,
+                basis_source: BasisSource::BuiltIn,
+                long_context: None,
                 observed_at_ms: start.try_into()?,
                 approved_at_ms: start.try_into()?,
                 effective_from_ms: start.try_into()?,
@@ -174,6 +176,7 @@ impl Fixture {
                     scope: Uuid::from_u128(scope),
                     dialect,
                     dispatched_at_ms: at(time)?.try_into()?,
+                    account: None,
                 },
                 observations: Vec::new(),
                 original_price: match price {

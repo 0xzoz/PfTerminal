@@ -197,6 +197,7 @@ fn revoke(target: RevocationTarget) -> SecurityControlAction {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_restrictive_persists_first_and_applies_now() {
     let fixture = fixture(SecurityLevel::Permissive);
     let store = MemoryStore::default();
@@ -213,6 +214,7 @@ fn security_transition_restrictive_persists_first_and_applies_now() {
             next_start_level: SecurityLevel::Aggressive,
             kill_switch_active: false,
             not_saved: None,
+            reached_other_trees: false,
         }
     );
     assert_eq!(store.saved(), vec![(SecurityLevel::Aggressive, 1, false)]);
@@ -434,6 +436,7 @@ fn security_transition_fences_children_pending_decisions_and_grants() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_kill_switch_and_release() {
     let fixture = fixture(SecurityLevel::Moderate);
     let store = MemoryStore::default();
@@ -517,6 +520,7 @@ fn security_transition_grant_request_is_not_a_transition() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_drops_grants_cached_and_pending_approvals() {
     use crate::security::aggressive;
     use crate::security::tainted_action::PostTaintAction;
@@ -616,6 +620,7 @@ fn post_taint(fixture: &Fixture) -> crate::security::tainted_action::PostTaintSt
 /// later commit in the older tree merges into what is stored instead of
 /// overwriting it, and a restrictive commit reaches the other tree now.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_trees_on_one_home_merge_and_propagate() {
     let home = tempfile::TempDir::new().unwrap();
     let store = crate::security::recovery::HomeTransitionStore::new(home.path());
@@ -666,6 +671,7 @@ fn security_transition_trees_on_one_home_merge_and_propagate() {
 }
 
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_revoking_an_actor_stops_its_agents() {
     let fixture = fixture(SecurityLevel::Aggressive);
     let child = ThreadId::new();
@@ -694,6 +700,7 @@ fn security_transition_revoking_an_actor_stops_its_agents() {
 /// next commit that does save (and it is saved then), and a commit with no
 /// stored state does not store this tree's level as a floor for the user.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_unsaved_kill_switch_survives_the_next_commit() {
     let fixture = fixture(SecurityLevel::Aggressive);
     let store = MemoryStore::failing();
@@ -713,6 +720,7 @@ fn security_transition_unsaved_kill_switch_survives_the_next_commit() {
 /// still takes another tree's kill switch, and a release confirmed before a
 /// newer kill switch was stored is refused.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_kill_switch_reaches_older_trees_and_stale_release_is_refused() {
     let home = tempfile::TempDir::new().unwrap();
     let store = crate::security::recovery::HomeTransitionStore::new(home.path());
@@ -769,6 +777,7 @@ fn security_transition_kill_switch_reaches_older_trees_and_stale_release_is_refu
 /// Round 2: a held state lock never blocks the kill switch: it applies in
 /// memory and says it was not saved.
 #[test]
+#[serial_test::serial(aggressive_grants)]
 fn security_transition_kill_switch_does_not_wait_for_a_held_lock() {
     let home = tempfile::TempDir::new().unwrap();
     let holder = std::fs::File::create(home.path().join("security_state.lock")).unwrap();
@@ -788,4 +797,396 @@ fn security_transition_kill_switch_does_not_wait_for_a_held_lock() {
             .is_some_and(|reason| reason.contains("locked")),
     );
     assert!(fixture.now().4);
+}
+
+/// Another process saving to the same home: the file changes, but no tree
+/// of this process is reached by the commit itself.
+struct OtherProcessStore(crate::security::recovery::HomeTransitionStore);
+
+impl TransitionStore for OtherProcessStore {
+    fn home(&self) -> Option<&std::path::Path> {
+        None
+    }
+
+    fn update(
+        &self,
+        write: crate::security::recovery::TransitionWrite,
+        merge: &mut dyn FnMut(
+            Option<DurableSecurityState>,
+        ) -> Result<DurableSecurityState, TransitionError>,
+    ) -> Result<DurableSecurityState, TransitionError> {
+        self.0.update(write, merge)
+    }
+}
+
+/// Waits up to `limit` for `done`.
+fn within(limit: std::time::Duration, done: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        if done() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    done()
+}
+
+/// #507 (Travis, 2026-10-12): a kill switch another Corbanu Terminal process
+/// turns on for the home reaches the trees of this process while they run
+/// (their sinks stop the running work), within the stated latency, and so
+/// does turning it off. Levels are not taken from the file.
+#[test]
+#[serial_test::serial(aggressive_grants)]
+fn security_transition_kill_switch_from_another_process_reaches_running_trees() {
+    let latency = std::time::Duration::from_secs(2);
+    let home = tempfile::TempDir::new().unwrap();
+    let here = fixture(SecurityLevel::Moderate);
+    here.view.register_home(home.path());
+    let mut watched = kill_switch_watch::start_for_test(home.path());
+    assert!(!*watched.borrow_and_update());
+    let other = fixture(SecurityLevel::Moderate);
+    let store = OtherProcessStore(crate::security::recovery::HomeTransitionStore::new(
+        home.path(),
+    ));
+
+    let committed = other
+        .commit_with(other.kill(/*active*/ true), &store)
+        .unwrap();
+    assert!(!committed.reached_other_trees);
+    // #931: subscribers are told after the watcher pass has adopted the
+    // switch and run the sinks; the tree's state alone changes first.
+    assert!(
+        within(latency, || *watched.borrow()),
+        "the kill switch did not arrive"
+    );
+    assert!(here.now().4);
+    assert!(here.revocations() >= 1, "the running work was not stopped");
+    // A stricter level saved by the other process is not taken while running
+    // (only the kill switch and the revocations saved with it are).
+    assert_eq!(here.now().0, SecurityLevel::Moderate);
+
+    let release = other.kill(/*active*/ false);
+    other
+        .controller
+        .commit_transition(release, &store, NOW + 1)
+        .unwrap();
+    assert!(
+        within(latency, || !here.now().4),
+        "turning it off did not arrive"
+    );
+    assert!(within(latency, || !*watched.borrow()));
+}
+
+/// #507: a switch this tree turned on later than the one saved is kept; a
+/// release saved by another process does not end a switch it never saw (one
+/// this process could not save); an unreadable file changes nothing while
+/// running.
+#[test]
+#[serial_test::serial(aggressive_grants)]
+fn security_transition_kill_switch_watch_keeps_unseen_switches_and_ignores_unreadable() {
+    let home = tempfile::TempDir::new().unwrap();
+    let here = fixture(SecurityLevel::Moderate);
+    here.view.register_home(home.path());
+    let other = fixture(SecurityLevel::Moderate);
+    let store = OtherProcessStore(crate::security::recovery::HomeTransitionStore::new(
+        home.path(),
+    ));
+    other
+        .commit_with(other.kill(/*active*/ true), &store)
+        .unwrap();
+    // This tree turns its own switch on later, and cannot save it.
+    here.controller
+        .commit_transition(here.kill(/*active*/ true), &MemoryStore::failing(), NOW + 5)
+        .unwrap();
+    let held = here.controller.kill_switch_event_id();
+    assert!(held.is_some());
+    assert_eq!(kill_switch_watch::apply(home.path()), 0);
+    assert_eq!(here.controller.kill_switch_event_id(), held);
+
+    // The other process releases its own switch, later still: this tree's
+    // unseen switch stays on.
+    other
+        .controller
+        .commit_transition(other.kill(/*active*/ false), &store, NOW + 9)
+        .unwrap();
+    assert_eq!(kill_switch_watch::apply(home.path()), 0);
+    assert!(here.now().4);
+    assert_eq!(here.controller.kill_switch_event_id(), held);
+
+    std::fs::write(home.path().join("security_state.json"), b"{not json").unwrap();
+    assert_eq!(kill_switch_watch::apply(home.path()), 0);
+    assert!(here.now().4);
+}
+
+/// #507: a switch another process turned on and off again before this one
+/// looked (one wake-up) changes nothing here: nothing to stop or end.
+#[test]
+#[serial_test::serial(aggressive_grants)]
+fn security_transition_kill_switch_watch_on_and_off_within_one_look_changes_nothing() {
+    let home = tempfile::TempDir::new().unwrap();
+    let here = fixture(SecurityLevel::Moderate);
+    here.view.register_home(home.path());
+    let before = here.now();
+    let other = fixture(SecurityLevel::Moderate);
+    let store = OtherProcessStore(crate::security::recovery::HomeTransitionStore::new(
+        home.path(),
+    ));
+    other
+        .commit_with(other.kill(/*active*/ true), &store)
+        .unwrap();
+    other
+        .controller
+        .commit_transition(other.kill(/*active*/ false), &store, NOW + 1)
+        .unwrap();
+    assert_eq!(kill_switch_watch::apply(home.path()), 0);
+    assert_eq!(here.now(), before);
+    assert_eq!(here.revocations(), 0);
+}
+
+/// #507: a switch this process saves itself updates the subscribers' value
+/// without signalling a change made elsewhere (the confirming screen reports
+/// it); one saved by another process is signalled.
+#[test]
+#[serial_test::serial(aggressive_grants)]
+fn security_transition_kill_switch_watch_signals_only_other_processes() {
+    let home = tempfile::TempDir::new().unwrap();
+    let here = fixture(SecurityLevel::Moderate);
+    here.view.register_home(home.path());
+    let mut watched = kill_switch_watch::start_for_test(home.path());
+    let _ = watched.borrow_and_update();
+    let local = crate::security::recovery::HomeTransitionStore::new(home.path());
+    here.commit_with(here.kill(/*active*/ true), &local)
+        .unwrap();
+    assert!(within(std::time::Duration::from_secs(2), || *watched.borrow()));
+    std::thread::sleep(kill_switch_watch::POLL);
+    assert!(
+        !watched.has_changed().unwrap(),
+        "a local change was signalled"
+    );
+
+    let other = fixture(SecurityLevel::Moderate);
+    let store = OtherProcessStore(crate::security::recovery::HomeTransitionStore::new(
+        home.path(),
+    ));
+    // The other process saw this switch (it read the saved state) and
+    // releases it.
+    let seen = crate::security::recovery::recover(home.path(), SecurityLevel::Moderate);
+    other.controller.catch_up(&seen);
+    other
+        .controller
+        .commit_transition(other.kill(/*active*/ false), &store, NOW + 3)
+        .unwrap();
+    assert!(within(std::time::Duration::from_secs(2), || {
+        watched.has_changed().unwrap_or(false)
+    }));
+    assert!(!*watched.borrow_and_update());
+    assert!(!here.now().4);
+}
+
+/// #842 (Travis, 2026-10-15): Moderate confirmed in another Corbanu Terminal
+/// process on the home raises this process's trees below it while they run,
+/// as a confirmation raises the other sessions of its own process: Core's
+/// level now (the next start stays Moderate), grants and "for session"
+/// approvals end (the epoch moves) and the sinks revoke; subscribers are
+/// told. A tree already at Moderate or above is left alone, and a lower
+/// level saved elsewhere is not taken while running (Aggressive is, #919).
+#[test]
+#[serial_test::serial(aggressive_grants)]
+fn issue_842_moderate_from_another_process_raises_running_trees() {
+    let latency = std::time::Duration::from_secs(2);
+    let home = tempfile::TempDir::new().unwrap();
+    let here = fixture(SecurityLevel::Permissive);
+    here.view.register_home(home.path());
+    let already = fixture(SecurityLevel::Aggressive);
+    already.view.register_home(home.path());
+    let mut raised = kill_switch_watch::subscribe_level_raised(home.path());
+    assert_eq!(*raised.borrow_and_update(), None);
+    let (_, _, epoch, _, _) = here.now();
+    let other = fixture(SecurityLevel::Permissive);
+    let store = OtherProcessStore(crate::security::recovery::HomeTransitionStore::new(
+        home.path(),
+    ));
+
+    let committed = other
+        .commit_with(other.set_level(SecurityLevel::Moderate), &store)
+        .unwrap();
+    assert!(!committed.reached_other_trees);
+    // #931: subscribers are told after the watcher pass has raised the tree
+    // and run its sinks; the level alone becomes visible first.
+    assert!(
+        within(latency, || raised.has_changed().unwrap_or(false)),
+        "Moderate did not arrive"
+    );
+    assert_eq!(*raised.borrow_and_update(), Some(SecurityLevel::Moderate));
+    let (level, next_start, after, _, kill_switch) = here.now();
+    assert_eq!(
+        (level, next_start, kill_switch),
+        (SecurityLevel::Moderate, SecurityLevel::Moderate, false)
+    );
+    assert!(after > epoch, "grants and approvals did not end");
+    assert_eq!(here.revocations(), 1);
+    // Above it: unchanged.
+    assert_eq!(already.now().0, SecurityLevel::Aggressive);
+    assert_eq!(already.revocations(), 0);
+    // Seen once: nothing more to take.
+    assert_eq!(kill_switch_watch::apply_saved(home.path()).raised, None);
+
+    // A downgrade saved elsewhere (Permissive) raises nothing. The tree is
+    // registered after it is saved: one registered while Moderate is still
+    // saved rises to it on the watch's next read (the downgrade's own write).
+    let downgrading = fixture(SecurityLevel::Moderate);
+    downgrading
+        .commit_with(downgrading.set_level(SecurityLevel::Permissive), &store)
+        .unwrap();
+    let lower = fixture(SecurityLevel::Permissive);
+    lower.view.register_home(home.path());
+    assert_eq!(kill_switch_watch::apply_saved(home.path()).raised, None);
+    assert_eq!(lower.now().0, SecurityLevel::Permissive);
+    assert_eq!(here.now().0, SecurityLevel::Moderate);
+}
+
+/// #919 (Travis, 2026-10-16, D20): Aggressive confirmed in another Corbanu
+/// Terminal process on the home raises this process's trees below it while
+/// they run (Permissive and Moderate alike), as a confirmation raises the
+/// other sessions of its own process: Core's level now (the next start stays
+/// Aggressive), grants and "for session" approvals end (the epoch moves),
+/// the sinks revoke, and this process's sessions take approval for every
+/// command (#505); subscribers are told. A tree already at Aggressive is
+/// left alone, and nothing saved later lowers a tree while it runs. Before
+/// #919 Aggressive saved elsewhere was not taken until a restart.
+#[test]
+#[serial_test::serial(aggressive_grants)]
+fn issue_919_aggressive_from_another_process_raises_running_trees() {
+    let latency = std::time::Duration::from_secs(5);
+    let home = tempfile::TempDir::new().unwrap();
+    let permissive = fixture(SecurityLevel::Permissive);
+    permissive.view.register_home(home.path());
+    let moderate = fixture(SecurityLevel::Moderate);
+    moderate.view.register_home(home.path());
+    let already = fixture(SecurityLevel::Aggressive);
+    already.view.register_home(home.path());
+    let mut raised = kill_switch_watch::subscribe_level_raised(home.path());
+    assert_eq!(*raised.borrow_and_update(), None);
+    let (_, _, permissive_epoch, _, _) = permissive.now();
+    let (_, _, moderate_epoch, _, _) = moderate.now();
+    assert!(!crate::security::confirmed_approvals::confirmed_here(
+        home.path()
+    ));
+    let other = fixture(SecurityLevel::Permissive);
+    let store = OtherProcessStore(crate::security::recovery::HomeTransitionStore::new(
+        home.path(),
+    ));
+
+    let committed = other
+        .commit_with(other.set_level(SecurityLevel::Aggressive), &store)
+        .unwrap();
+    assert!(!committed.reached_other_trees);
+    assert!(
+        within(latency, || raised.has_changed().unwrap_or(false)),
+        "Aggressive did not arrive"
+    );
+    assert_eq!(*raised.borrow_and_update(), Some(SecurityLevel::Aggressive));
+    for (tree, epoch) in [(&permissive, permissive_epoch), (&moderate, moderate_epoch)] {
+        let (level, next_start, after, _, kill_switch) = tree.now();
+        assert_eq!(
+            (level, next_start, kill_switch),
+            (SecurityLevel::Aggressive, SecurityLevel::Aggressive, false)
+        );
+        assert!(after > epoch, "grants and approvals did not end");
+        assert_eq!(tree.revocations(), 1);
+    }
+    // #505: approval for every command, in this process's sessions on the
+    // home and those it starts later (signalled after it applied).
+    assert!(crate::security::confirmed_approvals::confirmed_here(
+        home.path()
+    ));
+    // Already Aggressive: unchanged.
+    assert_eq!(already.now().0, SecurityLevel::Aggressive);
+    assert_eq!(already.revocations(), 0);
+    // Seen once: nothing more to take.
+    assert_eq!(kill_switch_watch::apply_saved(home.path()).raised, None);
+
+    // Never lowered while running: Moderate, then Permissive, saved
+    // elsewhere (downgrades there) leave these trees Aggressive.
+    for lower in [SecurityLevel::Moderate, SecurityLevel::Permissive] {
+        let downgrading = fixture(SecurityLevel::Aggressive);
+        downgrading
+            .commit_with(downgrading.set_level(lower), &store)
+            .unwrap();
+        assert_eq!(
+            crate::security::recovery::load(home.path())
+                .ok()
+                .flatten()
+                .map(|state| state.level),
+            Some(lower)
+        );
+        assert_eq!(kill_switch_watch::apply_saved(home.path()).raised, None);
+        for tree in [&permissive, &moderate, &already] {
+            assert_eq!(tree.now().0, SecurityLevel::Aggressive);
+        }
+    }
+    assert_eq!(permissive.revocations(), 1);
+}
+
+/// #919: the same across two real processes on one home. A child process
+/// (this test binary again) confirms Aggressive through its own policy tree
+/// and the home's transition store, then exits; the running tree of this
+/// process rises to Aggressive within about a second, and its sessions take
+/// approval for every command.
+#[test]
+#[serial_test::serial(aggressive_grants)]
+fn issue_919_aggressive_confirmed_in_a_second_process_reaches_this_one() {
+    const CHILD_ENV: &str = "CODEX_CORE_ISSUE_919_CHILD_HOME";
+    const TEST: &str = "security::effective_policy::transition::tests::issue_919_aggressive_confirmed_in_a_second_process_reaches_this_one";
+    if let Some(home) = std::env::var_os(CHILD_ENV) {
+        // The other Corbanu Terminal: a person confirms Aggressive there.
+        let home = std::path::PathBuf::from(home);
+        let there = fixture(SecurityLevel::Permissive);
+        there.view.register_home(&home);
+        let committed = there
+            .commit_with(
+                there.set_level(SecurityLevel::Aggressive),
+                &crate::security::recovery::HomeTransitionStore::new(&home),
+            )
+            .unwrap();
+        assert_eq!(committed.level, SecurityLevel::Aggressive);
+        assert_eq!(committed.not_saved, None);
+        return;
+    }
+    let home = tempfile::TempDir::new().unwrap();
+    let here = fixture(SecurityLevel::Permissive);
+    here.view.register_home(home.path());
+    let mut raised = kill_switch_watch::subscribe_level_raised(home.path());
+    assert_eq!(*raised.borrow_and_update(), None);
+    let (_, _, epoch, _, _) = here.now();
+
+    let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+        .env(CHILD_ENV, home.path())
+        .env("CORBANU_TEST_NO_NATIVE_KEYRING", "1")
+        .output()
+        .expect("run the other process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        within(std::time::Duration::from_secs(5), || {
+            raised.has_changed().unwrap_or(false)
+        }),
+        "Aggressive from the other process did not arrive"
+    );
+    assert_eq!(*raised.borrow_and_update(), Some(SecurityLevel::Aggressive));
+    let (level, next_start, after, _, _) = here.now();
+    assert_eq!(
+        (level, next_start),
+        (SecurityLevel::Aggressive, SecurityLevel::Aggressive)
+    );
+    assert!(after > epoch, "grants and approvals did not end");
+    assert_eq!(here.revocations(), 1);
+    assert!(crate::security::confirmed_approvals::confirmed_here(
+        home.path()
+    ));
 }

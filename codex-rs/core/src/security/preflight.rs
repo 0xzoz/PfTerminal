@@ -41,6 +41,10 @@ pub struct ReadinessFlags {
     pub secretless_launch: bool,
     pub credential_broker: bool,
     pub output_gate: bool,
+    /// PF-24-S02: `source_envelopes`. Core's protected levels refuse model
+    /// requests that carry unlabelled external content, so without it a
+    /// session cannot work under them.
+    pub untrusted_content: bool,
 }
 
 impl ReadinessFlags {
@@ -49,6 +53,7 @@ impl ReadinessFlags {
             secretless_launch: config.features.enabled(Feature::SecretlessAgentLaunch),
             credential_broker: config.features.enabled(Feature::IsolatedCredentialBroker),
             output_gate: config.features.enabled(Feature::SecretOutputGate),
+            untrusted_content: config.features.enabled(Feature::SourceEnvelopes),
         }
     }
 }
@@ -222,6 +227,11 @@ fn readiness(inventory: &Inventory, flags: ReadinessFlags) -> Vec<ReadinessItem>
             "Secret output gate",
             required(flags.output_gate, "secret_output_gate"),
         ),
+        item(
+            "untrusted-content",
+            "Untrusted-content labels",
+            required(flags.untrusted_content, "source_envelopes"),
+        ),
         item("vault", "Vault", vault),
     ];
     if inventory.migration_unfinished {
@@ -288,10 +298,38 @@ pub const CORBANU_HOME_STORES: [&str; 9] = [
     "log",
 ];
 
+/// The database init lock (#549), next to the databases.
+pub const DB_INIT_LOCK: &str = "pfterminal_db_init.lock";
+
+/// #611: what Corbanu keeps in its database folder besides the databases:
+/// the init lock, the GPU controller's lock, pending accounting records
+/// (`codex_state::PENDING_DIR`) and databases set aside by recovery.
+pub const DATABASE_FOLDER_ENTRIES: &[&str] = &[
+    DB_INIT_LOCK,
+    "gpu-controller.lock",
+    "accounting-pending",
+    "db-backups",
+];
+
 /// Deny-read glob for Corbanu's state databases and their `-wal`/`-shm`
-/// files, which come and go while Corbanu runs.
-pub fn database_glob(codex_home: &std::path::Path) -> std::path::PathBuf {
-    codex_home.join("*.sqlite*")
+/// files in `folder` (the Corbanu home or a separate database folder), which
+/// come and go while Corbanu runs. The folder is escaped (#651).
+pub fn database_glob(folder: &std::path::Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(glob_escape_path(folder)).join("*.sqlite*")
+}
+
+/// #651: `path` as a glob pattern that matches only itself, each glob
+/// metacharacter in a one-character class (`[*]`, `[?]`, `[[]`, `[{]`,
+/// `[}]`). A `]` outside a class is already literal to every matcher
+/// (Seatbelt's translation, ripgrep and globset).
+pub fn glob_escape_path(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .map(|ch| match ch {
+            '*' | '?' | '[' | '{' | '}' => format!("[{ch}]"),
+            other => other.to_string(),
+        })
+        .collect()
 }
 
 /// Whether `path` contains glob syntax, so it cannot prefix a glob pattern.

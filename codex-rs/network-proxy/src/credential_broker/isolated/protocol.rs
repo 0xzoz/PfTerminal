@@ -192,6 +192,9 @@ pub(crate) enum ControlRequest {
         binding: ModelBindingWire,
         provider_key_id: String,
         env_names: Vec<String>,
+        /// PF-84: a named account's key. It never comes from `env_names`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        account: Option<StoredKeyAccount>,
     },
     /// PF-27-S05: drop one reference (a refreshed sign-in token replaces it).
     Unregister {
@@ -222,10 +225,11 @@ impl fmt::Debug for ControlRequest {
             Self::RegisterModelStored {
                 binding,
                 provider_key_id,
+                account,
                 ..
             } => write!(
                 formatter,
-                "ControlRequest::RegisterModelStored({binding:?}, {provider_key_id})"
+                "ControlRequest::RegisterModelStored({binding:?}, {provider_key_id}, {account:?})"
             ),
             Self::Unregister { .. } => formatter.write_str("ControlRequest::Unregister"),
             Self::Revoke => formatter.write_str("ControlRequest::Revoke"),
@@ -251,6 +255,10 @@ impl Drop for ControlRequest {
 pub(crate) struct BrokerBootstrap {
     pub(crate) protocol_version: u32,
     pub(crate) control_socket: String,
+    /// #390: the broker could not create its pipes because another process
+    /// holds a name (`control_socket` is then empty), and exits.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) pipe_taken: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +299,29 @@ pub(crate) enum ControlErrorCode {
 }
 
 /// PF-27-S05: a provider-key id or environment variable name.
+/// PF-84: the named account (provider id and account name, never a value)
+/// whose stored key the broker reads.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredKeyAccount {
+    pub provider_id: String,
+    pub name: String,
+}
+
+impl StoredKeyAccount {
+    pub(crate) fn validate(&self) -> bool {
+        let part = |value: &str| {
+            !value.is_empty()
+                && value.len() <= MAX_ID_BYTES
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'-' | b'_' | b'.')
+                })
+        };
+        part(&self.provider_id) && part(&self.name)
+    }
+}
+
 pub(crate) fn valid_env_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= MAX_ID_BYTES
@@ -330,7 +361,7 @@ pub(crate) fn decode_key(value: &str) -> Option<[u8; 32]> {
         return None;
     }
     let mut key = [0_u8; 32];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         let high = hex_value(chunk[0])?;
         let low = hex_value(chunk[1])?;
         key[index] = (high << 4) | low;

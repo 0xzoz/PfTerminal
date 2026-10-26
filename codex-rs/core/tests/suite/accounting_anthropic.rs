@@ -45,6 +45,8 @@ async fn accounting_plan_identity_zero_usage_and_provider_switch() -> anyhow::Re
             approved_endpoint: endpoint.clone(),
             approved_query: None,
             pricing: PriceAuthority::Unavailable,
+            basis_source: Default::default(),
+            account: None,
         };
         let test = builder(endpoint, mode)
             .with_config(move |config| {
@@ -105,9 +107,10 @@ async fn accounting_plan_identity_zero_usage_and_provider_switch() -> anyhow::Re
         for quote in quotes {
             assert_eq!(quote.usage.input, Some(if zero { 0 } else { 7 }));
             assert_eq!(quote.usage.output, Some(if zero { 0 } else { 3 }));
-            assert_eq!(quote.snapshot, None);
+            // Both fixture routes are mock servers no table declares.
+            assert_eq!(quote.basis(), codex_state::accounting::Basis::Undeclared);
             assert_eq!(quote.all_buckets_priced, None);
-            assert_eq!(quote.buckets, [BucketQuote::MissingRate; 4]);
+            assert_eq!(quote.known_subtotal, Decimal::default());
         }
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
         assert_eq!(next_server.received_requests().await.unwrap().len(), 1);
@@ -670,8 +673,7 @@ async fn accounting_anthropic_role_extends_actual_child_idle_timeout() -> anyhow
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn accounting_anthropic_role_endpoint_mismatch_has_no_unapproved_send() -> anyhow::Result<()>
-{
+async fn accounting_anthropic_role_endpoint_mismatch_is_sent_unrecorded() -> anyhow::Result<()> {
     role_override_native(RoleOverride::Endpoint).await
 }
 
@@ -893,12 +895,15 @@ async fn role_override_native(case: RoleOverride) -> anyhow::Result<()> {
             .len(),
         records.len()
     );
-    assert!(
+    // A role that points the child elsewhere is the operator's choice.
+    // Accounting cannot attribute that send, so it goes out unrecorded.
+    assert_eq!(
         unapproved
             .received_requests()
             .await
             .expect("unapproved endpoint request capture")
-            .is_empty()
+            .len(),
+        usize::from(case == RoleOverride::Endpoint)
     );
     assert!(
         gate.incoming.try_recv().is_err(),
@@ -1001,8 +1006,17 @@ async fn accounting_anthropic_actual_presence_revisions_and_remote_only_price_un
         );
         let records = attempts(&db).await?;
         assert_eq!(records.len(), 1);
+        // An unpriced attempt is bound to a pay-per-use record with no rates
+        // (PF-60-S05); only priced records are counted here.
         let snapshots: Vec<Snapshot> = payloads(&db, "draft_accounting_price_snapshots").await?;
-        assert_eq!(snapshots.len(), usize::from(!remote_only));
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(
+            snapshots
+                .iter()
+                .filter(|snapshot| snapshot.rates != codex_state::accounting::Rates::default())
+                .count(),
+            usize::from(!remote_only)
+        );
         let as_of = chrono::Utc::now().timestamp_millis();
         let store = AccountingStore::open(&db, as_of).await?;
         let RetainedDay::Available {
@@ -1185,6 +1199,8 @@ async fn accounting_plan_turn_records_the_identity_the_catalogue_prices() -> any
         approved_endpoint: endpoint.clone(),
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
     };
     let test = builder(endpoint, mode)
         .with_config(|config| {
@@ -1254,6 +1270,8 @@ async fn accounting_ephemeral_session_runs_turns_without_collecting() -> anyhow:
         approved_endpoint: endpoint.clone(),
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
     };
     let test = builder(endpoint, mode)
         .with_config(|config| {

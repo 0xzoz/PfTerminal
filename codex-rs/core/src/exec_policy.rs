@@ -20,6 +20,7 @@ use codex_execpolicy::PolicyParser;
 use codex_execpolicy::PrefixRule;
 use codex_execpolicy::RuleMatch;
 use codex_execpolicy::blocking_append_allow_prefix_rule;
+use codex_execpolicy::blocking_append_allow_prefix_rule_with_justification;
 use codex_execpolicy::blocking_append_network_rule;
 use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -272,10 +273,25 @@ pub enum ExecPolicyUpdateError {
     JoinBlockingTask { source: tokio::task::JoinError },
 
     #[error("failed to update in-memory rules: {source}")]
-    AddRule {
-        #[from]
-        source: ExecPolicyRuleError,
-    },
+    AddRule { source: ExecPolicyRuleError },
+}
+
+// Written by hand: thiserror's `#[from]` on this named field expands to
+// `AddRule { source: source }`, which clippy 1.99 reports as
+// `redundant_field_names` at the field's span.
+impl From<ExecPolicyRuleError> for ExecPolicyUpdateError {
+    fn from(source: ExecPolicyRuleError) -> Self {
+        Self::AddRule { source }
+    }
+}
+
+/// #626: the level a person approved a remembered approval under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApprovedUnder {
+    /// Security level Aggressive was active: the rule applies there too.
+    Aggressive,
+    /// A less strict level: the rule is suspended while Aggressive is active.
+    LessStrict,
 }
 
 pub(crate) struct ExecPolicyManager {
@@ -283,6 +299,13 @@ pub(crate) struct ExecPolicyManager {
     update_lock: Semaphore,
     /// See [`Self::load`]: forbidden rules also match wrapped commands.
     strict_rules: bool,
+    /// #626: the remembered approvals a person saved while Aggressive was
+    /// active, the only `allow` prefix rules that apply under Aggressive
+    /// (see [`aggressive`]).
+    aggressive_approved: ArcSwap<Vec<Vec<String>>>,
+    /// D52 (#1001): the hosts whose network `allow` rules a person saved
+    /// while Aggressive was active, the only ones that apply under it.
+    aggressive_approved_hosts: ArcSwap<Vec<String>>,
 }
 
 pub(crate) struct ExecApprovalRequest<'a> {
@@ -300,6 +323,8 @@ impl ExecPolicyManager {
             policy: ArcSwap::from(policy),
             update_lock: Semaphore::new(/*permits*/ 1),
             strict_rules: false,
+            aggressive_approved: ArcSwap::from_pointee(Vec::new()),
+            aggressive_approved_hosts: ArcSwap::from_pointee(Vec::new()),
         }
     }
 
@@ -312,29 +337,89 @@ impl ExecPolicyManager {
         config_stack: &ConfigLayerStack,
         strict_rules: bool,
     ) -> Result<Self, ExecPolicyError> {
-        if strict_rules {
+        let manager = if strict_rules {
             let mut manager = Self::new(Arc::new(load_exec_policy(config_stack).await?));
             manager.strict_rules = true;
-            return Ok(manager);
-        }
-        let (policy, warning) = load_exec_policy_with_warning(config_stack).await?;
-        if let Some(err) = warning.as_ref() {
-            tracing::warn!("failed to parse rules: {err}");
-        }
-        Ok(Self::new(Arc::new(policy)))
-    }
-
-    pub(crate) fn strict_rules(&self) -> bool {
-        self.strict_rules
+            manager
+        } else {
+            let (policy, warning) = load_exec_policy_with_warning(config_stack).await?;
+            if let Some(err) = warning.as_ref() {
+                tracing::warn!("failed to parse rules: {err}");
+            }
+            Self::new(Arc::new(policy))
+        };
+        let (approved, approved_hosts) = aggressive::load_approved(config_stack).await;
+        manager.aggressive_approved.store(Arc::new(approved));
+        manager
+            .aggressive_approved_hosts
+            .store(Arc::new(approved_hosts));
+        Ok(manager)
     }
 
     pub(crate) fn current(&self) -> Arc<Policy> {
         self.policy.load_full()
     }
 
+    /// Issue #443: the policy an agent command is checked against. While
+    /// Core's level for the session is Aggressive (also right after a person
+    /// confirms it in `/security`, before the restart that loads the rules
+    /// file), the Aggressive vault rule is part of it, and (#626) remembered
+    /// approvals not saved under Aggressive are suspended, and (D52, #1001)
+    /// so are network allow rules (see [`aggressive`]).
+    pub(crate) fn current_for(&self, live_aggressive: bool) -> Arc<Policy> {
+        let current = self.current();
+        if live_aggressive {
+            let approved = self.aggressive_approved.load();
+            let approved_hosts = self.aggressive_approved_hosts.load();
+            Arc::new(
+                aggressive::suspend_unapproved_network(
+                    &aggressive::suspend_unapproved(&current, &approved),
+                    &approved_hosts,
+                )
+                .merge_overlay(aggressive_vault_policy()),
+            )
+        } else {
+            current
+        }
+    }
+
+    /// #626: the note an approval prompt carries under Aggressive, naming the
+    /// remembered approvals [`Self::current_for`] suspended where they would
+    /// have run the command unasked. `evaluate` checks the command against a
+    /// policy as the caller does (a shell command or a zsh-fork interception).
+    pub(crate) fn aggressive_suspended_note(
+        &self,
+        evaluate: impl FnOnce(&Policy) -> Evaluation,
+    ) -> Option<String> {
+        let full = evaluate(&self.current().merge_overlay(aggressive_vault_policy()));
+        aggressive::suspended_note(&aggressive::suspended_prefixes(
+            &full,
+            &self.aggressive_approved.load(),
+        ))
+    }
+
+    /// See [`Self::load`]; the vault rule of [`Self::current_for`] also
+    /// matches wrapped commands.
+    pub(crate) fn strict_rules_for(&self, live_aggressive: bool) -> bool {
+        self.strict_rules || live_aggressive
+    }
+
+    /// [`Self::create_exec_approval_requirement`] outside Aggressive.
+    #[cfg(test)]
     pub(crate) async fn create_exec_approval_requirement_for_command(
         &self,
         req: ExecApprovalRequest<'_>,
+    ) -> ExecApprovalRequirement {
+        self.create_exec_approval_requirement(req, /*live_aggressive*/ false)
+            .await
+    }
+
+    /// The approval an agent command needs under the session's live level
+    /// (see [`Self::current_for`]).
+    pub(crate) async fn create_exec_approval_requirement(
+        &self,
+        req: ExecApprovalRequest<'_>,
+        live_aggressive: bool,
     ) -> ExecApprovalRequirement {
         let ExecApprovalRequest {
             command,
@@ -344,7 +429,7 @@ impl ExecPolicyManager {
             sandbox_permissions,
             prefix_rule,
         } = req;
-        let exec_policy = self.current();
+        let exec_policy = self.current_for(live_aggressive);
         let ExecPolicyCommands {
             commands,
             used_complex_parsing,
@@ -375,7 +460,7 @@ impl ExecPolicyManager {
             &exec_policy_fallback,
             &match_options,
         );
-        if self.strict_rules {
+        if self.strict_rules_for(live_aggressive) {
             // The original command, not the parsed one: parsing keeps only
             // the first command of a heredoc script.
             apply_strict_forbidden_matches(&mut evaluation, exec_policy.as_ref(), command);
@@ -410,31 +495,53 @@ impl ExecPolicyManager {
                 let prompt_is_rule = evaluation.matched_rules.iter().any(|rule_match| {
                     is_policy_match(rule_match) && rule_match.decision() == Decision::Prompt
                 });
+                // #626: which remembered approvals Aggressive suspended, where
+                // the full policy would have run the command unasked.
+                let suspended_note = live_aggressive
+                    .then(|| {
+                        self.aggressive_suspended_note(|policy| {
+                            policy.check_multiple_with_options(
+                                commands.iter(),
+                                &exec_policy_fallback,
+                                &match_options,
+                            )
+                        })
+                    })
+                    .flatten();
+                let with_note = |reason: String| match &suspended_note {
+                    Some(note) => format!("{reason} {note}"),
+                    None => reason,
+                };
                 match prompt_is_rejected_by_policy(approval_policy, prompt_is_rule) {
                     Some(reason) if prompt_is_rule => ExecApprovalRequirement::Forbidden {
                         reason: reason.to_string(),
                     },
                     Some(reason) => ExecApprovalRequirement::Forbidden {
-                        reason: derive_rejected_prompt_reason(
+                        reason: with_note(derive_rejected_prompt_reason(
                             reason,
                             dangerous_command_match_for_heuristics(
                                 &evaluation,
                                 Decision::Prompt,
                                 command_origin,
                             ),
-                        ),
+                        )),
                     },
                     None => ExecApprovalRequirement::NeedsApproval {
-                        reason: derive_prompt_reason(command, &evaluation),
-                        proposed_execpolicy_amendment: requested_amendment.or_else(|| {
-                            if auto_amendment_allowed {
-                                try_derive_execpolicy_amendment_for_prompt_rules(
-                                    &evaluation.matched_rules,
-                                )
-                            } else {
-                                None
-                            }
-                        }),
+                        reason: match derive_prompt_reason(command, &evaluation) {
+                            Some(reason) => Some(with_note(reason)),
+                            None => suspended_note.clone(),
+                        },
+                        proposed_execpolicy_amendment: without_credentials(
+                            requested_amendment.or_else(|| {
+                                if auto_amendment_allowed {
+                                    try_derive_execpolicy_amendment_for_prompt_rules(
+                                        &evaluation.matched_rules,
+                                    )
+                                } else {
+                                    None
+                                }
+                            }),
+                        ),
                     },
                 }
             }
@@ -454,7 +561,9 @@ impl ExecPolicyManager {
                         })
                 }),
                 proposed_execpolicy_amendment: if auto_amendment_allowed {
-                    try_derive_execpolicy_amendment_for_allow_rules(&evaluation.matched_rules)
+                    without_credentials(try_derive_execpolicy_amendment_for_allow_rules(
+                        &evaluation.matched_rules,
+                    ))
                 } else {
                     None
                 },
@@ -462,11 +571,15 @@ impl ExecPolicyManager {
         }
     }
 
+    /// Saves a remembered approval. #626: one approved while Aggressive was
+    /// active is marked so that it applies under Aggressive too.
     pub(crate) async fn append_amendment_and_update(
         &self,
         codex_home: &Path,
         amendment: &ExecPolicyAmendment,
-    ) -> Result<(), ExecPolicyUpdateError> {
+        approved_under: ApprovedUnder,
+    ) -> Result<AmendmentScope, ExecPolicyUpdateError> {
+        let under_aggressive = approved_under == ApprovedUnder::Aggressive;
         let _update_guard =
             self.update_lock
                 .acquire()
@@ -476,20 +589,55 @@ impl ExecPolicyManager {
                         "exec policy update semaphore closed".to_string(),
                     ),
                 })?;
-        let policy_path = default_policy_path(codex_home);
-        spawn_blocking({
-            let policy_path = policy_path.clone();
-            let prefix = amendment.command.clone();
-            move || blocking_append_allow_prefix_rule(&policy_path, &prefix)
-        })
-        .await
-        .map_err(|source| ExecPolicyUpdateError::JoinBlockingTask { source })?
-        .map_err(|source| ExecPolicyUpdateError::AppendRule {
-            path: policy_path,
-            source,
-        })?;
+        // A rule holding a credential (#398) applies for this session only:
+        // the rules file would keep it in plain text.
+        let scope = if contains_credentials(&amendment.command) {
+            tracing::warn!("not saving an exec policy rule that contains a credential");
+            AmendmentScope::Session
+        } else {
+            let policy_path = default_policy_path(codex_home);
+            spawn_blocking({
+                let policy_path = policy_path.clone();
+                let prefix = amendment.command.clone();
+                move || {
+                    if under_aggressive {
+                        blocking_append_allow_prefix_rule_with_justification(
+                            &policy_path,
+                            &prefix,
+                            aggressive::APPROVED_UNDER_AGGRESSIVE,
+                        )
+                    } else {
+                        blocking_append_allow_prefix_rule(&policy_path, &prefix)
+                    }
+                }
+            })
+            .await
+            .map_err(|source| ExecPolicyUpdateError::JoinBlockingTask { source })?
+            .map_err(|source| ExecPolicyUpdateError::AppendRule {
+                path: policy_path,
+                source,
+            })?;
+            AmendmentScope::Saved
+        };
 
         let current_policy = self.current();
+        if under_aggressive {
+            let mut approved = self.aggressive_approved.load().as_ref().clone();
+            if approved.contains(&amendment.command) {
+                // A marked rule for it is in the policy already.
+                return Ok(scope);
+            }
+            approved.push(amendment.command.clone());
+            self.aggressive_approved.store(Arc::new(approved));
+            let mut updated_policy = current_policy.as_ref().clone();
+            updated_policy.add_prefix_rule_with_justification(
+                &amendment.command,
+                Decision::Allow,
+                Some(aggressive::APPROVED_UNDER_AGGRESSIVE.to_string()),
+            )?;
+            self.policy.store(Arc::new(updated_policy));
+            return Ok(scope);
+        }
         let match_options = MatchOptions {
             resolve_host_executables: true,
         };
@@ -503,15 +651,18 @@ impl ExecPolicyManager {
                 is_policy_match(rule_match) && rule_match.decision() == Decision::Allow
             });
         if already_allowed {
-            return Ok(());
+            return Ok(scope);
         }
 
         let mut updated_policy = current_policy.as_ref().clone();
         updated_policy.add_prefix_rule(&amendment.command, Decision::Allow)?;
         self.policy.store(Arc::new(updated_policy));
-        Ok(())
+        Ok(scope)
     }
 
+    /// Saves a network rule. D52 (#1001): an `allow` rule approved while
+    /// Aggressive was active is marked so that it applies under Aggressive
+    /// too (its justification is the mark).
     pub(crate) async fn append_network_rule_and_update(
         &self,
         codex_home: &Path,
@@ -519,7 +670,14 @@ impl ExecPolicyManager {
         protocol: NetworkRuleProtocol,
         decision: Decision,
         justification: Option<String>,
+        approved_under: ApprovedUnder,
     ) -> Result<(), ExecPolicyUpdateError> {
+        let marked = approved_under == ApprovedUnder::Aggressive && decision == Decision::Allow;
+        let justification = if marked {
+            Some(aggressive::APPROVED_UNDER_AGGRESSIVE.to_string())
+        } else {
+            justification
+        };
         let _update_guard =
             self.update_lock
                 .acquire()
@@ -554,9 +712,42 @@ impl ExecPolicyManager {
 
         let mut updated_policy = self.current().as_ref().clone();
         updated_policy.add_network_rule(&host, protocol, decision, justification)?;
+        if marked {
+            let mut approved = self.aggressive_approved_hosts.load().as_ref().clone();
+            // The policy normalized the host; record it as written there.
+            if let Some(rule) = updated_policy.network_rules().last()
+                && !approved.contains(&rule.host)
+            {
+                approved.push(rule.host.clone());
+                self.aggressive_approved_hosts.store(Arc::new(approved));
+            }
+        }
         self.policy.store(Arc::new(updated_policy));
         Ok(())
     }
+}
+
+/// The rules file Aggressive writes (`corbanu vault …` is forbidden), parsed
+/// once. It is generated, so it always parses.
+fn aggressive_vault_policy() -> &'static Policy {
+    static POLICY: std::sync::LazyLock<Policy> = std::sync::LazyLock::new(|| {
+        let mut parser = PolicyParser::new();
+        match parser.parse(
+            codex_security_level::level::RULES_FILE,
+            // The vault rule only (#441's nested-launch rules follow the
+            // stored setting and apply from the next start).
+            &codex_security_level::level::rules_contents_for(
+                codex_security_level::level::NestedAgents::Pass,
+            ),
+        ) {
+            Ok(()) => parser.build(),
+            Err(err) => {
+                tracing::error!("the Aggressive vault rule does not parse: {err}");
+                Policy::empty()
+            }
+        }
+    });
+    &POLICY
 }
 
 impl Default for ExecPolicyManager {
@@ -899,6 +1090,11 @@ fn strict_forbidden_matches(policy: &Policy, command: &[String]) -> Vec<RuleMatc
         if let Some(rule) = rule.as_any().downcast_ref::<PrefixRule>()
             && rule.decision == Decision::Forbidden
             && !rule.pattern.rest.is_empty()
+            // #441: the nested-launch rules only refuse earlier what the
+            // launch check refuses anyway; they match exactly, never loose
+            // text such as a commit message.
+            && rule.justification.as_deref()
+                != Some(codex_security_level::level::NESTED_LAUNCH_JUSTIFICATION)
         {
             rules_by_program
                 .entry(rule.pattern.first.to_ascii_lowercase())
@@ -1132,6 +1328,29 @@ fn try_derive_execpolicy_amendment_for_allow_rules(
         })
 }
 
+/// Where an approved exec policy amendment applies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AmendmentScope {
+    /// Written to the rules file: future sessions use it too.
+    Saved,
+    /// It carries a credential (#398), so it was not written and applies to
+    /// this session only.
+    Session,
+}
+
+/// Whether a command (or prefix) carries a credential the log redaction
+/// would hide (#398).
+fn contains_credentials(command: &[String]) -> bool {
+    codex_log_guard::contains_credentials(&command.join(" "))
+}
+
+/// `amendment` unless it carries a credential: approving it would save the
+/// credential in the rules file (#398). The user can still approve the
+/// command once or for the session.
+fn without_credentials(amendment: Option<ExecPolicyAmendment>) -> Option<ExecPolicyAmendment> {
+    amendment.filter(|amendment| !contains_credentials(&amendment.command))
+}
+
 fn derive_requested_execpolicy_amendment_from_prefix_rule(
     prefix_rule: Option<&Vec<String>>,
     matched_rules: &[RuleMatch],
@@ -1346,6 +1565,9 @@ async fn collect_policy_files(dir: impl AsRef<Path>) -> Result<Vec<PathBuf>, Exe
     );
     Ok(policy_paths)
 }
+
+#[path = "exec_policy_aggressive.rs"]
+mod aggressive;
 
 #[cfg(test)]
 #[path = "exec_policy_tests.rs"]

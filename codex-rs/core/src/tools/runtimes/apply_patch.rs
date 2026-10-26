@@ -105,7 +105,14 @@ impl ApplyPatchRuntime {
             permissions = match cwd {
                 Some(cwd) => contract.file_tool_permissions(
                     &permissions,
-                    attempt.sandbox != SandboxType::None,
+                    // PF-27-S06: on Windows only the elevated sandbox can
+                    // deny reads (patches never go through the proxy).
+                    attempt.sandbox != SandboxType::None
+                        && (!cfg!(windows)
+                            || (codex_sandboxing::windows_sandbox_uses_elevated_backend(
+                                attempt.windows_sandbox_level,
+                                /*proxy_enforced*/ false,
+                            ) && windows_new_files_protected(contract))),
                     cwd.as_path(),
                 ),
                 None => contract.file_tool_permissions(
@@ -139,6 +146,13 @@ impl Sandboxable for ApplyPatchRuntime {
 impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
     type ApprovalKey = ApplyPatchApprovalKey;
 
+    fn additional_permissions<'r>(
+        &self,
+        req: &'r ApplyPatchRequest,
+    ) -> Option<&'r AdditionalPermissionProfile> {
+        req.additional_permissions.as_ref()
+    }
+
     fn approval_keys(&self, req: &ApplyPatchRequest) -> Vec<Self::ApprovalKey> {
         req.file_paths
             .iter()
@@ -167,6 +181,7 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
                 return ReviewDecision::Approved;
             }
             if let Some(reason) = retry_reason {
+                crate::tools::sandboxing::note_person_asked();
                 let decision = session
                     .request_patch_approval(
                         turn,
@@ -301,3 +316,19 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
 #[cfg(test)]
 #[path = "apply_patch_tests.rs"]
 mod tests;
+
+/// PF-27-S06: on Windows a patch may run with the protected profile only once
+/// new files in `CODEX_HOME` are denied to the sandbox too.
+fn windows_new_files_protected(
+    contract: &crate::security::launch_contract::LaunchContract,
+) -> bool {
+    #[cfg(windows)]
+    {
+        contract.protect_new_codex_home_files().is_ok()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = contract;
+        true
+    }
+}

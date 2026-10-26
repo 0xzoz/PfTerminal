@@ -12,14 +12,19 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 
 pub(crate) use codex_security_level::level::ChosenLevel;
+pub(crate) use codex_security_level::level::ConfirmedLevel;
 pub use codex_security_level::level::NestedAgents;
 #[cfg(test)]
 pub(crate) use codex_security_level::level::RULES_DIR;
 pub(crate) use codex_security_level::level::STATE_FILE;
 pub(crate) use codex_security_level::level::StoredLevel;
 pub(crate) use codex_security_level::level::VAULT_PROGRAMS;
+pub(crate) use codex_security_level::level::aggressive_running;
+pub(crate) use codex_security_level::level::hold_aggressive_lock;
 pub(crate) use codex_security_level::level::load;
+pub(crate) use codex_security_level::level::load_confirmed;
 pub(crate) use codex_security_level::level::load_state;
+#[cfg(test)]
 pub(crate) use codex_security_level::level::rules_contents;
 pub(crate) use codex_security_level::level::rules_path;
 pub(crate) use codex_security_level::level::save;
@@ -53,10 +58,32 @@ pub(crate) fn context() -> Option<&'static LevelContext> {
     CONTEXT.get()
 }
 
+/// The level the next start enforces: the saved one, or Moderate where Core
+/// keeps it (`[security] level` in config, or Core's record over a
+/// Permissive file) and the saved level says less (#750).
+pub(crate) fn next_start(
+    stored: &StoredLevel,
+    core_next: crate::legacy_core::security_level_change::SecurityLevel,
+) -> ChosenLevel {
+    match stored.enforced() {
+        ChosenLevel::Permissive
+            if core_next == crate::legacy_core::security_level_change::SecurityLevel::Moderate =>
+        {
+            ChosenLevel::Moderate
+        }
+        saved => saved,
+    }
+}
+
 /// `/status` line for the flagged level: what is active now and, when it
-/// differs, what the next start will enforce.
-pub(crate) fn status_line(active: ChosenLevel, stored: &StoredLevel) -> String {
-    let next = stored.enforced();
+/// differs, what the next start will enforce (`core_next` is Core's level
+/// for the next start).
+pub(crate) fn status_line(
+    active: ChosenLevel,
+    stored: &StoredLevel,
+    core_next: crate::legacy_core::security_level_change::SecurityLevel,
+) -> String {
+    let next = next_start(stored, core_next);
     match stored {
         StoredLevel::Invalid(_) => format!(
             "{} active; stored level unreadable, Aggressive enforced (/security)",
@@ -101,6 +128,35 @@ pub(crate) fn external_agent_block_reason() -> Option<String> {
     }
     let context = context()?;
     external_agent_block_reason_in(context.active, load(&context.codex_home).enforced())
+}
+
+/// #758: whether this process enforces Aggressive.
+pub(crate) fn aggressive_active() -> bool {
+    #[cfg(test)]
+    if let Some((active, _)) = test_levels::LEVELS.get() {
+        return active == ChosenLevel::Aggressive;
+    }
+    context().is_some_and(|context| context.active == ChosenLevel::Aggressive)
+}
+
+/// #891: the stricter of the active and the saved level when that is a
+/// protected level (Moderate or Aggressive), for the rules contained Claude
+/// panes take under it. The saved level counts as soon as it is saved, as
+/// Core's own rules follow the stricter of the saved level and the live
+/// policy.
+pub(crate) fn protected_level_for_panes() -> Option<ChosenLevel> {
+    #[cfg(test)]
+    if let Some((active, stored)) = test_levels::LEVELS.get() {
+        return stricter_protected(active, stored);
+    }
+    let context = context()?;
+    stricter_protected(context.active, load(&context.codex_home).enforced())
+}
+
+fn stricter_protected(active: ChosenLevel, stored: ChosenLevel) -> Option<ChosenLevel> {
+    [ChosenLevel::Aggressive, ChosenLevel::Moderate]
+        .into_iter()
+        .find(|level| *level == active || *level == stored)
 }
 
 /// For entry points that may have no launch context (`corbanu

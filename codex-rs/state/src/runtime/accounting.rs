@@ -61,7 +61,7 @@ impl<'a> Journal<'a> {
     ) -> anyhow::Result<()> {
         attempt.validate()?;
         ensure!(batch.len() <= 256, "observation batch too large");
-        let mut tx = self.runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = crate::runtime::db_lock::begin_immediate(&self.runtime.pool).await?;
         match Self::append_on_connection(&mut tx, attempt, batch).await {
             Ok(()) => tx.commit().await?,
             Err(error) => {
@@ -92,7 +92,7 @@ impl<'a> Journal<'a> {
                 .context("detail expiry overflow")?;
             ensure!(
                 detail_expiry > checkpoint,
-                "unsupported compact-only late import in this fixture"
+                "request dispatch time is outside the ledger's 90-day detail window; compact-only late imports are unsupported"
             );
         }
         let installed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'draft_accounting_tombstones')")
@@ -119,11 +119,21 @@ impl<'a> Journal<'a> {
             );
         }
         if let Some(predecessor) = attempt.retry_of {
-            let parent = read_attempt(conn, predecessor).await?;
-            ensure!(
-                parent.as_ref().is_some_and(|p| attempt.same_owner(p)),
-                "invalid retry predecessor"
-            );
+            let Some(parent) = read_attempt(conn, predecessor).await? else {
+                return Err(native::PredecessorMissing.into());
+            };
+            ensure!(attempt.same_owner(&parent), "invalid retry predecessor");
+        }
+        // A record a format-1 ledger cannot express upgrades the ledger in the
+        // same transaction that writes it.
+        let format = batch
+            .iter()
+            .map(Observation::ledger_format)
+            .chain([attempt.ledger_format()])
+            .max()
+            .unwrap_or(1);
+        if format > 1 {
+            crate::runtime::accounting::store::require_format_on_connection(conn, format).await?;
         }
         sqlx::query("INSERT INTO draft_accounting_attempts VALUES (?, ?, ?) ON CONFLICT(attempt_id) DO NOTHING")
             .bind(attempt.attempt_id.to_string())
@@ -204,6 +214,22 @@ enum RetentionFixture {
     Absent,
     Staging,
     Active(i64),
+}
+
+/// How long a day's totals and replay fences are kept: one year. Expiry and
+/// the stated retention floor both use this one value.
+const REPLAY_MS: i64 = 365 * 86_400_000;
+
+/// The first UTC day whose daily totals are still kept at `checkpoint`. Day
+/// pages and ranges both read it here, so they agree on how far back the
+/// totals go.
+fn aggregate_day_floor(checkpoint: i64) -> i64 {
+    const DAY_MS: i64 = 86_400_000;
+    if checkpoint < REPLAY_MS {
+        0
+    } else {
+        (checkpoint - REPLAY_MS) / DAY_MS + 1
+    }
 }
 
 /// Strict fixture metadata, never an implicit install, repair or activation path.

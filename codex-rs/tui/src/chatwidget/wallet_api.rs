@@ -509,33 +509,33 @@ async fn load_read_only_account(
             notice: Some("Top up with USDC to create the first API key.".to_string()),
         });
     };
-    let account_response = gateway
-        .client
-        .get(format!("{}/v1/account", gateway.origin))
-        .bearer_auth(api_key.as_str())
-        .send()
-        .await
-        .map_err(|error| error.to_string())?;
-    if account_response.status() == reqwest::StatusCode::UNAUTHORIZED {
+    let account_response =
+        super::wallet_http::account_get(&gateway, "/v1/account", &api_key).await?;
+    if account_response.status == reqwest::StatusCode::UNAUTHORIZED {
+        // #641: a key from the environment wins over a stored replacement.
+        let notice = match &api_key {
+            super::wallet_http::CorbanuAccountKey::HeldByBroker => {
+                "The Corbanu API key from the environment (CORBANU_API_KEY) is no longer valid. Replace it there and restart Corbanu Terminal, or unset it, restart, and unlock this wallet to create a replacement key."
+            }
+            super::wallet_http::CorbanuAccountKey::Value(_) => {
+                "The stored Corbanu API key is no longer valid. Unlock this wallet to load its balance or create a replacement key."
+            }
+        };
         return Ok(CorbanuApiView {
             account: None,
             models,
             key_summaries_loaded: false,
-            notice: Some(
-                "The stored Corbanu API key is no longer valid. Unlock this wallet to load its balance or create a replacement key."
-                    .to_string(),
-            ),
+            notice: Some(notice.to_string()),
         });
     }
-    if !account_response.status().is_success() {
+    if !account_response.status.is_success() {
         return Err(format!(
             "Corbanu API account returned HTTP {}",
-            account_response.status()
+            account_response.status
         ));
     }
     let account = account_response
         .json::<KeyAccountResponse>()
-        .await
         .map_err(|error| format!("Corbanu API account response was malformed: {error}"))?;
     let daemon = WalletDaemonClient::new(home)
         .status()

@@ -34,6 +34,7 @@ use super::approval;
 use super::bridge::run_claude_bridge;
 use super::output_parse::ParsedClaudeOutput;
 use super::output_parse::parse_claude_output;
+use super::output_parse::tool_results_report_user_namespace_denial;
 use super::pane::ClaudePaneTurnStatus;
 use super::pane::ClaudePaneUsageStatus;
 use super::progress::dedupe_tool_names;
@@ -48,6 +49,7 @@ use super::progress::turn_usage_summary_from_stdout;
 use super::progress::unix_epoch_ms;
 use super::progress::usage_status_from_summary;
 use super::turn_types::ClaudeCommandPlan;
+use super::turn_types::ClaudePaneToolEvent;
 use super::turn_types::ClaudePaneTurnAudit;
 use super::turn_types::ClaudePaneTurnOutput;
 use super::turn_types::DeferredClaudePlanAuth;
@@ -187,6 +189,10 @@ pub(crate) async fn run_claude_command_plan(
         )),
     );
     let redactor = ClaudeSecretRedactor::from_plan(&plan, /*additional_secret*/ None);
+    // #891: the level under which this launch denies user namespaces.
+    let user_namespaces_denied = contained
+        .as_ref()
+        .and_then(|contained| contained.user_namespaces_denied);
     let mut command = match contained {
         Some(contained) => {
             let (program, args) = contained
@@ -506,18 +512,26 @@ pub(crate) async fn run_claude_command_plan(
 
     if !stdout_text.trim().is_empty() {
         let output = match parse_claude_output(&stdout_text) {
-            Ok(parsed) => turn_output_from_parsed(&plan, parsed, duration_ms),
+            Ok(parsed) => {
+                let mut output = turn_output_from_parsed(&plan, parsed, duration_ms);
+                add_user_namespaces_note(&mut output, user_namespaces_denied, &stdout_text);
+                output
+            }
             // A transcript this client cannot parse is still a turn that
             // spent money, and the line stating what it spent may be sitting
             // in that same stdout. Salvage it rather than drop the turn.
-            Err(err) => partial_failed_turn_output(
-                &plan,
-                duration_ms,
-                ClaudePaneTurnStatus::ParseFailure,
-                Some("parse_failure".to_string()),
-                format!("{err:#}"),
-                &stdout_text,
-            ),
+            Err(err) => {
+                let mut output = partial_failed_turn_output(
+                    &plan,
+                    duration_ms,
+                    ClaudePaneTurnStatus::ParseFailure,
+                    Some("parse_failure".to_string()),
+                    format!("{err:#}"),
+                    &stdout_text,
+                );
+                add_user_namespaces_note(&mut output, user_namespaces_denied, &stdout_text);
+                output
+            }
         };
         report_direct_turn(progress_tx.as_ref(), &output);
         write_turn_audit(
@@ -804,7 +818,7 @@ fn is_executable_file(path: &std::path::Path) -> bool {
 /// in the turn's sandbox). A file that passed is remembered by
 /// path, size, modification time and (Unix) inode, so a replaced binary is
 /// checked again.
-async fn require_contained_claude_version(
+pub(super) async fn require_contained_claude_version(
     claude: &std::path::Path,
     version: super::containment::ContainedCommand,
     cwd: &std::path::Path,
@@ -853,7 +867,6 @@ async fn require_contained_claude_version(
         .map_err(|_| anyhow!("`{} --version` did not finish", claude.display()))?
         .with_context(|| format!("failed to run `{} --version`", claude.display()))?;
     let text = String::from_utf8_lossy(&output.stdout);
-    let (major, minor, patch) = CONTAINED_CLAUDE_MIN_VERSION;
     match parse_claude_version(&text) {
         Some(version) if version >= CONTAINED_CLAUDE_MIN_VERSION => {
             if let Some(identity) = identity {
@@ -864,14 +877,100 @@ async fn require_contained_claude_version(
             }
             Ok(())
         }
-        found => Err(anyhow!(
-            "contained Claude panes need Claude Code {major}.{minor}.{patch} or later; found {}. Update Claude Code and try again.",
-            found.map_or_else(
-                || "an unknown version".to_string(),
-                |(a, b, c)| format!("{a}.{b}.{c}")
-            )
-        )),
+        found => Err(anyhow!(contained_claude_version_problem(
+            claude,
+            found,
+            output.status.code(),
+            &String::from_utf8_lossy(&output.stderr),
+        ))),
     }
+}
+
+/// #554: why a contained pane cannot use the Claude Code at `claude`, which
+/// reported `found` (`None`: no version; `exit_code` and `stderr` say why),
+/// and what to do about it.
+pub(super) fn contained_claude_version_problem(
+    claude: &std::path::Path,
+    found: Option<(u64, u64, u64)>,
+    exit_code: Option<i32>,
+    stderr: &str,
+) -> String {
+    let (major, minor, patch) = CONTAINED_CLAUDE_MIN_VERSION;
+    let path = claude.display();
+    let reported = match found {
+        Some((a, b, c)) => format!("the `claude` found on PATH (`{path}`) is {a}.{b}.{c}"),
+        None => {
+            let status = exit_code.map_or_else(
+                || "it was stopped by a signal".to_string(),
+                |code| format!("exit status {code}"),
+            );
+            let reason = stderr
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(|line| {
+                    let line: String = line.chars().take(200).collect();
+                    format!(": {}", super::approval::escape_plain(&line))
+                })
+                .unwrap_or_default();
+            format!(
+                "`claude --version` with the `claude` found on PATH (`{path}`) reported no \
+                 version ({status}{reason})"
+            )
+        }
+    };
+    format!(
+        "Claude panes run in Corbanu's sandbox here (contained), which needs Claude Code \
+         {major}.{minor}.{patch} or later, and {reported}. Update Claude Code (`claude update`, \
+         or the way you installed it) or put a newer `claude` first on PATH; Codex panes are not \
+         affected."
+    )
+}
+
+/// #554: whether a new contained Claude pane can run the Claude Code on
+/// PATH, checked as its turns check it (in the same sandbox), so an old one
+/// is explained when the pane opens rather than at its first task. `None`
+/// when panes are not contained, are off, or it can.
+pub(crate) async fn contained_claude_launch_problem(
+    codex_home: std::path::PathBuf,
+    pane_id: String,
+    cwd: std::path::PathBuf,
+) -> Option<String> {
+    let settings = super::containment::enabled()?;
+    if crate::security::level::external_agent_block_reason().is_some() {
+        return None;
+    }
+    let check = async {
+        let containment = super::containment::ClaudeContainment {
+            state_dir: super::containment::state_dir(
+                &codex_home,
+                &pane_id,
+                settings.state_root.as_deref(),
+            )?,
+            panes_dir: codex_home.join("panes"),
+            linux_sandbox_exe: settings.linux_sandbox_exe.clone(),
+        };
+        let claude_path = resolve_contained_claude(
+            "claude",
+            &[&cwd, &containment.state_dir, &containment.panes_dir],
+        )?;
+        // `--version` needs no network: the only port it may reach is one
+        // nothing listens on.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .and_then(|listener| listener.local_addr())
+            .context("failed to pick a loopback port")?
+            .port();
+        let version = super::containment::contain(
+            &containment,
+            &claude_path.to_string_lossy(),
+            &["--version".to_string()],
+            &containment.claude_env(),
+            &cwd,
+            port,
+        )?;
+        require_contained_claude_version(&claude_path, version, &cwd).await
+    };
+    check.await.err().map(|err| format!("{err:#}"))
 }
 
 /// `2.1.292` from `2.1.292 (Claude Code)`.
@@ -886,12 +985,20 @@ pub(super) fn parse_claude_version(text: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some(version)
 }
 
-async fn resolve_deferred_claude_plan_token(
+pub(super) async fn resolve_deferred_claude_plan_token(
     deferred: DeferredClaudePlanAuth,
 ) -> Result<Zeroizing<String>> {
     let mut command = Command::new(&deferred.helper_executable);
+    command.arg(codex_login::auth::CLAUDE_PLAN_TOKEN_HELPER_SUBCOMMAND);
+    // PF-84 (#414): the account goes in argv too, so a helper that predates
+    // named accounts refuses instead of printing the default account's token.
+    match deferred.account.as_deref() {
+        Some(account) => command
+            .args(["--account", account, "--enable", "named_accounts"])
+            .env(codex_login::PROVIDER_ACCOUNT_ENV_VAR, account),
+        None => command.env_remove(codex_login::PROVIDER_ACCOUNT_ENV_VAR),
+    };
     command
-        .arg("internal-claude-oauth-token")
         .env("CORBANU_HOME", &deferred.codex_home)
         .env("PFTERMINAL_HOME", &deferred.codex_home)
         .env("CODEX_HOME", &deferred.codex_home)
@@ -1073,6 +1180,28 @@ fn linux_descendant_pids(root_pid: libc::pid_t) -> Vec<libc::pid_t> {
     }
 
     descendants
+}
+
+/// #891: when this turn's launch denied user namespaces (at `level`) and a
+/// tool result in `stdout` reports the refusal, the turn's text ends with a
+/// note naming the rule, instead of bubblewrap's misleading message alone.
+pub(super) fn add_user_namespaces_note(
+    output: &mut ClaudePaneTurnOutput,
+    level: Option<&str>,
+    stdout: &str,
+) {
+    let Some(level) = level else {
+        return;
+    };
+    if !tool_results_report_user_namespace_denial(stdout) {
+        return;
+    }
+    let note = codex_sandboxing::user_namespaces::claude_pane_note(level);
+    output.text = if output.text.trim().is_empty() {
+        note
+    } else {
+        format!("{}\n\n{note}", output.text.trim_end())
+    };
 }
 
 fn turn_output_from_parsed(
@@ -1263,7 +1392,15 @@ pub(crate) fn write_turn_audit(
         reasoning_events: output.reasoning_events.clone(),
         tool_use_count: output.tool_events.len(),
         tool_names: output.tool_names.clone(),
-        tool_events: output.tool_events.clone(),
+        // Previews can hold Bash command lines (#398).
+        tool_events: output
+            .tool_events
+            .iter()
+            .map(|event| ClaudePaneToolEvent {
+                name: event.name.clone(),
+                preview: codex_log_guard::redact_credentials(&event.preview).into_owned(),
+            })
+            .collect(),
     };
     let bytes =
         serde_json::to_vec_pretty(&audit).context("failed to serialize Claude turn audit")?;

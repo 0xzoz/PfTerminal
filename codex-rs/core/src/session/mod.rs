@@ -211,6 +211,7 @@ use codex_protocol::exec_output::StreamOutput;
 
 mod code_mode_warning;
 mod config_lock;
+mod confirmed_aggressive;
 pub(crate) mod context_window;
 mod extension_metrics;
 mod handlers;
@@ -304,6 +305,10 @@ impl SteerInputError {
     }
 }
 
+/// PF-84: how long a switch to an account without a fresh cached model list
+/// waits for that list (API-key sign-ins need no fetch and never wait).
+const FIRST_MODEL_LIST_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Notes from the previous real user turn.
 ///
 /// Conceptually this is the same role that `previous_model` used to fill, but
@@ -370,6 +375,7 @@ use codex_protocol::models::LocalImagePreparation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
+use codex_protocol::protocol::AccountTokenUsage;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -629,6 +635,11 @@ impl Session {
         };
 
         let mut config = Arc::new(config);
+        // PF-84: a user's session lists models with its own account's sign-in.
+        if !session_source.is_non_root_agent() {
+            let account = codex_model_provider::named_sign_in_account(&config.model_provider);
+            models_manager.follow_sign_in_account(account.as_ref());
+        }
         let refresh_strategy = if session_source.is_non_root_agent() {
             codex_models_manager::manager::RefreshStrategy::Offline
         } else {
@@ -727,6 +738,7 @@ impl Session {
             compact_prompt: config.compact_prompt.clone(),
             approval_policy: config.permissions.approval_policy.clone(),
             approvals_reviewer: config.approvals_reviewer,
+            aggressive_approvals: false,
             permission_profile_state: session_permission_profile_state_from_config(&config)?,
             windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
             environments: TurnEnvironmentSelections::new(
@@ -1149,7 +1161,12 @@ impl Session {
                 return;
             }
         };
-        let current_exec_policy = self.services.exec_policy.current();
+        // D52 (#1001): under Aggressive, network allow rules saved outside it
+        // are suspended.
+        let current_exec_policy = self
+            .services
+            .exec_policy
+            .current_for(self.services.model_client().live_level_is_aggressive());
         let spec = match spec.with_exec_policy_network_rules(current_exec_policy.as_ref()) {
             Ok(spec) => spec,
             Err(err) => {
@@ -1250,7 +1267,7 @@ impl Session {
         }
     }
 
-    fn next_internal_sub_id(&self) -> String {
+    pub(crate) fn next_internal_sub_id(&self) -> String {
         let id = self
             .next_internal_sub_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1308,6 +1325,32 @@ impl Session {
     pub(crate) async fn token_usage_info(&self) -> Option<TokenUsageInfo> {
         let state = self.state.lock().await;
         state.token_info()
+    }
+
+    /// PF-84: usage of requests made for this conversation outside its own
+    /// turn loop (a guardian or `/review` delegate, stage-one memory
+    /// extraction), which the accounting ledger also records under it. Sent
+    /// at once on the active turn, if any; otherwise with the next count.
+    pub(crate) async fn record_delegated_account_usage(&self, usage: &[AccountTokenUsage]) {
+        if usage.is_empty() || !self.features().enabled(Feature::NamedAccounts) {
+            return;
+        }
+        {
+            let mut state = self.state.lock().await;
+            for entry in usage {
+                state.record_account_token_usage(&entry.provider_id, &entry.account, &entry.usage);
+            }
+        }
+        if let Some((turn_context, _)) = self.active_turn_context_and_cancellation_token().await {
+            self.send_token_count_event(&turn_context).await;
+        }
+    }
+
+    /// PF-84: this thread's provider-reported usage per named account, for
+    /// replay to a client that attaches after resume.
+    pub(crate) async fn account_token_usage(&self) -> Option<Vec<AccountTokenUsage>> {
+        let state = self.state.lock().await;
+        state.account_token_usage()
     }
 
     pub(crate) async fn get_estimated_token_count(
@@ -1443,6 +1486,15 @@ impl Session {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
+                // PF-84: a resumed thread keeps its usage per account, only while
+                // named accounts are on. A fork does not: its parent's requests
+                // stay the parent's.
+                if turn_context.config.features.enabled(Feature::NamedAccounts)
+                    && let Some(usage) = Self::last_account_token_usage_from_rollout(&rollout_items)
+                {
+                    let mut state = self.state.lock().await;
+                    state.set_account_token_usage(usage);
+                }
                 Self::trace_session_timing(
                     "record_initial_history_resumed_after_token_seed",
                     initial_history_started_at,
@@ -1498,6 +1550,18 @@ impl Session {
                         // cold resume cannot observe inherited settings as the latest value.
                         rollout_items.push(thread_settings_applied);
                     }
+                }
+                // PF-84: the copied prefix holds the parent's usage per account; mark
+                // where this fork's own (none yet) begins, so a resume before its first
+                // reply does not count the parent's again.
+                if turn_context.config.features.enabled(Feature::NamedAccounts) {
+                    rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
+                        TokenCountEvent {
+                            info: None,
+                            rate_limits: None,
+                            account_usage: Some(Vec::new()),
+                        },
+                    )));
                 }
                 self.persist_rollout_items(&rollout_items).await;
 
@@ -1614,6 +1678,15 @@ impl Session {
         })
     }
 
+    fn last_account_token_usage_from_rollout(
+        rollout_items: &[RolloutItem],
+    ) -> Option<Vec<AccountTokenUsage>> {
+        rollout_items.iter().rev().find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.account_usage.clone(),
+            _ => None,
+        })
+    }
+
     fn last_model_response_completed_from_rollout(
         rollout_items: &[RolloutItem],
     ) -> Option<ModelResponseCompletedEvent> {
@@ -1653,6 +1726,7 @@ impl Session {
             permission_profile_changed,
             mcp_inputs_changed,
             stale_startup_prewarm,
+            follows_model_list,
         ) = {
             let mut state = self.state.lock().await;
             let updated = match state.session_configuration.apply(&updates) {
@@ -1678,6 +1752,7 @@ impl Session {
                 .model_provider_id
                 != updated.original_config_do_not_use.model_provider_id
                 || state.session_configuration.provider != updated.provider;
+            let account_switched = model_provider_changed && self.follow_provider_account(&updated);
             if model_provider_changed {
                 // Publish while updates are serialized, before the new configuration
                 // becomes observable. Frame guards read this client without state locks.
@@ -1694,6 +1769,8 @@ impl Session {
                     .turn_environments
                     .update_selections(updated.environment_selections());
             }
+            let follows_model_list =
+                model_provider_changed && self.model_list_follows_this_session(&updated);
             state.session_configuration = updated;
             if mcp_inputs_changed {
                 self.mark_mcp_runtime_dirty();
@@ -1702,10 +1779,14 @@ impl Session {
                 previous_config,
                 new_config,
                 permission_profile_changed,
-                mcp_inputs_changed,
+                mcp_inputs_changed || account_switched,
                 stale_startup_prewarm,
+                follows_model_list,
             )
         };
+        if follows_model_list {
+            self.follow_model_list_account().await;
+        }
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
         if let Some(startup_prewarm) = stale_startup_prewarm {
             startup_prewarm.abort().await;
@@ -1718,6 +1799,72 @@ impl Session {
             self.schedule_mcp_prewarm();
         }
         Ok(())
+    }
+
+    /// PF-84: whether this session's account drives the process's model
+    /// list: a user's session, not a sub-agent's or an internal one's.
+    pub(super) fn model_list_follows_this_session(
+        &self,
+        configuration: &SessionConfiguration,
+    ) -> bool {
+        !configuration.session_source.is_non_root_agent()
+    }
+
+    /// PF-84: on a provider change, makes the new provider's sign-in (a named
+    /// account's or the default login) the one connectors, plugin installs and
+    /// accounting use, before the model client is built. Called under the
+    /// state lock by every path that changes the provider. Returns whether the
+    /// account changed; connectors are then marked for reconnection.
+    pub(super) fn follow_provider_account(&self, next: &SessionConfiguration) -> bool {
+        if !self.services.active_auth.follow_provider(&next.provider) {
+            return false;
+        }
+        let account = codex_model_provider::named_sign_in_account(&next.provider)
+            .map_or_else(|| "default".to_string(), |account| account.to_string());
+        info!(
+            %account,
+            "connectors, plugin installs, accounting and the model list follow the switch"
+        );
+        self.mark_mcp_runtime_dirty();
+        true
+    }
+
+    /// PF-84: lists models with the sign-in of the account this session's
+    /// provider uses (the default login for any other provider). When that
+    /// changed, the account's list is fetched again: in the background when
+    /// its own cache (see `AccountModelsManager`) is fresh, otherwise waited
+    /// for, at most [`FIRST_MODEL_LIST_WAIT`], so the client's next
+    /// `model/list` has it.
+    pub(super) async fn follow_model_list_account(&self) {
+        let (provider, http_client_factory) = {
+            let state = self.state.lock().await;
+            (
+                state.session_configuration.provider.clone(),
+                state
+                    .session_configuration
+                    .original_config_do_not_use
+                    .http_client_factory(),
+            )
+        };
+        let account = codex_model_provider::named_sign_in_account(&provider);
+        if !self
+            .services
+            .models_manager
+            .follow_sign_in_account(account.as_ref())
+        {
+            return;
+        }
+        let models_manager = Arc::clone(&self.services.models_manager);
+        let cached = models_manager.load_cached_list().await;
+        let fetch = self.services.runtime_handle.spawn(async move {
+            models_manager
+                .list_models(RefreshStrategy::Online, http_client_factory)
+                .await;
+        });
+        if !cached {
+            // On timeout the fetch goes on in the background.
+            let _ = tokio::time::timeout(FIRST_MODEL_LIST_WAIT, fetch).await;
+        }
     }
 
     async fn ensure_runtime_model_provider(&self, updates: &mut SessionSettingsUpdate) {
@@ -1791,7 +1938,7 @@ impl Session {
     ) -> ModelClient {
         let config = configuration.original_config_do_not_use.as_ref();
         ModelClient::new(
-            Some(Arc::clone(&self.services.auth_manager)),
+            Some(self.services.auth_manager()),
             if config.features.enabled(Feature::UseAgentIdentity) {
                 codex_login::auth::AgentIdentityAuthPolicy::ChatGptAuth
             } else {
@@ -1907,6 +2054,208 @@ impl Session {
     pub(crate) async fn provider(&self) -> ModelProviderInfo {
         let state = self.state.lock().await;
         state.session_configuration.provider.clone()
+    }
+
+    /// The session's configured definition of provider `id`, user overrides
+    /// such as `billing` included.
+    pub(crate) async fn configured_model_provider(
+        &self,
+        id: &str,
+    ) -> Option<codex_model_provider_info::ModelProviderInfo> {
+        let state = self.state.lock().await;
+        state
+            .session_configuration
+            .original_config_do_not_use
+            .model_providers
+            .get(id)
+            .cloned()
+    }
+
+    /// Where this session's paid requests are recorded (PF-60-S05, PF-60-S04,
+    /// PF-60-S06).
+    ///
+    /// A persisted session records under its own thread. A session with no
+    /// thread of its own records under the conversation it works for, in that
+    /// conversation's ledger, with a turn label saying what it is:
+    /// - a guardian reviewer (the reusable trunk and its ephemeral forks): the
+    ///   conversation it reviews for, as `review:`;
+    /// - a memory consolidation agent: the conversation that started it, as
+    ///   `consolidation:` (bound when the session is built, so its first
+    ///   request, a startup prewarm included, already has its owner);
+    /// - a sub-agent (a spawned agent, a `/review` task): the conversation it
+    ///   works for, as `agent:` or `code-review:`. A `/review` task records
+    ///   there even though it is persisted as a thread of its own (#898): that
+    ///   thread names no parent the ledger can resolve, so its requests would
+    ///   otherwise be counted under no conversation;
+    /// - an ephemeral fork: the conversation it was forked from, as `side:`
+    ///   for a TUI `/side` conversation and `fork:` for any other.
+    ///
+    /// When the conversation worked for is not persisted either (a guardian
+    /// review or a sub-agent inside `/side`), its own owner is used and the
+    /// labels nest (`side:review:`, `side:agent:`), so the work is counted
+    /// once under the persisted conversation at the root.
+    ///
+    /// `Err` says why there is none: a session that is not collected by design
+    /// (`exec --ephemeral`, or work for a conversation that is itself not
+    /// collected), or a ledger that could not be reached.
+    pub(crate) async fn accounting_owner(
+        &self,
+    ) -> Result<crate::accounting::AccountingOwner, crate::accounting::Uncollected> {
+        self.accounting_owner_at(/*depth*/ 0).await
+    }
+
+    async fn accounting_owner_at(
+        &self,
+        depth: usize,
+    ) -> Result<crate::accounting::AccountingOwner, crate::accounting::Uncollected> {
+        use crate::accounting::Uncollected;
+        use codex_protocol::protocol::SubAgentSource;
+        let (guardian_parent, code_review_parent, worked_for, forked_from) = {
+            let state = self.state.lock().await;
+            let configuration = &state.session_configuration;
+            let guardian_parent = match &configuration.session_source {
+                SessionSource::SubAgent(SubAgentSource::Other(name))
+                    if name == crate::guardian::GUARDIAN_REVIEWER_NAME =>
+                {
+                    Some(configuration.parent_thread_id)
+                }
+                _ => None,
+            };
+            let code_review_parent = match &configuration.session_source {
+                SessionSource::SubAgent(SubAgentSource::Review) => configuration.parent_thread_id,
+                _ => None,
+            };
+            let worked_for = match &configuration.session_source {
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id, ..
+                }) => Some((*parent_thread_id, "agent:")),
+                SessionSource::SubAgent(
+                    SubAgentSource::Compact
+                    | SubAgentSource::MemoryConsolidation
+                    | SubAgentSource::Other(_),
+                ) => configuration
+                    .parent_thread_id
+                    .map(|parent| (parent, "agent:")),
+                _ => None,
+            };
+            let forked_from = configuration.forked_from_thread_id.map(|parent| {
+                let side = matches!(
+                    &configuration.thread_source,
+                    Some(ThreadSource::Feature(feature))
+                        if feature == ThreadSource::SIDE_CONVERSATION
+                );
+                (parent, if side { "side:" } else { "fork:" })
+            });
+            (guardian_parent, code_review_parent, worked_for, forked_from)
+        };
+        if let Some(parent) = guardian_parent {
+            let parent = parent.ok_or(Uncollected::Excluded("guardian_without_parent"))?;
+            return self
+                .accounting_owner_elsewhere(parent, "review:", depth)
+                .await;
+        }
+        if let Some(parent) = code_review_parent {
+            return self
+                .accounting_owner_elsewhere(parent, "code-review:", depth)
+                .await;
+        }
+        if self.live_thread().is_some() {
+            let db = self
+                .state_db()
+                .ok_or(Uncollected::Failed("no state database"))?;
+            return Ok(crate::accounting::AccountingOwner {
+                thread: self.thread_id,
+                db,
+                label_prefix: String::new(),
+            });
+        }
+        if let Some(started_by) = self
+            .services
+            .thread_extension_data
+            .get::<crate::accounting::StartedBy>()
+        {
+            return self
+                .accounting_owner_elsewhere(started_by.0, "consolidation:", depth)
+                .await;
+        }
+        if let Some((parent, label)) = worked_for.or(forked_from) {
+            return self.accounting_owner_elsewhere(parent, label, depth).await;
+        }
+        Err(Uncollected::Excluded("ephemeral_session"))
+    }
+
+    /// `parent`'s ledger, for a session with no thread of its own that works
+    /// for `parent`. Such a session has no database of its own; it shares the
+    /// parent's thread store, and so the parent's ledger. A parent that is not
+    /// persisted either is followed, while it is live, to its own owner.
+    async fn accounting_owner_elsewhere(
+        &self,
+        parent: ThreadId,
+        label: &'static str,
+        depth: usize,
+    ) -> Result<crate::accounting::AccountingOwner, crate::accounting::Uncollected> {
+        use crate::accounting::Uncollected;
+        /// Nested temporary work deeper than this is not followed further.
+        const MAX_DEPTH: usize = 4;
+        let db = match self.state_db() {
+            Some(db) => Some(db),
+            None => match self
+                .services
+                .thread_store
+                .as_any()
+                .downcast_ref::<codex_thread_store::LocalThreadStore>()
+            {
+                Some(store) => store.state_db().await,
+                None => None,
+            },
+        }
+        .ok_or(Uncollected::Failed("no state database"))?;
+        match db.get_thread(parent).await {
+            Ok(Some(_)) => Ok(crate::accounting::AccountingOwner {
+                thread: parent,
+                db,
+                label_prefix: label.to_string(),
+            }),
+            // Work for a conversation that is itself not persisted (a side
+            // conversation, a sub-agent of one) records where that
+            // conversation records; work for one that is not collected at all
+            // (exec --ephemeral) has no thread to record under.
+            Ok(None) => {
+                let parent_session = if depth < MAX_DEPTH && parent != self.thread_id {
+                    self.services.agent_control.live_session(parent).await
+                } else {
+                    None
+                };
+                let Some(parent_session) = parent_session else {
+                    return Err(Uncollected::Excluded("parent_not_persisted"));
+                };
+                match Box::pin(parent_session.accounting_owner_at(depth + 1)).await {
+                    Ok(owner) => {
+                        // A saved conversation whose thread row is not
+                        // written yet (work started before its first saved
+                        // item, such as `/review` racing the item that opens
+                        // it) records under its own thread; save it now, as
+                        // its own first request would, so the ledger has the
+                        // thread to record under (#898).
+                        if owner.thread == parent {
+                            parent_session
+                                .try_ensure_rollout_materialized()
+                                .await
+                                .map_err(|_| Uncollected::Failed("parent thread not saved"))?;
+                        }
+                        Ok(crate::accounting::AccountingOwner {
+                            label_prefix: format!("{}{label}", owner.label_prefix),
+                            ..owner
+                        })
+                    }
+                    Err(Uncollected::Excluded(_)) => {
+                        Err(Uncollected::Excluded("parent_not_persisted"))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            Err(_) => Err(Uncollected::Failed("parent thread unreadable")),
+        }
     }
 
     /// The accounting mode and provider identity in force right now.
@@ -2349,6 +2698,14 @@ impl Session {
             .await;
     }
 
+    /// Delivers an event to the client without writing it to the rollout: a
+    /// notice about this session's own start that a later reopen must not
+    /// replay as if it had happened again.
+    pub(crate) async fn send_event_raw_unpersisted(&self, event: Event) {
+        self.send_event_raw_with_persistence(event, /*persist*/ false)
+            .await;
+    }
+
     /// Delivers an event without creating a local rollout for a thread that has not materialized.
     pub(crate) async fn send_event_raw_without_materializing_rollout(&self, event: Event) {
         let persist = match self.current_rollout_path().await {
@@ -2441,11 +2798,18 @@ impl Session {
     }
 
     /// Adds an execpolicy amendment to both the in-memory and on-disk policies so future
-    /// commands can use the newly approved prefix.
+    /// commands can use the newly approved prefix. #626: one approved while
+    /// Aggressive is active is recorded as such, so it applies under
+    /// Aggressive too (the others are suspended there).
+    /// Saves a "don't ask again" answer. #945: `shown_under` is the policy
+    /// marker its prompt was shown under; when a security transition was
+    /// committed since, the answer was for a stale prompt and nothing is
+    /// saved (`Ok(None)`).
     pub(crate) async fn persist_execpolicy_amendment(
         &self,
         amendment: &ExecPolicyAmendment,
-    ) -> Result<(), ExecPolicyUpdateError> {
+        shown_under: Option<(u64, u64)>,
+    ) -> Result<Option<crate::exec_policy::AmendmentScope>, ExecPolicyUpdateError> {
         let codex_home = self
             .state
             .lock()
@@ -2454,12 +2818,39 @@ impl Session {
             .codex_home()
             .clone();
 
+        // Aggressive in force now (an unreadable live level counts as
+        // Aggressive, as it is enforced): the person approved it under
+        // Aggressive. Read before the marker: the marker only moves forward,
+        // so an unchanged marker means this was the level at the prompt.
+        let approved_under = if self.services.model_client().live_level_is_aggressive() {
+            crate::exec_policy::ApprovedUnder::Aggressive
+        } else {
+            crate::exec_policy::ApprovedUnder::LessStrict
+        };
+        if self.services.transition_since(shown_under) {
+            return Ok(None);
+        }
         self.services
             .exec_policy
-            .append_amendment_and_update(&codex_home, amendment)
-            .await?;
+            .append_amendment_and_update(&codex_home, amendment, approved_under)
+            .await
+            .map(Some)
+    }
 
-        Ok(())
+    /// #945: the policy marker the open approval prompt `approval_id` was
+    /// shown under; `None` when no such prompt is open.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn reads must stay consistent with the matching turn state"
+    )]
+    pub(crate) async fn pending_approval_shown_under(
+        &self,
+        approval_id: &str,
+    ) -> Option<Option<(u64, u64)>> {
+        let active = self.active_turn.lock().await;
+        let active = active.as_ref()?;
+        let ts = active.turn_state.lock().await;
+        ts.pending_approval_shown_under(approval_id)
     }
 
     pub(crate) async fn turn_context_for_sub_id(&self, sub_id: &str) -> Option<Arc<TurnContext>> {
@@ -2498,10 +2889,14 @@ impl Session {
             .await;
     }
 
+    /// `shown_under` (#945): the policy marker an allowing answer's prompt
+    /// was shown under; when a security transition was committed since,
+    /// nothing is changed.
     pub(crate) async fn persist_network_policy_amendment(
         &self,
         amendment: &NetworkPolicyAmendment,
         network_approval_context: &NetworkApprovalContext,
+        shown_under: Option<Option<(u64, u64)>>,
         on_policy_applied: impl FnOnce() + Send,
     ) -> anyhow::Result<()> {
         let _refresh_guard = self
@@ -2509,6 +2904,21 @@ impl Session {
             .acquire()
             .await
             .map_err(|_| anyhow::anyhow!("managed network proxy refresh semaphore closed"))?;
+        // D52 (#1001): one allowed while Aggressive is in force applies under
+        // Aggressive too (the others are suspended there). An unreadable live
+        // level counts as Aggressive, as it is enforced. Read before the
+        // marker: the marker only moves forward, so an unchanged marker means
+        // this was the level at the prompt (as for command rules, #945).
+        let approved_under = if self.services.model_client().live_level_is_aggressive() {
+            crate::exec_policy::ApprovedUnder::Aggressive
+        } else {
+            crate::exec_policy::ApprovedUnder::LessStrict
+        };
+        if let Some(shown_under) = shown_under
+            && self.services.transition_since(shown_under)
+        {
+            anyhow::bail!("the security level changed while network access was being approved");
+        }
         let host =
             Self::validated_network_policy_amendment_host(amendment, network_approval_context)?;
         let codex_home = self
@@ -2549,6 +2959,7 @@ impl Session {
                 execpolicy_amendment.protocol,
                 execpolicy_amendment.decision,
                 Some(execpolicy_amendment.justification),
+                approved_under,
             )
             .await
             .map_err(|err| {
@@ -2631,7 +3042,11 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(effective_approval_id.clone(), tx_approve)
+                    ts.insert_pending_approval(
+                        effective_approval_id.clone(),
+                        tx_approve,
+                        self.services.authority_marker(),
+                    )
                 }
                 None => None,
             }
@@ -2710,7 +3125,11 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(approval_id.clone(), tx_approve)
+                    ts.insert_pending_approval(
+                        approval_id.clone(),
+                        tx_approve,
+                        self.services.authority_marker(),
+                    )
                 }
                 None => None,
             }
@@ -2731,10 +3150,6 @@ impl Session {
         rx_approve.await.unwrap_or(ReviewDecision::Abort)
     }
 
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn checks and turn state updates must remain atomic"
-    )]
     pub(crate) async fn request_permissions_for_environment(
         self: &Arc<Self>,
         turn_context: &Arc<TurnContext>,
@@ -2743,22 +3158,53 @@ impl Session {
         environment: TurnEnvironmentSelection,
         cancellation_token: CancellationToken,
     ) -> Option<RequestPermissionsResponse> {
+        self.request_permissions_explained(
+            turn_context,
+            call_id,
+            args,
+            environment,
+            cancellation_token,
+        )
+        .await
+        .unwrap_or_else(|_refusal| {
+            Some(RequestPermissionsResponse {
+                permissions: RequestPermissionProfile::default(),
+                scope: PermissionGrantScope::Turn,
+                strict_auto_review: false,
+            })
+        })
+    }
+
+    /// [`Self::request_permissions_for_environment`], or `Err` with why when
+    /// the request was refused before anyone was asked (#584).
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    pub(crate) async fn request_permissions_explained(
+        self: &Arc<Self>,
+        turn_context: &Arc<TurnContext>,
+        call_id: String,
+        args: RequestPermissionsArgs,
+        environment: TurnEnvironmentSelection,
+        cancellation_token: CancellationToken,
+    ) -> Result<Option<RequestPermissionsResponse>, String> {
         match turn_context.as_ref().approval_policy.value() {
             AskForApproval::Never => {
-                return Some(RequestPermissionsResponse {
+                return Ok(Some(RequestPermissionsResponse {
                     permissions: RequestPermissionProfile::default(),
                     scope: PermissionGrantScope::Turn,
                     strict_auto_review: false,
-                });
+                }));
             }
             AskForApproval::Granular(granular_config)
                 if !granular_config.allows_request_permissions() =>
             {
-                return Some(RequestPermissionsResponse {
+                return Ok(Some(RequestPermissionsResponse {
                     permissions: RequestPermissionProfile::default(),
                     scope: PermissionGrantScope::Turn,
                     strict_auto_review: false,
-                });
+                }));
             }
             AskForApproval::OnRequest
             | AskForApproval::UnlessTrusted
@@ -2772,11 +3218,20 @@ impl Session {
                 cwd = %environment.cwd,
                 "request_permissions requires a cwd native to the Codex host"
             );
-            return Some(RequestPermissionsResponse {
+            return Ok(Some(RequestPermissionsResponse {
                 permissions: RequestPermissionProfile::default(),
                 scope: PermissionGrantScope::Turn,
                 strict_auto_review: false,
-            });
+            }));
+        };
+        let requested_permissions = tokio::select! {
+            biased;
+            _ = cancellation_token.cancelled() => return Ok(None),
+            kept = self.grantable_request(
+                turn_context.as_ref(),
+                requested_permissions,
+                &native_environment_cwd,
+            ) => kept?,
         };
 
         if crate::guardian::routes_approval_to_guardian(turn_context.as_ref()) {
@@ -2785,6 +3240,8 @@ impl Session {
                 active.as_ref().map(|active| Arc::clone(&active.turn_state))
             };
             let review_id = crate::guardian::new_guardian_review_id();
+            // #945: the policy the request is reviewed under.
+            let shown_under = self.services.authority_marker();
             let session = Arc::clone(self);
             let turn = Arc::clone(turn_context);
             let request = crate::guardian::GuardianApprovalRequest::RequestPermissions {
@@ -2808,7 +3265,7 @@ impl Session {
             );
             let decision = tokio::select! {
                 biased;
-                _ = cancellation_token.cancelled() => return None,
+                _ = cancellation_token.cancelled() => return Ok(None),
                 decision = review_rx => decision.unwrap_or_else(|_| {
                     ReviewDecision::denied("automatic approval review could not complete")
                 }),
@@ -2848,18 +3305,27 @@ impl Session {
                     strict_auto_review: false,
                 },
             };
+            let response = self.unless_stale_grant(response, shown_under);
             let response = Self::normalize_request_permissions_response(
                 requested_permissions,
                 response,
                 native_environment_cwd.as_path(),
             );
+            let response = self
+                .without_protected_grant(
+                    response,
+                    &native_environment_cwd,
+                    Some(turn_context.as_ref()),
+                )
+                .await;
             self.record_granted_request_permissions_for_turn(
                 &response,
                 &environment.environment_id,
                 originating_turn_state.as_ref(),
+                shown_under,
             )
             .await;
-            return Some(response);
+            return Ok(Some(response));
         }
 
         let _elicitation = self.services.elicitations.register();
@@ -2875,6 +3341,7 @@ impl Session {
                             tx_response,
                             requested_permissions: requested_permissions.clone(),
                             environment: environment.clone(),
+                            shown_under: self.services.authority_marker(),
                         },
                     )
                 }
@@ -2895,7 +3362,7 @@ impl Session {
             cwd: Some(native_environment_cwd),
         });
         self.send_event(turn_context.as_ref(), event).await;
-        tokio::select! {
+        Ok(tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
                 let mut active = self.active_turn.lock().await;
@@ -2906,7 +3373,7 @@ impl Session {
                 None
             }
             response = rx_response => response.ok(),
-        }
+        })
     }
 
     pub(crate) async fn request_permissions_for_cwd(
@@ -3038,11 +3505,19 @@ impl Session {
             Some(entry) => {
                 // TODO(anp): Migrate request_permissions to support paths from foreign environments.
                 let response = match entry.environment.cwd.to_abs_path() {
-                    Ok(native_environment_cwd) => Self::normalize_request_permissions_response(
-                        entry.requested_permissions,
-                        response,
-                        native_environment_cwd.as_path(),
-                    ),
+                    Ok(native_environment_cwd) => {
+                        let response = Self::normalize_request_permissions_response(
+                            entry.requested_permissions,
+                            response,
+                            native_environment_cwd.as_path(),
+                        );
+                        self.without_protected_grant(
+                            response,
+                            &native_environment_cwd,
+                            /*turn_context*/ None,
+                        )
+                        .await
+                    }
                     Err(err) => {
                         warn!(
                             cwd = %entry.environment.cwd,
@@ -3056,10 +3531,12 @@ impl Session {
                         }
                     }
                 };
+                let response = self.unless_stale_grant(response, entry.shown_under);
                 self.record_granted_request_permissions_for_turn(
                     &response,
                     &entry.environment.environment_id,
                     originating_turn_state.as_ref(),
+                    entry.shown_under,
                 )
                 .await;
                 entry.tx_response.send(response).ok();
@@ -3067,6 +3544,25 @@ impl Session {
             None => {
                 warn!("No pending request_permissions found for call_id: {call_id}");
             }
+        }
+    }
+
+    /// #945: a grant answered after a security transition was for a stale
+    /// request: nothing is granted (the model may ask again under the new
+    /// level).
+    fn unless_stale_grant(
+        &self,
+        response: RequestPermissionsResponse,
+        shown_under: Option<(u64, u64)>,
+    ) -> RequestPermissionsResponse {
+        if response.permissions.is_empty() || !self.services.transition_since(shown_under) {
+            return response;
+        }
+        warn!("request_permissions answered after a security transition; nothing granted");
+        RequestPermissionsResponse {
+            permissions: RequestPermissionProfile::default(),
+            scope: PermissionGrantScope::Turn,
+            strict_auto_review: false,
         }
     }
 
@@ -3099,32 +3595,144 @@ impl Session {
         }
     }
 
-    async fn record_granted_request_permissions_for_turn(
+    /// #584: under Aggressive no answer grants a protected path or a
+    /// read-only one (`ReadOnlyScope::for_grant`; #520: the project's
+    /// `.codex` and `.agents` included), so those entries are left out before
+    /// anyone is asked, and the person is told why. `Err` with why when
+    /// nothing would be left to grant: then nobody is asked.
+    async fn grantable_request(
+        &self,
+        turn_context: &TurnContext,
+        requested: RequestPermissionProfile,
+        cwd: &AbsolutePathBuf,
+    ) -> Result<RequestPermissionProfile, String> {
+        if requested.is_empty() {
+            return Ok(requested);
+        }
+        let Some(level @ codex_security_policy::SecurityLevel::Aggressive) =
+            crate::security::protected_additional::protected_level(self)
+        else {
+            return Ok(requested);
+        };
+        let (codex_home, sqlite_home, configs) = self.grant_check_configs(Some(cwd)).await;
+        let (kept, refusal) = crate::security::protected_additional::strip_grant_off_thread(
+            level,
+            codex_home,
+            sqlite_home,
+            configs,
+            requested.clone().into(),
+        )
+        .await;
+        let Some(refusal) = refusal else {
+            return Ok(requested);
+        };
+        let unchecked = refusal == crate::security::protected_additional::unchecked_refusal(level);
+        crate::security::inspection::record_refusal(
+            self.thread_id(),
+            "a permission request naming a protected path",
+            match kept {
+                Some(_) => "those paths were left out before anyone was asked",
+                None if unchecked => "refused before anyone was asked; it could not be checked",
+                None => "refused before anyone was asked; never granted under Aggressive",
+            },
+        );
+        crate::security::protected_reads::notify(self, turn_context, refusal.clone()).await;
+        kept.map(Into::into).ok_or(refusal)
+    }
+
+    /// Issue #245: once the protected-path rules apply, a permission grant
+    /// never names a protected path. Such entries are dropped from the answer
+    /// the model gets and from what is recorded, and the person is told why.
+    async fn without_protected_grant(
+        &self,
+        response: RequestPermissionsResponse,
+        cwd: &AbsolutePathBuf,
+        turn_context: Option<&TurnContext>,
+    ) -> RequestPermissionsResponse {
+        if response.permissions.is_empty() {
+            return response;
+        }
+        let Some(level) = crate::security::protected_additional::protected_level(self) else {
+            return response;
+        };
+        let (codex_home, sqlite_home, configs) = self.grant_check_configs(Some(cwd)).await;
+        let (kept, refusal) = crate::security::protected_additional::strip_grant_off_thread(
+            level,
+            codex_home,
+            sqlite_home,
+            configs,
+            response.permissions.clone().into(),
+        )
+        .await;
+        let Some(refusal) = refusal else {
+            return response;
+        };
+        // #622: listed under the inspector's recent denials too.
+        crate::security::inspection::record_refusal(
+            self.thread_id(),
+            "a permission grant naming a protected path",
+            "those paths were left out of the grant",
+        );
+        match turn_context {
+            Some(turn_context) => {
+                crate::security::protected_reads::notify(self, turn_context, refusal).await;
+            }
+            None => {
+                if let Some((turn_context, _)) =
+                    self.active_turn_context_and_cancellation_token().await
+                {
+                    crate::security::protected_reads::notify(self, &turn_context, refusal).await;
+                }
+            }
+        }
+        RequestPermissionsResponse {
+            permissions: kept.map(Into::into).unwrap_or_default(),
+            ..response
+        }
+    }
+
+    /// Records a grant answered to a request shown under `granted_under`.
+    /// D51 (#1001): it holds only while no security transition is committed
+    /// (see [`crate::state::GrantedPermissions`]).
+    pub(crate) async fn record_granted_request_permissions_for_turn(
         &self,
         response: &RequestPermissionsResponse,
         environment_id: &str,
         originating_turn_state: Option<&Arc<Mutex<crate::state::TurnState>>>,
+        granted_under: Option<(u64, u64)>,
     ) {
         if response.permissions.is_empty() {
             return;
         }
+        let permissions: AdditionalPermissionProfile = response.permissions.clone().into();
         match response.scope {
             PermissionGrantScope::Turn => {
                 if let Some(turn_state) = originating_turn_state {
                     let mut ts = turn_state.lock().await;
-                    let permissions: AdditionalPermissionProfile =
-                        response.permissions.clone().into();
-                    ts.record_granted_permissions(environment_id, permissions);
-                    if response.strict_auto_review {
-                        ts.enable_strict_auto_review();
+                    // Read under the lock: a later grant is never recorded
+                    // under an earlier marker.
+                    let current = self.services.authority_marker();
+                    let recorded = ts.record_granted_permissions(
+                        environment_id,
+                        permissions,
+                        granted_under,
+                        current,
+                    );
+                    // D51: strict auto-review comes with the grant and ends
+                    // with it.
+                    if recorded && response.strict_auto_review {
+                        ts.enable_strict_auto_review(current);
                     }
                 }
             }
             PermissionGrantScope::Session => {
                 let mut state = self.state.lock().await;
+                let current = self.services.authority_marker();
                 state.record_granted_permissions(
                     environment_id,
-                    response.permissions.clone().into(),
+                    permissions,
+                    granted_under,
+                    current,
                 );
             }
         }
@@ -3138,10 +3746,75 @@ impl Session {
         &self,
         environment_id: &str,
     ) -> Option<AdditionalPermissionProfile> {
-        let active = self.active_turn.lock().await;
-        let active = active.as_ref()?;
-        let ts = active.turn_state.lock().await;
-        ts.granted_permissions(environment_id)
+        let granted = {
+            let active = self.active_turn.lock().await;
+            let active = active.as_ref()?;
+            let mut ts = active.turn_state.lock().await;
+            ts.granted_permissions(environment_id, self.services.authority_marker())
+        };
+        self.usable_grant(granted).await
+    }
+
+    /// Issue #245: a stored grant as later commands and file tools may use
+    /// it: without protected paths while the protected-path rules apply. A
+    /// grant recorded before they applied (the level raised mid-session)
+    /// cannot reopen one either.
+    async fn usable_grant(
+        &self,
+        granted: Option<AdditionalPermissionProfile>,
+    ) -> Option<AdditionalPermissionProfile> {
+        let granted = granted?;
+        let Some(level) = crate::security::protected_additional::protected_level(self) else {
+            return Some(granted);
+        };
+        let (codex_home, sqlite_home, configs) = self.grant_check_configs(/*cwd*/ None).await;
+        crate::security::protected_additional::strip_grant_off_thread(
+            level,
+            codex_home,
+            sqlite_home,
+            configs,
+            granted,
+        )
+        .await
+        .0
+    }
+
+    /// Issue #524: the Corbanu home and its database folder (#611), and what
+    /// a grant is checked against:
+    /// `cwd` (or the session's original folder) with the original profile,
+    /// and the session's current folder and profile, which may have changed
+    /// since, each with the current workspace roots.
+    async fn grant_check_configs(
+        &self,
+        cwd: Option<&AbsolutePathBuf>,
+    ) -> (
+        std::path::PathBuf,
+        std::path::PathBuf,
+        Vec<crate::security::protected_additional::GrantCheckConfig>,
+    ) {
+        use crate::security::protected_additional::GrantCheckConfig;
+        let state = self.state.lock().await;
+        let current = &state.session_configuration;
+        let config = &current.original_config_do_not_use;
+        let workspace_roots = current.primary_workspace_roots();
+        let mut configs = vec![GrantCheckConfig {
+            cwd: cwd.unwrap_or(&config.cwd).clone(),
+            workspace_roots: workspace_roots.clone(),
+            profile: config.permissions.permission_profile().clone(),
+        }];
+        let now = GrantCheckConfig {
+            cwd: current.cwd().clone(),
+            workspace_roots,
+            profile: current.permission_profile(),
+        };
+        if !configs.contains(&now) {
+            configs.push(now);
+        }
+        (
+            config.codex_home.to_path_buf(),
+            config.sqlite.home().to_path_buf(),
+            configs,
+        )
     }
 
     #[expect(
@@ -3154,15 +3827,18 @@ impl Session {
             return false;
         };
         let ts = active.turn_state.lock().await;
-        ts.strict_auto_review_enabled()
+        ts.strict_auto_review_enabled(self.services.authority_marker())
     }
 
     pub(crate) async fn granted_session_permissions(
         &self,
         environment_id: &str,
     ) -> Option<AdditionalPermissionProfile> {
-        let state = self.state.lock().await;
-        state.granted_permissions(environment_id)
+        let granted = {
+            let mut state = self.state.lock().await;
+            state.granted_permissions(environment_id, self.services.authority_marker())
+        };
+        self.usable_grant(granted).await
     }
 
     #[expect(
@@ -3953,7 +4629,7 @@ impl Session {
             && (features.enabled(Feature::ToolSuggest)
                 || features.enabled(Feature::RecommendedPlugins))
         {
-            let auth = self.services.auth_manager.auth().await;
+            let auth = self.services.auth_manager().auth().await;
             let plugins_config = turn_context.config.plugins_config_input();
             self.services
                 .plugins_manager
@@ -4159,10 +4835,32 @@ impl Session {
             items,
         );
         let items = gated.as_deref().unwrap_or(items);
-        if let Some(live_thread) = self.live_thread()
-            && let Err(e) = live_thread.append_items(items).await
+        let Some(live_thread) = self.live_thread() else {
+            return;
+        };
+        let Err(e) = live_thread.append_items(items).await else {
+            // #616: only an append that wrote something shows the home works.
+            if items.iter().any(|item| {
+                codex_rollout::is_persisted_rollout_item(item, live_thread.history_mode())
+            }) {
+                crate::home_access::note_rollout_written(self.thread_id());
+            }
+            return;
+        };
+        error!("failed to record rollout items: {e:#}");
+        // #616: the writer keeps unwritten items for its next flush; exec
+        // waits for their folder before it saves the session at exit. Record
+        // why the rollout could not be written.
+        let message = format!("{e:#}");
+        if crate::home_access::is_operation_not_permitted(&message)
+            && let Ok(Some(rollout)) = live_thread.local_rollout_path().await
         {
-            error!("failed to record rollout items: {e:#}");
+            if let Some(dir) = rollout.parent() {
+                crate::home_access::note_rollout_unwritten(self.thread_id(), dir.to_path_buf());
+            }
+            tokio::task::spawn_blocking(move || {
+                crate::home_access::record_home_access_failure("rollout write", &rollout, &message)
+            });
         }
     }
 
@@ -4380,6 +5078,23 @@ impl Session {
                 let mut state = self.state.lock().await;
                 state
                     .update_token_info_from_usage(token_usage, turn_context.model_context_window());
+                // PF-84: attribute the usage to the account that served it, as the
+                // accounting ledger does (provider id and account name only).
+                if turn_context.config.features.enabled(Feature::NamedAccounts) {
+                    let account = turn_context
+                        .provider
+                        .info()
+                        .account
+                        .as_ref()
+                        .map_or(codex_vault::DEFAULT_PROVIDER_ACCOUNT, |account| {
+                            account.name.as_str()
+                        });
+                    state.record_account_token_usage(
+                        &turn_context.config.model_provider_id,
+                        account,
+                        token_usage,
+                    );
+                }
                 if matches!(
                     turn_context.config.model_auto_compact_token_limit_scope,
                     AutoCompactTokenLimitScope::BodyAfterPrefix
@@ -4480,11 +5195,16 @@ impl Session {
     }
 
     pub(crate) async fn send_token_count_event(&self, turn_context: &TurnContext) {
-        let (info, rate_limits) = {
+        let (info, rate_limits, account_usage) = {
             let state = self.state.lock().await;
-            state.token_info_and_rate_limits()
+            let (info, rate_limits) = state.token_info_and_rate_limits();
+            (info, rate_limits, state.account_token_usage())
         };
-        let event = EventMsg::TokenCount(TokenCountEvent { info, rate_limits });
+        let event = EventMsg::TokenCount(TokenCountEvent {
+            info,
+            rate_limits,
+            account_usage,
+        });
         self.send_event(turn_context, event).await;
     }
 
@@ -4864,3 +5584,15 @@ mod elicitation_holders_tests;
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "account_switch_tests.rs"]
+mod account_switch_tests;
+
+#[cfg(test)]
+#[path = "home_access_session_tests.rs"]
+mod home_access_session_tests;
+
+#[cfg(test)]
+#[path = "stale_approval_tests.rs"]
+mod stale_approval_tests;

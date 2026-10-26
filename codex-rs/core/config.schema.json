@@ -359,6 +359,32 @@
       },
       "type": "object"
     },
+    "BillingBasis": {
+      "description": "How work on a route is paid for.",
+      "oneOf": [
+        {
+          "description": "Covered by a membership or plan; never counted as money spent.",
+          "enum": [
+            "subscription"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Charged per request from a balance or card.",
+          "enum": [
+            "pay_per_use"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Runs on the user's own machine; no charge.",
+          "enum": [
+            "local"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "BundledSkillsConfig": {
       "additionalProperties": false,
       "properties": {
@@ -508,10 +534,10 @@
             "concurrent_reasoning_summaries": {
               "type": "boolean"
             },
-            "contained_external_agents": {
+            "connectors": {
               "type": "boolean"
             },
-            "connectors": {
+            "contained_external_agents": {
               "type": "boolean"
             },
             "current_time_reminder": {
@@ -627,6 +653,9 @@
             },
             "multi_agent_v2": {
               "$ref": "#/definitions/FeatureToml_for_MultiAgentV2ConfigToml"
+            },
+            "named_accounts": {
+              "type": "boolean"
             },
             "network_proxy": {
               "$ref": "#/definitions/FeatureToml_for_NetworkProxyConfigToml"
@@ -1759,6 +1788,14 @@
         "base_url": {
           "description": "Base URL for the provider's OpenAI-compatible API.",
           "type": "string"
+        },
+        "billing": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/BillingBasis"
+            }
+          ],
+          "description": "How this provider's work is paid for: `subscription`, `pay_per_use` or `local`. Overrides the built-in declaration for unusual setups; when unset, the built-in table decides from the route and credential used, and an unknown route is shown as not declared."
         },
         "chat_completions_provider": {
           "description": "Optional `provider` object to include in Chat Completions request bodies. This is used by OpenRouter-compatible routes for provider routing preferences such as `order`, `sort`, `allow_fallbacks`, and `require_parameters`."
@@ -5226,10 +5263,10 @@
         "concurrent_reasoning_summaries": {
           "type": "boolean"
         },
-        "contained_external_agents": {
+        "connectors": {
           "type": "boolean"
         },
-        "connectors": {
+        "contained_external_agents": {
           "type": "boolean"
         },
         "current_time_reminder": {
@@ -5345,6 +5382,9 @@
         },
         "multi_agent_v2": {
           "$ref": "#/definitions/FeatureToml_for_MultiAgentV2ConfigToml"
+        },
+        "named_accounts": {
+          "type": "boolean"
         },
         "network_proxy": {
           "$ref": "#/definitions/FeatureToml_for_NetworkProxyConfigToml"
@@ -5851,6 +5891,14 @@
       },
       "type": "object"
     },
+    "provider_accounts": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "default": null,
+      "description": "PF-84 (`named_accounts` feature): the account each provider uses, keyed by provider id, for example `zai = \"work\"`. Unlisted providers and `\"default\"` use today's credentials.",
+      "type": "object"
+    },
     "realtime": {
       "allOf": [
         {
@@ -5919,6 +5967,10 @@
         }
       ],
       "description": "User-level skill config entries keyed by SKILL.md path."
+    },
+    "skip_reopen_warmup": {
+      "description": "When `true`, reopening a conversation (resume, restart, `/side` or any other fork) does not send the paid warm-up request that primes the model's cache; the first reply after reopening may be slower. Defaults to `false`.",
+      "type": "boolean"
     },
     "sqlite_home": {
       "allOf": [

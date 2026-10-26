@@ -3,12 +3,18 @@
 //! not connected to a live event channel; no policy mutation is activated.
 
 pub(crate) mod aggressive;
+pub(crate) mod confirm;
 pub(crate) mod current;
+pub(crate) mod grant_view;
+pub(crate) mod inspector;
 pub(crate) mod launch;
 pub(crate) mod level;
 pub(crate) mod migration;
+pub(crate) mod moderate;
 pub(crate) mod nested;
 pub(crate) mod preflight;
+pub mod restart;
+pub(crate) mod revocation_view;
 pub(crate) mod view;
 
 use codex_protocol::security::SecurityControlAction;

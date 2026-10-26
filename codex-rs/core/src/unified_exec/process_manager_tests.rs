@@ -93,11 +93,14 @@ fn exec_env_policy_excludes_runtime_permission_profile() {
     };
 
     assert_eq!(
-        exec_env_policy_from_shell_policy(&policy),
+        exec_env_policy_from_shell_policy(&policy, vec!["ZAI_API_KEY".to_string()]),
         codex_exec_server::ExecEnvPolicy {
             inherit: policy.inherit,
             ignore_default_excludes: policy.ignore_default_excludes,
-            exclude: vec![CODEX_PERMISSION_PROFILE_ENV_VAR.to_string()],
+            exclude: vec![
+                CODEX_PERMISSION_PROFILE_ENV_VAR.to_string(),
+                "ZAI_API_KEY".to_string(),
+            ],
             r#set: HashMap::from([("KEEP".to_string(), "value".to_string())]),
             include_only: Vec::new(),
         }
@@ -269,7 +272,7 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
         Instant::now() + Duration::from_secs(5),
     );
     let produce = async {
-        for byte in [b'a', b'b', b'c'] {
+        for byte in *b"abc" {
             output_buffer.lock().await.push_chunk(
                 vec![byte; crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES],
             );
@@ -294,7 +297,7 @@ async fn output_collection_stays_bounded_across_repeated_drains() {
 
     let (collected, ()) = tokio::join!(collect, produce);
     let mut expected = HeadTailBuffer::default();
-    for byte in [b'a', b'b', b'c'] {
+    for byte in *b"abc" {
         expected.push_chunk(vec![
             byte;
             crate::unified_exec::UNIFIED_EXEC_OUTPUT_MAX_BYTES
@@ -398,6 +401,7 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
         additional_permissions_preapproved: false,
         justification: None,
         prefix_rule: None,
+        handler_basis: None,
     };
 
     let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));

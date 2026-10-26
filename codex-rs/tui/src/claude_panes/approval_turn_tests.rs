@@ -264,7 +264,12 @@ async fn a_request_without_an_id_ends_the_turn() {
 async fn a_second_result_is_an_error() {
     let dir = tempfile::tempdir().expect("tempdir");
     let script = format!("{}sleep 30", emit(&[RESULT, RESULT]));
-    let output = run(plan_for(&dir, script), CancellationToken::new(), None).await;
+    let output = run(
+        plan_for(&dir, script),
+        CancellationToken::new(),
+        /*tx*/ None,
+    )
+    .await;
     assert_eq!(
         output.status,
         ClaudePaneTurnStatus::ProviderError,
@@ -298,7 +303,7 @@ async fn interrupting_a_turn_closes_its_open_popups() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert_eq!(person.asked().len(), 1);
-    assert!(!person.responder(0).is_settled());
+    assert!(!person.responder(/*index*/ 0).is_settled());
     cancel.cancel();
     let output = turn.await.expect("turn task");
     assert_eq!(
@@ -312,7 +317,7 @@ async fn interrupting_a_turn_closes_its_open_popups() {
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(person.responder(0).is_settled());
+    assert!(person.responder(/*index*/ 0).is_settled());
     assert_eq!(*person.settled.lock().unwrap(), 1);
 }
 
@@ -338,8 +343,8 @@ async fn claude_code_can_withdraw_a_request() {
     let answer_second = tokio::spawn(async move {
         loop {
             let asked = answering.asked.lock().unwrap().len();
-            if asked == 2 && answering.responder(0).is_settled() {
-                answering.responder(1).respond(/*allow*/ false);
+            if asked == 2 && answering.responder(/*index*/ 0).is_settled() {
+                answering.responder(/*index*/ 1).respond(/*allow*/ false);
                 return;
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -369,7 +374,7 @@ async fn claude_exiting_before_reading_the_prompt_ends_the_turn() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut plan = plan_for(&dir, "exit 3".to_string());
     plan.stdin_prompt = Some("p".repeat(1 << 20));
-    let output = run(plan, CancellationToken::new(), None).await;
+    let output = run(plan, CancellationToken::new(), /*tx*/ None).await;
     assert_ne!(output.status, ClaudePaneTurnStatus::Success, "{output:?}");
 }
 
@@ -389,7 +394,7 @@ async fn prompts_larger_than_a_pipe_buffer_arrive_whole() {
     let mut plan = plan_for(&dir, script);
     let prompt = "q".repeat(300 * 1024);
     plan.stdin_prompt = Some(prompt.clone());
-    let output = run(plan, CancellationToken::new(), None).await;
+    let output = run(plan, CancellationToken::new(), /*tx*/ None).await;
     assert_eq!(output.status, ClaudePaneTurnStatus::Success, "{output:?}");
     assert_eq!(
         read_json(&dir, "prompt.json")["message"]["content"],
@@ -476,4 +481,76 @@ fn contained_claude_is_never_taken_from_a_writable_folder() {
     std::fs::write(&plain, "x").expect("write");
     assert!(resolve_contained_claude(plain.to_str().expect("utf-8"), &[&pane]).is_err());
     assert!(resolve_contained_claude("./claude", &[&pane]).is_err());
+}
+
+/// #554: a Claude Code older than contained panes need, or one whose
+/// `--version` fails, is explained: which file, what it reported, why it
+/// matters and what to do. A new enough one passes.
+#[tokio::test]
+async fn issue_554_old_or_broken_claude_code_is_explained() {
+    use crate::claude_panes::containment::ContainedCommand;
+    use crate::claude_panes::execution::require_contained_claude_version;
+
+    let root = tempfile::tempdir().expect("tempdir");
+    let check = async |name: &str, script: &str| {
+        let path = root.path().join(name);
+        std::fs::write(&path, script).expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let version = ContainedCommand {
+            argv: vec![path.display().to_string(), "--version".to_string()],
+            arg0: None,
+            env: std::collections::HashMap::from([(
+                "PATH".to_string(),
+                "/usr/bin:/bin".to_string(),
+            )]),
+            user_namespaces_denied: None,
+        };
+        require_contained_claude_version(&path, version, root.path())
+            .await
+            .map_err(|err| format!("{err:#}"))
+            .map(|()| path)
+    };
+
+    let old = check("claude-old", "#!/bin/sh\necho '2.1.92 (Claude Code)'\n")
+        .await
+        .expect_err("2.1.92 is too old");
+    assert!(old.contains("needs Claude Code 2.1.292 or later"), "{old}");
+    assert!(
+        old.contains("the `claude` found on PATH (`") && old.contains("claude-old`) is 2.1.92"),
+        "{old}"
+    );
+    assert!(old.contains("Update Claude Code (`claude update`"), "{old}");
+    assert!(old.contains("first on PATH"), "{old}");
+
+    let broken = check(
+        "claude-broken",
+        "#!/bin/sh\necho 'SyntaxError: Unexpected token' >&2\nexit 1\n",
+    )
+    .await
+    .expect_err("no version");
+    assert!(
+        broken.contains(
+            "claude-broken`) reported no version (exit status 1: SyntaxError: Unexpected token)"
+        ),
+        "{broken}"
+    );
+
+    check("claude-new", "#!/bin/sh\necho '2.1.296 (Claude Code)'\n")
+        .await
+        .expect("2.1.296 is new enough");
+}
+
+/// #554: panes that are not contained check nothing when they open.
+#[tokio::test]
+async fn issue_554_uncontained_panes_have_no_launch_problem() {
+    let root = tempfile::tempdir().expect("tempdir");
+    assert_eq!(
+        crate::claude_panes::execution::contained_claude_launch_problem(
+            root.path().to_path_buf(),
+            "pane-1".to_string(),
+            root.path().to_path_buf(),
+        )
+        .await,
+        None
+    );
 }

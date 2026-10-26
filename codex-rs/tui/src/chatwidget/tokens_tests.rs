@@ -42,11 +42,9 @@ async fn accounting_inspect_usability_unavailable_first_screen() {
     ] {
         let chat = unavailable_inspector(/*width*/ 150, args).await;
         let screen = render_bottom_popup_with_height(&chat, /*width*/ 150, /*height*/ 16);
-        assert!(
-            screen.contains("Unavailable — accounting ledger not installed."),
-            "{screen}"
-        );
-        assert!(screen.contains("Collection remains off."), "{screen}");
+        // #289: a build that records costs never says collection is off.
+        assert!(screen.contains(super::absent_state()), "{screen}");
+        assert!(!screen.contains("Collection remains off."), "{screen}");
     }
 }
 
@@ -61,19 +59,21 @@ async fn accounting_inspect_usability_wrap_tracks_resize() {
         .take(3)
         .collect::<Vec<_>>()
         .join("\n");
-    insta::assert_snapshot!(first_lines, @"
-    Cost — this conversation
-    Requested UTC day: 2026-09-16
-    › Unavailable — accounting ledger not installed. Collection remains off.
-    ");
+    assert_eq!(
+        first_lines,
+        format!(
+            "Cost — this conversation\nRequested UTC day: 2026-09-16\n› {}",
+            super::absent_state()
+        )
+    );
     assert!(
         wide.contains("Collection coverage: unknown; recorded root and resolved descendants only."),
         "{wide}"
     );
     chat.on_terminal_resize(/*width*/ 40);
     let narrow = render_bottom_popup_with_height(&chat, /*width*/ 40, /*height*/ 16);
-    assert!(!narrow.contains("Unavailable — accounting ledger not installed."));
-    assert!(narrow.contains("Unavailable — accounting"), "{narrow}");
+    assert!(!narrow.contains(super::absent_state()));
+    assert!(narrow.contains("Unavailable — "), "{narrow}");
     chat.on_terminal_resize(/*width*/ 150);
     assert_eq!(
         render_bottom_popup_with_height(&chat, /*width*/ 150, /*height*/ 16),
@@ -252,6 +252,7 @@ fn quote() -> ObservationQuote {
             scope: Uuid::from_u128(5),
             dialect: Dialect::Inclusive,
             dispatched_at_ms: 0.try_into().unwrap(),
+            account: None,
         },
         observations: vec![],
         snapshot: None,
@@ -307,6 +308,7 @@ fn packet() -> InspectionDay {
         unknown_parent_requests: Default::default(),
         requests: std::collections::BTreeMap::from([(q.attempt.request_id, vec![q])]),
         other_conversations: Some(Default::default()),
+        empty_day: None,
     })
 }
 
@@ -317,7 +319,8 @@ fn range_packet(partial: bool, day: InspectionDay) -> InspectionDay {
             end_ms: 3_600_000,
             grouping: InspectionGrouping::Hour,
         },
-        oldest_aggregate_day: Some(0),
+        aggregate_day_floor: Some(0),
+        completed_as_of_ms: None,
         read_at_ms: 90 * 86_400_000,
         buckets: vec![codex_state::accounting::InspectionBucket {
             start_ms: 0,
@@ -355,13 +358,476 @@ fn accounting_inspect_range_partial_no_amount_and_explicit_coverage() {
     );
     insta::assert_snapshot!(pages[0].text.join("\n"), @"
     Requested: [1970-01-01T00:00:00.001Z, 1970-01-01T01:00:00.000Z); timezone: UTC; grouping: Hour
-    Retention: request detail kept since 1970-01-01T00:00:00.000Z; oldest daily total kept 1970-01-01
-    Collection coverage: unknown. Range estimate covers root and resolved descendants; unknown ancestry stays separate in bucket breakdowns. Billed cost: unavailable — no settlement evidence.
+    Retention: request detail kept since 1970-01-01T00:00:00.000Z; daily totals kept since 1970-01-01
+    Collection coverage: unknown. Range estimate covers root and resolved descendants; unknown ancestry stays separate in bucket breakdowns.
     Range: Unknown parent population: 0 inspectable attempts, excluded from range total
     Other conversations are not included in this view; /cost covers only the open conversation.
     Range total unavailable — partial or unavailable buckets excluded; no partial total.
     Effective coverage (requested ∩ aggregate retention ∩ snapshot) for [1970-01-01T00:00:00.000Z, 1970-01-01T01:00:00.000Z): [1970-01-01T00:00:00.001Z, 1970-01-01T01:00:00.000Z)
     ");
+}
+
+/// A week read on its third day: day 0 recorded up to the checkpoint, the
+/// rest not reached yet. A nonzero `start` cuts the bucket's coverage short
+/// at its start, as retention or the requested range would.
+fn week_reaching_today(start: i64) -> Vec<InspectorPage> {
+    const DAY: i64 = 86_400_000;
+    let InspectionDay::Ready(mut view) = packet() else {
+        panic!()
+    };
+    view.coverage.completed_as_of_ms = 1_000;
+    view.read_at_ms = 2 * DAY;
+    let mut days = vec![InspectionDay::Ready(view)];
+    days.extend((1..7).map(|_| InspectionDay::CheckpointLag));
+    range_pages(
+        InspectionRange {
+            start_ms: 0,
+            end_ms: 7 * DAY,
+            grouping: InspectionGrouping::Week,
+        },
+        Some(0),
+        /*completed_as_of_ms*/ None,
+        /*read_at*/ 2 * DAY,
+        vec![codex_state::accounting::InspectionBucket {
+            start_ms: 0,
+            end_ms: 7 * DAY,
+            effective: Some((start, 1_001)),
+            partial: true,
+            days,
+        }],
+    )
+}
+
+// #289 R2: a bucket that reaches today is in progress. It shows what is
+// recorded so far and offers no next step that cannot change anything.
+#[test]
+fn accounting_inspect_range_bucket_reaching_today_is_in_progress() {
+    let pages = week_reaching_today(/*start*/ 0);
+    let so_far = "In progress — totals so far, recorded through 1970-01-01T00:00:01.000Z";
+    let range = &pages[0].text;
+    assert!(range.iter().any(|s| s == so_far), "{range:#?}");
+    assert!(
+        range
+            .iter()
+            .any(|s| s.starts_with("Estimated token cost")
+                || s.starts_with("Full recorded estimate")),
+        "{range:#?}"
+    );
+    assert!(
+        !range
+            .iter()
+            .any(|s| s.starts_with("Range total unavailable"))
+    );
+    let (label, target) = &pages[0].links[0];
+    assert!(label.ends_with(" (in progress)"), "{label}");
+    let bucket = &pages[*target];
+    assert_eq!(bucket.title, "Cost so far — this conversation");
+    assert!(
+        bucket.text.iter().any(|s| s == so_far),
+        "{:#?}",
+        bucket.text
+    );
+    assert!(
+        bucket
+            .text
+            .iter()
+            .any(|s| s.starts_with("This conversation, so far in [")),
+        "{:#?}",
+        bucket.text
+    );
+    let all = pages
+        .iter()
+        .flat_map(|p| p.text.iter().chain([&p.title]))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    for absent in [
+        "Bucket unavailable",
+        "Partial bucket",
+        "Next step: send a turn",
+        "excluded from totals",
+        "unavailable slices may contain",
+        NOT_CURRENT,
+    ] {
+        assert!(!all.contains(absent), "{absent}: {all}");
+    }
+
+    // Cut short at its start instead: still partial, and still withheld.
+    let pages = week_reaching_today(/*start*/ 500);
+    let bucket = &pages[pages[0].links[0].1];
+    assert_eq!(bucket.title, "Bucket unavailable");
+    assert!(
+        bucket
+            .text
+            .iter()
+            .any(|s| s == "Partial bucket — excluded from totals")
+    );
+    assert!(
+        pages[0]
+            .text
+            .iter()
+            .any(|s| s.starts_with("Range total unavailable"))
+    );
+}
+
+fn bucket(
+    start_ms: i64,
+    end_ms: i64,
+    effective: Option<(i64, i64)>,
+    days: Vec<InspectionDay>,
+) -> codex_state::accounting::InspectionBucket {
+    codex_state::accounting::InspectionBucket {
+        start_ms,
+        end_ms,
+        partial: effective != Some((start_ms, end_ms)),
+        effective,
+        days,
+    }
+}
+
+fn ready_at(checkpoint: i64, read_at: i64) -> InspectionDay {
+    let InspectionDay::Ready(mut view) = packet() else {
+        panic!()
+    };
+    view.coverage.completed_as_of_ms = checkpoint;
+    view.read_at_ms = read_at;
+    InspectionDay::Ready(view)
+}
+
+fn joined(pages: &[InspectorPage]) -> String {
+    pages
+        .iter()
+        .flat_map(|p| p.text.iter().chain([&p.title]))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// A bucket reaching today stays partial, and withheld, unless the read time
+// is all that cuts it short.
+#[test]
+fn accounting_inspect_range_bucket_reaching_today_stays_partial_when_unverified() {
+    const DAY: i64 = 86_400_000;
+    let week = |end_ms: i64, effective: (i64, i64), first: InspectionDay| {
+        let mut days = vec![first];
+        days.extend((1..7).map(|_| InspectionDay::CheckpointLag));
+        range_pages(
+            InspectionRange {
+                start_ms: 0,
+                end_ms,
+                grouping: InspectionGrouping::Week,
+            },
+            Some(0),
+            /*completed_as_of_ms*/ None,
+            /*read_at*/ 2 * DAY,
+            vec![bucket(/*start_ms*/ 0, 7 * DAY, Some(effective), days)],
+        )
+    };
+    let detail = InspectionDay::DetailUnavailable {
+        coverage: RetentionCoverage {
+            completed_as_of_ms: 1_000,
+            detail_expired_through_ms: None,
+            aggregate_day_floor: 0,
+            oldest_recorded_day: Some(0),
+        },
+        read_at_ms: 2 * DAY,
+        compact: false,
+    };
+    for (label, pages) in [
+        (
+            "needs refresh",
+            week(7 * DAY, (0, 1_001), InspectionDay::NeedsRefresh),
+        ),
+        ("detail unavailable", week(7 * DAY, (0, 1_001), detail)),
+        // A lagging day inside the coverage is unverified, not "not yet".
+        (
+            "lag before end",
+            week(7 * DAY, (0, 1_001), InspectionDay::CheckpointLag),
+        ),
+        // The requested range ends at the read time: cut short by the request.
+        (
+            "request ends",
+            week(2 * DAY, (0, 2 * DAY), ready_at(2 * DAY, 2 * DAY)),
+        ),
+    ] {
+        let text = joined(&pages);
+        assert!(
+            text.contains("Partial bucket — excluded from totals"),
+            "{label}: {text}"
+        );
+        assert!(text.contains("Range total unavailable"), "{label}: {text}");
+        assert!(!text.contains("In progress"), "{label}: {text}");
+    }
+}
+
+// Hour grouping: a whole hour and the current one. The range total is their
+// sum, and says it is so far.
+#[test]
+fn accounting_inspect_range_hour_in_progress_total_sums_whole_and_current() {
+    const HOUR: i64 = 3_600_000;
+    let checkpoint = HOUR + 1_000;
+    let pages = range_pages(
+        InspectionRange {
+            start_ms: 0,
+            end_ms: 2 * HOUR,
+            grouping: InspectionGrouping::Hour,
+        },
+        Some(0),
+        /*completed_as_of_ms*/ None,
+        /*read_at*/ HOUR + HOUR / 2,
+        vec![
+            bucket(
+                /*start_ms*/ 0,
+                HOUR,
+                Some((0, HOUR)),
+                vec![ready_at(checkpoint, HOUR + HOUR / 2)],
+            ),
+            bucket(
+                HOUR,
+                2 * HOUR,
+                Some((HOUR, checkpoint + 1)),
+                vec![ready_at(checkpoint, HOUR + HOUR / 2)],
+            ),
+        ],
+    );
+    let q = quote();
+    let sum = DayTotals::from_quotes([&q, &q]).unwrap();
+    let range = &pages[0].text;
+    assert!(
+        range.contains(
+            &"In progress — totals so far, recorded through 1970-01-01T01:00:01.000Z".to_string()
+        ),
+        "{range:#?}"
+    );
+    for line in estimate(&sum, EstimateGaps::default()) {
+        assert!(range.contains(&line), "{line}: {range:#?}");
+    }
+    assert!(!range.iter().any(|s| s == NOT_CURRENT), "{range:#?}");
+    let labels: Vec<_> = pages[0].links.iter().map(|(l, _)| l.clone()).collect();
+    assert!(!labels[0].contains("(in progress)"), "{labels:?}");
+    assert!(labels[1].ends_with(" (in progress)"), "{labels:?}");
+}
+
+// Weeks after today have not started: they say so, offer no next step and do
+// not withhold the total of the week in progress.
+#[test]
+fn accounting_inspect_range_future_buckets_have_not_started() {
+    const DAY: i64 = 86_400_000;
+    let lag = || {
+        (0..7)
+            .map(|_| InspectionDay::CheckpointLag)
+            .collect::<Vec<_>>()
+    };
+    let mut current = vec![ready_at(/*checkpoint*/ 1_000, 2 * DAY)];
+    current.extend((1..7).map(|_| InspectionDay::CheckpointLag));
+    let pages = range_pages(
+        InspectionRange {
+            start_ms: 0,
+            end_ms: 21 * DAY,
+            grouping: InspectionGrouping::Week,
+        },
+        Some(0),
+        /*completed_as_of_ms*/ None,
+        /*read_at*/ 2 * DAY,
+        vec![
+            bucket(/*start_ms*/ 0, 7 * DAY, Some((0, 1_001)), current),
+            bucket(7 * DAY, 14 * DAY, /*effective*/ None, lag()),
+            bucket(14 * DAY, 21 * DAY, /*effective*/ None, lag()),
+        ],
+    );
+    let range = &pages[0].text;
+    assert!(
+        range
+            .iter()
+            .any(|s| s.starts_with("In progress — totals so far")),
+        "{range:#?}"
+    );
+    assert!(
+        !range
+            .iter()
+            .any(|s| s.starts_with("Range total unavailable")),
+        "{range:#?}"
+    );
+    let links = &pages[0].links;
+    assert!(links[0].0.ends_with(" (in progress)"));
+    for (label, target) in &links[1..] {
+        assert!(label.ends_with(" (not started)"), "{label}");
+        let page = &pages[*target];
+        assert_eq!(page.title, "Not started yet");
+        assert!(
+            page.text.iter().any(|s| s == NOT_STARTED),
+            "{:#?}",
+            page.text
+        );
+    }
+    let text = joined(&pages);
+    for absent in [
+        "Bucket unavailable",
+        "Next step: send a turn",
+        "Partial bucket",
+        NOT_CURRENT,
+    ] {
+        assert!(!text.contains(absent), "{absent}: {text}");
+    }
+}
+
+// An older bucket with expired detail beside the week in progress: the
+// ledger being behind the read time is still that week's "recorded through",
+// not a stale snapshot.
+#[test]
+fn accounting_inspect_range_expired_bucket_beside_in_progress_is_not_stale() {
+    const DAY: i64 = 86_400_000;
+    let expired = InspectionDay::DetailUnavailable {
+        coverage: RetentionCoverage {
+            completed_as_of_ms: 100 * DAY + 1_000,
+            detail_expired_through_ms: Some(10 * DAY),
+            aggregate_day_floor: 0,
+            oldest_recorded_day: Some(0),
+        },
+        read_at_ms: 102 * DAY,
+        compact: true,
+    };
+    let mut current = vec![ready_at(100 * DAY + 1_000, 102 * DAY)];
+    current.extend((1..7).map(|_| InspectionDay::CheckpointLag));
+    let pages = range_pages(
+        InspectionRange {
+            start_ms: 0,
+            end_ms: 107 * DAY,
+            grouping: InspectionGrouping::Day,
+        },
+        /*aggregate_day_floor*/ None,
+        /*completed_as_of_ms*/ None,
+        /*read_at*/ 102 * DAY,
+        vec![
+            bucket(/*start_ms*/ 0, DAY, Some((0, DAY)), vec![expired]),
+            bucket(
+                100 * DAY,
+                107 * DAY,
+                Some((100 * DAY, 100 * DAY + 1_001)),
+                current,
+            ),
+        ],
+    );
+    let text = joined(&pages);
+    assert!(!text.contains(NOT_CURRENT), "{text}");
+    assert!(text.contains("In progress — totals so far"), "{text}");
+    assert!(
+        pages[0]
+            .text
+            .iter()
+            .any(|s| s.starts_with("Retention:")
+                && s.ends_with("; daily totals kept: not known yet")),
+        "{:#?}",
+        pages[0].text
+    );
+}
+
+// The same, from what the store actually returns for a week reaching today
+// and the weeks after it.
+#[tokio::test]
+async fn accounting_inspect_store_range_reaching_today_reads_as_in_progress() -> anyhow::Result<()>
+{
+    use codex_state::accounting::AccountingStore;
+    const DAY: i64 = 86_400_000;
+    // 1970-04-11, a Saturday; its ISO week starts on day 95.
+    let time = 100 * DAY;
+    let home = tempfile::tempdir()?;
+    let runtime = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::from_sqlite_home(
+            codex_utils_absolute_path::AbsolutePathBuf::try_from(home.path().to_path_buf())?,
+        ),
+        "synthetic".into(),
+    )
+    .await?;
+    let mut attempt = quote().attempt;
+    attempt.retry_of = None;
+    attempt.dispatched_at_ms = time.try_into()?;
+    let owner = attempt.thread_id;
+    let metadata = codex_state::ThreadMetadataBuilder::new(
+        owner,
+        home.path().join("synthetic.jsonl"),
+        chrono::Utc::now(),
+        codex_protocol::protocol::SessionSource::Cli,
+    );
+    runtime.upsert_thread(&metadata.build("synthetic")).await?;
+    let store = AccountingStore::open(&runtime, time).await?;
+    store.admit(owner, &attempt, &[], time).await?;
+    let result = AccountingStore::inspect_range(
+        &runtime,
+        owner,
+        InspectionRange {
+            start_ms: 95 * DAY,
+            end_ms: 116 * DAY,
+            grouping: InspectionGrouping::Week,
+        },
+        time + 3_600_000,
+    )
+    .await?;
+    let pages = inspection_pages(Ok(result));
+    let titles: Vec<_> = pages[0]
+        .links
+        .iter()
+        .map(|(_, target)| pages[*target].title.clone())
+        .collect();
+    assert_eq!(
+        titles,
+        vec![
+            "Cost so far — this conversation",
+            "Not started yet",
+            "Not started yet"
+        ]
+    );
+    assert!(
+        pages[0]
+            .text
+            .iter()
+            .any(|s| s == "In progress — totals so far, recorded through 1970-04-11T00:00:00.000Z"),
+        "{:#?}",
+        pages[0].text
+    );
+    let text = joined(&pages);
+    for absent in [
+        "Bucket unavailable",
+        "Next step: send a turn",
+        "Partial bucket",
+    ] {
+        assert!(!text.contains(absent), "{absent}: {text}");
+    }
+    runtime.close().await;
+    Ok(())
+}
+
+// #289 R3: the range header and the day pages state the same floor.
+#[test]
+fn accounting_inspect_range_retention_matches_day_pages() {
+    let floor = 36;
+    let pages = range_pages(
+        InspectionRange {
+            start_ms: 40 * 86_400_000,
+            end_ms: 41 * 86_400_000,
+            grouping: InspectionGrouping::Day,
+        },
+        Some(floor),
+        /*completed_as_of_ms*/ None,
+        /*read_at*/ 400 * 86_400_000,
+        Vec::new(),
+    );
+    let phrase = "daily totals kept since 1970-02-06";
+    assert!(
+        pages[0]
+            .text
+            .iter()
+            .any(|s| s.starts_with("Retention:") && s.contains(phrase)),
+        "{:#?}",
+        pages[0].text
+    );
+    assert!(retention(400 * 86_400_000, floor, /*oldest_recorded_day*/ None).contains(phrase));
+    assert!(
+        !pages[0]
+            .text
+            .iter()
+            .any(|s| s.contains("oldest daily total"))
+    );
 }
 
 #[test]
@@ -375,6 +841,7 @@ fn accounting_inspect_range_coverage_names_intersection_for_request_and_retentio
                 grouping: InspectionGrouping::Month,
             },
             Some(aggregate_floor),
+            /*completed_as_of_ms*/ None,
             31 * day_ms,
             vec![codex_state::accounting::InspectionBucket {
                 start_ms: 0,
@@ -440,7 +907,8 @@ fn accounting_inspect_range_bucket_ancestry_counts_have_explicit_scopes() {
             end_ms: 7_200_000,
             grouping: InspectionGrouping::Hour,
         },
-        /*oldest*/ None,
+        /*aggregate_day_floor*/ None,
+        /*completed_as_of_ms*/ None,
         /*read_at*/ 7_200_000,
         buckets,
     );
@@ -510,7 +978,8 @@ fn accounting_inspect_range_overview_discloses_unknown_population_before_total()
             end_ms: 2 * 3_600_000,
             grouping: InspectionGrouping::Hour,
         },
-        /*oldest*/ None,
+        /*aggregate_day_floor*/ None,
+        /*completed_as_of_ms*/ None,
         2 * 3_600_000,
         buckets,
     );
@@ -599,7 +1068,8 @@ fn accounting_inspect_range_week_and_month_merge_exact_attempts() {
                 end_ms,
                 grouping,
             },
-            oldest_aggregate_day: None,
+            aggregate_day_floor: None,
+            completed_as_of_ms: None,
             read_at_ms: end_ms,
             buckets: vec![codex_state::accounting::InspectionBucket {
                 start_ms,
@@ -748,8 +1218,8 @@ fn money_day(known: Decimal, unknown: i64, attempts: i64) -> DayTotals {
 }
 
 /// A day of subscription work: plan attempts, the consumption they imply, and
-/// the API equivalent, with `unknown_equivalents` for rows the catalogue does
-/// not price.
+/// the API equivalent, with `unknown_equivalents` for attempts with no API rate
+/// or an incomplete token count.
 fn plan_day(equivalent: Decimal, burn_milli_tokens: i64, unknown_equivalents: i64) -> DayTotals {
     DayTotals {
         attempts: 2,
@@ -769,27 +1239,46 @@ fn plan_day(equivalent: Decimal, burn_milli_tokens: i64, unknown_equivalents: i6
 fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
     // Plan work with an API equivalent: the plan rate, what it consumed, and
     // what the same tokens would have cost - none of it spend.
-    insta::assert_snapshot!(estimate(&plan_day(decimal("0.00161"), /*burn_milli_tokens*/ 140_000, /*unknown_equivalents*/ 0)).join("\n"), @"
+    insta::assert_snapshot!(estimate(&plan_day(decimal("0.00161"), /*burn_milli_tokens*/ 140_000, /*unknown_equivalents*/ 0), EstimateGaps::default()).join("\n"), @"
     No recorded attempt here was billed per token.
     Subscription capacity: 2 of 2 attempts, not billed per token
     Plan consumption: 140 tokens at the plan rate that applied
     Same tokens at API rates: $0.001610
     ");
-    // A plan row the catalogue states no API price for says so, rather than
+    // A plan row with no API rate recorded says so, rather than
     // reporting zero.
-    insta::assert_snapshot!(estimate(&plan_day(Decimal::default(), /*burn_milli_tokens*/ 280_000, /*unknown_equivalents*/ 2)).join("\n"), @"
+    insta::assert_snapshot!(estimate(&plan_day(Decimal::default(), /*burn_milli_tokens*/ 280_000, /*unknown_equivalents*/ 2), EstimateGaps::default()).join("\n"), @"
     No recorded attempt here was billed per token.
     Subscription capacity: 2 of 2 attempts, not billed per token
     Plan consumption: 280 tokens at the plan rate that applied
-    Same tokens at API rates: unavailable — the catalogue states no API price for 2 of 2 plan attempts
+    Same tokens at API rates: unavailable — no API rate or complete token count for 2 of 2 plan attempts
     ");
+    // #352: a plan attempt with API rates but no cache-write count (OpenAI on
+    // a ChatGPT login reports none) has a known part and no complete figure.
+    let mut q = quote();
+    q.snapshot = Some(native_snapshot(
+        serde_json::json!({"noncached":"1","read":"0.1","write":"1.25","output":"4"}),
+        "PlanEquivalent",
+        /*basis_source*/ None,
+        /*plan_burn_millis*/ Some(1000),
+    ));
+    q.known_subtotal = Decimal::default();
+    q.subtotal_display = Decimal::default().display();
+    q.known_equivalent = decimal("0.00018");
+    q.all_buckets_equivalent = None;
+    q.plan_burn_millis = Some(1000);
+    q.plan_burn_milli_tokens = Some(160_000);
+    let partial = DayTotals::from_quotes([&q]).unwrap();
+    assert_eq!(
+        plan(&partial).last().unwrap(),
+        "Same tokens at API rates: at least $0.000180; 1 of 1 plan attempts have no API rate or an incomplete token count"
+    );
     // A day with no plan work says nothing about plans at all.
     assert_eq!(
-        estimate(&money_day(
-            decimal("0.00018"),
-            /*unknown*/ 0,
-            /*attempts*/ 1
-        )),
+        estimate(
+            &money_day(decimal("0.00018"), /*unknown*/ 0, /*attempts*/ 1),
+            EstimateGaps::default()
+        ),
         vec!["Estimated token cost for recorded attempts: $0.000180"]
     );
     // A mixed day is the case the two populations exist for. Three attempts,
@@ -810,7 +1299,7 @@ fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
         equivalent_usd: decimal("0.00161"),
         ..Default::default()
     };
-    insta::assert_snapshot!(estimate(&mixed).join("\n"), @"
+    insta::assert_snapshot!(estimate(&mixed, EstimateGaps::default()).join("\n"), @"
     Estimated token cost for recorded attempts: $0.000180
     Subscription capacity: 2 of 3 attempts, not billed per token
     Plan consumption: 140 tokens at the plan rate that applied
@@ -823,7 +1312,7 @@ fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
         known_usd: Decimal::default(),
         ..mixed
     };
-    insta::assert_snapshot!(estimate(&mixed_unpriced).join("\n"), @"
+    insta::assert_snapshot!(estimate(&mixed_unpriced, EstimateGaps::default()).join("\n"), @"
     Estimated token cost: unknown
     Full recorded estimate: unavailable (1 of 1 billed attempts incomplete)
     Subscription capacity: 2 of 3 attempts, not billed per token
@@ -861,7 +1350,7 @@ fn accounting_inspect_plan_work_is_never_reported_as_money_spent() {
 
 #[test]
 fn accounting_inspect_partial_and_unknown_copy() {
-    insta::assert_snapshot!(estimate(&money_day(decimal("0.00018"), /*unknown*/ 1, /*attempts*/ 1)).join("\n"), @"
+    insta::assert_snapshot!(estimate(&money_day(decimal("0.00018"), /*unknown*/ 1, /*attempts*/ 1), EstimateGaps::default()).join("\n"), @"
     Known estimated token cost: $0.000180 + unknown costs
     Full recorded estimate: unavailable (1 of 1 billed attempts incomplete)
     ");
@@ -875,7 +1364,7 @@ fn accounting_inspect_partial_and_unknown_copy() {
         summary.contains("Cache write: not reported (1 attempt)"),
         "{summary}"
     );
-    assert!(summary.contains("Billed cost: unavailable"));
+    assert!(summary.contains(SYNTHETIC_NOT_STATED), "{summary}");
     assert!(summary.contains("Collection coverage: unknown"));
     assert!(
         attempt_text(&quote())
@@ -886,16 +1375,15 @@ fn accounting_inspect_partial_and_unknown_copy() {
 
 #[test]
 fn accounting_inspect_unpriced_zero_and_missing_rate() {
-    insta::assert_snapshot!(estimate(&money_day(Decimal::default(), /*unknown*/ 1, /*attempts*/ 1)).join("\n"), @"
+    insta::assert_snapshot!(estimate(&money_day(Decimal::default(), /*unknown*/ 1, /*attempts*/ 1), EstimateGaps::default()).join("\n"), @"
     Estimated token cost: unknown
     Full recorded estimate: unavailable (1 of 1 billed attempts incomplete)
     ");
     assert_eq!(
-        estimate(&money_day(
-            Decimal::default(),
-            /*unknown*/ 0,
-            /*attempts*/ 1
-        )),
+        estimate(
+            &money_day(Decimal::default(), /*unknown*/ 0, /*attempts*/ 1),
+            EstimateGaps::default()
+        ),
         vec!["Estimated token cost for recorded attempts: $0.000000"]
     );
     let mut q = quote();
@@ -961,6 +1449,129 @@ fn accounting_inspect_request_attempt_price_detail() {
     }
 }
 
+/// A price record in the shape the native catalogue binds: `rates`, `basis`,
+/// `basis_source` and `plan_burn_millis` as given.
+fn native_snapshot(
+    rates: serde_json::Value,
+    basis: &str,
+    basis_source: Option<&str>,
+    plan_burn_millis: Option<i64>,
+) -> codex_state::accounting::Snapshot {
+    let mut value = serde_json::json!({
+        "id":Uuid::from_u128(6),"provider":"synthetic","model":"synthetic-model","scope":Uuid::from_u128(5),
+        "currency":"USD","unit":"PerMillionTokens","rates":rates,
+        "source_reference":Uuid::from_u128(7),"source_kind":"NativeCatalog",
+        "observed_at_ms":0,"approved_at_ms":0,"effective_from_ms":0,"effective_end_ms":null,
+        "basis":basis
+    });
+    if let Some(source) = basis_source {
+        value["basis_source"] = serde_json::json!(source);
+    }
+    if let Some(burn) = plan_burn_millis {
+        value["plan_burn_millis"] = serde_json::json!(burn);
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+const PRICE_METADATA: [&str; 6] = [
+    "Price ID",
+    "Price source",
+    "Price currency/unit",
+    "Price observed/approved",
+    "Price effective interval",
+    "Rate unavailable for",
+];
+
+/// PF-60-S04: a request whose record states only its billing basis - no rate
+/// and no plan rate - has no price, so its detail says so instead of showing a
+/// price source, price metadata and per-rate gaps as if a price existed.
+#[test]
+fn accounting_inspect_basis_only_request_shows_no_price_metadata() {
+    let none = serde_json::json!({"noncached":null,"read":null,"write":null,"output":null});
+    for (basis, source, shown) in [
+        ("PlanEquivalent", None, "subscription (built-in default)"),
+        ("Billed", None, "pay per use (built-in default)"),
+        ("Local", None, "local, no charge (built-in default)"),
+        // An undeclared basis has no default to name.
+        ("Undeclared", None, "not declared"),
+        (
+            "PlanEquivalent",
+            Some("UserConfig"),
+            "subscription (set in your config)",
+        ),
+    ] {
+        let mut q = quote();
+        q.snapshot = Some(native_snapshot(
+            none.clone(),
+            basis,
+            source,
+            /*plan_burn_millis*/ None,
+        ));
+        let lines = attempt_text(&q);
+        let text = lines.join("\n");
+        assert!(lines.contains(&format!("Billing basis: {shown}")), "{text}");
+        // #396: no parentheses inside the sentence's own clause.
+        let clause = shown
+            .replace(" (set in your config)", "; set in your config")
+            .replace(" (built-in default)", "; built-in default");
+        assert!(
+            text.contains(&format!(
+                "Price: none recorded — this request records only its billing basis: {clause}"
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("(set in your config))"), "{text}");
+        assert!(!text.contains("(built-in default))"), "{text}");
+        for absent in PRICE_METADATA
+            .iter()
+            .chain(&["no dispatch-time price snapshot"])
+        {
+            assert!(!text.contains(absent), "{basis}: {absent}\n{text}");
+        }
+    }
+}
+
+/// PF-60-S04: a record that states any price - an API rate, or only a plan
+/// rate (a subscription row with no API twin) - keeps its full price block.
+#[test]
+fn accounting_inspect_priced_or_plan_rate_request_keeps_price_metadata() {
+    let none = serde_json::json!({"noncached":null,"read":null,"write":null,"output":null});
+    let one_rate = serde_json::json!({"noncached":"1","read":null,"write":null,"output":null});
+    for snapshot in [
+        native_snapshot(
+            none,
+            "PlanEquivalent",
+            /*basis_source*/ None,
+            Some(1000),
+        ),
+        native_snapshot(
+            one_rate.clone(),
+            "Billed",
+            /*basis_source*/ None,
+            /*plan_burn_millis*/ None,
+        ),
+        native_snapshot(
+            one_rate,
+            "PlanEquivalent",
+            /*basis_source*/ None,
+            /*plan_burn_millis*/ None,
+        ),
+    ] {
+        let mut q = quote();
+        // A request copies the plan rate from its record.
+        q.plan_burn_millis = snapshot.plan_burn_millis;
+        q.snapshot = Some(snapshot);
+        let text = attempt_text(&q).join("\n");
+        if q.plan_burn_millis.is_some() {
+            assert!(text.contains("Plan rate at dispatch: 1x"), "{text}");
+        }
+        for present in &PRICE_METADATA[..5] {
+            assert!(text.contains(present), "{present}\n{text}");
+        }
+        assert!(!text.contains("Price: none recorded"), "{text}");
+    }
+}
+
 #[tokio::test]
 async fn accounting_inspect_narrow_and_long_fields() {
     for width in [40, 80] {
@@ -1005,6 +1616,8 @@ async fn accounting_inspect_empty_day_after_checkpoint_renders_lag() -> anyhow::
     use codex_state::accounting::AccountingStore;
 
     let home = tempfile::tempdir()?;
+    // Stored before the id is minted, so it is the conversation's start.
+    let created = chrono::Utc::now();
     let owner = ThreadId::new();
     let runtime = codex_state::StateRuntime::init(
         codex_state::SqliteConfig::from_sqlite_home(
@@ -1016,7 +1629,7 @@ async fn accounting_inspect_empty_day_after_checkpoint_renders_lag() -> anyhow::
     let metadata = codex_state::ThreadMetadataBuilder::new(
         owner,
         home.path().join("synthetic.jsonl"),
-        chrono::Utc::now(),
+        created,
         codex_protocol::protocol::SessionSource::Cli,
     );
     runtime.upsert_thread(&metadata.build("synthetic")).await?;
@@ -1029,13 +1642,16 @@ async fn accounting_inspect_empty_day_after_checkpoint_renders_lag() -> anyhow::
     assert_eq!(view.totals, DayTotals::default());
     assert!(view.requests.is_empty());
     assert_eq!(view.coverage.completed_as_of_ms, 0);
-    // The empty conversation says so in its scope, and that no other
-    // conversation recorded anything that day either.
+    // FUP-02: the conversation started today, so 1970-01-01 provably had
+    // none of its requests; and no other conversation recorded anything.
     assert_eq!(
         inspection_pages(Ok(empty))[0].text[..2].to_vec(),
         vec![
-            "This conversation on 1970-01-01 (UTC): no recorded requests.",
-            "No other conversation recorded requests on this day.",
+            format!(
+                "This conversation on 1970-01-01 (UTC): no requests recorded — this conversation started on {} (UTC), after this day.",
+                created.date_naive()
+            ),
+            "No other conversation recorded requests on this day.".to_string(),
         ]
     );
 
@@ -1135,8 +1751,8 @@ async fn accounting_inspect_maintenance_with_stale_raw_renders_refresh() -> anyh
         insta::allow_duplicates! {
             insta::assert_snapshot!(text, @"
             Recorded totals unavailable — stored contributions need refresh. Retry rereads only; no repair performed.
+            Next step: select Refresh. If it stays unavailable, the recorded totals cannot be checked here; check your provider's bill.
             Collection coverage: unknown; recorded root and resolved descendants only. Unknown parent population excluded.
-            Billed cost: unavailable — no settlement evidence
             Logical requests may have attempts on other days; this UTC day is not their complete lifetime.
             ");
         }
@@ -1168,13 +1784,13 @@ async fn accounting_inspect_maintenance_with_current_contributions_renders_raw_t
     This conversation on 1970-04-11 (UTC):
     • synthetic · synthetic-model — Pay per use. 1 request, tokens not reported. Estimated cost: no price available.
     No other conversation recorded requests on this day.
-    Costs are estimates from published prices; your provider's bill is the final amount.
+    Next step for requests with no price: check the bill from synthetic. No published price covers them, so no cost is shown for them here.
+    Costs are estimates from published prices; synthetic doesn't report its charges — check synthetic's bill.
     Select a provider below to see its requests.
     —— Details ——
     Estimated token cost: unknown
     Full recorded estimate: unavailable (1 of 1 billed attempts incomplete)
     Collection coverage: unknown; recorded root and resolved descendants only. Unknown parent population excluded.
-    Billed cost: unavailable — no settlement evidence
     Logical requests may have attempts on other days; this UTC day is not their complete lifetime.
     Day covered (UTC): [1970-04-11T00:00:00.000Z, 1970-04-12T00:00:00.000Z)
     Read at: 1970-04-11T00:00:00.000Z; ledger current to: 1970-04-11T00:00:00.000Z (0 ms behind)
@@ -1189,7 +1805,6 @@ async fn accounting_inspect_maintenance_with_current_contributions_renders_raw_t
     Total (not separately billed): not reported (1 attempt)
     Root total = own attempts + resolved descendant attempts. Provider/model groups partition the same root total. Compare exact USD, not rounded displays.
     Unknown parent population: 0 attempts, excluded from root total
-    Estimate versus billed difference: unknown — no settlement evidence
     ");
     // The fixture's day-100 attempt was admitted with no observations, so the
     // page must say it cannot complete the estimate rather than presenting the
@@ -1224,8 +1839,8 @@ fn accounting_inspect_availability_state_snapshots() {
         .into_iter()
         .map(|s| inspection_pages(Ok(s))[0].text.first().unwrap().clone())
         .collect();
-    insta::assert_snapshot!(text.join("\n"), @"
-    Unavailable — accounting ledger not installed. Collection remains off.
+    assert_eq!(text[0], super::absent_state());
+    insta::assert_snapshot!(text[1..].join("\n"), @"
     Unavailable — native thread no longer exists.
     Snapshot is not current; newer activity is unverified
     Recorded totals unavailable — stored contributions need refresh. Retry rereads only; no repair performed.
@@ -1237,8 +1852,11 @@ fn accounting_inspect_availability_state_snapshots() {
     empty.totals = DayTotals::default();
     empty.requests.clear();
     assert_eq!(
-        inspection_pages(Ok(InspectionDay::Ready(empty)))[0].text[0],
-        "This conversation on 1970-01-01 (UTC): no recorded requests."
+        inspection_pages(Ok(InspectionDay::Ready(empty)))[0].text[..2],
+        [
+            "This conversation on 1970-01-01 (UTC): nothing recorded.",
+            super::empty_day::NOT_PROOF,
+        ]
     );
     let InspectionDay::Ready(view) = packet() else {
         unreachable!()
@@ -1280,7 +1898,7 @@ fn accounting_inspect_coverage_never_claims_run_complete() {
     for caveat in [
         "Collection coverage: unknown",
         "resolved descendants only",
-        "Billed cost: unavailable",
+        SYNTHETIC_NOT_STATED,
         "other days",
         "Snapshot is not current; newer activity is unverified",
     ] {
@@ -1500,19 +2118,47 @@ fn accounting_zero_plan_usage_renders_money_unavailable() {
         @"Token cost: unavailable — no applicable price; recorded usage is not a zero-cost claim.");
 }
 
+/// The overview's one billing line for the `packet()` day, whose provider
+/// states no charge.
+const SYNTHETIC_NOT_STATED: &str = "Costs are estimates from published prices; synthetic doesn't report its charges — check synthetic's bill.";
+
 #[test]
 fn accounting_inspect_estimate_only_never_invents_billed_or_difference() {
     let pages = inspection_pages(Ok(breakdown_packet()));
+    // The first screen says it once, in its overview (one provider here is
+    // unnamed, so it names none); every other page with attempts says it once
+    // in its details, naming whose bill to check where it can.
+    let alpha = "Billed cost: alpha doesn't report its charges, so any cost here is an estimate — check alpha's bill.";
+    assert!(
+        pages[0].text.contains(
+            &"Costs are estimates from published prices; your provider's bill is the final amount."
+                .into()
+        ),
+        "{:#?}",
+        pages[0].text
+    );
+    assert!(!pages[0].text.iter().any(|s| s.starts_with("Billed cost:")));
     for page in &pages {
+        let billed: Vec<_> = page
+            .text
+            .iter()
+            .filter(|s| s.starts_with("Billed cost:"))
+            .collect();
+        assert!(billed.len() <= 1, "{}: {billed:?}", page.title);
         assert!(
-            page.text
-                .contains(&"Billed cost: unavailable — no settlement evidence".into())
+            billed.iter().all(|s| !s.starts_with("Billed cost: $")),
+            "{billed:?}"
         );
-        assert!(page.text.contains(
-            &"Estimate versus billed difference: unknown — no settlement evidence".into()
-        ));
-        assert!(!page.text.iter().any(|s| s.starts_with("Billed cost: $")));
+        assert!(
+            !page
+                .text
+                .iter()
+                .any(|s| s.contains("settlement") || s.contains("billed difference")),
+            "{}",
+            page.title
+        );
     }
+    assert!(pages.iter().any(|page| page.text.contains(&alpha.into())));
     assert!(
         pages[0]
             .text
@@ -1735,20 +2381,23 @@ fn accounting_inspect_names_the_rows_whose_tokens_have_no_price() {
         BucketQuote::MissingRate,
     ];
 
-    let lines = super::unpriced_rows([
-        &priced,
-        &unpriced,
-        &also_unpriced,
-        &duplicate,
-        &no_usage,
-        &zero_bucket,
-        &zero_usage,
-        &plan_attempt,
-        &zero_rate,
-        &mixed_priced,
-        &mixed_unpriced,
-        &partly_priced,
-    ]);
+    let lines = super::unpriced_rows(
+        [
+            &priced,
+            &unpriced,
+            &also_unpriced,
+            &duplicate,
+            &no_usage,
+            &zero_bucket,
+            &zero_usage,
+            &plan_attempt,
+            &zero_rate,
+            &mixed_priced,
+            &mixed_unpriced,
+            &partly_priced,
+        ],
+        /*named*/ false,
+    );
 
     assert_eq!(
         lines.len(),
@@ -1820,7 +2469,7 @@ fn accounting_inspect_names_the_rows_whose_tokens_have_no_price() {
     );
 
     // Nothing to say when everything carried a rate.
-    assert!(super::unpriced_rows([&priced]).is_empty());
+    assert!(super::unpriced_rows([&priced], /*named*/ false).is_empty());
 }
 
 /// The line has to land on the page the operator actually reads - the one
@@ -1943,16 +2592,13 @@ fn accounting_inspect_first_screen_names_provider_model_and_billing_type() {
                 money(decimal("0.5"))
             ),
             "No other conversation recorded requests on this day.".to_string(),
+            super::OVERFLOW_NOTE.to_string(),
             "Costs are estimates from published prices; your provider's bill is the final amount."
                 .to_string(),
             "Select a provider below to see its requests.".to_string(),
         ]
     );
-    for technical in [
-        "Billed cost:",
-        "Collection coverage:",
-        "Known subtotal exact USD:",
-    ] {
+    for technical in ["Collection coverage:", "Known subtotal exact USD:"] {
         let at = root
             .text
             .iter()
@@ -2014,19 +2660,73 @@ fn accounting_inspect_first_screen_names_provider_model_and_billing_type() {
 }
 
 #[test]
+fn accounting_operator_preserves_alias_wire_and_custom_route_identity() {
+    let cases = [
+        ("corbanu-plan", "pfterminal-plan"),
+        ("corbanu-terminal-plan", "pfterminal-plan"),
+        ("corbanu-plan-anthropic", "pfterminal-plan"),
+        ("pfterminal-plan-anthropic", "pfterminal-plan"),
+        ("zai-anthropic", "zai"),
+        ("openrouter-anthropic", "openrouter"),
+        ("baseten-anthropic", "baseten"),
+        ("vercel-anthropic", "vercel"),
+        ("vercel-anthropic-fast", "vercel"),
+        ("pfterminal-plan", "pfterminal-plan"),
+        ("openai", "openai"),
+        ("anthropic", "anthropic"),
+    ];
+    let actual = cases.map(|(route, _)| (route, operator(route)));
+    assert_eq!(actual, cases);
+
+    // Custom IDs remain exact: sharing alias normalization must not start
+    // treating different case, whitespace, or similar names as built-ins.
+    let mut custom = vec![String::new(), "private/自分のモデル".to_string()];
+    for (route, _) in cases {
+        custom.extend([
+            route.to_uppercase(),
+            format!(" {route}"),
+            format!("{route} "),
+            format!("{route}-custom"),
+        ]);
+    }
+    let unchanged = custom.iter().map(String::as_str).collect::<Vec<_>>();
+    let actual = custom
+        .iter()
+        .map(|route| operator(route))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, unchanged);
+}
+
+#[test]
+fn accounting_model_names_resolve_corbanu_alias_routes() {
+    let slug = "corbanu/deepseek-v4.1-flash";
+    let routes = [
+        "pfterminal-plan",
+        "pfterminal-plan-anthropic",
+        "corbanu-plan",
+        "corbanu-terminal-plan",
+        "corbanu-plan-anthropic",
+    ];
+    let actual = routes.map(|route| model_name(route, slug));
+    assert_eq!(actual, ["DeepSeek V4.1 Flash"; 5]);
+}
+
+#[test]
 fn accounting_inspect_plain_wording_counts_attempts_and_names_every_route() {
     let mut first = quote();
     first.all_buckets_priced = None;
+    first.buckets[3] = BucketQuote::MissingRate;
     first.known_subtotal = decimal("0.00001");
     let mut retry = quote();
     retry.attempt.attempt_id = Uuid::from_u128(9);
     retry.attempt.model = "other-model".into();
     retry.all_buckets_priced = None;
+    retry.buckets[3] = BucketQuote::MissingRate;
     retry.known_subtotal = decimal("0.00001");
     let quotes = vec![first, retry];
     let totals = DayTotals::from_quotes(quotes.iter()).unwrap();
     assert_eq!(
-        plain_billing(&totals),
+        plain_billing(&totals, EstimateGaps::of(quotes.iter())),
         (
             "Pay per use",
             format!(
@@ -2036,16 +2736,74 @@ fn accounting_inspect_plain_wording_counts_attempts_and_names_every_route() {
         )
     );
     assert_eq!(
-        request_route(&quotes).as_deref(),
+        request_route(&quotes, /*named*/ false).as_deref(),
         Some("several routes (synthetic · synthetic-model, synthetic · other-model)")
     );
     assert_eq!(
-        request_route(&quotes[..1]).as_deref(),
+        request_route(&quotes[..1], /*named*/ false).as_deref(),
         Some("synthetic · synthetic-model")
     );
     // Real routes read by their display names.
-    assert_eq!(model_name("gpt-6-sol"), "GPT-6 Sol");
+    assert_eq!(model_name("openai", "gpt-6-sol"), "GPT-6 Sol");
     assert_eq!(provider_name("deepseek"), "DeepSeek");
+    // #352: the two local providers are told apart.
+    assert_eq!(provider_name("ollama"), "Ollama");
+    assert_eq!(provider_name("lmstudio"), "LM Studio");
+    // #352: another provider's catalogue row is not this route's name.
+    assert_eq!(model_name("ambient", "z-ai/glm-5.2"), "Ambient GLM 5.2");
+    assert_eq!(model_name("openrouter", "z-ai/glm-5.2"), "z-ai/glm-5.2");
+    assert_eq!(
+        model_name("openrouter", "z-ai/glm-5.3-flash"),
+        "OpenRouter GLM 5.3 Flash"
+    );
+    // An Anthropic-wire route is its operator's.
+    assert_eq!(model_name("zai-anthropic", "glm-5.2"), "Z.AI GLM 5.2");
+    assert_eq!(
+        model_name("vercel-anthropic-fast", "zai/glm-5.2"),
+        "Vercel GLM 5.2"
+    );
+    // A provider you configured shows the slug: the name's brand is unknown.
+    assert_eq!(model_name("my-zai", "glm-5.2"), "glm-5.2");
+    // #1196: a name without a route brand names the model on any route.
+    assert_eq!(
+        model_name("my-claude-proxy", "claude-opus-5-5"),
+        "Claude Opus 5.5"
+    );
+    assert_eq!(
+        model_name("openrouter", "claude-opus-5-5"),
+        "Claude Opus 5.5"
+    );
+    assert_eq!(model_name("my-openai", "gpt-6-sol"), "GPT-6 Sol");
+    // A brand of several words counts only when every word is in the name.
+    assert_eq!(
+        model_name("anthropic", "claude-opus-5-5-plan"),
+        "claude-opus-5-5-plan"
+    );
+    assert_eq!(model_name("kimi-code", "k3"), "Kimi Code K3");
+    assert_eq!(model_name("openrouter", "k3"), "k3");
+    assert_eq!(
+        model_name("openrouter", "deepseek-v4-pro"),
+        "deepseek-v4-pro"
+    );
+    // The brand is the operator's: Vercel owns its Anthropic-wire fast route.
+    assert_eq!(
+        model_name("openrouter", "zai/glm-5.2-fast"),
+        "zai/glm-5.2-fast"
+    );
+    // No catalogue name read on another route says how a route sells the model.
+    let catalogue = codex_models_manager::bundled_models_response().unwrap();
+    for model in catalogue.models {
+        let name = model_name("my-route", &model.slug);
+        let lower = name.to_lowercase();
+        assert!(
+            name == model.slug
+                || !lower
+                    .split_whitespace()
+                    .any(|word| ["plan", "(direct)", "free"].contains(&word)),
+            "{} reads as {name:?} on another route",
+            model.slug
+        );
+    }
 }
 
 #[test]
@@ -2075,13 +2833,20 @@ fn accounting_inspect_multi_day_bucket_heading_names_the_whole_bucket() {
     );
 }
 
+/// #368: OpenRouter's stated charge prices its request, so it is the cost
+/// rather than a second figure beside an estimate; a response that stated
+/// none keeps its estimate.
 #[test]
 fn accounting_inspect_states_the_providers_billed_charge() {
     let InspectionDay::Ready(mut view) = breakdown_packet() else {
         unreachable!()
     };
-    // alpha/one states its charge; alpha/two does not.
+    // OpenRouter states its charges: here on model one's response, not on
+    // model two's.
     for quote in view.requests.values_mut().flatten() {
+        if quote.attempt.provider == "alpha" {
+            quote.attempt.provider = "openrouter".into();
+        }
         if quote.attempt.model == "one" {
             quote.usage.billed_usd = Some(decimal("0.0123312"));
         }
@@ -2093,16 +2858,17 @@ fn accounting_inspect_states_the_providers_billed_charge() {
     let line = root
         .text
         .iter()
-        .find(|s| s.starts_with("• alpha · one"))
+        .find(|s| s.starts_with("• OpenRouter · one"))
         .unwrap();
     assert!(
-        line.ends_with(&format!(" Billed by alpha: {billed}.")),
+        line.ends_with(&format!(" Cost: {billed}, charged by OpenRouter.")),
         "{line}"
     );
+    assert!(!line.contains("Billed"), "{line}");
     let other = root
         .text
         .iter()
-        .find(|s| s.starts_with("• alpha · two"))
+        .find(|s| s.starts_with("• OpenRouter · two"))
         .unwrap();
     assert!(!other.contains("Billed"), "{other}");
     // Only one of the day's three pay-per-use attempts stated a charge.
@@ -2110,24 +2876,21 @@ fn accounting_inspect_states_the_providers_billed_charge() {
         "Billed cost: at least {billed} (1 of 3 attempts stated a charge) — as stated by the provider with each response"
     );
     assert!(root.text.contains(&detail), "{:?}", root.text);
-    assert!(
-        !root
-            .text
-            .iter()
-            .any(|s| s == "Billed cost: unavailable — no settlement evidence")
-    );
+    assert!(!root.text.iter().any(|s| s.contains("report its charges")));
     // The request page states it plainly, and no longer claims the
     // difference is unknowable next to a stated charge.
     let (_, page) = root
         .links
         .iter()
-        .find(|(label, _)| label.starts_with("Request ") && label.contains("alpha · one"))
+        .find(|(label, _)| label.starts_with("Request ") && label.contains("OpenRouter · one"))
         .unwrap();
     let request = &pages[*page];
     assert!(
         request
             .text
-            .contains(&format!("Billed by provider: {billed}"))
+            .contains(&format!("Cost: {billed}, charged by OpenRouter")),
+        "{:#?}",
+        request.text
     );
     assert!(request.text.contains(&billed_detail(&billed)));
     assert!(
@@ -2145,16 +2908,124 @@ fn accounting_inspect_states_the_providers_billed_charge() {
             .count(),
         1
     );
-    // A request that stated nothing keeps the honest unavailable line.
+    // A request whose response stated nothing says so, without claiming
+    // OpenRouter never reports its charges.
     let (_, page) = root
         .links
         .iter()
-        .find(|(label, _)| label.starts_with("Request ") && label.contains("alpha · two"))
+        .find(|(label, _)| label.starts_with("Request ") && label.contains("OpenRouter · two"))
         .unwrap();
     assert!(
         pages[*page]
             .text
-            .contains(&"Billed cost: unavailable — no settlement evidence".to_string())
+            .contains(&"Billed cost: OpenRouter stated no charge for this work, so any cost here is an estimate — check OpenRouter's bill.".to_string())
+    );
+}
+
+/// Every page with work that can be billed has exactly one billing line; the
+/// first screen's is its overview estimate line, so its details add none.
+#[test]
+fn accounting_inspect_one_billing_line_per_page() {
+    let pages = inspection_pages(Ok(breakdown_packet()));
+    let overview_lines = pages[0]
+        .text
+        .iter()
+        .filter(|s| s.starts_with("Costs are estimates") || s.starts_with("Billed cost:"))
+        .count();
+    assert_eq!(overview_lines, 1, "{:#?}", pages[0].text);
+    for page in &pages[1..] {
+        let lines = page
+            .text
+            .iter()
+            .filter(|s| s.starts_with("Billed cost:"))
+            .count();
+        // Every page past the first covers at least one pay-per-use attempt.
+        assert_eq!(lines, 1, "{}: {:#?}", page.title, page.text);
+    }
+}
+
+fn billed_quote(provider: &str) -> ObservationQuote {
+    let mut quote = quote();
+    quote.attempt.provider = provider.into();
+    quote
+}
+
+#[test]
+fn accounting_billed_line_names_whose_bill_to_check() {
+    let line = |quotes: &[ObservationQuote]| billed_line(&quotes.iter().collect::<Vec<_>>());
+    // A provider that never states its charge.
+    assert_eq!(
+        line(&[billed_quote("zai")]).unwrap(),
+        "Billed cost: Z.AI doesn't report its charges, so any cost here is an estimate — check Z.AI's bill."
+    );
+    // One that does, but stated none on these responses.
+    assert_eq!(
+        line(&[billed_quote("openrouter")]).unwrap(),
+        "Billed cost: OpenRouter stated no charge for this work, so any cost here is an estimate — check OpenRouter's bill."
+    );
+    // Both kinds, and several names.
+    assert_eq!(
+        line(&[billed_quote("zai"), billed_quote("openrouter")]).unwrap(),
+        "Billed cost: Z.AI doesn't report its charges and OpenRouter stated no charge for this work, so any cost here is an estimate — check their bills."
+    );
+    assert_eq!(
+        line(&[billed_quote("c"), billed_quote("a"), billed_quote("b")]).unwrap(),
+        "Billed cost: a, b and c don't report their charges, so any cost here is an estimate — check their bills."
+    );
+    // The Corbanu API's two routes are one provider.
+    assert_eq!(
+        line(&[
+            billed_quote("pfterminal-plan"),
+            billed_quote("pfterminal-plan-anthropic")
+        ])
+        .unwrap(),
+        "Billed cost: Corbanu API stated no charge for this work, so any cost here is an estimate — check Corbanu API's bill."
+    );
+    // A refused attempt that reported nothing was normally not charged.
+    let mut refused = billed_quote("openrouter");
+    refused.usage = Usage::default();
+    assert_eq!(
+        line(&[refused]).unwrap(),
+        "Billed cost: none stated — OpenRouter reported no usage here; a refused request is normally not charged, but if it stopped mid-response, check OpenRouter's bill."
+    );
+    // No provider id: nothing to name.
+    assert_eq!(
+        line(&[billed_quote("")]).unwrap(),
+        "Billed cost: not reported, so any cost here is an estimate — check your provider's bill."
+    );
+    // Subscription work has no bill to check, and an empty page no line.
+    let mut plan = billed_quote("claude-plan");
+    plan.plan_burn_millis = Some(1000);
+    assert_eq!(line(&[plan]), None);
+    assert_eq!(line(&[]), None);
+}
+
+/// A complete range states the billing basis once on its overview; a partial
+/// one shows no total, so no billing line either.
+#[test]
+fn accounting_inspect_range_overview_billing_line_only_with_a_total() {
+    let current = || {
+        let InspectionDay::Ready(mut view) = packet() else {
+            unreachable!()
+        };
+        view.read_at_ms = view.coverage.completed_as_of_ms;
+        InspectionDay::Ready(view)
+    };
+    let complete = inspection_pages(Ok(range_packet(/*partial*/ false, current())));
+    assert!(
+        complete[0].text.contains(
+            &"Billed cost: synthetic doesn't report its charges, so any cost here is an estimate — check synthetic's bill."
+                .to_string()
+        ),
+        "{:#?}",
+        complete[0].text
+    );
+    let partial = inspection_pages(Ok(range_packet(/*partial*/ true, current())));
+    assert!(
+        !partial[0]
+            .text
+            .iter()
+            .any(|s| s.starts_with("Billed cost:"))
     );
 }
 
@@ -2278,15 +3149,21 @@ fn accounting_inspect_reads_plainly_for_every_provider() {
     }
     let labels: Vec<_> = pages[0].links.iter().map(|(l, _)| l.as_str()).collect();
     let billed = money(decimal("0.002246"));
-    for route in [
-        "Corbanu API · corbanu/glm-5.3-flash",
-        "DeepSeek · deepseek-chat",
-    ] {
-        assert!(
-            labels.contains(&format!("{route} — billed {billed} (1 request)").as_str()),
-            "{labels:?}"
-        );
-    }
+    assert!(
+        labels
+            .contains(&format!("DeepSeek · deepseek-chat — billed {billed} (1 request)").as_str()),
+        "{labels:?}"
+    );
+    // The Corbanu API's reported charge is the cost (Travis, 2026-10-14).
+    assert!(
+        labels.contains(
+            &format!(
+                "Corbanu API · corbanu/glm-5.3-flash — {billed}, charged by Corbanu API (1 request)"
+            )
+            .as_str()
+        ),
+        "{labels:?}"
+    );
     assert!(
         labels.contains(&"OpenRouter · some/unlisted-model — no price available (1 request)")
             || labels
@@ -2385,3 +3262,536 @@ fn accounting_inspect_plan_consumption_groups_thousands() {
     assert_eq!(rate_scaled(/*milli_tokens*/ 1_234_567_500), "1,234,567.500");
     assert_eq!(rate_scaled(/*milli_tokens*/ 500), "0.500");
 }
+
+/// #289: an inclusive attempt that did not report cache writes, bound to a
+/// price that charges nothing for them, is costed from input − cache read.
+/// Its lines say so instead of calling the count unknown beside its cost.
+fn free_write_quote() -> ObservationQuote {
+    let mut q = quote();
+    q.snapshot = Some(
+        serde_json::from_value(serde_json::json!({
+            "id": Uuid::from_u128(1000), "provider": "synthetic", "model": "synthetic-model",
+            "scope": Uuid::from_u128(5), "currency": "USD", "unit": "PerMillionTokens",
+            "rates": {"noncached": "1.4", "read": "0.26", "write": "0", "output": "4.4"},
+            "source_reference": Uuid::from_u128(1001), "source_kind": "ProviderPublished",
+            "observed_at_ms": 0, "approved_at_ms": 0, "effective_from_ms": 0,
+            "effective_end_ms": null
+        }))
+        .unwrap(),
+    );
+    q
+}
+
+#[test]
+fn accounting_inspect_free_cache_writes_show_the_counts_their_costs_used() {
+    let q = free_write_quote();
+    assert_eq!(q.priced_counts(), [Some(80), Some(20), Some(0), Some(40)]);
+    let lines = super::attempt_text(&q);
+    for expected in [
+        "Noncached input (derived for inclusive input): 80 (derived as input − cache read: cache writes were not reported, and this price charges nothing for cache writes)",
+        "Cache write: not reported — this price charges nothing for cache writes",
+    ] {
+        assert!(
+            lines.iter().any(|line| line == expected),
+            "{expected}\n{lines:#?}"
+        );
+    }
+    assert!(
+        !lines.iter().any(
+            |line| line.contains("unknown — no retained numeric evidence")
+                && (line.starts_with("Noncached input (") || line.starts_with("Cache write:"))
+        ),
+        "{lines:#?}"
+    );
+
+    let InspectionDay::Ready(mut view) = packet() else {
+        unreachable!()
+    };
+    view.requests = std::collections::BTreeMap::from([(q.attempt.request_id, vec![q])]);
+    let text = inspection_pages(Ok(InspectionDay::Ready(view)))[0]
+        .text
+        .join("\n");
+    assert!(
+        text.contains("Noncached input (derived for inclusive input): not reported (1 attempt) — costed as input − cache read for 1 attempt, whose price charges nothing for cache writes"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Cache write: not reported (1 attempt) — free at the price of 1 attempt, so nothing was charged"),
+        "{text}"
+    );
+}
+
+/// #289: requests are numbered in the order they were sent.
+#[test]
+fn accounting_inspect_requests_are_numbered_in_dispatch_order() {
+    let InspectionDay::Ready(mut view) = packet() else {
+        unreachable!()
+    };
+    view.requests.clear();
+    // Ids sort the other way round from dispatch time.
+    for (id, sent) in [(1u128, 30_000i64), (2, 10_000), (3, 20_000)] {
+        let mut q = quote();
+        q.attempt.attempt_id = Uuid::from_u128(id);
+        q.attempt.request_id = Uuid::from_u128(100 + id);
+        q.attempt.thread_id = view.owner;
+        q.attempt.dispatched_at_ms = sent.try_into().unwrap();
+        view.requests.insert(q.attempt.request_id, vec![q]);
+    }
+    let pages = inspection_pages(Ok(InspectionDay::Ready(view)));
+    let requests: Vec<_> = pages[0]
+        .links
+        .iter()
+        .filter(|(label, _)| label.starts_with("Request "))
+        .map(|(label, page)| {
+            let id = pages[*page]
+                .text
+                .iter()
+                .find_map(|line| line.strip_prefix("Request: "))
+                .unwrap()
+                .to_string();
+            (label.split(' ').nth(1).unwrap().to_string(), id)
+        })
+        .collect();
+    assert_eq!(
+        requests,
+        [(2, 102), (3, 103), (1, 101)]
+            .into_iter()
+            .enumerate()
+            .map(|(n, (_, id))| ((n + 1).to_string(), Uuid::from_u128(id).to_string()))
+            .collect::<Vec<_>>()
+    );
+    // Group pages list the same requests in the same order and numbering.
+    let root = pages
+        .iter()
+        .find(|page| page.title == "Root's own attempts")
+        .expect("root group page");
+    assert_eq!(
+        root.links
+            .iter()
+            .map(|(label, _)| label.as_str())
+            .collect::<Vec<_>>(),
+        ["Request 1", "Request 2", "Request 3"]
+    );
+}
+
+/// #289: a valid date after today is refused with the reason, not the syntax.
+#[tokio::test]
+async fn accounting_inspect_future_day_says_why() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.open_accounting_command(
+        "requests 2026-09-17",
+        NaiveDate::from_ymd_opt(2026, 9, 16).unwrap(),
+    );
+    let mut text = String::new();
+    while let Ok(event) = rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            for line in cell.display_lines(/*width*/ 200) {
+                text.push_str(&line.to_string());
+                text.push('\n');
+            }
+        }
+    }
+    assert!(
+        text.contains("2026-09-17 is after today (2026-09-16, UTC)"),
+        "{text}"
+    );
+    assert!(!text.contains("Usage:"), "{text}");
+}
+
+/// #475: a request the provider refused with 401 before any response reads
+/// as a failure with no charge: never as incomplete usage, a lower bound or a
+/// reason to check the provider's bill.
+#[test]
+fn accounting_inspect_refused_request_reads_as_failed_with_no_charge() {
+    // With a price bound at dispatch, and with none (review S6).
+    let priced = native_snapshot(
+        serde_json::json!({"noncached":"1","read":"1","write":null,"output":"4"}),
+        "Billed",
+        /*basis_source*/ None,
+        /*plan_burn_millis*/ None,
+    );
+    for snapshot in [Some(priced), None] {
+        let mut q = quote();
+        q.attempt.provider = "zai".into();
+        q.attempt.account = Some(codex_state::accounting::AttemptAccount {
+            name: "fake".into(),
+            fingerprint: Some("0123456789ab".into()),
+        });
+        q.snapshot = snapshot;
+        q.usage = Usage {
+            input: Some(0),
+            noncached: Some(0),
+            read: Some(0),
+            write: Some(0),
+            output: Some(0),
+            reasoning: Some(0),
+            total: Some(0),
+            billed_usd: None,
+            refused_status: Some(401),
+            session_ended_at_ms: None,
+        };
+        q.buckets = [BucketQuote::Priced(Decimal::default()); 4];
+        q.known_subtotal = Decimal::default();
+        q.all_buckets_priced = Some(Decimal::default());
+        let quotes = [&q];
+
+        let route = route_line(&quotes, /*named*/ true);
+        assert!(
+            route.contains("1 attempt refused by the provider (HTTP 401) — no charge"),
+            "{route}"
+        );
+        let header = plain_header(&quotes, /*named*/ true).join("\n");
+        assert!(
+            header.contains("Refused: 1 attempt refused by the provider (HTTP 401) — no charge")
+        );
+        let attempt = attempt_text(&q).join("\n");
+        assert!(
+            attempt.contains(
+                "Completion/billing status: refused by the provider (HTTP 401) before any response; no tokens, no charge"
+            ),
+            "{attempt}"
+        );
+        for text in [&route, &header, &attempt] {
+            for misleading in [
+                "incomplete",
+                "at least",
+                "check",
+                "not reported",
+                "no price",
+                "no applicable price",
+            ] {
+                assert!(!text.contains(misleading), "{misleading}: {text}");
+            }
+        }
+    }
+}
+
+/// #396 item 1: a component with no rate states no money even when it had no
+/// tokens ("none — 0 tokens", never "$0.000000"); a component with a rate
+/// keeps its zero figure.
+#[test]
+fn accounting_unpriced_zero_token_component_states_no_money() {
+    let mut q = quote();
+    q.usage.write = Some(0);
+    q.buckets = [
+        BucketQuote::MissingRate,
+        BucketQuote::MissingRate,
+        BucketQuote::Priced(Decimal::default()),
+        BucketQuote::MissingRate,
+    ];
+    q.known_subtotal = Decimal::default();
+    q.all_buckets_priced = None;
+    q.subtotal_display = Decimal::default().display();
+    q.snapshot = Some(native_snapshot(
+        serde_json::json!({"noncached":null,"read":null,"write":null,"output":null}),
+        "Billed",
+        /*basis_source*/ None,
+        /*plan_burn_millis*/ None,
+    ));
+    let unpriced = attempt_text(&q);
+    assert!(
+        unpriced
+            .iter()
+            .any(|line| line == "Cache write cost: none — 0 tokens"),
+        "{unpriced:#?}"
+    );
+    assert!(
+        !unpriced.iter().any(|line| line.contains("$0.000000")),
+        "{unpriced:#?}"
+    );
+    q.snapshot = Some(native_snapshot(
+        serde_json::json!({"noncached":"1","read":"0.1","write":"1.25","output":"8"}),
+        "Billed",
+        /*basis_source*/ None,
+        /*plan_burn_millis*/ None,
+    ));
+    let priced = attempt_text(&q);
+    assert!(
+        priced
+            .iter()
+            .any(|line| line == "Cache write cost: $0.000000; exact USD 0"),
+        "{priced:#?}"
+    );
+}
+
+/// #403 (Travis, 2026-10-14, option C): `/cost` names the warm-up a reopened
+/// conversation sent, on the first screen, in the request's link and on its
+/// page, with its cost; an ordinary request is not named so.
+#[test]
+fn accounting_reopen_warmup_is_named_with_its_cost() {
+    let InspectionDay::Ready(mut view) = packet() else {
+        unreachable!()
+    };
+    let mut warmup = quote();
+    warmup.attempt.attempt_id = Uuid::from_u128(11);
+    warmup.attempt.request_id = Uuid::from_u128(12);
+    warmup.attempt.retry_of = None;
+    warmup.attempt.turn = format!("side:prewarm:reopen:{}", Uuid::from_u128(13));
+    warmup.attempt.dispatched_at_ms = 1.try_into().unwrap();
+    view.requests
+        .insert(warmup.attempt.request_id, vec![warmup]);
+    view.totals = DayTotals::from_quotes(view.requests.values().flatten()).unwrap();
+    view.own_totals = view.totals.clone();
+    let pages = inspection_pages(Ok(InspectionDay::Ready(view)));
+    let screen: Vec<&String> = pages[0]
+        .text
+        .iter()
+        .take_while(|line| line.as_str() != "—— Details ——")
+        .collect();
+    assert!(
+        screen.iter().any(|line| line.as_str()
+            == "Reopen warm-up: 1 request, estimated at least $0.000180 (1 attempt had no price). Sent when this conversation was reopened or forked, to prime the model's cache."),
+        "{screen:#?}"
+    );
+    let labels: Vec<&str> = pages[0]
+        .links
+        .iter()
+        .map(|(label, _)| label.as_str())
+        .collect();
+    let warmup_links: Vec<&&str> = labels
+        .iter()
+        .filter(|label| label.contains("Reopen warm-up"))
+        .collect();
+    assert_eq!(warmup_links.len(), 1, "{labels:?}");
+    assert!(
+        warmup_links[0].starts_with("Request 2 · Reopen warm-up · "),
+        "{labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|label| label.starts_with("Request 1 · ") && !label.contains("warm-up")),
+        "{labels:?}"
+    );
+    let (_, index) = pages[0]
+        .links
+        .iter()
+        .find(|(label, _)| label.contains("Reopen warm-up"))
+        .unwrap();
+    assert!(
+        pages[*index].text.iter().any(|line| line.starts_with(
+            "Kind: Reopen warm-up — sent when this conversation was reopened or forked"
+        )),
+        "{:#?}",
+        pages[*index].text
+    );
+}
+
+/// A recorded realtime WebSocket session (#824): one request, admitted at
+/// `started` and ended at `ended`, with no token count and only a billing
+/// basis (no catalogue price for realtime models).
+fn realtime_quote(started: i64, ended: Option<i64>) -> ObservationQuote {
+    let mut q = quote();
+    q.attempt.attempt_id = Uuid::from_u128(21);
+    q.attempt.request_id = Uuid::from_u128(22);
+    q.attempt.retry_of = None;
+    q.attempt.turn = format!("realtime:ws:{}", Uuid::from_u128(23));
+    q.attempt.provider = "openai".into();
+    q.attempt.model = "gpt-realtime-1.5".into();
+    q.attempt.dispatched_at_ms = started.try_into().unwrap();
+    q.usage = Usage {
+        session_ended_at_ms: ended,
+        ..Usage::default()
+    };
+    q.buckets = [BucketQuote::MissingUsage; 4];
+    q.known_subtotal = Decimal::default();
+    q.all_buckets_priced = None;
+    q.subtotal_display = Decimal::default().display();
+    q.snapshot = Some(native_snapshot(
+        serde_json::json!({"noncached":null,"read":null,"write":null,"output":null}),
+        "Billed",
+        /*basis_source*/ None,
+        /*plan_burn_millis*/ None,
+    ));
+    q
+}
+
+/// #824 (Travis, 2026-10-15, option a): `/cost` names a realtime session on
+/// the first screen, in its request's link and on its pages, with its start
+/// and end times and its tokens and cost unknown - never a $0 figure.
+#[test]
+fn accounting_realtime_session_reads_unknown_not_zero() {
+    let InspectionDay::Ready(mut view) = packet() else {
+        unreachable!()
+    };
+    let session = realtime_quote(/*started*/ 1_000, Some(61_000));
+    view.requests =
+        std::collections::BTreeMap::from([(session.attempt.request_id, vec![session.clone()])]);
+    view.totals = DayTotals::from_quotes(view.requests.values().flatten()).unwrap();
+    view.own_totals = view.totals.clone();
+    let pages = inspection_pages(Ok(InspectionDay::Ready(view)));
+    let screen: Vec<&String> = pages[0]
+        .text
+        .iter()
+        .take_while(|line| line.as_str() != "—— Details ——")
+        .collect();
+    assert!(
+        screen.iter().any(|line| line.as_str()
+            == "Realtime: 1 session; token counts and cost unknown, not zero — a realtime session's usage is not reported to this client."),
+        "{screen:#?}"
+    );
+    let (label, index) = pages[0]
+        .links
+        .iter()
+        .find(|(label, _)| label.contains("Realtime session"))
+        .expect("a realtime request link");
+    assert!(
+        label.starts_with("Request 1 · Realtime session · "),
+        "{label}"
+    );
+    let request = &pages[*index].text;
+    assert!(
+        request.iter().any(|line| line
+            == "Kind: Realtime session — started 1970-01-01T00:00:01.000Z, ended 1970-01-01T00:01:01.000Z; its token counts and cost are unknown, not zero: a realtime session's usage is not reported to this client."),
+        "{request:#?}"
+    );
+    let attempt = attempt_text(&session);
+    assert!(
+        attempt
+            .iter()
+            .any(|line| line == "Admission time: 1970-01-01T00:00:01.000Z"),
+        "{attempt:#?}"
+    );
+    assert!(
+        attempt
+            .iter()
+            .any(|line| line == "Realtime session ended: 1970-01-01T00:01:01.000Z"),
+        "{attempt:#?}"
+    );
+    // Nothing anywhere states a money figure for it.
+    for text in pages
+        .iter()
+        .flat_map(|page| {
+            page.text
+                .iter()
+                .chain(page.links.iter().map(|(label, _)| label))
+        })
+        .chain(attempt.iter())
+    {
+        assert!(!text.contains('$'), "{text}");
+    }
+}
+
+/// #824: a session whose end was never recorded (the process stopped
+/// mid-session) says so rather than inventing a time.
+#[test]
+fn accounting_realtime_session_without_an_end_says_so() {
+    let session = realtime_quote(/*started*/ 1_000, /*ended*/ None);
+    let attempt = attempt_text(&session);
+    assert!(
+        attempt
+            .iter()
+            .any(|line| line == "Realtime session ended: not recorded"),
+        "{attempt:#?}"
+    );
+    let kind = realtime_session_kind(&[&session]);
+    assert!(
+        kind.starts_with(
+            "Kind: Realtime session — started 1970-01-01T00:00:01.000Z, ended not recorded;"
+        ),
+        "{kind}"
+    );
+    // An owner prefix keeps it a realtime session; an ordinary turn and a
+    // WebRTC call are not. A WebRTC call is recorded at its creation; the end
+    // it may carry (#955) is its client control channel's, not the media
+    // call's, so it is not shown as a session end (#1000).
+    let mut side = session.clone();
+    side.attempt.turn = format!("side:realtime:ws:{}", Uuid::from_u128(24));
+    assert!(realtime_session(&[&side]));
+    assert!(!realtime_session(&[&quote()]));
+    let mut call = session;
+    call.attempt.turn = format!("realtime:{}", Uuid::from_u128(25));
+    call.usage.session_ended_at_ms = Some(61_000);
+    assert!(!realtime_session(&[&call]));
+    assert!(
+        !attempt_text(&call)
+            .iter()
+            .any(|line| line.starts_with("Realtime session")),
+    );
+}
+
+/// #352 item 3: a request with 9,908 noncached input tokens, no cache reads, a
+/// missing cache-write count and 1 output token showed `1+ tokens`. The input
+/// total is unknown, but the parts the provider reported still count.
+#[test]
+fn plain_tokens_lower_bound_counts_reported_input_parts() {
+    let day = DayTotals {
+        // Input, noncached, read, write, output, reasoning, total.
+        measured: [
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 9_908,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 1,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+        ],
+        ..Default::default()
+    };
+    assert_eq!(plain_tokens(&day), "9,909+ tokens");
+}
+
+/// A known input total with no breakdown still bounds the request from below:
+/// the reported parts never lower it.
+#[test]
+fn plain_tokens_lower_bound_keeps_a_known_input_total() {
+    let day = DayTotals {
+        // Input, noncached, read, write, output, reasoning, total.
+        measured: [
+            Metric {
+                known: 10_000,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+            Metric {
+                known: 0,
+                unknown: 0,
+            },
+            Metric {
+                known: 0,
+                unknown: 1,
+            },
+        ],
+        ..Default::default()
+    };
+    assert_eq!(plain_tokens(&day), "10,000+ tokens");
+}
+
+#[path = "tokens/warmup_resume_tests.rs"]
+mod warmup_resume_tests;

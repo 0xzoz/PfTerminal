@@ -17,6 +17,7 @@ chrono = { workspace = true, features = ["serde"] }
 codex-collaboration-mode-templates = { workspace = true }
 codex-http-client = { workspace = true }
 codex-login = { workspace = true }
+codex-model-provider-info = { workspace = true }
 codex-otel = { workspace = true }
 codex-protocol = { workspace = true }
 codex-utils-output-truncation = { workspace = true }
@@ -27,7 +28,6 @@ tokio = { workspace = true, features = ["fs", "sync", "time"] }
 tracing = { workspace = true, features = ["log"] }
 
 [dev-dependencies]
-codex-model-provider-info = { workspace = true }
 pretty_assertions = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

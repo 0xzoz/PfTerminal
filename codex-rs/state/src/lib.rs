@@ -24,13 +24,17 @@ mod sqlite;
 mod telemetry;
 
 pub use log_scrub::scrub_log_file_once;
+pub use log_scrub::scrub_sandbox_logs_once;
 pub use model::LogEntry;
 pub use model::LogQuery;
 pub use model::LogRow;
 pub use model::Phase2JobClaimOutcome;
 /// Preferred entrypoint: owns configuration and metrics.
+pub use runtime::QUICK_BUSY_TIMEOUT;
 pub use runtime::StateRuntime;
+pub use runtime::is_state_db_busy;
 pub use sqlite::SqliteConfig;
+pub use sqlite::runtime_database_filenames;
 
 pub use audit::ThreadStateAuditRow;
 pub use audit::read_thread_state_audit_rows;
@@ -88,8 +92,10 @@ pub use runtime::ProviderRequestLease;
 pub use runtime::ProviderRequestLeaseDecision;
 pub use runtime::ProviderRequestPreflight;
 pub use runtime::ProviderRequestResult;
+pub use runtime::ProviderRequestThrottled;
 pub use runtime::RemoteControlEnrollmentRecord;
 pub use runtime::RuntimeDbBackup;
+pub use runtime::StateDbFallback;
 pub use runtime::ThreadFilterOptions;
 pub use runtime::backup_runtime_db_for_fresh_start;
 pub use runtime::is_sqlite_corruption_error;

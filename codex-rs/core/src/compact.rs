@@ -9,6 +9,10 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
+use crate::provider_throttle::AdmittedProviderRequest;
+use crate::provider_throttle::AuxiliaryRequest;
+use crate::provider_throttle::is_provider_request_block;
+use crate::provider_throttle::record_auxiliary_outcome;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
@@ -269,13 +273,15 @@ async fn run_compact_task_inner_impl(
 
     let max_retries = turn_context.provider.info().stream_max_retries();
     let mut retries = 0;
+    let mut unresolvable_item_retries = 0;
+    let mut home_wait = crate::home_access::HomeWait::default();
     let mut client_session = sess.services.new_model_client_session();
     // A compaction is inference the operator paid for - and `/compact` is one they
     // asked for directly - so it is collected like any other turn rather than
     // silently escaping accounting.
     // Best effort on purpose: a compaction that cannot be recorded must still
     // run. Accounting is an observer here, not a gate on the user's session.
-    let _accounting = match crate::accounting::attach_turn(
+    let accounting = match crate::accounting::attach_turn(
         &sess,
         &turn_context,
         &client_session,
@@ -304,13 +310,12 @@ async fn run_compact_task_inner_impl(
 
     loop {
         // Clone is required because of the loop
-        let turn_input = history
-            .clone()
-            .for_prompt(&turn_context.model_info.input_modalities);
+        let turn_input = history.clone().for_turn_prompt(&turn_context);
         let turn_input_len = turn_input.len();
         let prompt = Prompt {
             input: turn_input,
             base_instructions: sess.get_base_instructions().await,
+            producer: Some(turn_context.output_producer()),
             ..Default::default()
         };
         let attempt_result = drain_to_completed(
@@ -334,7 +339,10 @@ async fn run_compact_task_inner_impl(
             {
                 return Err(err);
             }
-            Err(e) if matches!(e.details(), CodexErrorDetails::SessionBudgetExceeded) => {
+            Err(e)
+                if matches!(e.details(), CodexErrorDetails::SessionBudgetExceeded)
+                    || is_provider_request_block(&e) =>
+            {
                 sess.track_turn_codex_error(turn_context.as_ref(), &e);
                 let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
                 sess.send_event(&turn_context, event).await;
@@ -356,7 +364,29 @@ async fn run_compact_task_inner_impl(
                 sess.send_event(&turn_context, event).await;
                 return Err(e);
             }
+            // #578: the provider could not find an item this request referenced.
+            Err(e)
+                if crate::session::turn::retry_without_unresolvable_item(
+                    &client_session,
+                    &e,
+                    &mut unresolvable_item_retries,
+                ) =>
+            {
+                continue;
+            }
             Err(e) => {
+                // #616: wait out an unreadable home without using retries.
+                let e = match crate::home_access::wait_if_home_unreadable(
+                    &mut home_wait,
+                    &sess,
+                    turn_context.as_ref(),
+                    e,
+                )
+                .await
+                {
+                    Ok(()) => continue,
+                    Err(e) => e,
+                };
                 if retries < max_retries {
                     retries += 1;
                     let delay = backoff(retries);
@@ -378,6 +408,8 @@ async fn run_compact_task_inner_impl(
         }
     }
 
+    // `/compact` is a request the user asked for: say so when it went unrecorded.
+    crate::accounting::warn_if_unrecorded(&sess, &turn_context, accounting.as_ref()).await;
     let history_snapshot = sess.clone_history().await;
     let history_items = history_snapshot.raw_items();
     let summary_suffix = get_last_assistant_message_from_turn(history_items).unwrap_or_default();
@@ -768,6 +800,33 @@ fn build_compacted_history_with_limit(
 }
 
 async fn drain_to_completed(
+    sess: &Session,
+    turn_context: &TurnContext,
+    client_session: &mut ModelClientSession,
+    responses_metadata: &CodexResponsesMetadata,
+    prompt: &Prompt,
+) -> CodexResult<()> {
+    // #509: compaction is a model request on the turn's key like any other.
+    let admitted = AdmittedProviderRequest::admit_for_turn(
+        AuxiliaryRequest::Compaction,
+        sess,
+        turn_context,
+        prompt,
+    )
+    .await?;
+    let outcome = stream_compaction(
+        sess,
+        turn_context,
+        client_session,
+        responses_metadata,
+        prompt,
+    )
+    .await;
+    record_auxiliary_outcome(admitted.as_ref(), &outcome).await;
+    outcome
+}
+
+async fn stream_compaction(
     sess: &Session,
     turn_context: &TurnContext,
     client_session: &mut ModelClientSession,

@@ -1912,7 +1912,8 @@ mod tests {
         assert!(!guarded.dangerously_allow_all_unix_sockets());
         assert!(guarded.allow_unix_sockets().is_empty());
         let handle = guarded.run().await?;
-        let prepared = guarded.prepare_for_optional_environment(HashMap::new(), None)?;
+        let prepared = guarded
+            .prepare_for_optional_environment(HashMap::new(), /*environment_id*/ None)?;
         assert_eq!(
             prepared
                 .env

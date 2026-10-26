@@ -407,6 +407,27 @@ pub(crate) enum AppEvent {
     SelectAgentThread(ThreadId),
     /// Open the user-pane picker for switching Codex/Claude panes.
     OpenPanePicker,
+    /// `/security` "restart now" (PF-24-S02): shut down like `/quit`, then
+    /// start Corbanu Terminal again so a saved level takes effect.
+    RestartForSecurityLevel,
+    /// #507: the kill switch was turned on in `/security`; stop the Claude
+    /// panes' running turns (Core stops its own sessions).
+    KillSwitchTurnedOn,
+    /// #507: the kill switch was turned off. Nothing restarts; the person is
+    /// told which Claude panes have a task waiting for their next turn.
+    KillSwitchTurnedOff,
+    /// #507 (Travis, 2026-10-12): another Corbanu Terminal process on this
+    /// home turned the kill switch on or off; Core already applied it to
+    /// this process's sessions.
+    KillSwitchChangedElsewhere {
+        on: bool,
+    },
+    /// #842 (Travis, 2026-10-15): Moderate confirmed in another Corbanu
+    /// Terminal process on this home; Core already raised this process's
+    /// sessions to it.
+    SecurityLevelRaisedElsewhere {
+        level: crate::legacy_core::security_revocation::SecurityLevel,
+    },
     /// Open the `/spawn` role picker.
     OpenSpawnRolePicker,
     /// Open the `/spawn` Nazgul pane-binding picker.
@@ -457,13 +478,22 @@ pub(crate) enum AppEvent {
     OpenSpawnClaudePaneTaskPrompt {
         pane_id: String,
     },
-    /// Start a normal turn in an existing spawned-agent pane.
+    /// An agent's task for a native pane, agent-opened or opened by the person
+    /// (D106, #1176): admitted to the pane's Core mailbox as an inter-agent
+    /// message, never as the person's input.
     SubmitSpawnAgentTask {
         thread_id: codex_protocol::ThreadId,
         task: String,
+        /// #660: another agent sent it while the security kill switch was
+        /// on: it waits in the mailbox for the pane's next turn even when it
+        /// is handled after the switch was turned off.
+        sent_while_kill_switch_on: bool,
     },
-    /// Start a normal turn in an operator-owned native user pane.
-    SubmitCodexUserPaneTask {
+    /// D95 (#1146): a task the person typed into Spawn status's "Send task
+    /// to" prompt. It starts a turn in that pane as the person's own input,
+    /// as if typed there, not as a message from another agent. Only that
+    /// prompt sends it; tasks from agents use [`AppEvent::SubmitSpawnAgentTask`].
+    SubmitSpawnAgentTaskFromPerson {
         thread_id: codex_protocol::ThreadId,
         task: String,
     },
@@ -475,6 +505,10 @@ pub(crate) enum AppEvent {
     SubmitSpawnClaudePaneTask {
         pane_id: String,
         task: String,
+        /// #613: another agent sent it while the security kill switch was
+        /// on: it waits for the pane's next turn even when it is handled
+        /// after the switch was turned off.
+        sent_while_kill_switch_on: bool,
     },
     /// Show the current orchestration tree.
     OpenSpawnStatus,
@@ -630,6 +664,12 @@ pub(crate) enum AppEvent {
     /// was interrupted, timed out, or Claude Code cancelled them); their
     /// popups close.
     ClaudePaneApprovalsSettled,
+    /// #554: a new contained Claude pane cannot run the Claude Code on PATH
+    /// (too old, or it does not run); `problem` says why and what to do.
+    ClaudePaneLaunchProblem {
+        pane_id: String,
+        problem: String,
+    },
     /// A Claude Code headless pane emitted bounded live progress.
     ClaudePaneTurnProgress {
         progress: crate::claude_panes::ClaudePaneTurnProgress,
@@ -1532,6 +1572,7 @@ pub(crate) enum AppEvent {
     /// Open the explicit Max/Ultra reasoning selection popup for a model.
     OpenAdvancedReasoningPopup {
         model: ModelPreset,
+        purpose: crate::chatwidget::ModelSelectionPurpose,
     },
 
     /// Apply an advanced reasoning effort to the active conversation without changing defaults.
@@ -1646,6 +1687,16 @@ pub(crate) enum AppEvent {
         generation: u64,
         status_host: crate::provider_status_host::ProviderStatusHost,
         statuses: Vec<codex_provider_auth::ProviderStatusSnapshot>,
+        /// PF-84-S04: named accounts, when the `named_accounts` feature is on.
+        accounts: Option<Vec<crate::provider_named_accounts::NamedAccountRow>>,
+    },
+    /// PF-84-S04: a named-account action from `/providers`.
+    ProviderAccount(crate::provider_named_accounts::ProviderAccountEvent),
+    /// PF-84 (#572): whether the vault holds a named Bedrock account (`None`
+    /// when it could not be read), for the check numbered `generation`.
+    NamedBedrockAccountChecked {
+        generation: u64,
+        offered: Option<bool>,
     },
     ProviderManagerMetadataResolved {
         generation: u64,
@@ -2127,9 +2178,8 @@ pub(crate) enum AppEvent {
         profile_selection: Option<PermissionProfileSelection>,
     },
 
-    /// Update the Windows sandbox feature mode without changing approval presets.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-
+    // Handled when sent; nothing constructs it in this build.
+    #[allow(dead_code)]
     /// Update the current approval policy in the running app and widget.
     UpdateAskForApprovalPolicy(AskForApproval),
 

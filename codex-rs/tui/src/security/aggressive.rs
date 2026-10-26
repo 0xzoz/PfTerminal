@@ -19,6 +19,12 @@ use codex_execpolicy::Decision;
 use codex_features::Feature;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::permissions::CREDENTIAL_FILE_NAME_PATTERNS;
+use codex_protocol::permissions::ReadDenyMatcher;
+use codex_protocol::permissions::credential_file_globs;
+use codex_protocol::permissions::credential_file_names_shown;
+use codex_protocol::permissions::is_credential_file_name;
+use codex_protocol::permissions::unsafe_credential_entry_message;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::shell_environment::create_env_from_vars;
 
@@ -29,17 +35,17 @@ use crate::legacy_core::format_exec_policy_error_with_source;
 use crate::legacy_core::load_exec_policy;
 
 /// The permission profile Aggressive defines and selects.
-pub(crate) const PROFILE_ID: &str = "corbanu-aggressive";
+pub(crate) const PROFILE_ID: &str = codex_security_level::level::AGGRESSIVE_PROFILE_ID;
 
 /// Removed from agent command environments in addition to the built-in
 /// `*KEY*`, `*SECRET*` and `*TOKEN*` excludes.
 const SECRET_ENV_PATTERNS: [&str; 4] = ["*VAULT*", "*PASSWORD*", "*PASSPHRASE*", "*CREDENTIAL*"];
 
 /// One row of the mapping table, as shown before confirmation.
-pub(crate) const ROWS: [(&str, &str); 5] = [
+pub(crate) const ROWS: [(&str, &str); 6] = [
     (
         "Sandbox",
-        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off",
+        "write only in the current folder (where the Corbanu home and the nested-launch registry stay read-only): no extra writable folders, no /tmp or $TMPDIR; approved commands stay inside it too; escalation and permission-request tools are off; the project's .git, .codex and .agents stay read-only, even with Grant once (it only lets one command write git hooks and config kept outside a .git folder and, when the current folder holds your home folder, start-up files, login agents and .claude settings); reading credential files (.env, .env.* and .envrc files, also ones created later; not .env.example, .env.sample or .env.template; SSH, cloud and CLI tokens) or Corbanu's sign-in, vault, config and history is denied to agent commands and is never granted, not even once (switch to Permissive in /security to allow it); on Linux and Windows a command is stopped when such a file appears while it runs, and a process already waiting for that file can read it in the moment before the stop; a credential file that is a link must be replaced with a regular file or moved out of the folder",
     ),
     (
         "Approvals",
@@ -48,13 +54,36 @@ pub(crate) const ROWS: [(&str, &str); 5] = [
     ("Network", "off for agent commands; web search off"),
     (
         "Vault",
-        "the vault store and sign-in file are unreadable to agent commands, and direct `corbanu vault …` commands are refused; secret-like environment variables (KEY, SECRET, TOKEN, VAULT, PASSWORD, PASSPHRASE, CREDENTIAL) are removed, and login profiles and shell snapshots are not used",
+        "the vault store and sign-in file are unreadable to agent commands, and direct `corbanu vault …` commands are refused; secret-like environment variables (KEY, SECRET, TOKEN, VAULT, PASSWORD, PASSPHRASE, CREDENTIAL) are removed, and with secretless_agent_launch on so is every other variable outside an allowlist (for example PATH, HOME, locale, terminal, proxy and tool locations; set others explicitly in shell_environment_policy.set); login profiles and shell snapshots are not used",
     ),
+    (MODEL_KEYS_LABEL, MODEL_KEYS_ROW),
     (
         "Child agents",
         "spawned agents get the same values; custom roles that would change them are refused at start; Claude panes are refused because Claude Code runs outside the sandbox, unless contained_external_agents and secretless_agent_launch run them in it, asking you before every command, file edit and web request (reading files stays automatic) (Claude Code sign-in still runs)",
     ),
 ];
+
+/// #442 (Travis, 2026-10-12): what "Grant once" lifts under Aggressive, and
+/// what it never does, wherever it is described (grant review, inspector).
+/// It clears `ReadDenials`' lifted write rules (`issue_442_a_grant_lifts_only
+/// _the_described_kinds` in Core pins that set). The real profile writes only
+/// in the current folder, where the project's `.git` stays read-only whatever
+/// the grant, and `.codex` and `.agents` are never lifted.
+pub(crate) const GRANT_ONCE_LIFTS: &str = "lets one command write files that run code later, which Aggressive otherwise keeps read-only, and only inside the current folder: git hooks and config kept outside a .git folder (a hooks folder set with core.hooksPath, such as Husky's .husky, or a git folder with another name), and, when the current folder holds your home folder, your shell and git start-up files (such as .zshrc, .profile, .gitconfig and .local/bin), login agents and services, and .claude settings. Nothing else changes: credential files and Corbanu's sign-in, vault, config and history stay unreadable; Corbanu's own files and the project's .git, .codex and .agents stay read-only; other folders and the network stay closed.";
+
+/// Not checked by [`verify`]: the person's own config may keep it off.
+pub(crate) const MODEL_KEYS_LABEL: &str = "Model keys";
+
+/// #391: Aggressive turns `broker_model_auth` on where the broker runs.
+pub(crate) const MODEL_KEYS_ROW: &str = if cfg!(any(
+    target_os = "macos",
+    target_os = "linux",
+    windows
+)) {
+    "provider API keys from the environment or the vault are held by the isolated credential broker, which sends model requests for Corbanu (sign-in tokens are passed to it; command, AWS and header sign-ins are not brokered; realtime and websockets are off); if it cannot start, model requests are refused, never sent directly (broker_model_auth; `broker_model_auth = false` in your own config keeps it off)"
+} else {
+    "unchanged: the credential broker does not run on this system, so Corbanu reads provider keys itself (broker_model_auth)"
+};
 
 /// The nested-launch line shown under the rows.
 pub(crate) fn nested_row(nested: super::level::NestedAgents) -> &'static str {
@@ -68,7 +97,7 @@ pub(crate) fn nested_row(nested: super::level::NestedAgents) -> &'static str {
     }
 }
 
-pub(crate) const UNCHANGED: &str = "Unchanged: model and provider, MCP servers, apps and hooks (they run outside the sandbox), wallet scopes, and commands you have already allowed permanently (they skip the prompt but stay sandboxed). `corbanu exec` that you start yourself and IDE sessions are not covered yet.";
+pub(crate) const UNCHANGED: &str = "Unchanged: model and provider, MCP servers, apps and hooks (they run outside the sandbox), wallet scopes, and commands you have already allowed permanently (they skip the prompt but stay sandboxed). `corbanu exec` that you start yourself and IDE sessions are not covered yet, except that they also hold provider keys in the credential broker and, while they run on this Corbanu home, take Core's Aggressive protections and approval for every command.";
 
 /// Role config keys (dotted) that would give a spawned child different values.
 const ROLE_KEYS: [&str; 15] = [
@@ -149,6 +178,20 @@ pub(crate) fn base_overrides_with_registry(
         // contains it (the home folder) cannot delete its entries.
         if let Some(registry) = registry.and_then(registry_profile_key) {
             filesystem.insert(registry.to_string(), string("read"));
+        }
+        // #442 (Travis, 2026-10-11): credential files by name, so one created
+        // after launch is denied too, not only those the preflight found.
+        let workspace = CREDENTIAL_FILE_NAME_PATTERNS
+            .iter()
+            .map(|name| (format!("**/{name}"), string("deny")))
+            .collect::<toml::Table>();
+        filesystem.insert(":workspace_roots".to_string(), workspace.into());
+        // Seatbelt matches the names everywhere by regex; the other sandboxes
+        // can only expand them below the workspace (see `verify_sandbox`).
+        if cfg!(target_os = "macos") {
+            for glob in credential_file_globs("/") {
+                filesystem.insert(glob, string("deny"));
+            }
         }
     }
     vec![
@@ -405,6 +448,115 @@ fn verify_sandbox(config: &Config, failures: &mut Vec<String>) {
             failures.push(format!("Sandbox: {} is writable", outside.display()));
         }
     }
+    verify_credential_names(&file_system, cwd, failures);
+}
+
+/// #442: a credential file created after launch is denied by its name: below
+/// the current folder on every system (the exact globs the Linux sandbox
+/// watches for), and anywhere under Seatbelt.
+fn verify_credential_names(
+    file_system: &codex_protocol::permissions::FileSystemSandboxPolicy,
+    cwd: &Path,
+    failures: &mut Vec<String>,
+) {
+    if cwd
+        .to_string_lossy()
+        .contains(['*', '?', '[', ']', '{', '}'])
+    {
+        failures.push(format!(
+            "Sandbox: the current folder's path ({}) contains glob characters, so credential files created later cannot be denied by name; start from another folder",
+            cwd.display()
+        ));
+        return;
+    }
+    let globs = file_system.get_unreadable_globs_with_cwd(cwd);
+    let mut expected = credential_file_globs(&cwd.to_string_lossy());
+    if cfg!(target_os = "macos") {
+        expected.extend(credential_file_globs("/"));
+    }
+    let matcher = ReadDenyMatcher::try_new(file_system, cwd).ok().flatten();
+    let probe = |path: &Path| matcher.as_ref().is_some_and(|m| m.is_read_denied(path));
+    let probes_denied = [".env", "app/.env.local", ".envrc"]
+        .iter()
+        .all(|name| probe(&cwd.join("corbanu-new").join(name)));
+    if !probes_denied || expected.iter().any(|glob| !globs.contains(glob)) {
+        failures.push(format!(
+            "Sandbox: credential files created later ({}) would be readable to agent commands",
+            credential_file_names_shown()
+        ));
+    }
+    failures.extend(unsafe_credential_entries(cwd));
+}
+
+/// Folder entries [`unsafe_credential_entries`] looks at, at most.
+const MAX_CHECKED_ENTRIES: usize = 1_000_000;
+
+/// #442: credential-named entries in the current folder that the sandbox
+/// cannot protect, because what the person writes to them could land where
+/// agent commands can read it (links, extra hard links, pipes). Agent
+/// commands cannot create such names under Aggressive on macOS; this catches
+/// ones made before (another session, a checkout). Only the current folder
+/// is checked.
+fn unsafe_credential_entries(cwd: &Path) -> Vec<String> {
+    let Ok(root) = std::fs::canonicalize(cwd) else {
+        return vec![format!("Sandbox: cannot read {}", cwd.display())];
+    };
+    let mut problems = Vec::new();
+    let mut pending = vec![root];
+    let mut seen = 0_usize;
+    while let Some(folder) = pending.pop() {
+        let entries = match std::fs::read_dir(&folder) {
+            Ok(entries) => entries,
+            Err(err) => {
+                problems.push(format!(
+                    "Sandbox: cannot check {} for unsafe credential files: {err}",
+                    folder.display()
+                ));
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    problems.push(format!(
+                        "Sandbox: cannot check {} for unsafe credential files: {err}",
+                        folder.display()
+                    ));
+                    continue;
+                }
+            };
+            seen += 1;
+            if seen > MAX_CHECKED_ENTRIES {
+                problems.push(format!(
+                    "Sandbox: more than {MAX_CHECKED_ENTRIES} files below {} to check for unsafe credential files; start from a smaller folder",
+                    cwd.display()
+                ));
+                return problems;
+            }
+            let path = entry.path();
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => {
+                    problems.push(format!(
+                        "Sandbox: cannot check {} for unsafe credential files: {err}",
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
+            if metadata.is_dir() {
+                pending.push(path);
+            } else if is_credential_file_name(&entry.file_name())
+                && let Some(message) = unsafe_credential_entry_message(&path, &metadata)
+            {
+                // #442 (Travis, 2026-10-12): it names the entry and the fix.
+                problems.push(format!("Sandbox: {message}"));
+            }
+        }
+    }
+    problems
 }
 
 /// The registry nested-launch detection reads must be read-only to agent

@@ -47,6 +47,7 @@ use super::execution::ClaudeSecretRedactor;
 use super::execution::failed_turn_output;
 use super::execution::partial_failed_turn_output;
 use super::execution::run_claude_command_plan;
+#[cfg(unix)]
 use super::execution::stop_claude_child;
 use super::execution::write_turn_audit;
 use super::output_parse::parse_claude_output;
@@ -75,6 +76,7 @@ use super::smoke_workflows::smoke_provider_profile;
 use super::turn_types::ClaudeBridgeKind;
 #[cfg(unix)]
 use super::turn_types::ClaudeBridgePlan;
+#[cfg(unix)]
 use super::turn_types::ClaudeCommandPlan;
 use super::turn_types::ClaudePaneReasoningEvent;
 use super::turn_types::ClaudePaneToolEvent;
@@ -83,6 +85,7 @@ use super::turn_types::ClaudePaneTurnProgress;
 use super::turn_types::PaneDirectAccounting;
 
 use std::path::PathBuf;
+#[cfg(unix)]
 use tokio::process::Command;
 
 // Re-export items the test helpers use with their original unqualified names.
@@ -2810,8 +2813,140 @@ fn claude_provider_picker_labels_are_compact() {
     );
     assert_eq!(
         ClaudeProviderProfileKind::ClaudePlan.status_model_label(),
-        "Opus 5 Claude Plan"
+        "Opus 5.5 Claude Plan"
     );
+}
+
+#[test]
+fn claude_plan_pane_label_names_the_pinned_model_it_serves() {
+    let (dir, pane) = pane(ClaudeProviderProfileKind::ClaudePlan);
+    let plan =
+        build_claude_command_plan(&pane, "hello".to_string(), dir.path()).expect("command plan");
+    let model_arg = plan
+        .args
+        .iter()
+        .position(|arg| arg == "--model")
+        .and_then(|index| plan.args.get(index + 1))
+        .expect("--model argument");
+
+    // The pane asks Claude Code for an exact model, not the moving `opus`
+    // alias, and its label names that model.
+    assert_eq!(model_arg, "claude-opus-5-5");
+    assert_eq!(plan.provider_model, "claude-opus-5-5");
+    assert_eq!(
+        ClaudeProviderProfileKind::ClaudePlan.status_model_label(),
+        "Opus 5.5 Claude Plan"
+    );
+}
+
+#[test]
+fn saved_claude_plan_pane_titles_move_to_the_current_label() {
+    use super::persistence::current_profile_title;
+    use super::persistence::spawn_identity_from_title;
+    let profile = ClaudeProviderProfileKind::ClaudePlan;
+
+    assert_eq!(
+        current_profile_title(
+            "Claude Code Burzum [troll] - Opus 5 Claude Plan".to_string(),
+            profile
+        ),
+        "Claude Code Burzum [troll] - Opus 5.5 Claude Plan"
+    );
+    assert_eq!(
+        current_profile_title("Review - Claude Plan".to_string(), profile),
+        "Review - Claude Plan"
+    );
+    assert_eq!(
+        current_profile_title("My review pane".to_string(), profile),
+        "My review pane"
+    );
+    assert_eq!(
+        spawn_identity_from_title("Claude Code Burzum [troll] - Opus 5 Claude Plan", profile),
+        (Some(SpawnRole::Troll), Some("Burzum".to_string()))
+    );
+}
+
+#[test]
+fn saved_pane_with_the_old_opus_5_label_restores_relabelled() {
+    let codex_home = tempfile::tempdir().expect("codex home");
+    let pane_id = "claude-opus5-label-pane";
+    let artifact_dir = codex_home.path().join("panes").join(pane_id);
+    std::fs::create_dir_all(&artifact_dir).expect("artifact dir");
+    let artifact_path = artifact_dir.join("turn-0001.jsonl");
+    let audit_path = artifact_dir.join("turn-0001.audit.json");
+    std::fs::write(
+        &artifact_path,
+        serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "result": "legacy Claude Plan result",
+            "session_id": "22222222-3333-4444-8555-666666666666"
+        })
+        .to_string(),
+    )
+    .expect("artifact");
+    std::fs::write(
+        &audit_path,
+        serde_json::json!({
+            "pane_id": pane_id,
+            "pane_title": "Claude Code Burzum [troll] - Opus 5 Claude Plan",
+            "provider": "Claude Code - Opus 5 Claude Plan",
+            "model": "opus",
+            "session_id": "22222222-3333-4444-8555-666666666666",
+            "turn_index": 1,
+            "command_mode": "new-session",
+            "max_turns": null,
+            "artifact_path": artifact_path,
+            "audit_path": audit_path,
+            "timeout_ms": null,
+            "started_at_unix_ms": current_unix_ms_i64(),
+            "ended_at_unix_ms": current_unix_ms_i64(),
+            "last_progress_elapsed_ms": null,
+            "duration_ms": 123,
+            "usage": null,
+            "usage_status": "untrusted",
+            "terminal_reason": null,
+            "status": "success",
+            "error_summary": null,
+            "reasoning_event_count": 0,
+            "reasoning_events": [],
+            "tool_use_count": 0,
+            "tool_names": [],
+            "tool_events": []
+        })
+        .to_string(),
+    )
+    .expect("audit");
+
+    let layout = PaneLayoutState {
+        version: PANE_LAYOUT_VERSION,
+        codex_thread_id: Some("019f0657-1d67-7103-9d65-89e71587347d".to_string()),
+        active_user_pane_id: None,
+        spawn_nazgul_pane_id: None,
+        claude_pane_ids: vec![pane_id.to_string()],
+        spawn_parent_by_node: BTreeMap::new(),
+        ..Default::default()
+    };
+    let restored = ClaudePaneRegistry::restore_from_disk(codex_home.path(), Some(&layout));
+    assert_eq!(restored.panes().len(), 1);
+    let pane = &restored.panes()[0];
+    assert_eq!(pane.id, pane_id);
+    assert_eq!(pane.profile, ClaudeProviderProfileKind::ClaudePlan);
+    assert_eq!(pane.spawn_role, Some(SpawnRole::Troll));
+    assert_eq!(pane.spawn_nickname.as_deref(), Some("Burzum"));
+    assert_eq!(
+        pane.title,
+        "Claude Code Burzum [troll] - Opus 5.5 Claude Plan"
+    );
+    assert_eq!(
+        pane.claude_session_id.as_deref(),
+        Some("22222222-3333-4444-8555-666666666666")
+    );
+    assert_eq!(
+        pane.latest_result_message.as_deref(),
+        Some("legacy Claude Plan result")
+    );
+    assert_eq!(pane.next_turn_index, 2);
 }
 
 #[test]
@@ -3280,7 +3415,7 @@ fn claude_spawn_pane_title_includes_role() {
             /*spawn_role*/ None,
             /*spawn_nickname*/ None
         ),
-        "Claude Code - Opus 5 Claude Plan"
+        "Claude Code - Opus 5.5 Claude Plan"
     );
 }
 
@@ -3307,7 +3442,7 @@ fn create_pane_with_role_sets_spawn_role_and_title() {
     assert_eq!(pane.spawn_nickname.as_deref(), Some("Burzum"));
     assert_eq!(
         pane.title,
-        "Claude Code Burzum [troll] - Opus 5 Claude Plan"
+        "Claude Code Burzum [troll] - Opus 5.5 Claude Plan"
     );
 }
 
@@ -4644,6 +4779,62 @@ fn aggressive_refuses_turns_in_existing_panes_without_side_effects() {
     );
 }
 
+/// #507: with the kill switch on, a Claude pane turn is refused the same
+/// way as a Codex turn, before anything starts; turning it off lets turns
+/// through again.
+#[test]
+fn kill_switch_refuses_claude_pane_turns() {
+    use crate::legacy_core::security_level_change::LevelBasis;
+    use crate::legacy_core::security_level_change::SecurityLevel;
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    use crate::legacy_core::security_revocation::KILL_SWITCH_REFUSAL;
+    use crate::legacy_core::security_revocation::commit_human_revocation;
+    let codex_home = tempfile::tempdir().expect("codex home");
+    let mut registry = ClaudePaneRegistry::new();
+    let pane_id = registry
+        .create_pane(
+            ClaudeProviderProfileKind::ClaudePlan,
+            std::env::current_dir().expect("cwd"),
+            codex_home.path(),
+        )
+        .expect("create pane");
+    let switch = |choice| {
+        let basis = LevelBasis::read(
+            codex_home.path(),
+            SecurityLevel::Permissive,
+            /*thread*/ None,
+        );
+        commit_human_revocation(
+            codex_home.path(),
+            SecurityLevel::Permissive,
+            /*thread*/ None,
+            &basis,
+            choice,
+            /*now_unix_seconds*/ 1_000,
+        )
+        .expect("commit");
+    };
+    switch(HumanRevocation::KillSwitchOn);
+    let Err(error) = registry.prepare_turn(&pane_id, "hi".to_string(), codex_home.path()) else {
+        panic!("the kill switch refuses Claude turns");
+    };
+    assert_eq!(error.to_string(), KILL_SWITCH_REFUSAL);
+    let pane = registry
+        .panes()
+        .iter()
+        .find(|pane| pane.id == pane_id)
+        .expect("pane");
+    assert_eq!(
+        (pane.status.clone(), pane.next_turn_index),
+        (ClaudePaneStatus::Idle, 1)
+    );
+
+    switch(HumanRevocation::KillSwitchOff);
+    if let Err(error) = registry.prepare_turn(&pane_id, "hi".to_string(), codex_home.path()) {
+        assert_ne!(error.to_string(), KILL_SWITCH_REFUSAL);
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn aggressive_refuses_to_start_a_claude_process() {
@@ -4949,3 +5140,163 @@ fn contained_plan_routes_tool_approvals_to_corbanu() {
 #[cfg(unix)]
 #[path = "approval_turn_tests.rs"]
 mod approval_turn;
+
+/// PF-84 (#414): a Claude Plan pane on a named account passes the account in
+/// argv, so a helper that predates named accounts refuses instead of printing
+/// the default account's token; without one, no account variable leaks in.
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_plan_pane_passes_its_named_account_to_the_helper() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let write_helper = |name: &str, body: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("helper");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        path
+    };
+    let current = write_helper(
+        "corbanu",
+        "if [ \"$*\" = \"internal-claude-oauth-token --account work --enable named_accounts\" ] && [ \"$CORBANU_PROVIDER_ACCOUNT\" = work ]; then printf token-work; \
+         elif [ \"$*\" = internal-claude-oauth-token ] && [ -z \"${CORBANU_PROVIDER_ACCOUNT+x}\" ]; then printf token-default; else exit 3; fi",
+    );
+    let outdated = write_helper(
+        "old-corbanu",
+        "if [ $# -gt 1 ]; then echo \"error: unexpected argument '$2' found\" >&2; exit 2; fi; printf token-default",
+    );
+    let deferred = |helper: &std::path::Path, account: Option<&str>| {
+        super::turn_types::DeferredClaudePlanAuth {
+            codex_home: dir.path().to_path_buf(),
+            helper_executable: helper.to_path_buf(),
+            cwd: dir.path().to_path_buf(),
+            claude_config_dir_override: None,
+            account: account.map(str::to_string),
+        }
+    };
+    let token = |plan| async move {
+        super::execution::resolve_deferred_claude_plan_token(plan)
+            .await
+            .map(|token| token.to_string())
+    };
+
+    assert_eq!(
+        token(deferred(&current, Some("work")))
+            .await
+            .expect("named"),
+        "token-work"
+    );
+    assert_eq!(
+        token(deferred(&current, None)).await.expect("default"),
+        "token-default"
+    );
+    assert!(token(deferred(&outdated, Some("work"))).await.is_err());
+}
+
+/// #891: where a contained pane's launch denied user namespaces, a tool
+/// result reporting the refusal (bubblewrap's message from Claude Code's own
+/// Bash sandbox, or `unshare`) ends the turn's text with a note naming the
+/// rule. Nothing is added without the rule, or for other failures.
+#[cfg(unix)]
+#[test]
+fn issue_891_pane_names_the_user_namespace_rule_when_a_command_hits_it() {
+    use super::execution::add_user_namespaces_note;
+    use super::output_parse::tool_results_report_user_namespace_denial;
+
+    let call = |id: &str, name: &str| {
+        json!({
+            "type": "assistant",
+            "message": { "role": "assistant", "content": [{
+                "type": "tool_use", "id": id, "name": name, "input": {},
+            }]},
+        })
+        .to_string()
+    };
+    let result = |id: &str, content: Value| {
+        json!({
+            "type": "user",
+            "message": { "role": "user", "content": [{
+                "type": "tool_result", "tool_use_id": id, "content": content,
+            }]},
+        })
+    };
+    // Claude Code's own Bash sandbox, as bubblewrap reports it in a pane.
+    let bwrap = format!(
+        "{}\n{}",
+        call("toolu_1", "Bash"),
+        result(
+            "toolu_1",
+            json!(
+                "bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces."
+            ),
+        )
+    );
+    let mut unshare_result = result(
+        "toolu_2",
+        json!([{ "type": "text", "text": "unshare: unshare failed: Operation not permitted" }]),
+    );
+    unshare_result["tool_use_result"] =
+        json!({ "stdout": "", "stderr": "unshare: unshare failed: Operation not permitted" });
+    let unshare = format!("{}\n{unshare_result}", call("toolu_2", "Bash"));
+    let other = format!(
+        "{}\n{}",
+        call("toolu_3", "Bash"),
+        result("toolu_3", json!("cat: /etc/shadow: Permission denied"))
+    );
+    // A file Claude Code read, or the assistant quoting the words: no
+    // command ran.
+    let read = format!(
+        "{}\n{}",
+        call("toolu_4", "Read"),
+        result(
+            "toolu_4",
+            json!("unshare: unshare failed: Operation not permitted")
+        )
+    );
+    let quoted = json!({
+        "type": "assistant",
+        "message": { "role": "assistant", "content": [{
+            "type": "text",
+            "text": "unshare: unshare failed: Operation not permitted",
+        }]},
+    })
+    .to_string();
+    for (stdout, reported) in [
+        (bwrap.as_str(), true),
+        (unshare.as_str(), true),
+        (other.as_str(), false),
+        (read.as_str(), false),
+        (quoted.as_str(), false),
+        ("not json", false),
+    ] {
+        assert_eq!(
+            tool_results_report_user_namespace_denial(stdout),
+            reported,
+            "{stdout}"
+        );
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plan = bridge_redaction_plan(&dir, String::new(), "secret-891");
+    let turn = |text: &str, level: Option<&str>, stdout: &str| {
+        let mut output = failed_turn_output(
+            &plan,
+            /*duration_ms*/ 0,
+            ClaudePaneTurnStatus::Success,
+            /*terminal_reason*/ None,
+            String::new(),
+        );
+        output.text = text.to_string();
+        add_user_namespaces_note(&mut output, level, stdout);
+        output.text
+    };
+    let noted = turn("It failed.", Some("Moderate"), &bwrap);
+    assert!(
+        noted.starts_with("It failed.\n\nCorbanu Terminal: a command in this turn reported a refused user namespace. Security level Moderate blocks"),
+        "{noted}"
+    );
+    assert!(
+        turn("", Some("Aggressive"), &unshare).starts_with("Corbanu Terminal:"),
+        "empty text gets the note alone"
+    );
+    assert_eq!(turn("It failed.", None, &bwrap), "It failed.");
+    assert_eq!(turn("It failed.", Some("Moderate"), &other), "It failed.");
+}

@@ -3012,6 +3012,7 @@ async fn inline_instructions_set_base_instructions() -> std::io::Result<()> {
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home)
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .build()
         .await?;
 
@@ -4272,5 +4273,240 @@ async fn security_recovery_project_layer_only_raises_the_level() -> std::io::Res
         .await?;
         assert_eq!(crate::config::layered_security_floor(&layers), expected);
     }
+    Ok(())
+}
+
+/// PF-84 (#555): a resumed thread's recorded account of another provider is
+/// applied to that provider's entry, unless `--account` names that provider
+/// or it is the session's provider (the loader's job).
+#[tokio::test]
+async fn recorded_account_of_another_provider_is_applied_to_that_provider() -> std::io::Result<()> {
+    let codex_home = tempdir().expect("tempdir");
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "model = \"glm-5.3-flash\"\nmodel_provider = \"zai\"\n\n\
+         [features]\nnamed_accounts = true\n\n[provider_accounts]\nkimi-code = \"cfg\"\n",
+    )?;
+    let config = |explicit: Option<&str>| {
+        ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(crate::session::tests::kept_test_cwd()),
+                provider_account: explicit.map(str::to_string),
+                ..Default::default()
+            })
+            .build()
+    };
+    let account = |config: &crate::config::Config, id: &str| {
+        config.model_providers[id]
+            .account
+            .as_ref()
+            .map(|account| account.name.clone())
+    };
+
+    let mut plain = config(/*explicit*/ None).await?;
+    crate::config::apply_recorded_provider_account(&mut plain, "kimi-code:work")?;
+    crate::config::apply_recorded_provider_account(&mut plain, "zai:work")?;
+    let mut explicit = config(Some("kimi-code:alt")).await?;
+    crate::config::apply_recorded_provider_account(&mut explicit, "kimi-code:work")?;
+
+    assert_eq!(
+        [
+            account(&plain, "kimi-code"),
+            account(&plain, "zai"),
+            plain
+                .model_provider
+                .account
+                .clone()
+                .map(|account| account.name),
+            account(&explicit, "kimi-code"),
+        ],
+        [
+            Some("work".to_string()),
+            None,
+            None,
+            Some("alt".to_string())
+        ]
+    );
+    Ok(())
+}
+
+/// PF-84 (#425): the account a resumed thread recorded (or a worker's parent
+/// runs on) beats `[provider_accounts]`; an explicit account replaces it only
+/// for the same provider, so another provider's `--account` never drops it.
+#[tokio::test]
+async fn inherited_account_is_replaced_only_by_an_explicit_account_of_its_provider()
+-> std::io::Result<()> {
+    let codex_home = tempdir().expect("tempdir");
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "model = \"glm-5.3-flash\"\nmodel_provider = \"zai\"\n\n\
+         [features]\nnamed_accounts = true\n\n[provider_accounts]\nzai = \"cfg\"\n",
+    )?;
+    let accounts = |explicit: Option<&str>, inherited: Option<&str>, named: bool| {
+        let codex_home = codex_home.path().to_path_buf();
+        let cli_overrides = if named {
+            Vec::new()
+        } else {
+            vec![(
+                "features.named_accounts".to_string(),
+                TomlValue::Boolean(false),
+            )]
+        };
+        let overrides = ConfigOverrides {
+            cwd: Some(crate::session::tests::kept_test_cwd()),
+            provider_account: explicit.map(str::to_string),
+            inherited_provider_account: inherited.map(str::to_string),
+            ..Default::default()
+        };
+        async move {
+            let config = ConfigBuilder::default()
+                .codex_home(codex_home)
+                .cli_overrides(cli_overrides)
+                .harness_overrides(overrides)
+                .build()
+                .await?;
+            let account = |id: &str| {
+                config.model_providers[id]
+                    .account
+                    .as_ref()
+                    .map(|account| account.name.clone())
+            };
+            Ok::<_, std::io::Error>((account("zai"), account("kimi-code")))
+        }
+    };
+    let named = |name: &str| Some(name.to_string());
+    assert_eq!(
+        [
+            accounts(Some("kimi-code:alt"), Some("zai:work"), true).await?,
+            accounts(Some("zai:main"), Some("zai:work"), true).await?,
+            accounts(/*explicit*/ None, Some("zai:default"), true).await?,
+            accounts(Some("default"), Some("zai:main"), false).await?,
+        ],
+        [
+            (named("work"), named("alt")),
+            (named("main"), None),
+            (None, None),
+            (None, None),
+        ]
+    );
+    let error = accounts(/*explicit*/ None, Some("zai:main"), false)
+        .await
+        .expect_err("a recorded named account needs the feature");
+    assert!(
+        error
+            .to_string()
+            .starts_with("the thread's recorded account zai:main: named accounts need"),
+        "{error}"
+    );
+    Ok(())
+}
+
+/// #1129: an agent's recorded account is restored only while it can be used:
+/// `default` always is; a named account needs the `named_accounts` feature
+/// and must still be configured, otherwise the agent is refused and the
+/// provider is left unchanged.
+#[tokio::test]
+async fn recorded_agent_account_is_restored_or_refused() -> std::io::Result<()> {
+    let codex_home = tempdir().expect("tempdir");
+    let build = |named_accounts: bool| {
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            format!(
+                "model = \"glm-5.3-flash\"\nmodel_provider = \"zai\"\n\n\
+                 [features]\nnamed_accounts = {named_accounts}\n"
+            ),
+        )
+        .expect("write config");
+        ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
+            .build()
+    };
+    codex_vault::Vault::new(codex_home.path().to_path_buf())
+        .write_provider_account(
+            "zai",
+            &codex_vault::ProviderAccountName::parse("work").expect("name"),
+            codex_vault::ProviderAccountKind::ApiKey,
+            "canary-1129-work",
+        )
+        .expect("write account");
+    let restore = |config: &crate::config::Config, recorded: &str| {
+        let mut provider = config.model_providers["zai"].clone();
+        crate::config::restore_recorded_agent_account(config, "zai", &mut provider, recorded)
+            .map(|()| provider.account.map(|account| account.to_string()))
+    };
+    let refusal = |reason: &str| {
+        Err(format!(
+            "Resuming this agent: it ran on account `ghost` of `zai`, and {reason}. It is not \
+             moved to another account: ask the user to restore that account (`/providers`), \
+             or do the work without this agent. Do not retry on another account without the \
+             user's consent."
+        ))
+    };
+
+    let on = build(/*named_accounts*/ true).await?;
+    assert_eq!(restore(&on, "work"), Ok(Some("zai:work".to_string())));
+    assert_eq!(restore(&on, "default"), Ok(None));
+    let ghost = restore(&on, "ghost");
+    assert!(
+        ghost.as_ref().is_err_and(|message| message.starts_with(
+            "Resuming this agent: it ran on account `ghost` of `zai`, and account `ghost` \
+                 of provider `zai` is not configured"
+        )),
+        "{ghost:?}"
+    );
+
+    let off = build(/*named_accounts*/ false).await?;
+    assert_eq!(restore(&off, "default"), Ok(None));
+    assert_eq!(
+        restore(&off, "ghost"),
+        refusal("named accounts need the `named_accounts` feature, which is off now")
+    );
+    Ok(())
+}
+
+/// #1144: a conversation that ran on an account borrowed from another
+/// provider (recorded as `<owner>:<name>`) is refused on resume, with the
+/// account and the reason named, whether the loader or a client applies it.
+#[tokio::test]
+async fn recorded_borrowed_account_is_refused_with_its_name() -> std::io::Result<()> {
+    let codex_home = tempdir().expect("tempdir");
+    let build = |model_provider: &str, inherited: Option<&str>| {
+        std::fs::write(
+            codex_home.path().join(CONFIG_TOML_FILE),
+            format!(
+                "model = \"glm-5.3-flash\"\nmodel_provider = \"{model_provider}\"\n\n\
+                 [features]\nnamed_accounts = true\n"
+            ),
+        )
+        .expect("write config");
+        ConfigBuilder::default()
+            .codex_home(codex_home.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(crate::session::tests::kept_test_cwd()),
+                inherited_provider_account: inherited.map(str::to_string),
+                ..Default::default()
+            })
+            .build()
+    };
+    let expected = "This conversation ran on `zai-anthropic` with account `work` of `zai` \
+         (borrowed because both use the same API key), and a resumed or forked conversation \
+         restores only an account of the provider it runs on. It is not moved to another \
+         account: resume or fork it with `--account zai-anthropic:default` for the default \
+         credentials of `zai-anthropic`, or with `--account zai-anthropic:<name>` for one of \
+         its own accounts (see `corbanu account list`).";
+
+    let error = build("zai-anthropic", Some("zai-anthropic:zai:work"))
+        .await
+        .expect_err("a borrowed recorded account is refused");
+    assert_eq!(error.to_string(), expected);
+
+    let mut config = build("zai", /*inherited*/ None).await?;
+    let error =
+        crate::config::apply_recorded_provider_account(&mut config, "zai-anthropic:zai:work")
+            .expect_err("a borrowed recorded account is refused");
+    assert_eq!(error.to_string(), expected);
+    assert_eq!(config.model_providers["zai-anthropic"].account, None);
     Ok(())
 }

@@ -36,6 +36,7 @@ fn attempt() -> Attempt {
         scope: Uuid::from_u128(4),
         dialect: Dialect::Inclusive,
         dispatched_at_ms: Count::try_from(1_700_000_000_000).unwrap(),
+        account: None,
     }
 }
 
@@ -361,6 +362,8 @@ fn native_anthropic_partial_input_and_unknown_dialect_remain_distinct() -> anyho
             total: Some(65),
             reasoning: None,
             billed_usd: None,
+            refused_status: None,
+            session_ended_at_ms: None,
         }
     );
     Ok(())
@@ -407,6 +410,8 @@ fn inclusive_subsets_totals_and_arithmetic_overflow_are_validated() {
             reasoning: Some(2),
             total: Some(12),
             billed_usd: None,
+            refused_status: None,
+            session_ended_at_ms: None,
         }
     );
 }
@@ -474,4 +479,63 @@ async fn invalid_metadata_revision_and_batch_leave_no_intent() -> anyhow::Result
     assert_eq!(j.read_observations(a.attempt_id).await?, None);
     f.runtime.close().await;
     Ok(())
+}
+
+/// #475: a refusal replays to zero counts in every dialect, and must be a
+/// lone, well-formed patch.
+#[test]
+fn a_refusal_replays_to_zero_usage() {
+    for dialect in [
+        Dialect::Inclusive,
+        Dialect::NativeAnthropic,
+        Dialect::UnknownCompatible,
+    ] {
+        let usage = replay(
+            dialect,
+            &[observation(
+                /*revision*/ 1,
+                r#"{"refused_status":403}"#,
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            usage,
+            Usage {
+                input: Some(0),
+                noncached: Some(0),
+                read: Some(0),
+                write: Some(0),
+                output: Some(0),
+                reasoning: Some(0),
+                total: Some(0),
+                billed_usd: None,
+                refused_status: Some(403),
+                session_ended_at_ms: None,
+            }
+        );
+    }
+    for invalid in [
+        vec![observation(
+            /*revision*/ 1,
+            r#"{"refused_status":429}"#,
+        )],
+        vec![observation(
+            /*revision*/ 1,
+            r#"{"refused_status":400}"#,
+        )],
+        vec![observation(
+            /*revision*/ 1,
+            r#"{"refused_status":200}"#,
+        )],
+        vec![observation(
+            /*revision*/ 1,
+            r#"{"refused_status":401,"output":0}"#,
+        )],
+        vec![
+            observation(/*revision*/ 1, r#"{"input":1}"#),
+            observation(/*revision*/ 2, r#"{"refused_status":401}"#),
+        ],
+    ] {
+        assert!(replay(Dialect::Inclusive, &invalid).is_err(), "{invalid:?}");
+    }
 }

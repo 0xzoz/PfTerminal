@@ -21,21 +21,28 @@ use std::path::Path;
 
 pub(crate) mod confined;
 mod gate;
+mod git_paths;
 mod read_denials;
 mod typed;
+mod upload_read;
 
 pub(crate) use gate::Admission;
 pub(crate) use gate::Route;
 pub(crate) use gate::admit;
 pub(crate) use gate::ask_human;
+pub(crate) use gate::ask_human_answer;
 pub(crate) use gate::check_dispatch;
+#[cfg(test)]
+pub(crate) use gate::question_id;
 pub(crate) use read_denials::ReadDenials;
+pub(crate) use read_denials::create_missing_database_folder;
 pub(crate) use read_denials::post_taint_read_policy;
 pub(crate) use read_denials::protect_file_tool_context;
 pub(crate) use read_denials::readable_under;
 pub(crate) use typed::TypedWindow;
 pub(crate) use typed::lock as lock_typed_input;
 pub(crate) use typed::note_interrupt;
+pub(crate) use upload_read::read_checked;
 
 /// Who provides a tool. Only first-party code says `Builtin` or `Extension`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

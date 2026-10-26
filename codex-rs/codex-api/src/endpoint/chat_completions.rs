@@ -1167,7 +1167,7 @@ async fn process_chat_sse_observed(
     telemetry: Option<Arc<dyn SseTelemetry>>,
     response_id_hint: Option<String>,
     metrics: Option<ChatCallMetrics>,
-    observer: Option<Arc<dyn accounting::ChatUsageObserver>>,
+    mut observer: Option<Arc<dyn accounting::ChatUsageObserver>>,
 ) {
     let mut position = 0_i64;
     let (activity, mut activity_rx) = ChatStreamActivity::new();
@@ -1255,7 +1255,7 @@ async fn process_chat_sse_observed(
             actionable_deadline_at = Some(now + actionable_silence_timeout);
         }
 
-        if let Some(observer) = &observer {
+        if let Some(active) = &observer {
             let next = position.checked_add(1);
             let patch = match next {
                 Some(next) => {
@@ -1274,15 +1274,12 @@ async fn process_chat_sse_observed(
                 let result = tokio::select! {
                     biased;
                     _ = tx_event.closed() => return,
-                    result = observer.observe(position, usage) => result,
+                    result = active.observe(position, usage) => result,
                 };
+                // Accounting observes the stream; it never ends it. Rejected
+                // evidence stops observation for the rest of this response.
                 if invalid || result.is_err() {
-                    let _ = tx_event
-                        .send(Err(ApiError::Stream(
-                            "Chat accounting evidence rejected".into(),
-                        )))
-                        .await;
-                    return;
+                    observer = None;
                 }
             }
         }
@@ -1929,18 +1926,19 @@ mod tests {
 
     #[tokio::test]
     async fn comment_only_stream_survives_actionable_silence_timeout() {
-        // Keepalives every 200ms span 600ms, twice the 300ms actionable-silence
-        // budget. At 20ms/30ms, coarse Windows timers stretched a gap past it.
-        let body = delayed_body(vec![
-            (Duration::ZERO, b": OPENROUTER PROCESSING\n\n".to_vec()),
+        // Keepalives every 200ms span 1.2s, half again the 800ms
+        // actionable-silence budget, so only the keepalives keep the stream
+        // alive. Each gap leaves 600ms of slack: with 200ms against 300ms, a
+        // loaded Windows Bazel run stretched one gap past the budget (#636).
+        let keepalive = || {
             (
                 Duration::from_millis(200),
                 b": OPENROUTER PROCESSING\n\n".to_vec(),
-            ),
-            (
-                Duration::from_millis(200),
-                b": OPENROUTER PROCESSING\n\n".to_vec(),
-            ),
+            )
+        };
+        let mut chunks = vec![(Duration::ZERO, b": OPENROUTER PROCESSING\n\n".to_vec())];
+        chunks.extend(std::iter::repeat_with(keepalive).take(5));
+        chunks.extend([
             (
                 Duration::from_millis(200),
                 br#"data: {"id":"chatcmpl-late","choices":[{"delta":{"content":"late"}}]}"#
@@ -1949,13 +1947,14 @@ mod tests {
             (Duration::ZERO, b"\n\n".to_vec()),
             (Duration::ZERO, b"data: [DONE]\n\n".to_vec()),
         ]);
+        let body = delayed_body(chunks);
         let (tx_event, mut rx_event) = mpsc::channel(1600);
 
         process_chat_sse(
             body,
             tx_event,
-            Duration::from_millis(1_000),
-            Duration::from_millis(300),
+            Duration::from_millis(2_000),
+            Duration::from_millis(800),
             /*telemetry*/ None,
             /*response_id_hint*/ None,
             /*metrics*/ None,
@@ -2000,20 +1999,22 @@ mod tests {
     async fn normalized_reasoning_deltas_keep_actionable_silence_alive() {
         // Fast-pool OpenRouter hosts (StreamLake/AkashML/Together, probed
         // 2026-07-02) stream thinking as `delta.reasoning`, not
-        // `reasoning_content`. Six reasoning frames spanning 120ms with a
-        // 60ms actionable timeout must survive because each delta refreshes
-        // the deadline; pre-fix this stream was killed at 60ms.
+        // `reasoning_content`. Ten reasoning frames 50ms apart span 500ms
+        // with a 250ms actionable timeout; the stream must survive because
+        // each delta refreshes the deadline (pre-fix it was killed after the
+        // first timeout). The 200ms of slack per gap covers loaded Windows
+        // Bazel runs, which stretched 20ms gaps past a 60ms timeout (#636).
         let reasoning_frame = |i: u64| {
             format!(
                 "data: {{\"id\":\"chatcmpl-r\",\"provider\":\"StreamLake\",\"choices\":[{{\"delta\":{{\"reasoning\":\"t{i}\"}}}}]}}\n\n"
             )
             .into_bytes()
         };
-        let mut frames: Vec<(Duration, Vec<u8>)> = (0..6)
-            .map(|i| (Duration::from_millis(20), reasoning_frame(i)))
+        let mut frames: Vec<(Duration, Vec<u8>)> = (0..10)
+            .map(|i| (Duration::from_millis(50), reasoning_frame(i)))
             .collect();
         frames.push((
-            Duration::from_millis(20),
+            Duration::from_millis(50),
             br#"data: {"id":"chatcmpl-r","choices":[{"delta":{"content":"done"}}]}"#.to_vec(),
         ));
         frames.push((Duration::ZERO, b"\n\n".to_vec()));
@@ -2023,8 +2024,8 @@ mod tests {
         process_chat_sse(
             delayed_body(frames),
             tx_event,
-            Duration::from_millis(500),
-            Duration::from_millis(60),
+            Duration::from_millis(1_000),
+            Duration::from_millis(250),
             /*telemetry*/ None,
             /*response_id_hint*/ None,
             /*metrics*/ None,

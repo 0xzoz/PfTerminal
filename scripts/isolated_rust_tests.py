@@ -23,6 +23,7 @@ def test_environment(parent: dict[str, str], home: Path) -> dict[str, str]:
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "CLAUDE_CODE_OAUTH_TOKEN",
+        "ZAI_API_KEY",
         "CODEX_APP_SERVER_MANAGED_CONFIG_PATH",
     ):
         env.pop(name, None)

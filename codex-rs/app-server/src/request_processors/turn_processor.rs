@@ -688,12 +688,19 @@ impl TurnRequestProcessor {
             let config_snapshot = thread.config_snapshot().await;
             let parent_permission_profile =
                 parent_permission_profile_override.unwrap_or(config_snapshot.permission_profile);
+            let thread_config = thread.config().await;
+            // #658: the usage check runs on the thread's own account.
+            let auth_manager =
+                match codex_model_provider::named_sign_in_account(&thread_config.model_provider) {
+                    Some(account) => self.auth_manager.for_named_account(account),
+                    None => self.auth_manager.default_account_manager(),
+                };
             codex_memories_write::start_memories_startup_task(
                 Arc::clone(&self.thread_manager),
-                Arc::clone(&self.auth_manager),
+                auth_manager,
                 thread_id,
                 Arc::clone(&thread),
-                thread.config().await,
+                thread_config,
                 parent_permission_profile,
                 &config_snapshot.session_source,
             );

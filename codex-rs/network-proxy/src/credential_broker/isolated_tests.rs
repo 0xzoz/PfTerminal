@@ -56,7 +56,25 @@ fn pf_27_s04_pf_27_s01_isolated_broker_child_entry() {
 /// PF-27-S05 stand-in for the vault resolver the binary supplies: reads
 /// `<home>/pf27-store/<id>`; an `<id>.fail` file reports the store as
 /// unavailable.
-fn test_stored_key(home: &std::path::Path, id: &str) -> std::io::Result<Option<String>> {
+fn test_stored_key(
+    home: &std::path::Path,
+    id: &str,
+    account: Option<&crate::StoredKeyAccount>,
+) -> std::io::Result<Option<String>> {
+    // PF-84: a named account's key is `<id>@<provider>.<name>`.
+    let id = &match account {
+        Some(account) => format!("{id}@{}.{}", account.provider_id, account.name),
+        None => id.to_string(),
+    };
+    // PF-27-S09: `VAULT_<LABEL>` reads the real encrypted vault, as the
+    // binary's resolver does.
+    #[cfg(windows)]
+    if let Some(label) = id.strip_prefix("VAULT_") {
+        return codex_vault::Vault::new(home.to_path_buf())
+            .reveal(&label.to_ascii_lowercase())
+            .map(Some)
+            .map_err(|error| std::io::Error::other(error.to_string()));
+    }
     let dir = home.join("pf27-store");
     if dir.join(format!("{id}.fail")).exists() {
         return Err(std::io::Error::other("store unavailable"));
@@ -68,11 +86,37 @@ fn test_stored_key(home: &std::path::Path, id: &str) -> std::io::Result<Option<S
     }
 }
 
+/// Whether the broker's data endpoint still exists: its socket file, or on
+/// Windows its named pipe (probed without connecting).
+fn endpoint_exists(path: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Pipes::WaitNamedPipeW;
+        const ERROR_FILE_NOT_FOUND: i32 = 2;
+        let wide: Vec<u16> = path
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `wide` is NUL-terminated; waits at most 1 ms.
+        let ready = unsafe { WaitNamedPipeW(wide.as_ptr(), 1) } != 0;
+        ready || std::io::Error::last_os_error().raw_os_error() != Some(ERROR_FILE_NOT_FOUND)
+    }
+    #[cfg(unix)]
+    {
+        path.exists()
+    }
+}
+
 /// PF-27-S05: the key the upstream's `/check` path expects.
 static CHECK_KEY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 struct Upstream {
     port: u16,
+    /// Every request it received: its path and which credential headers it
+    /// carried (#504). Read only by unix tests.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    seen: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     _ca_dir: TempDir,
     ca_path: PathBuf,
 }
@@ -93,55 +137,74 @@ async fn start_upstream_for(tls_host: &str) -> Upstream {
         .await
         .expect("bind upstream");
     let port = listener.local_addr().expect("upstream addr").port();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen_by_service = seen.clone();
     let service = TlsAcceptorLayer::new(acceptor).into_layer(HttpServer::http1().service(
-        service_fn(|request: Request| async move {
-            let echoed = if request.uri().path().ends_with("/xkey") {
-                rama_http::header::HeaderName::from_static("x-api-key")
-            } else {
-                AUTHORIZATION
-            };
-            let authorization = request
-                .headers()
-                .get(echoed)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("<none>")
-                .to_string();
-            if request.uri().path().ends_with("/check") {
-                // PF-27-S05: confirm the key arrived without echoing it.
-                let expected = CHECK_KEY.get().map(|key| format!("Bearer {key}"));
-                let verdict = if expected.as_deref() == Some(authorization.as_str()) {
-                    "ok"
+        service_fn(move |request: Request| {
+            let header = |name: &str| {
+                if request.headers().contains_key(name) {
+                    "<present>"
                 } else {
-                    "mismatch"
-                };
-                return Ok::<_, Infallible>(Response::new(Body::from(verdict)));
-            }
-            if request.uri().path().ends_with("/redirect") {
-                let mut response = Response::new(Body::empty());
-                *response.status_mut() = rama_http::StatusCode::FOUND;
-                response.headers_mut().insert(
-                    rama_http::header::LOCATION,
-                    HeaderValue::from_static("https://elsewhere.invalid/v1/steal"),
-                );
-                return Ok::<_, Infallible>(response);
-            }
-            let body = if request.uri().path() == STREAM_PATH {
-                let first = rama_core::futures::stream::iter([Ok::<_, Infallible>(Bytes::from(
-                    "first-chunk\n",
-                ))]);
-                Body::from_stream(rama_core::futures::StreamExt::chain(
-                    first,
-                    rama_core::futures::stream::pending(),
-                ))
-            } else {
-                Body::from(authorization)
+                    "<none>"
+                }
             };
-            Ok::<_, Infallible>(Response::new(body))
+            let line = format!(
+                "{} authorization={} x-api-key={}",
+                request.uri().path(),
+                header(AUTHORIZATION.as_str()),
+                header("x-api-key")
+            );
+            seen_by_service.lock().expect("upstream log").push(line);
+            async move {
+                let echoed = if request.uri().path().ends_with("/xkey") {
+                    rama_http::header::HeaderName::from_static("x-api-key")
+                } else {
+                    AUTHORIZATION
+                };
+                let authorization = request
+                    .headers()
+                    .get(echoed)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("<none>")
+                    .to_string();
+                if request.uri().path().ends_with("/check") {
+                    // PF-27-S05: confirm the key arrived without echoing it.
+                    let expected = CHECK_KEY.get().map(|key| format!("Bearer {key}"));
+                    let verdict = if expected.as_deref() == Some(authorization.as_str()) {
+                        "ok"
+                    } else {
+                        "mismatch"
+                    };
+                    return Ok::<_, Infallible>(Response::new(Body::from(verdict)));
+                }
+                if request.uri().path().ends_with("/redirect") {
+                    let mut response = Response::new(Body::empty());
+                    *response.status_mut() = rama_http::StatusCode::FOUND;
+                    response.headers_mut().insert(
+                        rama_http::header::LOCATION,
+                        HeaderValue::from_static("https://elsewhere.invalid/v1/steal"),
+                    );
+                    return Ok::<_, Infallible>(response);
+                }
+                let body = if request.uri().path() == STREAM_PATH {
+                    let first = rama_core::futures::stream::iter([Ok::<_, Infallible>(
+                        Bytes::from("first-chunk\n"),
+                    )]);
+                    Body::from_stream(rama_core::futures::StreamExt::chain(
+                        first,
+                        rama_core::futures::stream::pending(),
+                    ))
+                } else {
+                    Body::from(authorization)
+                };
+                Ok::<_, Infallible>(Response::new(body))
+            }
         }),
     ));
     tokio::spawn(listener.serve(service));
     Upstream {
         port,
+        seen,
         _ca_dir: ca_dir,
         ca_path,
     }
@@ -166,6 +229,31 @@ fn launcher_with_ca(
             (OsString::from("SSL_CERT_FILE"), ca_path.into_os_string()),
         ],
         controller_pid_override,
+    )
+}
+
+/// #504: a launcher whose broker waits `hold` after its cleanup before it
+/// exits, so a test can act in that window.
+#[cfg(unix)]
+fn launcher_holding_exit(upstream: &Upstream, hold: Duration) -> IsolatedBrokerLauncher {
+    IsolatedBrokerLauncher::test_harness(
+        /*program*/ None,
+        [CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        vec![
+            (OsString::from(CHILD_ENV), OsString::from("1")),
+            (
+                OsString::from("SSL_CERT_FILE"),
+                upstream.ca_path.clone().into_os_string(),
+            ),
+            (
+                OsString::from(super::TEST_EXIT_HOLD_MS_ENV),
+                OsString::from(hold.as_millis().to_string()),
+            ),
+        ],
+        /*controller_pid_override*/ None,
     )
 }
 
@@ -304,6 +392,189 @@ async fn pf_27_s04_pf_27_s01_raw_credential_is_substituted_only_inside_the_broke
     assert_eq!(headers, bearer(&dummy));
 }
 
+const CONTROLLER_ENV: &str = "CODEX_PF27S06_CONTROLLER_CHILD";
+#[cfg(windows)]
+const CONTROLLER_TEST: &str =
+    "credential_broker::isolated::tests::pf_27_s06_controller_child_entry";
+
+/// Stands in for Core: starts a broker, prints its process id, then waits to
+/// be killed.
+#[test]
+fn pf_27_s06_controller_child_entry() {
+    if std::env::var_os(CONTROLLER_ENV).is_none() {
+        return;
+    }
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    runtime.block_on(async {
+        let upstream = start_upstream().await;
+        let broker = isolated_broker(launcher(&upstream, /*controller_pid_override*/ None));
+        let _ = virtualized_dummy(&broker);
+        let pid = broker
+            .current_isolated_client()
+            .and_then(|client| client.pid_for_test())
+            .expect("broker pid");
+        use std::io::Write as _;
+        let mut stdout = std::io::stdout();
+        let _ = writeln!(stdout, "\npf27s06-broker-pid:{pid}");
+        let _ = stdout.flush();
+        std::future::pending::<()>().await;
+    });
+}
+
+/// PF-27-S06: a broker whose controller is killed outright (no graceful
+/// close) exits by itself instead of lingering with credentials.
+#[cfg(windows)]
+#[test]
+fn pf_27_s06_broker_exits_when_its_controller_is_killed() {
+    use std::io::BufRead as _;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::OpenProcess;
+    use windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
+    use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    let mut controller = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .args([
+            CONTROLLER_TEST,
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CONTROLLER_ENV, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .expect("controller");
+    let stdout = controller.stdout.take().expect("controller stdout");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+        {
+            if let Some(pid) = line
+                .split("pf27s06-broker-pid:")
+                .nth(1)
+                .and_then(|pid| pid.trim().parse::<u32>().ok())
+            {
+                let _ = sender.send(pid);
+                break;
+            }
+        }
+    });
+    let broker_pid = receiver
+        .recv_timeout(Duration::from_secs(60))
+        .expect("controller reported its broker");
+    // SAFETY: wait-only access; closed below.
+    let broker = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, broker_pid) };
+    assert_ne!(broker, 0, "the broker is running");
+    controller.kill().expect("kill controller");
+    let _ = controller.wait();
+    // SAFETY: `broker` is open.
+    let waited = unsafe { WaitForSingleObject(broker, 10_000) };
+    // SAFETY: opened above.
+    unsafe { CloseHandle(broker) };
+    assert_eq!(
+        waited, /*WAIT_OBJECT_0*/ 0,
+        "broker outlived its controller"
+    );
+}
+
+/// Disables `SeDebugPrivilege` in this process's token, if it is enabled.
+#[cfg(windows)]
+fn disable_debug_privilege() {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Foundation::LUID;
+    use windows_sys::Win32::Security::AdjustTokenPrivileges;
+    use windows_sys::Win32::Security::LUID_AND_ATTRIBUTES;
+    use windows_sys::Win32::Security::LookupPrivilegeValueW;
+    use windows_sys::Win32::Security::TOKEN_ADJUST_PRIVILEGES;
+    use windows_sys::Win32::Security::TOKEN_PRIVILEGES;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    use windows_sys::Win32::System::Threading::OpenProcessToken;
+    let name: Vec<u16> = "SeDebugPrivilege"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut luid = LUID {
+        LowPart: 0,
+        HighPart: 0,
+    };
+    let mut token = 0;
+    // SAFETY: valid pointers; the token is closed below.
+    unsafe {
+        if LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut luid) == 0
+            || OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token) == 0
+        {
+            return;
+        }
+        let disabled = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: 0,
+            }],
+        };
+        AdjustTokenPrivileges(
+            token,
+            0,
+            &disabled,
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        );
+        CloseHandle(token);
+    }
+}
+
+/// PF-27-S06: on Windows the broker runs over its named pipes, reports both
+/// containment layers, and no other process of the user can open it to read
+/// its memory or environment (opening this test process is the control).
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn pf_27_s06_windows_broker_uses_pipes_and_cannot_be_read() {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::System::Threading::OpenProcess;
+    use windows_sys::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
+    use windows_sys::Win32::System::Threading::PROCESS_VM_READ;
+    let open_for_reading = |pid: u32| -> Result<(), u32> {
+        // SAFETY: plain OpenProcess; the handle is closed at once.
+        unsafe {
+            let handle = OpenProcess(PROCESS_VM_READ | PROCESS_QUERY_INFORMATION, 0, pid);
+            if handle == 0 {
+                Err(GetLastError())
+            } else {
+                CloseHandle(handle);
+                Ok(())
+            }
+        }
+    };
+
+    let upstream = start_upstream().await;
+    let broker = isolated_broker(launcher(&upstream, /*controller_pid_override*/ None));
+    let dummy = virtualized_dummy(&broker);
+    let client = broker.current_isolated_client().expect("broker client");
+    assert_eq!(client.containment(), "token+dacl+job");
+    let pipe = client.socket_path().to_string_lossy().into_owned();
+    assert!(
+        super::pipe::valid_pipe_name(&pipe, /*control*/ false),
+        "{pipe}"
+    );
+
+    let response = forward(&broker, upstream.port, "/echo", &dummy).await;
+    assert_eq!(
+        response.try_into_string().await.expect("body"),
+        format!("Bearer {SYNTHETIC_TOKEN}")
+    );
+
+    assert_eq!(open_for_reading(std::process::id()), Ok(()));
+    // CI runners run elevated with SeDebugPrivilege enabled, which opens any
+    // process whatever its DACL; an ordinary process of the user has it off.
+    disable_debug_privilege();
+    let broker_pid = client.pid_for_test().expect("broker pid");
+    assert_eq!(open_for_reading(broker_pid), Err(/*ERROR_ACCESS_DENIED*/ 5));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pf_27_s04_pf_27_s01_wrong_os_peer_is_disconnected_before_any_request() {
     let upstream = start_upstream().await;
@@ -318,9 +589,16 @@ async fn pf_27_s04_pf_27_s01_wrong_os_peer_is_disconnected_before_any_request() 
         panic!("expected a brokered route");
     };
 
+    // On Windows Core cannot tell a broker that hangs up on it from a pipe
+    // squatter that does (#390); either way nothing is sent.
+    let expected = if cfg!(windows) {
+        IsolatedBrokerError::PipeSquatted
+    } else {
+        IsolatedBrokerError::Unavailable
+    };
     assert_eq!(
         route.forward(request("/echo", &dummy)).await.err(),
-        Some(IsolatedBrokerError::Unavailable)
+        Some(expected)
     );
 }
 
@@ -471,7 +749,7 @@ async fn pf_27_s04_pf_27_s01_broker_crash_fails_closed_and_restart_rejects_old_h
         route(&broker, upstream.port, "/echo", &old_dummy).err(),
         Some(ScopedCredentialInjectionError::IsolatedBrokerUnavailable)
     );
-    assert!(!old_client.socket_path().exists());
+    assert!(!endpoint_exists(old_client.socket_path()));
 
     // A dead broker is not replaced: later children still get only dummies and
     // nothing is injected until Core restarts.
@@ -566,14 +844,14 @@ async fn pf_27_s04_pf_27_s01_controller_exit_stops_the_broker() {
         .expect("broker client")
         .socket_path()
         .to_path_buf();
-    assert!(socket_path.exists());
+    assert!(endpoint_exists(&socket_path));
 
     drop(broker);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while socket_path.exists() && tokio::time::Instant::now() < deadline {
+    while endpoint_exists(&socket_path) && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(!socket_path.exists());
+    assert!(!endpoint_exists(&socket_path));
 }
 
 #[test]
@@ -593,6 +871,7 @@ fn pf_27_s04_pf_27_s01_unavailable_broker_never_exposes_or_injects_raw_values() 
     );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn pf_27_s04_pf_27_s01_externally_terminated_broker_is_detected_and_cleaned_up() {
     let upstream = start_upstream().await;
@@ -611,14 +890,91 @@ async fn pf_27_s04_pf_27_s01_externally_terminated_broker_is_detected_and_cleane
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert!(!client.socket_path().exists());
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // #495: the broker revokes every reference and removes its socket
+    // directory before it exits, so the process can outlive the directory
+    // (by hundreds of milliseconds on a loaded runner). Wait, bounded, for
+    // the client to observe the exit instead of sleeping a fixed time.
+    while client.is_alive() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!client.is_alive());
 
     assert_eq!(
         route(&broker, upstream.port, "/echo", &dummy).err(),
         Some(ScopedCredentialInjectionError::IsolatedBrokerUnavailable)
     );
+    // The dead broker was not silently replaced.
+    let current = broker.current_isolated_client().expect("broker client");
+    assert!(std::sync::Arc::ptr_eq(&current, &client));
+    assert_eq!(current.pid_for_test(), Some(pid));
 }
 
+/// #504: between removing its socket directory and exiting, the broker is
+/// still alive, so a route may still authorize (`Brokered`). Forwarding that
+/// route fails as unavailable and the upstream never receives the token.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_504_forwarding_in_the_exit_window_fails_closed() {
+    let upstream = start_upstream().await;
+    let broker = isolated_broker(launcher_holding_exit(&upstream, Duration::from_secs(20)));
+    let dummy = virtualized_dummy(&broker);
+    let client = broker.current_isolated_client().expect("broker client");
+    let pid = client.pid_for_test().expect("broker pid");
+    let status = std::process::Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .status()
+        .expect("kill");
+    assert!(status.success());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while client.socket_path().exists() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(!client.socket_path().exists());
+    assert!(client.is_alive(), "the broker is in its exit window");
+
+    let Ok(CredentialRouting::Brokered(brokered)) = route(&broker, upstream.port, "/echo", &dummy)
+    else {
+        panic!("a live broker still authorizes the route");
+    };
+    assert_eq!(
+        brokered.forward(request("/echo", &dummy)).await.err(),
+        Some(IsolatedBrokerError::Unavailable)
+    );
+    assert!(client.is_alive(), "still in the exit window");
+    assert_eq!(
+        *upstream.seen.lock().expect("upstream log"),
+        Vec::<String>::new()
+    );
+    client.kill_for_test();
+}
+
+/// #504: an early exit on a broken control channel revokes like a
+/// termination signal does: an open download closes while the process is
+/// still alive, rather than only when it exits.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn issue_504_a_broken_control_channel_revokes_before_the_broker_exits() {
+    let upstream = start_upstream().await;
+    let broker = isolated_broker(launcher_holding_exit(&upstream, Duration::from_secs(20)));
+    let dummy = virtualized_dummy(&broker);
+    let client = broker.current_isolated_client().expect("broker client");
+    let response = forward(&broker, upstream.port, STREAM_PATH, &dummy).await;
+    assert_eq!(response.status(), 200);
+    let reader = tokio::spawn(async move { response.try_into_string().await.is_err() });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A control line over the bound: the broker's read fails and it exits.
+    client.send_raw_control_for_test(&vec![b'x'; super::protocol::MAX_CONTROL_LINE_BYTES + 2]);
+    let stream_failed = tokio::time::timeout(Duration::from_secs(10), reader)
+        .await
+        .expect("the revoke closes the open download")
+        .expect("reader task");
+    assert!(stream_failed);
+    assert!(client.is_alive(), "closed by the revoke, not by the exit");
+    client.kill_for_test();
+}
+
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn pf_27_s02_broker_sockets_live_in_the_private_runtime_dir() {
     let upstream = start_upstream().await;
@@ -666,6 +1022,7 @@ async fn pf_27_s02_broker_sockets_live_in_the_private_runtime_dir() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn pf_27_s02_a_spoofed_bootstrap_path_is_never_trusted() {
     // A "broker" that prints a control socket owned by someone else: the
@@ -845,7 +1202,7 @@ async fn pf_33_s02_unpinned_broker_resolves_and_pins_keep_the_private_peer_check
     let broker = pinned_broker(&upstream, options());
     let dummy = virtualized_dummy_for(&broker, PINNED_NAME);
     let response = pinned_route(&broker, upstream.port, &dummy)
-        .forward(pinned_request(&dummy, None))
+        .forward(pinned_request(&dummy, /*pin*/ None))
         .await
         .expect("broker response");
     assert_eq!(denial(&response), Some("upstream_failed"));
@@ -868,6 +1225,13 @@ async fn pf_33_s02_unpinned_broker_resolves_and_pins_keep_the_private_peer_check
     assert_eq!(denial(&response), Some("upstream_failed"));
 }
 
+// #390: pipe squats of the Windows broker's named pipes.
+#[cfg(windows)]
+#[path = "pipe_squat_tests.rs"]
+mod sec_390;
+
+// PF-27-S05 model auth; on Windows since PF-27-S09 (named pipes).
+#[cfg(any(unix, windows))]
 mod pf_27_s05 {
     use super::Body;
     use super::CHECK_KEY;
@@ -890,6 +1254,7 @@ mod pf_27_s05 {
     use crate::credential_broker::model_auth::ModelCredentialBroker;
     use crate::credential_broker::model_auth::ModelCredentialBrokerError;
     use crate::credential_broker::model_auth::ModelCredentialBrokerOptions;
+    #[cfg(unix)]
     use crate::upstream::UpstreamClient;
     use pretty_assertions::assert_eq;
     use rama_core::Service as _;
@@ -927,10 +1292,12 @@ mod pf_27_s05 {
             .header(MODEL_BROKER_FRAME_HEADER, frame)
             .body(Body::empty())
             .expect("request");
-        UpstreamClient::unix_socket(&credential.socket_path().to_string_lossy())
-            .serve(request)
-            .await
-            .expect("broker response")
+        #[cfg(unix)]
+        let broker = UpstreamClient::unix_socket(&credential.socket_path().to_string_lossy());
+        // PF-27-S09: the data pipe, checked to be served by the broker.
+        #[cfg(windows)]
+        let broker = credential.data_pipe_client_for_test();
+        broker.serve(request).await.expect("broker response")
     }
 
     async fn signed(credential: &ModelCredential, port: u16, path: &str) -> Response {
@@ -1110,7 +1477,7 @@ mod pf_27_s05 {
         let bound = binding(upstream.port, "/v1", ModelAuthHeader::Bearer);
 
         let credential = broker
-            .register_stored(bound.clone(), "ZAI_API_KEY", &[])
+            .register_stored(bound.clone(), "ZAI_API_KEY", &[], /*account*/ None)
             .expect("register")
             .expect("stored key");
         let response = signed(&credential, upstream.port, "/v1/responses").await;
@@ -1122,28 +1489,68 @@ mod pf_27_s05 {
         // Nothing stored, an unreadable store, a malformed id.
         assert!(
             broker
-                .register_stored(bound.clone(), "MISSING_API_KEY", &[])
+                .register_stored(bound.clone(), "MISSING_API_KEY", &[], /*account*/ None)
                 .expect("register")
                 .is_none()
         );
         assert_eq!(
             broker
-                .register_stored(bound.clone(), "BROKEN_API_KEY", &[])
+                .register_stored(bound.clone(), "BROKEN_API_KEY", &[], /*account*/ None)
                 .err(),
             Some(ModelCredentialBrokerError::StoreUnavailable)
         );
         assert_eq!(
             broker
-                .register_stored(bound.clone(), "../ZAI_API_KEY", &[])
+                .register_stored(bound.clone(), "../ZAI_API_KEY", &[], /*account*/ None)
                 .err(),
             Some(ModelCredentialBrokerError::Rejected)
         );
         // A broker started without a store home reads no stored keys.
         assert!(
             model_broker(&upstream)
-                .register_stored(bound, "ZAI_API_KEY", &[])
+                .register_stored(bound, "ZAI_API_KEY", &[], /*account*/ None)
                 .expect("register")
                 .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pf_84_named_account_key_is_read_only_from_that_account() {
+        let upstream = start_upstream().await;
+        let home = tempfile::tempdir().expect("home");
+        let store = home.path().join("pf27-store");
+        std::fs::create_dir(&store).expect("store");
+        std::fs::write(store.join("ZAI_API_KEY"), "canary-default").expect("default key");
+        std::fs::write(store.join("ZAI_API_KEY@zai.work"), MODEL_KEY).expect("work key");
+        let broker = store_broker(&upstream, home.path());
+        let bound = binding(upstream.port, "/v1", ModelAuthHeader::Bearer);
+        let account = |name: &str| crate::StoredKeyAccount {
+            provider_id: "zai".to_string(),
+            name: name.to_string(),
+        };
+
+        let credential = broker
+            .register_stored(bound.clone(), "ZAI_API_KEY", &[], Some(&account("work")))
+            .expect("register")
+            .expect("work key");
+        let response = signed(&credential, upstream.port, "/v1/responses").await;
+        assert_eq!(
+            response.try_into_string().await.expect("body"),
+            format!("Bearer {MODEL_KEY}")
+        );
+        // A missing account never falls back to the default key.
+        assert!(
+            broker
+                .register_stored(bound.clone(), "ZAI_API_KEY", &[], Some(&account("absent")))
+                .expect("register")
+                .is_none()
+        );
+        // A malformed account is refused.
+        assert_eq!(
+            broker
+                .register_stored(bound, "ZAI_API_KEY", &[], Some(&account("../work")))
+                .err(),
+            Some(ModelCredentialBrokerError::Rejected)
         );
     }
 
@@ -1151,8 +1558,13 @@ mod pf_27_s05 {
     async fn pf_27_s05_env_keys_are_handed_over_removed_and_unregistered() {
         let upstream = start_upstream().await;
         let name = format!("PF27_S05_ENV_KEY_{}", std::process::id());
-        // SAFETY: a unique variable no other test reads.
-        unsafe { std::env::set_var(&name, MODEL_KEY) };
+        // A value no other test holds, kept here only masked: on Windows the
+        // hand-over overwrites every other copy of it in this process
+        // (PF-27-S09), this test's included.
+        let key = format!("sk-pf27s05-env-{:016x}", rand::random::<u64>());
+        crate::credential_broker::env_scrub::set_env_var_for_test(&name, &key);
+        let masked = memory_scan_tests::mask(key.as_bytes());
+        drop(key);
         let broker = model_broker(&upstream);
         let taken = broker
             .take_env_keys(&[name.clone(), "PF27_S05_NEVER_SET_KEY".to_string()])
@@ -1165,13 +1577,19 @@ mod pf_27_s05 {
                 binding(upstream.port, "/v1", ModelAuthHeader::Bearer),
                 "PF27_S05_NEVER_SET_KEY",
                 &taken,
+                /*account*/ None,
             )
             .expect("register")
             .expect("stashed key");
         let response = signed(&credential, upstream.port, "/v1/responses").await;
+        let body = response.try_into_string().await.expect("body");
+        let unmasked = body
+            .strip_prefix("Bearer ")
+            .map(|key| memory_scan_tests::mask(key.as_bytes()));
         assert_eq!(
-            response.try_into_string().await.expect("body"),
-            format!("Bearer {MODEL_KEY}")
+            unmasked,
+            Some(masked),
+            "the broker attached the handed-over key"
         );
 
         // A replaced sign-in token drops the broker's copy.
@@ -1183,6 +1601,7 @@ mod pf_27_s05 {
     /// The vault lock is created before containment (so a vault first
     /// created later in the session is still usable) and is never reached
     /// through a symlink.
+    #[cfg(unix)]
     #[test]
     fn pf_27_s05_vault_lock_is_created_and_never_a_symlink() {
         use crate::credential_broker::isolated::server::prepare_vault_lock;
@@ -1238,10 +1657,49 @@ mod pf_27_s05 {
             .expect("port");
         let masked = decode_hex(&std::env::var(MEMORY_MASKED_ENV).expect("masked key"));
         let ca_path = PathBuf::from(std::env::var_os("SSL_CERT_FILE").expect("ca"));
+        // PF-27-S09: Windows keeps the environment block in UTF-16 and the C
+        // runtime's copy in the ANSI code page; both forms are scanned.
+        #[cfg(windows)]
+        let wide_masked: Vec<u8> = masked
+            .iter()
+            .flat_map(|byte| [*byte, memory_scan_tests::MASK])
+            .collect();
+        let count = |masked: &[u8]| {
+            let hits = memory_scan_tests::count_in_writable_memory(masked);
+            #[cfg(windows)]
+            let hits = hits + memory_scan_tests::count_in_writable_memory(&wide_masked);
+            hits
+        };
+        // Core grows its environment before the hand-over (arg0 prepends to
+        // PATH, `.env` adds variables), which can move the environment block.
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths: Vec<PathBuf> = (0..256)
+            .map(|index| std::env::temp_dir().join(format!("pf27s09-grow-{index}")))
+            .collect();
+        paths.extend(std::env::split_paths(&path));
+        let grown = std::env::join_paths(paths).expect("PATH");
+        crate::credential_broker::env_scrub::set_env_var_for_test("PATH", &grown.to_string_lossy());
+        crate::credential_broker::env_scrub::set_env_var_for_test(
+            "PF27_S09_GROWN",
+            // Within Windows' 32,767-character limit for a value.
+            &"x".repeat(30_000),
+        );
         // Positive control: the launch environment still holds the key.
-        let before = memory_scan_tests::count_in_writable_memory(&masked);
+        let before = count(&masked);
         println!("PF27S05 memory hits_before={before}");
         assert!(before > 0, "the scanner must find the key before hand-over");
+        #[cfg(windows)]
+        assert!(
+            memory_scan_tests::count_in_writable_memory(&wide_masked) > 0,
+            "positive control: the UTF-16 environment block"
+        );
+        #[cfg(windows)]
+        let environ_holds_key = || windows_environment_holds(&masked);
+        #[cfg(windows)]
+        assert!(
+            environ_holds_key(),
+            "positive control: the environment block"
+        );
         #[cfg(target_os = "linux")]
         let environ_holds_key = || {
             // Compared masked and the copy wiped, so this check leaves no
@@ -1281,6 +1739,7 @@ mod pf_27_s05 {
                     binding(port, "/v1", ModelAuthHeader::Bearer),
                     MEMORY_KEY_ENV,
                     &taken,
+                    /*account*/ None,
                 )
                 .expect("register")
                 .expect("stashed key");
@@ -1289,18 +1748,80 @@ mod pf_27_s05 {
                 assert_eq!(response.try_into_string().await.expect("body"), "ok");
             }
             // Scan while Core still holds its live handles.
-            let hits = memory_scan_tests::count_in_writable_memory(scan_masked);
+            let hits = count(scan_masked);
             drop((credential, broker));
             hits
         });
         // What another same-user process reads as Core's environment.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         assert!(
             !environ_holds_key(),
-            "/proc/self/environ still holds the key"
+            "the environment block still holds the key"
         );
         println!("PF27S05 memory hits_after={hits}");
-        assert_eq!(hits, 0, "the raw key is still in Core's memory");
+        #[cfg(windows)]
+        let places: Vec<String> = if hits > 0 {
+            [("ascii", &masked), ("utf-16", &wide_masked)]
+                .into_iter()
+                .flat_map(|(form, needle)| {
+                    memory_scan_tests::locate_in_writable_memory(needle)
+                        .into_iter()
+                        .map(move |place| format!("({form}) {place}"))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        #[cfg(not(windows))]
+        let places: Vec<String> = Vec::new();
+        #[cfg(windows)]
+        let parameters = format!(
+            "; process parameters at {:#x?}",
+            crate::credential_broker::env_scrub::process_parameters_allocation_for_test()
+        );
+        #[cfg(not(windows))]
+        let parameters = String::new();
+        assert_eq!(
+            hits,
+            0,
+            "the raw key is still in Core's memory: {}{parameters}",
+            places.join(" | ")
+        );
+    }
+
+    /// PF-27-S09: whether this process's environment block (what another
+    /// process reads as its environment) holds the masked key. Compared
+    /// masked, and the private copy is wiped, so this check leaves no plain
+    /// key behind for the memory scan.
+    #[cfg(windows)]
+    fn windows_environment_holds(masked: &[u8]) -> bool {
+        use windows_sys::Win32::System::Environment::FreeEnvironmentStringsW;
+        use windows_sys::Win32::System::Environment::GetEnvironmentStringsW;
+        // SAFETY: a private copy of the block, wiped and freed below.
+        let block = unsafe { GetEnvironmentStringsW() };
+        assert!(!block.is_null(), "environment block");
+        let mut len = 0;
+        // SAFETY: the block ends with two NUL units.
+        unsafe {
+            while *block.add(len) != 0 || *block.add(len + 1) != 0 {
+                len += 1;
+            }
+        }
+        // SAFETY: `len` units (plus the terminator) belong to the block.
+        let units = unsafe { std::slice::from_raw_parts_mut(block, len) };
+        let found = units.windows(masked.len()).any(|window| {
+            window
+                .iter()
+                .zip(masked)
+                .all(|(unit, masked)| *unit == u16::from(masked ^ memory_scan_tests::MASK))
+        });
+        for unit in units.iter_mut() {
+            // SAFETY: a valid element of the block.
+            unsafe { std::ptr::write_volatile(unit, 0) };
+        }
+        // SAFETY: from GetEnvironmentStringsW above.
+        unsafe { FreeEnvironmentStringsW(block) };
+        found
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1341,5 +1862,307 @@ mod pf_27_s05 {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(stdout.contains("1 passed"), "{stdout}");
+    }
+
+    /// PF-27-S09: Core creates the vault lock for the Windows broker, never
+    /// through a junction or symlink.
+    #[cfg(windows)]
+    #[test]
+    #[expect(
+        clippy::print_stdout,
+        reason = "records a skipped privilege-dependent case"
+    )]
+    fn pf_27_s09_vault_lock_is_created_and_never_a_reparse_point() {
+        use crate::credential_broker::isolated::prepare_vault_lock;
+        let home = tempfile::tempdir().expect("home");
+        let lock = prepare_vault_lock(home.path()).expect("lock created");
+        assert_eq!(
+            lock,
+            std::fs::canonicalize(home.path())
+                .expect("canonical home")
+                .join("secrets")
+                .join(".vault.lock")
+        );
+        assert!(lock.is_file());
+        // Again: an existing lock is kept.
+        assert_eq!(prepare_vault_lock(home.path()), Some(lock));
+
+        // `secrets` as a junction (no privilege needed to create one).
+        let elsewhere = tempfile::tempdir().expect("elsewhere");
+        let junction_home = tempfile::tempdir().expect("junction home");
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(junction_home.path().join("secrets"))
+            .arg(elsewhere.path())
+            .stdout(std::process::Stdio::null())
+            .status()
+            .expect("mklink");
+        assert!(status.success(), "junction");
+        assert_eq!(prepare_vault_lock(junction_home.path()), None);
+        assert!(!elsewhere.path().join(".vault.lock").exists());
+
+        // The lock itself as a file symlink (needs a privilege a normal
+        // session may not have).
+        let target = elsewhere.path().join("target");
+        std::fs::write(&target, b"").expect("target");
+        let linked = tempfile::tempdir().expect("linked home");
+        std::fs::create_dir(linked.path().join("secrets")).expect("secrets");
+        match std::os::windows::fs::symlink_file(
+            &target,
+            linked.path().join("secrets").join(".vault.lock"),
+        ) {
+            Ok(()) => assert_eq!(prepare_vault_lock(linked.path()), None),
+            Err(error) => println!("PF27S09 file symlink case skipped: {error}"),
+        }
+    }
+
+    #[cfg(windows)]
+    const LOCK_CHILD_ENV: &str = "CODEX_PF27_S09_LOCK_CHILD";
+
+    /// Run under the broker token by the test below: opens the vault lock
+    /// named in [`LOCK_CHILD_ENV`] for writing, then read-only and locks it.
+    #[cfg(windows)]
+    #[test]
+    #[expect(clippy::print_stdout, reason = "the parent test reads the results")]
+    fn pf_27_s09_lock_child_entry() {
+        let Some(lock) = std::env::var_os(LOCK_CHILD_ENV) else {
+            return;
+        };
+        let write = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock);
+        println!(
+            "pf27s09-lock write-open={}",
+            match &write {
+                Ok(_) => "ok".to_string(),
+                Err(error) => format!("{:?}", error.kind()),
+            }
+        );
+        let locked = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&lock)
+            .and_then(|file| file.lock().map(|()| file));
+        println!(
+            "pf27s09-lock read-only-lock={}",
+            if locked.is_ok() { "ok" } else { "failed" }
+        );
+    }
+
+    /// PF-27-S09: why the vault falls back to a read-only lock handle. Under
+    /// the broker token the lock Core created cannot be opened for writing
+    /// (access denied), but a read-only handle locks it exclusively. This
+    /// process, which can open it for writing, is the control.
+    #[cfg(windows)]
+    #[test]
+    fn pf_27_s09_broker_token_locks_the_vault_read_only() {
+        use crate::credential_broker::isolated::prepare_vault_lock;
+        use std::io::Read as _;
+        let home = tempfile::tempdir().expect("home");
+        let lock = prepare_vault_lock(home.path()).expect("lock");
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock)
+            .expect("control: this process opens the lock for writing");
+        let mut env: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().collect();
+        env.push((LOCK_CHILD_ENV.into(), lock.into_os_string()));
+        let args: Vec<std::ffi::OsString> = [
+            "credential_broker::isolated::tests::pf_27_s05::pf_27_s09_lock_child_entry",
+            "--exact",
+            "--nocapture",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        let (mut child, mut stdout) = codex_process_hardening::spawn_protected(
+            &std::env::current_exe().expect("test binary"),
+            &args,
+            &env,
+        )
+        .expect("start under the broker token");
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).expect("child output");
+        let _ = child.wait();
+        assert!(
+            output.contains("pf27s09-lock write-open=PermissionDenied"),
+            "{output}"
+        );
+        assert!(
+            output.contains("pf27s09-lock read-only-lock=ok"),
+            "{output}"
+        );
+    }
+
+    #[cfg(windows)]
+    const VAULT_CHILD_ENV: &str = "CODEX_PF27_S09_VAULT_CHILD";
+    #[cfg(windows)]
+    const VAULT_CHILD_TEST: &str =
+        "credential_broker::isolated::tests::pf_27_s05::pf_27_s09_vault_child_entry";
+
+    /// The vault half of [`pf_27_s09_stored_key_is_read_from_the_vault_under_the_broker_token`],
+    /// in a child whose debug keyring stays in the profile
+    /// (`CORBANU_TEST_NO_NATIVE_KEYRING`), so no test touches Credential Manager.
+    #[cfg(windows)]
+    #[test]
+    fn pf_27_s09_vault_child_entry() {
+        if std::env::var_os(VAULT_CHILD_ENV).is_none() {
+            return;
+        }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let upstream = start_upstream().await;
+            let home = tempfile::tempdir().expect("home");
+            codex_vault::Vault::new(home.path().to_path_buf())
+                .add(codex_vault::AddCredential {
+                    label: "zai".to_string(),
+                    credential_type: codex_vault::CredentialType::ApiKey,
+                    provider: Some("zai".to_string()),
+                    notes: None,
+                    revocation_notes: None,
+                    secret: MODEL_KEY.to_string(),
+                })
+                .expect("vault entry");
+            // The vault made its lock; Core must make it for the broker.
+            std::fs::remove_file(home.path().join("secrets").join(".vault.lock"))
+                .expect("remove the vault's own lock");
+            let broker = store_broker(&upstream, home.path());
+            let bound = binding(upstream.port, "/v1", ModelAuthHeader::Bearer);
+            // Core created the lock the broker token cannot create.
+            assert!(home.path().join("secrets").join(".vault.lock").is_file());
+            let credential = broker
+                .register_stored(bound.clone(), "VAULT_ZAI", &[], None)
+                .expect("the broker reads the vault")
+                .expect("stored key");
+            let response = signed(&credential, upstream.port, "/v1/responses").await;
+            assert_eq!(
+                response.try_into_string().await.expect("body"),
+                format!("Bearer {MODEL_KEY}")
+            );
+            // A label the vault does not hold is reported as unavailable,
+            // never as some other key.
+            assert_eq!(
+                broker
+                    .register_stored(bound, "VAULT_MISSING", &[], None)
+                    .err(),
+                Some(ModelCredentialBrokerError::StoreUnavailable)
+            );
+        });
+    }
+
+    /// PF-27-S09: under the broker token (low integrity, write-restricted),
+    /// the broker opens the encrypted vault, locks it through a read-only
+    /// handle to the lock Core created, and decrypts the stored key itself.
+    #[cfg(windows)]
+    #[test]
+    fn pf_27_s09_stored_key_is_read_from_the_vault_under_the_broker_token() {
+        let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args([
+                VAULT_CHILD_TEST,
+                "--exact",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(VAULT_CHILD_ENV, "1")
+            .env("CORBANU_TEST_NO_NATIVE_KEYRING", "1")
+            .env_remove(CHILD_ENV)
+            .output()
+            .expect("run vault child");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// PF-27-S09: the production send path on Windows. A signed request goes
+    /// over the checked data pipe and its response streams back; an unsigned
+    /// one is refused by the broker; after the broker dies nothing is sent.
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pf_27_s09_send_goes_only_to_the_broker_and_streams() {
+        use crate::credential_broker::model_auth::ModelBrokerRequest;
+        use rama_core::futures::StreamExt as _;
+        let upstream = start_upstream().await;
+        let broker = model_broker(&upstream);
+        let credential = broker
+            .register(
+                binding(upstream.port, "/", ModelAuthHeader::Bearer),
+                MODEL_KEY,
+            )
+            .expect("register");
+        let request = |path: &str, frame: Option<String>| {
+            let mut headers = rama_http::HeaderMap::new();
+            if let Some(frame) = frame {
+                headers.insert(
+                    MODEL_BROKER_FRAME_HEADER,
+                    rama_http::HeaderValue::from_str(&frame).expect("frame"),
+                );
+            }
+            ModelBrokerRequest {
+                method: rama_http::Method::POST,
+                host: UPSTREAM_HOST.to_string(),
+                path_and_query: path.to_string(),
+                headers,
+                body: rama_core::bytes::Bytes::from_static(b"{}"),
+            }
+        };
+
+        let frame = credential
+            .sign("POST", UPSTREAM_HOST, upstream.port, "/v1/responses")
+            .expect("frame");
+        let response = broker
+            .send(request("/v1/responses", Some(frame)))
+            .await
+            .expect("brokered response");
+        assert_eq!(response.status, 200);
+        let body: Vec<u8> = response
+            .body
+            .map(|chunk| chunk.expect("chunk").to_vec())
+            .concat()
+            .await;
+        assert_eq!(body, format!("Bearer {MODEL_KEY}").into_bytes());
+
+        // A streaming response arrives chunk by chunk (the rest never ends).
+        let frame = credential
+            .sign("POST", UPSTREAM_HOST, upstream.port, super::STREAM_PATH)
+            .expect("frame");
+        let mut response = broker
+            .send(request(super::STREAM_PATH, Some(frame)))
+            .await
+            .expect("streamed response");
+        let first = tokio::time::timeout(Duration::from_secs(10), response.body.next())
+            .await
+            .expect("first chunk in time")
+            .expect("a chunk")
+            .expect("chunk");
+        assert_eq!(first.as_ref(), b"first-chunk\n");
+        drop(response);
+
+        let unsigned = broker
+            .send(request("/v1/responses", None))
+            .await
+            .expect("broker answer");
+        assert_eq!(
+            unsigned
+                .headers
+                .get(super::BROKER_ERROR_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("missing_frame")
+        );
+
+        broker.kill_for_test();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while broker.is_alive() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            broker.send(request("/v1/responses", None)).await.err(),
+            Some(ModelCredentialBrokerError::Unavailable)
+        );
     }
 }

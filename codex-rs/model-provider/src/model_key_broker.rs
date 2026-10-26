@@ -42,6 +42,9 @@ pub enum BrokeredKeySource {
     ProviderKey {
         provider_key_id: String,
         env_vars: Vec<String>,
+        /// PF-84: read this named account's key instead; `env_vars` is then
+        /// empty because a named account never takes an environment key.
+        account: Option<codex_model_provider_info::NamedProviderAccount>,
     },
     /// A value Core already holds. `slot` names what a refreshed value of the
     /// same credential replaces (a ChatGPT access token); `None` for keys.
@@ -55,10 +58,13 @@ impl std::fmt::Debug for BrokeredKeySource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ProviderKey {
-                provider_key_id, ..
+                provider_key_id,
+                account,
+                ..
             } => f
                 .debug_struct("ProviderKey")
                 .field("provider_key_id", provider_key_id)
+                .field("account", account)
                 .finish_non_exhaustive(),
             Self::Value { key, slot } => f
                 .debug_struct("Value")
@@ -90,6 +96,20 @@ pub trait ModelKeyBroker: Send + Sync {
         &self,
         request: BrokeredAuthRequest,
     ) -> codex_protocol::error::Result<SharedAuthProvider>;
+
+    /// Why every credential use is refused (the broker did not start, or
+    /// does not run here), or `None` (#391).
+    fn unavailable_reason(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Why the broker, although it runs, refused the last brokered request
+    /// of one of `threads` (a session and its agents), else of this process
+    /// outside any session, until a later one of the same owner is served;
+    /// or `None` (#839, #878).
+    fn refused_reason(&self, _threads: &[codex_protocol::ThreadId]) -> Option<&'static str> {
+        None
+    }
 }
 
 static MODEL_KEY_BROKER: OnceLock<Arc<dyn ModelKeyBroker>> = OnceLock::new();
@@ -134,9 +154,35 @@ pub fn install_model_key_broker(broker: Arc<dyn ModelKeyBroker>) -> bool {
     MODEL_KEY_BROKER.set(broker).is_ok()
 }
 
+/// #641: auth for a request outside the model client that uses a provider
+/// credential (the Corbanu account calls of the wallet): signed for the
+/// installed broker, which attaches the credential, as for model requests.
+/// An error when no broker is installed; nothing falls back to sending the
+/// credential directly.
+pub fn brokered_auth(
+    request: BrokeredAuthRequest,
+) -> codex_protocol::error::Result<SharedAuthProvider> {
+    model_key_broker()
+        .ok_or_else(|| codex_protocol::error::CodexErr::Fatal(BROKER_NOT_RUNNING.to_string()))?
+        .auth(request)
+}
+
 /// Whether provider credentials in this process are brokered.
 pub fn model_key_broker_installed() -> bool {
     model_key_broker().is_some()
+}
+
+/// Why this process's installed broker refuses every credential use (#391),
+/// or `None`.
+pub fn model_key_broker_unavailable() -> Option<&'static str> {
+    model_key_broker().and_then(|broker| broker.unavailable_reason())
+}
+
+/// Why this process's installed broker refused the last brokered request of
+/// one of `threads`, or outside any session, although it runs (#839, #878);
+/// or `None`.
+pub fn model_key_broker_refused(threads: &[codex_protocol::ThreadId]) -> Option<&'static str> {
+    model_key_broker().and_then(|broker| broker.refused_reason(threads))
 }
 
 pub(crate) fn model_key_broker() -> Option<Arc<dyn ModelKeyBroker>> {
@@ -188,7 +234,7 @@ pub(crate) mod test_support {
         let broker = Arc::new(RecordingBroker::default());
         super::set_test_model_key_broker(Some(broker.clone()));
         let result = test(&broker);
-        super::set_test_model_key_broker(None);
+        super::set_test_model_key_broker(/*broker*/ None);
         result
     }
 }

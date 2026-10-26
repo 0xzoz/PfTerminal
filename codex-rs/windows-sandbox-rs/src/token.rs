@@ -276,7 +276,7 @@ pub unsafe fn get_logon_sid_bytes(h_token: HANDLE) -> Result<Vec<u8>> {
     Err(anyhow!("Logon SID not present on token"))
 }
 
-unsafe fn get_user_sid_bytes(h_token: HANDLE) -> Result<Vec<u8>> {
+pub(crate) unsafe fn get_user_sid_bytes(h_token: HANDLE) -> Result<Vec<u8>> {
     let mut needed: u32 = 0;
     GetTokenInformation(h_token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
     if needed == 0 {
@@ -483,8 +483,8 @@ unsafe fn create_token_with_caps_from(
     // an object it lacks DELETE on when the parent grants FILE_DELETE_CHILD, so a
     // parent that grants the user full control lets the sandbox delete or move
     // children that capability-SID ACEs protect. Legacy sessions close that route
-    // for protected paths with Everyone deny ACEs (`deny_delete_child_route`);
-    // outside writable roots it stays open.
+    // with Low integrity outside writable roots (`integrity.rs`) and with
+    // Everyone deny ACEs for protected paths inside them (`deny_delete_child_route`).
     let flags = DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED;
     let ok = CreateRestrictedToken(
         base_token,

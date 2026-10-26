@@ -77,6 +77,7 @@ members = [
     "linux-pidfd-spawn",
     "lmstudio",
     "login",
+    "log-guard",
     "codex-mcp",
     "mcp-server",
     "memories/read",
@@ -227,6 +228,7 @@ codex-hooks = { path = "hooks" }
 codex-keyring-store = { path = "keyring-store" }
 codex-linux-sandbox = { path = "linux-sandbox" }
 codex-lmstudio = { path = "lmstudio" }
+codex-log-guard = { path = "log-guard" }
 codex-login = { path = "login" }
 codex-message-history = { path = "message-history" }
 codex-memories-extension = { path = "ext/memories" }
@@ -351,7 +353,7 @@ crossterm = "0.29.0"
 # ctor 0.6 split its macros into host-only crates that rules_rs could not load
 # while cross-compiling the native-Windows gnullvm graph. The 1.x line uses the
 # linktime macro implementation already exercised elsewhere in this workspace.
-ctor = "1.0.6"
+ctor = "1.0.13"
 deno_core_icudata = "0.77.0"
 derive_more = "2"
 diffy = "0.4.2"
@@ -506,6 +508,8 @@ toml = "0.9.5"
 toml_edit = "0.24.0"
 tracing = "0.1.44"
 tracing-appender = "0.2.3"
+tracing-core = "0.1.36"
+tracing-log = "0.2.0"
 tracing-opentelemetry = "0.32.0"
 tracing-subscriber = "0.3.22"
 tracing-test = "0.2.5"
@@ -539,7 +543,15 @@ which = "8"
 whoami = "1.6.1"
 wildmatch = "2.6.1"
 winapi-util = "0.1.11"
-zip = "2.4.2"
+# Only the methods GitHub zipballs and skill exports use (stored, deflate,
+# deflate64, bzip2). Fewer decoders for untrusted archives, and fewer crates on
+# the Windows Bazel lint command line (#968).
+zip = { version = "9.0.5", default-features = false, features = [
+    "bzip2-rs",
+    "deflate64",
+    "deflate",
+    "time",
+] }
 zstd = "0.13"
 
 wiremock = "0.6"
@@ -613,6 +625,25 @@ opt-level = 3
 
 [profile.dev.package.salsa20]
 opt-level = 3
+
+# SQLite itself: the state DB is shared by every Corbanu process on a home, and
+# a write transaction holds its one write lock for as long as its statements
+# run. Unoptimized, SQLite's C code ran the ledger's scans 3-4x slower, so a
+# debug build held the lock several times longer and other sessions waited.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3
+
+[profile.dev.package.codex-state]
+opt-level = 2
+
+[profile.dev.package.sqlx-sqlite]
+opt-level = 2
+
+[profile.dev.package.sqlx-core]
+opt-level = 2
+
+[profile.dev.package.serde_json]
+opt-level = 2
 
 [profile.test.package.scrypt]
 opt-level = 3

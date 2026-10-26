@@ -27,6 +27,8 @@ async fn accounting_chat_custom_provider_collects_with_real_identity() -> anyhow
         approved_endpoint: endpoint.clone(),
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
     };
     let test = builder(endpoint, mode)
         .with_config(|config| {
@@ -40,12 +42,147 @@ async fn accounting_chat_custom_provider_collects_with_real_identity() -> anyhow
     let records = attempts(&db).await?;
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].provider, "custom-plan");
+    // A custom provider at a route no table declares: tokens recorded, basis
+    // bound as not declared, no rates (PF-60-S05 option B).
     let prices: Vec<Snapshot> = payloads(&db, "draft_accounting_price_snapshots").await?;
-    assert!(prices.is_empty());
+    assert_eq!(
+        prices.iter().map(|p| p.basis).collect::<Vec<_>>(),
+        vec![codex_state::accounting::Basis::Undeclared]
+    );
     assert_eq!(observations(&db).await?.len(), 1);
+    // The default account is recorded by its absence: the attempt keeps the
+    // bytes it had before named accounts, and the ledger its format.
+    assert_eq!(records[0].account, None);
+    assert!(!ledger_has_format_4(&db).await?);
+    // PF-84: with named accounts off, no usage is kept per account.
+    assert_eq!(test.codex.account_token_usage().await, None);
     posts(&server, /*expected*/ 1).await;
     stop(&test).await;
     Ok(())
+}
+
+/// PF-84: the per-account token summary `/status` shows (release builds, no
+/// cost records) agrees exactly with the accounting ledger `/cost` reads for
+/// the same session.
+#[tokio::test]
+async fn accounting_chat_named_account_summary_agrees_with_the_ledger() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/v1", server.uri());
+    mount(&server, success(usage())).await;
+    let mode = AccountingMode::Provider {
+        scope: uuid::Uuid::new_v4(),
+        provider_id: "my-llm".into(),
+        wire_api: codex_model_provider_info::WireApi::Chat,
+        approved_endpoint: endpoint.clone(),
+        approved_query: None,
+        pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
+    };
+    let test = builder(endpoint, mode)
+        .with_config(|config| {
+            let name = codex_vault::ProviderAccountName::parse("work").expect("account name");
+            codex_vault::Vault::new(config.codex_home.to_path_buf())
+                .write_provider_account(
+                    "my-llm",
+                    &name,
+                    codex_vault::ProviderAccountKind::ApiKey,
+                    "synthetic-pf84-work-key",
+                )
+                .expect("enroll the work account");
+            config.model_provider_id = "my-llm".into();
+            config.model_provider.name = "My LLM".into();
+            config.model_provider.requires_openai_auth = false;
+            config.model_provider.env_key = Some("PF84_STATUS_TOKENS_UNSET_KEY".into());
+            config.model_provider.account = Some(codex_model_provider_info::NamedProviderAccount {
+                provider_id: "my-llm".into(),
+                name: "work".into(),
+            });
+            config
+                .features
+                .enable(codex_features::Feature::NamedAccounts)
+                .expect("enable named accounts");
+        })
+        .with_auth_in_home()
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_turn("first turn on work").await?;
+    test.submit_turn("second turn on work").await?;
+    let db = test.codex.state_db().unwrap();
+    let records = attempts(&db).await?;
+    assert_eq!(records.len(), 2);
+    assert!(
+        records
+            .iter()
+            .all(|attempt| attempt.account_name() == "work")
+    );
+
+    let summary = test
+        .codex
+        .account_token_usage()
+        .await
+        .expect("usage per account");
+    assert_eq!(summary.len(), 1);
+    assert_eq!(
+        (summary[0].provider_id.as_str(), summary[0].account.as_str()),
+        ("my-llm", "work")
+    );
+    let now = chrono::Utc::now().timestamp_millis();
+    let InspectionDay::Ready(view) = AccountingStore::inspect_day(
+        &db,
+        test.session_configured.thread_id,
+        now / 86_400_000,
+        now,
+    )
+    .await?
+    else {
+        anyhow::bail!("expected the recorded day");
+    };
+    let quotes: Vec<&ObservationQuote> = view
+        .requests
+        .values()
+        .flatten()
+        .filter(|quote| quote.attempt.account_name() == "work")
+        .collect();
+    let ledger = DayTotals::from_quotes(quotes.iter().copied())?;
+    // Input, cached (read), output, reasoning and total, as `/cost` sums them.
+    let [input, _, read, _, output, reasoning, total] = ledger.measured;
+    assert!(
+        [&input, &read, &output, &reasoning, &total]
+            .iter()
+            .all(|metric| metric.unknown == 0)
+    );
+    let usage = &summary[0].usage;
+    assert_eq!(
+        [
+            usage.input_tokens,
+            usage.cached_input_tokens,
+            usage.output_tokens,
+            usage.reasoning_output_tokens,
+            usage.total_tokens,
+        ],
+        [
+            input.known,
+            read.known,
+            output.known,
+            reasoning.known,
+            total.known
+        ]
+    );
+    assert_eq!(usage.total_tokens, 280);
+    posts(&server, /*expected*/ 2).await;
+    stop(&test).await;
+    Ok(())
+}
+
+async fn ledger_has_format_4(db: &codex_state::StateRuntime) -> anyhow::Result<bool> {
+    let mut connection = connection(db).await?;
+    let present: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'draft_accounting_ledger_format_4')",
+    )
+    .fetch_one(&mut connection)
+    .await?;
+    Ok(present)
 }
 
 #[tokio::test]
@@ -150,7 +287,9 @@ async fn accounting_chat_native_literal_partial_and_zero_goldens() -> anyhow::Re
         let prices: Vec<Snapshot> = payloads(&db, "draft_accounting_price_snapshots").await?;
         assert_eq!(prices.len(), 1);
         eprintln!("CHAT_PRICES {}", serde_json::to_string(&prices)?);
-        assert_eq!(prices[0].rates.write, None);
+        // The sheet's cache-write rate is stated; Chat usage reports no write
+        // count here, so the uncached bucket stays unknown rather than guessed.
+        assert_eq!(prices[0].rates.write, Some("2.5".to_string().try_into()?));
         assert_eq!(prices[0].effective_from_ms, rows[0].dispatched_at_ms);
         stop(&test).await;
     }
@@ -235,21 +374,17 @@ async fn accounting_chat_native_top_level_error_retains_usage() -> anyhow::Resul
 }
 
 #[tokio::test]
-async fn accounting_chat_native_mismatched_endpoint_never_sends() -> anyhow::Result<()> {
+async fn accounting_chat_native_mismatched_endpoint_is_sent_unrecorded() -> anyhow::Result<()> {
     for suffix in ["/wrong", "?q=1", ":1", "/v1", "#fragment"] {
         let server = MockServer::start().await;
         let endpoint = format!("{}/v1", server.uri());
+        mount(&server, success(usage())).await;
         let test = builder(endpoint.clone(), enabled(&format!("{endpoint}{suffix}")))
             .build_with_auto_env(&server)
             .await?;
         submit(&test).await?;
-        assert!(
-            terminal(&test)
-                .await?
-                .iter()
-                .any(|e| matches!(e, EventMsg::Error(_)))
-        );
-        assert!(server.received_requests().await.unwrap().is_empty());
+        core_test_support::assert_accounting_gap(&terminal(&test).await?);
+        posts(&server, /*expected*/ 1).await;
         let db = test.codex.state_db().unwrap();
         absent(&db).await?;
         stop(&test).await;
@@ -261,7 +396,7 @@ async fn accounting_chat_native_mismatched_endpoint_never_sends() -> anyhow::Res
 
 #[tokio::test]
 async fn accounting_chat_native_immutable_prices_and_unpriced_rows() -> anyhow::Result<()> {
-    for model in ["gpt-5.6-sol", "gpt-6-astra", "remote-only-fixture"] {
+    for model in ["gpt-5.6-terra", "codex-auto-review", "remote-only-fixture"] {
         let server = MockServer::start().await;
         let endpoint = format!("{}/v1", server.uri());
         mount(&server, success(usage())).await;
@@ -279,13 +414,22 @@ async fn accounting_chat_native_immutable_prices_and_unpriced_rows() -> anyhow::
         let db = test.codex.state_db().unwrap();
         let rows = attempts(&db).await?;
         let prices: Vec<Snapshot> = payloads(&db, "draft_accounting_price_snapshots").await?;
-        assert_eq!(prices.len(), usize::from(model == "gpt-5.6-sol"));
+        // An unpriced attempt is bound to a pay-per-use record with no rates
+        // (PF-60-S05); only the catalogue-priced model has rates.
+        assert_eq!(
+            prices
+                .iter()
+                .filter(|snapshot| snapshot.rates != codex_state::accounting::Rates::default())
+                .count(),
+            usize::from(model == "gpt-5.6-terra")
+        );
+        assert_eq!(prices.len(), 1);
         let before = totals(&db, &rows[0]).await?;
         assert_eq!(before.unknown_estimates, 1);
         assert_eq!(
             before.known_usd,
-            if model == "gpt-5.6-sol" {
-                "0.00121"
+            if model == "gpt-5.6-terra" {
+                "0.000484"
             } else {
                 "0"
             }
@@ -384,7 +528,9 @@ async fn accounting_chat_native_finish_reason_and_tool_parity() -> anyhow::Resul
                     .disable(codex_features::Feature::CodeModeOnly)
                     .unwrap();
             })
-            .build_with_auto_env(&server)
+            // Local executor only: `shell_command` runs commands on the Codex
+            // host, never in a remote environment (#708, #721).
+            .build(&server)
             .await?;
         submit(&test).await?;
         let held = gate.next().await?;
@@ -448,7 +594,9 @@ async fn accounting_chat_native_sampling_auxiliary_scope() -> anyhow::Result<()>
                 .disable(codex_features::Feature::RemoteCompactionV2)
                 .unwrap();
         })
-        .build_with_auto_env(&server)
+        // Local executor only: `shell_command` runs commands on the Codex
+        // host, never in a remote environment (#708, #721).
+        .build(&server)
         .await?;
     submit(&test).await?;
     gate.next().await?.chunks.send(data(json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"safe-call",
@@ -550,6 +698,8 @@ async fn accounting_chat_completion_assessment_collects() -> anyhow::Result<()> 
         approved_endpoint: endpoint.clone(),
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
     };
     let test = builder(endpoint.clone(), mode)
         .with_config(|config| {
@@ -629,6 +779,140 @@ async fn accounting_chat_completion_assessment_collects() -> anyhow::Result<()> 
             .iter()
             .map(|record| &record.turn)
             .collect::<Vec<_>>()
+    );
+    stop(&test).await;
+    Ok(())
+}
+
+/// #368: OpenRouter states what it charged in `usage.cost`. The ledger keeps
+/// that charge with the attempt beside the price bound at dispatch, so `/cost`
+/// can price the request from the charge and fall back to the catalogue
+/// estimate only when no charge was reported.
+#[tokio::test]
+async fn accounting_chat_openrouter_records_the_reported_charge() -> anyhow::Result<()> {
+    for (cost, expected) in [
+        (Some(json!(0.000123)), Some("0.000123")),
+        (Some(json!(1.5e-5)), Some("0.000015")),
+        (None, None),
+    ] {
+        let server = MockServer::start().await;
+        let endpoint = format!("{}/v1", server.uri());
+        let mut usage = usage();
+        if let Some(cost) = cost {
+            usage["cost"] = cost;
+        }
+        mount(&server, success(usage)).await;
+        let mode = AccountingMode::Provider {
+            scope: uuid::Uuid::new_v4(),
+            provider_id: "openrouter".into(),
+            wire_api: codex_model_provider_info::WireApi::Chat,
+            approved_endpoint: endpoint.clone(),
+            approved_query: None,
+            pricing: PriceAuthority::ApiKeyRates,
+            basis_source: Default::default(),
+            account: None,
+        };
+        let test = builder(endpoint, mode)
+            .with_config(|config| {
+                config.model = Some("z-ai/glm-5.3-flash".into());
+                config.model_provider_id = "openrouter".into();
+                config.model_provider.name = "OpenRouter".into();
+            })
+            .build_with_auto_env(&server)
+            .await?;
+        test.submit_turn("openrouter accounting").await?;
+        let db = test.codex.state_db().unwrap();
+        let records = attempts(&db).await?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].provider, "openrouter");
+        // The charge is recorded beside whatever price was bound at
+        // dispatch, never in place of it.
+        let prices: Vec<Snapshot> = payloads(&db, "draft_accounting_price_snapshots").await?;
+        assert_eq!(prices.len(), 1);
+        let observed = observations(&db).await?;
+        assert_eq!(observed.len(), 1);
+        assert_eq!(
+            observed[0].patch.billed_usd,
+            expected
+                .map(|text| Decimal::try_from(text.to_string()))
+                .transpose()?
+        );
+        stop(&test).await;
+    }
+    Ok(())
+}
+
+/// #368: Moonshot bills K3 cache writes by the lifetime a request names, and
+/// five minutes when it names none. This client's Chat Completions request
+/// names none, which is why the Moonshot route is priced at the five-minute
+/// rate (`accounting_prices::MOONSHOT_OPEN_PLATFORM_RATES`).
+#[tokio::test]
+async fn accounting_chat_requests_name_no_cache_lifetime() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/v1", server.uri());
+    mount(&server, success(usage())).await;
+    let test = builder(endpoint.clone(), enabled(&endpoint))
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_turn("cache lifetime").await?;
+    let requests = server.received_requests().await.unwrap();
+    assert!(!requests.is_empty());
+    for request in requests {
+        let body: Value = serde_json::from_slice(&request.body)?;
+        assert!(body.get("prompt_cache_options").is_none(), "{body}");
+    }
+    stop(&test).await;
+    Ok(())
+}
+
+/// #786 (Travis, 2026-10-14, option a): OpenRouter's MiniMax M3 reported 37
+/// reasoning tokens of 36 output. The reasoning count is recorded as not
+/// reported and the rest of the record, the charge included, is kept: before,
+/// replay refused the whole record and `/cost` lost the charge.
+#[tokio::test]
+async fn accounting_chat_reasoning_above_output_keeps_the_record() -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let endpoint = format!("{}/v1", server.uri());
+    mount(
+        &server,
+        success(json!({
+            "prompt_tokens": 9098,
+            "completion_tokens": 36,
+            "total_tokens": 9134,
+            "cost": 0.00274188,
+            "completion_tokens_details": {"reasoning_tokens": 37}
+        })),
+    )
+    .await;
+    let mode = AccountingMode::Provider {
+        scope: uuid::Uuid::new_v4(),
+        provider_id: "openrouter".into(),
+        wire_api: codex_model_provider_info::WireApi::Chat,
+        approved_endpoint: endpoint.clone(),
+        approved_query: None,
+        pricing: PriceAuthority::ApiKeyRates,
+        basis_source: Default::default(),
+        account: None,
+    };
+    let test = builder(endpoint, mode)
+        .with_config(|config| {
+            config.model = Some("minimax/minimax-m3".into());
+            config.model_provider_id = "openrouter".into();
+            config.model_provider.name = "OpenRouter".into();
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    test.submit_turn("reasoning above output").await?;
+    let db = test.codex.state_db().unwrap();
+    let records = attempts(&db).await?;
+    assert_eq!(records.len(), 1);
+    let observed = observations(&db).await?;
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].patch.reasoning, Presence::Missing);
+    assert_eq!(observed[0].patch.output, Presence::Number(36.try_into()?));
+    assert_eq!(
+        observed[0].patch.billed_usd,
+        Some(Decimal::try_from("0.00274188".to_string())?)
     );
     stop(&test).await;
     Ok(())

@@ -102,6 +102,9 @@ use wiremock::matchers::path;
 const TEST_CHATGPT_ID_TOKEN: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9hdXRoIjp7ImNoYXRncHRfdXNlcl9pZCI6InVzZXItMTIzNDUiLCJ1c2VyX2lkIjoidXNlci0xMjM0NSIsImNoYXRncHRfcGxhbl90eXBlIjoicHJvIiwiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC0xMjMifX0.c2ln";
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 
+#[path = "client_connection_identity_tests.rs"]
+mod connection_identity;
+
 #[test]
 fn pf_30_s01_all_native_wire_builders_reject_missing_admission() {
     for level in [
@@ -305,7 +308,7 @@ fn pf_30_s01_labelled_context_round_trips_through_each_real_provider_adapter() {
         ],
         ..Default::default()
     };
-    let base = test_model_client(SessionSource::Cli).with_source_envelopes(true);
+    let base = test_model_client(SessionSource::Cli).with_source_envelopes(/*enabled*/ true);
     base.register_message_origin(std::slice::from_ref(&human), MessageOrigin::Human);
     base.register_message_origin(std::slice::from_ref(&call), MessageOrigin::Model);
     base.register_native_tool_origin("call-1", codex_protocol::provenance::SourceKind::Tool);
@@ -392,7 +395,7 @@ fn pf_30_s01_labelled_context_round_trips_through_each_real_provider_adapter() {
 
 #[test]
 fn pf_30_s01_labelled_restore_reinjection_waits_while_permissive() {
-    let client = test_model_client(SessionSource::Cli).with_source_envelopes(true);
+    let client = test_model_client(SessionSource::Cli).with_source_envelopes(/*enabled*/ true);
     client.note_restored_history(&[], std::iter::empty());
     // Permissive history is unchanged: the request stays pending.
     assert!(!client.take_host_context_reinjection());
@@ -2708,6 +2711,149 @@ async fn bedrock_unauthorized_error_uses_provider_mapping() {
     );
 }
 
+async fn openai_unauthorized_error(provider: &SharedModelProvider) -> String {
+    let mut auth_recovery = None;
+    super::handle_unauthorized(
+        TransportError::Http {
+            status: http::StatusCode::UNAUTHORIZED,
+            url: Some("wss://api.openai.com/v1/responses".to_string()),
+            headers: None,
+            body: Some(
+                r#"{"error":{"message":"Missing bearer or basic authentication in header"}}"#
+                    .to_string(),
+            ),
+        },
+        &mut auth_recovery,
+        &test_session_telemetry(),
+        provider,
+    )
+    .await
+    .expect_err("401 should fail")
+    .to_string()
+}
+
+#[tokio::test]
+async fn openai_unauthorized_without_credentials_names_the_variables_to_set() {
+    let provider = create_model_provider(
+        ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+        /*auth_manager*/ None,
+    );
+
+    let message = openai_unauthorized_error(&provider).await;
+
+    assert!(message.contains("Set OPENAI_API_KEY"), "{message}");
+    assert!(message.contains("CODEX_API_KEY"), "{message}");
+    assert!(message.contains("corbanu login"), "{message}");
+}
+
+/// #1311 (D171): a request on a named account that gets a 401 because the
+/// account was removed meanwhile (removal revokes its tokens) is reported
+/// with the account's recovery, as the next request would be, not with a
+/// generic unauthorized error. While the account still holds a sign-in, the
+/// provider's error is kept.
+#[tokio::test]
+async fn unauthorized_after_the_named_account_was_removed_names_the_recovery() {
+    let home = TempDir::new().expect("home");
+    let work = codex_login::NamedChatgptAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    };
+    codex_login::login_named_account_with_api_key(home.path(), &work, "sk-work-canary")
+        .expect("named sign-in");
+    let base = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("sk-default-canary"),
+        home.path().to_path_buf(),
+    );
+    let named = base.for_named_account_loaded(work).await;
+    let mut info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    info.account = Some(codex_model_provider_info::NamedProviderAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    });
+    let provider = create_model_provider(info, Some(Arc::clone(&named)));
+
+    let signed_in = openai_unauthorized_error(&provider).await;
+    assert!(
+        !signed_in.contains("corbanu login --account work"),
+        "{signed_in}"
+    );
+
+    let name = codex_vault::ProviderAccountName::parse("work").expect("name");
+    assert!(
+        codex_vault::Vault::new(home.path().to_path_buf())
+            .remove_provider_account("openai", &name)
+            .expect("remove")
+    );
+    let mut auth_recovery = Some(named.unauthorized_recovery());
+    let removed = super::handle_unauthorized(
+        TransportError::Http {
+            status: http::StatusCode::UNAUTHORIZED,
+            url: Some("wss://api.openai.com/v1/responses".to_string()),
+            headers: None,
+            body: Some(r#"{"error":{"message":"token revoked"}}"#.to_string()),
+        },
+        &mut auth_recovery,
+        &test_session_telemetry(),
+        &provider,
+    )
+    .await
+    .expect_err("401 should fail")
+    .to_string();
+
+    assert!(
+        removed.contains("account `work` has no sign-in (it may have been removed or signed out)")
+            && removed.contains("corbanu login --account work"),
+        "{removed}"
+    );
+    assert!(!removed.contains("sk-"), "{removed}");
+}
+
+#[tokio::test]
+async fn openai_unauthorized_without_env_fallback_asks_for_a_sign_in() {
+    let home = TempDir::new().expect("home");
+    // Plain `AuthManager::new` doesn't read OPENAI_API_KEY, like a config
+    // with `forced_login_method = "chatgpt"`.
+    let manager = Arc::new(
+        AuthManager::new(
+            home.path().to_path_buf(),
+            /*enable_codex_api_key_env*/ false,
+            codex_login::AuthCredentialsStoreMode::File,
+            /*forced_chatgpt_workspace_id*/ None,
+            /*chatgpt_base_url*/ None,
+            codex_login::AuthKeyringBackendKind::Direct,
+            codex_login::test_support::transport_default_auth_route_config(),
+        )
+        .await,
+    );
+    let provider = create_model_provider(
+        ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+        Some(manager),
+    );
+
+    let message = openai_unauthorized_error(&provider).await;
+
+    assert!(message.contains("run `corbanu login`"), "{message}");
+    assert!(!message.contains("OPENAI_API_KEY"), "{message}");
+}
+
+#[tokio::test]
+async fn openai_unauthorized_with_credentials_keeps_the_provider_error() {
+    let provider = create_model_provider(
+        ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+        Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+            "sk-test",
+        ))),
+    );
+
+    let message = openai_unauthorized_error(&provider).await;
+
+    assert!(
+        message.contains("Missing bearer or basic authentication"),
+        "{message}"
+    );
+    assert!(!message.contains("Set OPENAI_API_KEY"), "{message}");
+}
+
 #[tokio::test]
 async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
 -> anyhow::Result<()> {
@@ -2937,7 +3083,8 @@ async fn pf_60_s03_memory_summarize_is_recorded() -> anyhow::Result<()> {
         .await;
 
     let home = tempfile::tempdir()?;
-    let mut config = crate::session::tests::build_test_config(home.path()).await;
+    let test_cwd = tempfile::tempdir()?;
+    let mut config = crate::session::tests::build_test_config(home.path(), test_cwd.path()).await;
     config.model_provider = codex_model_provider_info::ModelProviderInfo {
         request_max_retries: Some(0),
         stream_max_retries: Some(0),
@@ -2954,6 +3101,8 @@ async fn pf_60_s03_memory_summarize_is_recorded() -> anyhow::Result<()> {
         approved_endpoint: endpoint.clone(),
         approved_query: None,
         pricing: crate::config::PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
     };
     config
         .features
@@ -2986,7 +3135,7 @@ async fn pf_60_s03_memory_summarize_is_recorded() -> anyhow::Result<()> {
     let client_session = owner.services.new_model_client_session();
     let provider = owner.provider().await;
     let (accounting, provider_id) = owner.accounting_binding().await;
-    let auth = owner.services.auth_manager.auth().await;
+    let auth = owner.services.auth_manager().auth().await;
     let _scopes = crate::accounting::attach_scopes(
         &owner,
         &accounting,
@@ -3148,6 +3297,134 @@ fn chat_freeform_tool_wrappers_are_never_strict() {
         .get("strict"),
         None
     );
+}
+
+#[test]
+fn namespaced_history_replays_under_offered_flat_names() {
+    let call = |namespace: &str, name: &str| ResponseItem::FunctionCall {
+        id: None,
+        name: name.to_string(),
+        namespace: Some(namespace.to_string()),
+        arguments: "{}".to_string(),
+        call_id: format!("call-{name}"),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let api_tool = |name: &str| codex_tools::ResponsesApiTool {
+        name: name.to_string(),
+        description: String::new(),
+        strict: false,
+        defer_loading: None,
+        parameters: codex_tools::JsonSchema::object(
+            Default::default(),
+            /*required*/ None,
+            /*additional_properties*/ None,
+        ),
+        output_schema: None,
+    };
+    let function = |name: &str| codex_tools::ToolSpec::Function(api_tool(name));
+    let long_namespace = format!("mcp__{}", "s".repeat(70));
+    let long_flat = crate::tools::flat_tool_names::flat_tool_name_for(
+        &codex_tools::ToolName::namespaced(long_namespace.clone(), "tool"),
+    );
+    assert_eq!(long_flat.len(), 64);
+    let tools = vec![
+        function("mcp__orders__lookup"),
+        function("spawn_agent"),
+        function(&long_flat),
+    ];
+    let mut input = vec![
+        call("mcp__orders", "lookup"),
+        // A collaboration call from a Responses parent: chat models are
+        // offered the plain tool, so it keeps its bare name.
+        call("collaboration", "spawn_agent"),
+        call(&long_namespace, "tool"),
+    ];
+
+    // The request's own mapping, as the router builds it.
+    let (_, flat_tool_names) = crate::tools::flat_tool_names::flatten_namespaced_tools(
+        vec![
+            (
+                codex_tools::ToolName::namespaced("mcp__orders", "lookup"),
+                api_tool("lookup"),
+            ),
+            (
+                codex_tools::ToolName::namespaced(long_namespace, "tool"),
+                api_tool("tool"),
+            ),
+        ],
+        &std::collections::HashSet::from(["spawn_agent".to_string()]),
+    );
+
+    super::flatten_namespaced_history(&mut input, &tools, &flat_tool_names);
+
+    let names: Vec<_> = input
+        .iter()
+        .map(|item| match item {
+            ResponseItem::FunctionCall {
+                name, namespace, ..
+            } => (name.clone(), namespace.clone()),
+            other => panic!("unexpected item {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("mcp__orders__lookup".to_string(), None),
+            ("spawn_agent".to_string(), None),
+            (long_flat, None),
+        ]
+    );
+}
+
+/// #688: a plain tool already takes an MCP tool's preferred flat name, so the
+/// MCP tool is offered under a hashed name. Its earlier calls replay under
+/// that hashed name, never as calls of the plain tool.
+#[test]
+fn namespaced_history_never_replays_under_a_plain_tool_with_the_same_name() {
+    let function = |name: &str| codex_tools::ResponsesApiTool {
+        name: name.to_string(),
+        description: String::new(),
+        strict: false,
+        defer_loading: None,
+        parameters: codex_tools::JsonSchema::object(
+            Default::default(),
+            /*required*/ None,
+            /*additional_properties*/ None,
+        ),
+        output_schema: None,
+    };
+    let mcp_tool = codex_tools::ToolName::namespaced("mcp__orders", "lookup");
+    let reserved = std::collections::HashSet::from(["mcp__orders__lookup".to_string()]);
+    let (flattened, flat_tool_names) = crate::tools::flat_tool_names::flatten_namespaced_tools(
+        vec![(mcp_tool, function("lookup"))],
+        &reserved,
+    );
+    let hashed = flattened[0].name.clone();
+    assert_ne!(hashed, "mcp__orders__lookup");
+    let tools = vec![
+        codex_tools::ToolSpec::Function(function("mcp__orders__lookup")),
+        codex_tools::ToolSpec::Function(flattened[0].clone()),
+    ];
+    let mut input = vec![ResponseItem::FunctionCall {
+        id: None,
+        name: "lookup".to_string(),
+        namespace: Some("mcp__orders".to_string()),
+        arguments: "{}".to_string(),
+        call_id: "call-lookup".to_string(),
+        encrypted_function_args: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+
+    super::flatten_namespaced_history(&mut input, &tools, &flat_tool_names);
+
+    let ResponseItem::FunctionCall {
+        name, namespace, ..
+    } = &input[0]
+    else {
+        panic!("unexpected item {:?}", input[0]);
+    };
+    assert_eq!((name.as_str(), namespace), (hashed.as_str(), &None));
 }
 
 #[test]
@@ -3418,4 +3695,290 @@ fn transient_rate_limit_delay_backs_off_and_honors_retry_after() {
         super::transient_rate_limit_delay(&with_header, /*attempt*/ 3).as_secs(),
         5
     );
+}
+
+/// #578: the ID in OpenAI's `store: false` lookup failure; nothing else.
+#[test]
+fn unresolvable_item_id_reads_only_the_not_found_error() {
+    assert_eq!(
+        super::unresolvable_item_id(
+            "unexpected status 404 Not Found: Item with id 'rs_2026101213421902b19754973e467e' \
+             not found. Items are not persisted when `store` is set to false."
+        ),
+        Some("rs_2026101213421902b19754973e467e".to_string())
+    );
+    for other in [
+        "unexpected status 404 Not Found: model not found",
+        "Item with id '' not found.",
+        "Item with id 'rs_1' could not be verified",
+        "Item with id 'rs 1' not found",
+    ] {
+        assert_eq!(super::unresolvable_item_id(other), None, "{other}");
+    }
+}
+
+/// #578: another provider's call IDs fit Anthropic's `tool_use` ID alphabet;
+/// valid IDs are unchanged.
+#[test]
+fn anthropic_tool_use_ids_fit_its_alphabet() {
+    assert_eq!(
+        super::anthropic_tool_use_id("toolu_01A-b"),
+        std::borrow::Cow::Borrowed("toolu_01A-b")
+    );
+    let mapped = super::anthropic_tool_use_id("functions.shell:0");
+    assert!(mapped.starts_with("functions_shell_0_"), "{mapped}");
+    assert!(
+        mapped
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    );
+    // Stable, and distinct for IDs that differ only in other characters.
+    assert_eq!(super::anthropic_tool_use_id("functions.shell:0"), mapped);
+    assert_ne!(super::anthropic_tool_use_id("functions:shell.0"), mapped);
+}
+
+// Issue688 item4: history names must match the currently offered V1 aliases.
+// These build real wire requests but never dispatch them or access credentials.
+fn issue688_v1_history_wire_case(
+    anthropic: bool,
+    namespace: &str,
+    name: &str,
+    offered: &[&str],
+    expected: &str,
+) {
+    let function = |name: &str| {
+        codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
+            name: name.to_string(),
+            description: String::new(),
+            strict: false,
+            defer_loading: None,
+            parameters: codex_tools::JsonSchema::object(
+                Default::default(),
+                /*required*/ None,
+                /*additional_properties*/ None,
+            ),
+            output_schema: None,
+        })
+    };
+    let arguments = r#"{"task":"keep 日本語 and id"}"#;
+    let message = |text: &str| ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let prompt = Prompt {
+        input: vec![
+            message("original request"),
+            ResponseItem::FunctionCall {
+                id: None,
+                name: name.to_string(),
+                namespace: Some(namespace.to_string()),
+                arguments: arguments.to_string(),
+                call_id: "issue688-call".to_string(),
+                encrypted_function_args: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: "issue688-call".to_string(),
+                output: FunctionCallOutputPayload::from_text("issue688-result".to_string()),
+                internal_chat_message_metadata_passthrough: None,
+            },
+            message("continue"),
+        ],
+        tools: offered.iter().map(|name| function(name)).collect(),
+        ..Default::default()
+    };
+    let client = test_model_client(SessionSource::Cli);
+    let mut model = test_model_info();
+    model.max_output_tokens = Some(4096);
+    let payload = if anthropic {
+        serde_json::to_value(
+            client
+                .build_anthropic_messages_request(&prompt, &model, /*effort*/ None)
+                .unwrap(),
+        )
+        .unwrap()
+    } else {
+        let metadata = test_responses_metadata_for_client(
+            &client,
+            /*turn_id*/ None,
+            "issue688-fixture".into(),
+            /*parent_thread_id*/ None,
+            TestCodexResponsesRequestKind::Turn,
+        );
+        serde_json::to_value(
+            client
+                .build_chat_completions_request(&prompt, &model, /*effort*/ None, &metadata)
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let messages = payload["messages"].as_array().unwrap();
+    if anthropic {
+        let blocks: Vec<_> = messages
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .collect();
+        let calls: Vec<_> = blocks
+            .iter()
+            .filter(|block| block["type"] == "tool_use")
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["name"], expected);
+        assert_eq!(calls[0]["id"], "issue688-call");
+        assert_eq!(
+            calls[0]["input"],
+            serde_json::from_str::<serde_json::Value>(arguments).unwrap()
+        );
+        let outputs: Vec<_> = blocks
+            .iter()
+            .filter(|block| block["type"] == "tool_result")
+            .collect();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["tool_use_id"], "issue688-call");
+        assert!(outputs[0].to_string().contains("issue688-result"));
+    } else {
+        let calls: Vec<_> = messages
+            .iter()
+            .flat_map(|message| message["tool_calls"].as_array().into_iter().flatten())
+            .collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], expected);
+        assert_eq!(calls[0]["id"], "issue688-call");
+        assert_eq!(calls[0]["function"]["arguments"], arguments);
+        let outputs: Vec<_> = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .collect();
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["tool_call_id"], "issue688-call");
+        assert!(outputs[0].to_string().contains("issue688-result"));
+    }
+}
+
+macro_rules! issue688_v1_history_tests {
+    ($($test:ident, $anthropic:expr, $name:literal, $alias:literal;)*) => {$ (
+        #[test]
+        fn $test() {
+            // Offer both identities: V1 history must not be attributed to the
+            // current collaboration tool merely because its bare name exists.
+            issue688_v1_history_wire_case($anthropic, "multi_agent_v1", $name, &[$name, $alias], $alias);
+        }
+    )*};
+}
+issue688_v1_history_tests! {
+    issue688_v1_history_chat_spawn, false, "spawn_agent", "spawn_agent_v1";
+    issue688_v1_history_chat_send, false, "send_input", "send_input_v1";
+    issue688_v1_history_chat_wait, false, "wait_agent", "wait_agent_v1";
+    issue688_v1_history_chat_close, false, "close_agent", "close_agent_v1";
+    issue688_v1_history_chat_resume, false, "resume_agent", "resume_agent_v1";
+    issue688_v1_history_anthropic_spawn, true, "spawn_agent", "spawn_agent_v1";
+    issue688_v1_history_anthropic_send, true, "send_input", "send_input_v1";
+    issue688_v1_history_anthropic_wait, true, "wait_agent", "wait_agent_v1";
+    issue688_v1_history_anthropic_close, true, "close_agent", "close_agent_v1";
+    issue688_v1_history_anthropic_resume, true, "resume_agent", "resume_agent_v1";
+}
+
+#[test]
+fn issue688_v1_history_keeps_unavailable_alias_fallback() {
+    for anthropic in [false, true] {
+        issue688_v1_history_wire_case(
+            anthropic,
+            "multi_agent_v1",
+            "spawn_agent",
+            &["spawn_agent"],
+            "spawn_agent",
+        );
+    }
+}
+#[test]
+fn issue688_v1_history_does_not_invent_unknown_v1_alias() {
+    for anthropic in [false, true] {
+        issue688_v1_history_wire_case(
+            anthropic,
+            "multi_agent_v1",
+            "future_agent",
+            &["future_agent", "future_agent_v1"],
+            "future_agent",
+        );
+    }
+}
+#[test]
+fn issue688_v1_history_keeps_current_collaboration_identity() {
+    for anthropic in [false, true] {
+        issue688_v1_history_wire_case(
+            anthropic,
+            "collaboration",
+            "spawn_agent",
+            &["spawn_agent", "spawn_agent_v1"],
+            "spawn_agent",
+        );
+    }
+}
+#[test]
+fn issue688_v1_history_does_not_alias_unrelated_namespace() {
+    for anthropic in [false, true] {
+        issue688_v1_history_wire_case(
+            anthropic,
+            "mcp__synthetic",
+            "spawn_agent",
+            &["spawn_agent", "spawn_agent_v1"],
+            "spawn_agent",
+        );
+    }
+}
+
+/// The shared history helper also handles custom calls. Keep their payload/ID
+/// intact, and do not synthesize aliases for names outside the actual V1 set.
+#[test]
+fn issue688_v1_history_custom_calls_preserve_payload_and_known_identity() {
+    let api_tool = |name: &str| {
+        codex_tools::ToolSpec::Function(codex_tools::ResponsesApiTool {
+            name: name.to_string(),
+            description: String::new(),
+            strict: false,
+            defer_loading: None,
+            parameters: codex_tools::JsonSchema::object(
+                Default::default(),
+                /*required*/ None,
+                /*additional_properties*/ None,
+            ),
+            output_schema: None,
+        })
+    };
+    let tools = vec![api_tool("spawn_agent_v1"), api_tool("unknown_agent_v1")];
+    for (name, expected) in [
+        ("unknown_agent", "unknown_agent"),
+        ("spawn_agent", "spawn_agent_v1"),
+    ] {
+        let mut input = vec![ResponseItem::CustomToolCall {
+            id: None,
+            status: None,
+            call_id: "issue688-custom".to_string(),
+            name: name.to_string(),
+            namespace: Some("multi_agent_v1".to_string()),
+            input: "raw 日本語 payload".to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }];
+        super::flatten_namespaced_history(&mut input, &tools, &Default::default());
+        let ResponseItem::CustomToolCall {
+            name,
+            namespace,
+            input,
+            call_id,
+            ..
+        } = &input[0]
+        else {
+            panic!("custom call variant changed");
+        };
+        assert_eq!(name, expected);
+        assert_eq!(namespace, &None);
+        assert_eq!(input, "raw 日本語 payload");
+        assert_eq!(call_id, "issue688-custom");
+    }
 }

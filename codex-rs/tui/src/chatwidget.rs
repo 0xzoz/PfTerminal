@@ -184,6 +184,8 @@ use tracing::debug;
 use tracing::warn;
 
 const DEFAULT_MODEL_DISPLAY_NAME: &str = "loading";
+/// #855: how many recent error messages a masked credential entry checks.
+const SHOWN_ERROR_TEXTS_KEPT: usize = 16;
 const MULTI_AGENT_ENABLE_TITLE: &str = "Enable subagents?";
 const MULTI_AGENT_ENABLE_YES: &str = "Yes, enable";
 const MULTI_AGENT_ENABLE_NO: &str = "Not now";
@@ -378,6 +380,7 @@ use self::plugins::PluginsCacheState;
 mod plan_implementation;
 use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
 mod model_popups;
+mod model_route_rows;
 mod provider_health;
 pub(crate) mod provider_model_policy;
 mod provider_recovery;
@@ -422,6 +425,7 @@ mod streaming;
 use self::status_surfaces::CachedProjectRootName;
 mod tokens;
 pub(crate) use self::tokens::TokenActivityView;
+pub(crate) use tokens::cost_command;
 mod tool_lifecycle;
 mod tool_requests;
 mod transcript;
@@ -442,6 +446,7 @@ pub(crate) mod claude_code_login;
 mod pfterminal_plan_status;
 pub(crate) mod provider_credentials;
 pub(crate) mod provider_manager;
+pub(crate) use provider_manager::provider_manager_rows;
 mod tasknode_menu;
 pub(crate) mod telegram_setup;
 mod usage;
@@ -461,6 +466,9 @@ use self::user_messages::QueueDrain;
 use self::user_messages::QueuedUserMessage;
 use self::user_messages::ShellEscapePolicy;
 use self::user_messages::ThreadComposerState;
+/// #507/#554: the line under the kill switch's message for a turn it
+/// stopped, in Codex and Claude panes alike.
+pub(crate) const KILL_SWITCH_TURN_STOPPED: &str = "Turn stopped by the security kill switch.";
 pub(crate) use self::user_messages::ThreadInputState;
 pub(crate) use self::user_messages::ThreadInputStateRestoreMode;
 pub(crate) use self::user_messages::UserMessage;
@@ -587,6 +595,8 @@ pub(crate) struct ChatWidget {
     runtime_model_provider_base_url: Option<String>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
     token_info: Option<TokenUsageInfo>,
+    // PF-84: per-account usage of every thread in this session, for `/status`.
+    pub(crate) session_account_usage: crate::status::SessionAccountUsage,
     tps_estimator: TpsEstimator,
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
     refreshing_status_outputs: Vec<(u64, StatusHistoryHandle)>,
@@ -630,6 +640,9 @@ pub(crate) struct ChatWidget {
     tasknode_active_chat_stream_id: Option<String>,
     /// Holds the platform clipboard lease so copied text remains available while supported.
     clipboard_lease: Option<crate::clipboard_copy::ClipboardLease>,
+    /// #855: the latest error messages shown in the transcript, so a masked
+    /// credential entry can refuse one pasted in place of the credential.
+    shown_error_texts: std::collections::VecDeque<String>,
     wallet_capability: Option<zeroize::Zeroizing<String>>,
     wallet_capability_policy: Option<codex_wallet_daemon::UnlockPolicy>,
     wallet_status_generation: u64,
@@ -756,6 +769,8 @@ pub(crate) struct ChatWidget {
     feedback: codex_feedback::CodexFeedback,
     // Current session rollout path (if known)
     current_rollout_path: Option<PathBuf>,
+    // PF-84: the account the app server reported for this thread (if any).
+    thread_provider_account: Option<String>,
     // Current working directory (if known)
     current_cwd: Option<PathBuf>,
     // App-server-backed command runner for status-line workspace metadata lookups.
@@ -1063,7 +1078,7 @@ impl ChatWidget {
             self.app_event_tx.clone(),
             self.bottom_pane.list_keymap(),
         );
-        self.bottom_pane.show_view(Box::new(view));
+        self.bottom_pane.show_app_link_view(view);
         self.request_redraw();
     }
 
@@ -1565,8 +1580,22 @@ impl ChatWidget {
     }
 
     pub(crate) fn add_error_message(&mut self, message: String) {
+        // A session that fails to start must not swallow its config warnings.
+        self.show_deferred_config_warnings();
+        if self.shown_error_texts.len() == SHOWN_ERROR_TEXTS_KEPT {
+            self.shown_error_texts.pop_front();
+        }
+        self.shown_error_texts.push_back(message.clone());
         self.add_to_history(history_cell::new_error_event(message));
         self.request_redraw();
+    }
+
+    /// #855: error messages recently shown in the transcript (see
+    /// [`VaultSecretEntryView::rejecting_shown_errors`]).
+    ///
+    /// [`VaultSecretEntryView::rejecting_shown_errors`]: crate::bottom_pane::vault_secret_entry::VaultSecretEntryView::rejecting_shown_errors
+    pub(crate) fn shown_error_texts(&self) -> Vec<String> {
+        self.shown_error_texts.iter().cloned().collect()
     }
 
     fn add_app_server_stub_message(&mut self, feature: &str) {

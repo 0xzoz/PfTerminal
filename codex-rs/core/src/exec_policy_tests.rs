@@ -110,6 +110,7 @@ async fn test_config() -> (TempDir, Config) {
     let home = TempDir::new().expect("create temp dir");
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .build()
         .await
         .expect("load default test config");
@@ -1680,7 +1681,11 @@ async fn append_execpolicy_amendment_updates_policy_and_file() {
     let manager = ExecPolicyManager::default();
 
     manager
-        .append_amendment_and_update(codex_home.path(), &ExecPolicyAmendment::from(prefix))
+        .append_amendment_and_update(
+            codex_home.path(),
+            &ExecPolicyAmendment::from(prefix),
+            ApprovedUnder::LessStrict,
+        )
         .await
         .expect("update policy");
     let updated_policy = manager.current();
@@ -1706,13 +1711,131 @@ async fn append_execpolicy_amendment_updates_policy_and_file() {
     );
 }
 
+/// #398: an approved rule holding a credential applies for the session but
+/// is never written to the rules file.
+#[tokio::test]
+async fn append_execpolicy_amendment_keeps_credentials_out_of_the_file() {
+    let codex_home = tempdir().expect("create temp dir");
+    let prefix = vec![
+        "curl".to_string(),
+        "-H".to_string(),
+        "Authorization: Bearer fake-398-rule-0001".to_string(),
+    ];
+    let manager = ExecPolicyManager::default();
+
+    let scope = manager
+        .append_amendment_and_update(
+            codex_home.path(),
+            &ExecPolicyAmendment::from(prefix),
+            ApprovedUnder::LessStrict,
+        )
+        .await
+        .expect("update policy");
+    assert_eq!(scope, AmendmentScope::Session);
+
+    let mut command = vec![
+        "curl".to_string(),
+        "-H".to_string(),
+        "Authorization: Bearer fake-398-rule-0001".to_string(),
+    ];
+    command.push("https://api.example".to_string());
+    assert_eq!(
+        manager
+            .current()
+            .check(&command, &|_| Decision::Prompt)
+            .decision,
+        Decision::Allow
+    );
+    assert!(!default_policy_path(codex_home.path()).exists());
+}
+
+/// #398: the auto-derived proposal (the whole command, no `prefix_rule`)
+/// is dropped too when the command carries a credential.
+#[tokio::test]
+async fn credential_commands_get_no_derived_execpolicy_amendment_proposal() {
+    // The credential-free versions of these are
+    // `heredoc_redirect_without_escalation_runs_inside_sandbox` and
+    // `heredoc_redirect_with_escalation_requires_approval`, which propose
+    // the whole command.
+    let command = vec![
+        "zsh".to_string(),
+        "-lc".to_string(),
+        "cat <<'EOF' > /some/important/folder/test.txt\nAuthorization: Bearer fake-398-derived-0003\nEOF"
+            .to_string(),
+    ];
+    assert_exec_approval_requirement_for_command(
+        ExecApprovalRequirementScenario {
+            policy_src: None,
+            command: command.clone(),
+            approval_policy: AskForApproval::OnRequest,
+            permission_profile: PermissionProfile::workspace_write(),
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            prefix_rule: None,
+        },
+        ExecApprovalRequirement::Skip {
+            bypass_sandbox: false,
+            proposed_execpolicy_amendment: None,
+        },
+    )
+    .await;
+    assert_exec_approval_requirement_for_command(
+        ExecApprovalRequirementScenario {
+            policy_src: Some(r#"prefix_rule(pattern=["cat"], decision="allow")"#.to_string()),
+            command,
+            approval_policy: AskForApproval::OnRequest,
+            permission_profile: PermissionProfile::workspace_write(),
+            sandbox_permissions: SandboxPermissions::RequireEscalated,
+            prefix_rule: None,
+        },
+        ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: None,
+        },
+    )
+    .await;
+}
+
+/// #398: a command carrying a credential gets no "don't ask again"
+/// proposal, which would save it in the rules file.
+#[tokio::test]
+async fn credential_commands_get_no_execpolicy_amendment_proposal() {
+    assert_exec_approval_requirement_for_command(
+        ExecApprovalRequirementScenario {
+            policy_src: None,
+            command: vec![
+                "curl".to_string(),
+                "--password".to_string(),
+                "fake-398-proposal-0002".to_string(),
+                "https://api.example".to_string(),
+            ],
+            approval_policy: AskForApproval::OnRequest,
+            permission_profile: PermissionProfile::workspace_write(),
+            sandbox_permissions: SandboxPermissions::RequireEscalated,
+            prefix_rule: Some(vec![
+                "curl".to_string(),
+                "--password".to_string(),
+                "fake-398-proposal-0002".to_string(),
+            ]),
+        },
+        ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: None,
+        },
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn append_execpolicy_amendment_rejects_empty_prefix() {
     let codex_home = tempdir().expect("create temp dir");
     let manager = ExecPolicyManager::default();
 
     let result = manager
-        .append_amendment_and_update(codex_home.path(), &ExecPolicyAmendment::from(vec![]))
+        .append_amendment_and_update(
+            codex_home.path(),
+            &ExecPolicyAmendment::from(vec![]),
+            ApprovedUnder::LessStrict,
+        )
         .await;
 
     assert!(matches!(
@@ -2684,4 +2807,187 @@ prefix_rule(pattern = ["rm"], decision = "forbidden")"#,
         }
     }
     Ok(())
+}
+
+/// #441 (milestone AGG-19): with nested agents set to refuse, the Aggressive
+/// rule file refuses an agent's `corbanu exec` / `review` before any prompt,
+/// through absolute paths and `bash -lc` scripts, under strict rules. Forms
+/// only the launch check sees (`env corbanu exec`) still prompt first. The
+/// nested-launch rules match exactly: text that only mentions them (a commit
+/// message, a search) is not refused, unlike the vault rule.
+#[tokio::test]
+async fn issue_441_nested_launch_rules_refuse_launches_but_not_text() -> anyhow::Result<()> {
+    let temp_dir = tempdir()?;
+    let policy_dir = temp_dir.path().join(RULES_DIR_NAME);
+    fs::create_dir_all(&policy_dir)?;
+    fs::write(
+        policy_dir.join("aggressive.rules"),
+        codex_security_level::level::rules_contents_for(
+            codex_security_level::level::NestedAgents::Refuse,
+        ),
+    )?;
+    let config_stack = config_stack_for_dot_codex_folder(temp_dir.path());
+    let strict = ExecPolicyManager::load(&config_stack, /*strict_rules*/ true).await?;
+    let requirement = |script: &'static str| {
+        let strict = &strict;
+        async move {
+            let command = vec!["bash".to_string(), "-lc".to_string(), script.to_string()];
+            strict
+                .create_exec_approval_requirement_for_command(ExecApprovalRequest {
+                    command: &command,
+                    approval_policy: AskForApproval::UnlessTrusted,
+                    permission_profile: PermissionProfile::read_only(),
+                    windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                    sandbox_permissions: SandboxPermissions::UseDefault,
+                    prefix_rule: None,
+                })
+                .await
+        }
+    };
+    for script in [
+        "corbanu exec \"say hi\"",
+        "corbanu review",
+        "corbanu e hi",
+        "/opt/bin/corbanu exec hi",
+        "cd /tmp && corbanu exec hi",
+        "codex exec hi",
+    ] {
+        assert!(
+            matches!(
+                requirement(script).await,
+                ExecApprovalRequirement::Forbidden { ref reason }
+                    if reason.contains("nested agent launches are set to refuse")
+            ),
+            "refused before any prompt: {script}"
+        );
+    }
+    for script in [
+        "git commit -m \"fix codex review flow\"",
+        "rg \"codex exec\" docs",
+        "corbanu --help | grep review",
+        "corbanu --version",
+        // Accepted gap: the launch check refuses it after the prompt.
+        "env corbanu exec hi",
+    ] {
+        assert!(
+            !matches!(
+                requirement(script).await,
+                ExecApprovalRequirement::Forbidden { .. }
+            ),
+            "not refused: {script}"
+        );
+    }
+    // The vault rule keeps its strict net.
+    assert!(matches!(
+        requirement("env corbanu vault list").await,
+        ExecApprovalRequirement::Forbidden { .. }
+    ));
+    Ok(())
+}
+
+/// Issue #443: while the session's live level is Aggressive (right after
+/// `/security` confirms it, before the restart that loads the rules file),
+/// the vault rule is part of the policy: wrapped forms, other paths and a
+/// user's own allow rule are refused too. Outside Aggressive nothing changes.
+#[tokio::test]
+async fn issue_443_live_aggressive_adds_the_vault_rule() {
+    let mut parser = PolicyParser::new();
+    parser
+        .parse(
+            "user.rules",
+            r#"prefix_rule(pattern=["corbanu", "vault"], decision="allow")"#,
+        )
+        .expect("parse policy");
+    let manager = ExecPolicyManager::new(Arc::new(parser.build()));
+    let requirement = |command: Vec<String>, live_aggressive: bool| {
+        let manager = &manager;
+        async move {
+            manager
+                .create_exec_approval_requirement(
+                    ExecApprovalRequest {
+                        command: &command,
+                        approval_policy: AskForApproval::OnRequest,
+                        permission_profile: PermissionProfile::read_only(),
+                        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                        sandbox_permissions: SandboxPermissions::UseDefault,
+                        prefix_rule: None,
+                    },
+                    live_aggressive,
+                )
+                .await
+        }
+    };
+    let words = |text: &str| text.split(' ').map(str::to_string).collect::<Vec<_>>();
+    for command in [
+        words("corbanu vault list"),
+        words("/opt/bin/codex vault get provider/example"),
+        vec![
+            "bash".to_string(),
+            "-lc".to_string(),
+            "env FOO=1 corbanu vault list".to_string(),
+        ],
+    ] {
+        match requirement(command.clone(), /*live_aggressive*/ true).await {
+            ExecApprovalRequirement::Forbidden { reason } => assert!(
+                reason.contains("Security level Aggressive: agents cannot use the Corbanu vault."),
+                "{command:?}: {reason}"
+            ),
+            other => panic!("{command:?} not refused: {other:?}"),
+        }
+    }
+    assert!(!matches!(
+        requirement(words("corbanu vault list"), /*live_aggressive*/ false).await,
+        ExecApprovalRequirement::Forbidden { .. }
+    ));
+    assert!(!matches!(
+        requirement(words("corbanu --version"), /*live_aggressive*/ true).await,
+        ExecApprovalRequirement::Forbidden { .. }
+    ));
+}
+
+/// #444 (AGG-30): "don't ask again" for `python3 src/notes.py list` must not
+/// carry a chained command. Under Aggressive's approval policy (untrusted) a
+/// chained command that is not read-only still asks, and a chained read-only
+/// one (`cat .env`) runs without a prompt but never bypasses the sandbox
+/// (whether `.env` itself is readable there is the sandbox profile's
+/// protected-path rules, not tested here).
+#[tokio::test]
+async fn sec_444_remembered_prefix_does_not_cover_a_chained_command() {
+    let policy_src = r#"
+prefix_rule(pattern=["python3", "src/notes.py", "list"], decision="allow")
+"#;
+    let chained = |script: &str| vec!["bash".to_string(), "-lc".to_string(), script.to_string()];
+    assert_exec_approval_requirement_for_command(
+        ExecApprovalRequirementScenario {
+            policy_src: Some(policy_src.to_string()),
+            command: chained("python3 src/notes.py list; rm notes.txt"),
+            approval_policy: AskForApproval::UnlessTrusted,
+            permission_profile: PermissionProfile::workspace_write(),
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            prefix_rule: None,
+        },
+        ExecApprovalRequirement::NeedsApproval {
+            reason: None,
+            proposed_execpolicy_amendment: Some(ExecPolicyAmendment::new(vec![
+                "rm".to_string(),
+                "notes.txt".to_string(),
+            ])),
+        },
+    )
+    .await;
+    assert_exec_approval_requirement_for_command(
+        ExecApprovalRequirementScenario {
+            policy_src: Some(policy_src.to_string()),
+            command: chained("python3 src/notes.py list; cat .env"),
+            approval_policy: AskForApproval::UnlessTrusted,
+            permission_profile: PermissionProfile::workspace_write(),
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            prefix_rule: None,
+        },
+        ExecApprovalRequirement::Skip {
+            bypass_sandbox: false,
+            proposed_execpolicy_amendment: None,
+        },
+    )
+    .await;
 }

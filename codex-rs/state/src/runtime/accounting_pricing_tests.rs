@@ -115,6 +115,8 @@ fn inclusive_revisions_replace_and_reasoning_is_not_charged_twice() {
                 reasoning: Some(2),
                 total: None,
                 billed_usd: None,
+                refused_status: None,
+                session_ended_at_ms: None,
             },
             snapshot: Some(s),
             buckets: [
@@ -702,5 +704,122 @@ fn quotes_refuse_rules_this_build_does_not_have() {
             rules == 0 || error.to_string().contains("newer than this build"),
             "{error}"
         );
+    }
+}
+
+/// Local and undeclared work states no price and claims no money of either
+/// kind, and a day counts it apart from pay-per-use and subscription work.
+#[test]
+fn local_and_undeclared_work_is_neither_spent_nor_subscription() {
+    let attempt = attempt();
+    let rows = vec![row(/*revision*/ 1, json!({"input":50,"read":10}))];
+    let mut quotes = Vec::new();
+    for basis in [Basis::Local, Basis::Undeclared] {
+        let mut stated = snapshot();
+        stated.basis = basis;
+        // A basis that charges nothing cannot carry rates.
+        assert!(quote_observations(&attempt, &rows, std::slice::from_ref(&stated)).is_err());
+        stated.rates = Rates::default();
+        let quote = quote_observations(&attempt, &rows, &[stated]).unwrap();
+        assert_eq!(quote.basis(), basis);
+        assert!(!quote.is_plan());
+        assert_eq!(
+            (quote.known_subtotal, quote.known_equivalent),
+            (Decimal::default(), Decimal::default())
+        );
+        assert_eq!(
+            (quote.all_buckets_priced, quote.all_buckets_equivalent),
+            (None, None)
+        );
+        quotes.push(quote);
+    }
+    let priced = quote_observations(&attempt, &rows, &[snapshot()]).unwrap();
+    let totals = DayTotals::from_quotes(quotes.iter().chain([&priced])).unwrap();
+    assert_eq!(
+        (
+            totals.attempts,
+            totals.local_attempts,
+            totals.undeclared_attempts,
+            totals.plan_attempts
+        ),
+        (3, 1, 1, 0)
+    );
+    assert_eq!(
+        (totals.per_use_attempts(), totals.per_use_unknown()),
+        (1, 1)
+    );
+    assert_eq!(totals.known_usd, decimal("0.000153"));
+}
+
+/// A long-context tier prices the whole attempt above its threshold, the base
+/// rates price it at or below, and an unknown input prices nothing.
+#[test]
+fn long_context_tier_prices_whole_attempt_above_threshold() {
+    let mut a = attempt();
+    a.dialect = Dialect::Inclusive;
+    let mut s = snapshot();
+    s.rates = Rates {
+        noncached: Some(decimal("0.2")),
+        read: Some(decimal("0.02")),
+        write: Some(decimal("0.25")),
+        output: Some(decimal("1.2")),
+    };
+    s.long_context = Some(LongContext {
+        above_input_tokens: 100.try_into().unwrap(),
+        rates: Rates {
+            noncached: Some(decimal("0.4")),
+            read: Some(decimal("0.04")),
+            write: Some(decimal("0.5")),
+            output: Some(decimal("1.8")),
+        },
+    });
+    let quote = |patch: Value| {
+        quote_observations(&a, &[row(/*revision*/ 1, patch)], &[s.clone()]).unwrap()
+    };
+    // At the threshold: base rates. 40*0.2 + 50*0.02 + 10*0.25 + 5*1.2 per million.
+    let at = quote(json!({"input":100,"read":50,"write":10,"output":5}));
+    assert_eq!(at.all_buckets_priced, Some(decimal("0.0000175")));
+    // One token above: every bucket at the long-context rates.
+    let above = quote(json!({"input":101,"read":50,"write":10,"output":5}));
+    assert_eq!(above.all_buckets_priced, Some(decimal("0.0000324")));
+    assert_eq!(
+        above.buckets,
+        [
+            BucketQuote::Priced(decimal("0.0000164")),
+            BucketQuote::Priced(decimal("0.000002")),
+            BucketQuote::Priced(decimal("0.000005")),
+            BucketQuote::Priced(decimal("0.000009")),
+        ]
+    );
+    // Input unknown: either tier could apply, so nothing is priced, and the
+    // gap is the missing input count, not a missing rate.
+    let unknown = quote(json!({"read":50,"write":10,"output":5}));
+    assert_eq!(unknown.all_buckets_priced, None);
+    assert_eq!(unknown.known_subtotal, Decimal::default());
+    assert_eq!(unknown.buckets, [BucketQuote::MissingUsage; 4]);
+    // The tier needs ledger format 3 and is never read in the pre-basis form.
+    assert_eq!(s.ledger_format(), 3);
+    let payload = serde_json::to_string(&s).unwrap();
+    assert!(payload.contains("\"long_context\""));
+    assert_eq!(serde_json::from_str::<Snapshot>(&payload).unwrap(), s);
+    let mut plain = s.clone();
+    plain.long_context = None;
+    assert!(
+        !serde_json::to_string(&plain)
+            .unwrap()
+            .contains("long_context")
+    );
+}
+
+/// #475 (review S6): a refused attempt is an exact $0 with or without a price
+/// bound at dispatch, so it is never "had no price" either.
+#[test]
+fn a_refused_attempt_is_an_exact_zero_without_a_price() {
+    let refused = vec![row(/*revision*/ 1, json!({"refused_status": 401}))];
+    for snapshots in [vec![], vec![snapshot()]] {
+        let quote = quote_observations(&attempt(), &refused, &snapshots).unwrap();
+        assert_eq!(quote.buckets, [BucketQuote::Priced(Decimal::default()); 4]);
+        assert_eq!(quote.all_buckets_priced, Some(Decimal::default()));
+        assert_eq!(quote.usage.refused_status, Some(401));
     }
 }
