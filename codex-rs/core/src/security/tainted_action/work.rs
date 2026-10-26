@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn reverse_search_counts_nonallocating_scan_work() {
-        let text = "x".repeat(4096);
+        let text = "x".repeat(/*n*/ 4096);
         let counted = super::measure(|| {
             assert_eq!(super::rfind(&text, "zz"), None);
         });
