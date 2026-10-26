@@ -11,8 +11,9 @@
 //! patterns, `~`), groups, comments or here-documents, so both readings
 //! split it as a shell does and every value is visible; and when nothing
 //! in the line may make `cd` or `exit` other than the builtins, change
-//! where `cd` goes, or read a value from data. `|| return` stays uncertain: bash's `return` outside a
-//! function fails and the line goes on.
+//! where `cd` goes, or read a value from data. `|| return` stays
+//! uncertain: bash's `return` outside a function fails and the line goes
+//! on.
 //!
 //! Where a `cd` goes is followed as before; what the line does not show
 //! may still send it elsewhere or hide its failure (an exported `CDPATH`,
@@ -123,7 +124,19 @@ const REDEFINERS: &[&str] = &[
     "fc",
     "history",
     "unhash",
+    // Values read from data (`read v < f; let v` may set `CDPATH`).
+    "read",
+    "select",
+    "vared",
+    "sysread",
+    // zsh options by letter (`setopt -T` is `CDABLE_VARS`).
+    "setopt",
+    "unsetopt",
+    "shopt",
 ];
+
+/// The options `set -o` may name.
+const SET_OPTIONS: &[&str] = &["errexit", "nounset", "pipefail", "xtrace"];
 
 /// Reserved words and wrappers after which the next word may be a
 /// command's name.
@@ -229,8 +242,10 @@ struct Scan {
 }
 
 /// Read a plain script's words as a shell splits them (`None`: a `[` or
-/// `]` that may be a pattern, or a redirection shells read otherwise). Commands end at `;`, `&`, `|` and line
-/// breaks (not in `>&`, `<&`, `>|`); a redirection's operator (`2>`,
+/// `]` that may be a pattern, a redirection shells read otherwise, a zsh
+/// numeric pattern `<1-9>`, or `set` with an option other than `e`, `u`,
+/// `x` and `-o pipefail`). Commands end at `;`, `&`, `|` and line breaks
+/// (not in `>&`, `<&`, `>|`); a redirection's operator (`2>`,
 /// `>&`, zsh `>!`) takes the next word as its file, joined or not, except
 /// one that closes (`>&-`). A word may be a command's name first, or after
 /// assignments, redirections, reserved words and wrappers with their
@@ -259,6 +274,8 @@ fn scan(script: &str) -> Option<Scan> {
         let mut starts = true;
         let mut value = false;
         let mut file = false;
+        let mut setting = false;
+        let mut option_name = false;
         let mut at = 0;
         while at < segment.len() {
             work::step();
@@ -267,6 +284,14 @@ fn scan(script: &str) -> Option<Scan> {
                 continue;
             }
             if matches!(segment[at], '<' | '>') {
+                // zsh `<->`, `<1-9>`: a pattern, not a redirection.
+                let digits = segment[at + 1..]
+                    .iter()
+                    .take_while(|ch| ch.is_ascii_digit())
+                    .count();
+                if segment[at] == '<' && segment.get(at + 1 + digits) == Some(&'-') {
+                    return None;
+                }
                 at += 1;
                 while at < segment.len() && "<>&|!".contains(segment[at]) {
                     work::step();
@@ -303,8 +328,31 @@ fn scan(script: &str) -> Option<Scan> {
                 // A redirection's file, or its descriptor (`2>`).
                 continue;
             }
+            if setting {
+                // zsh `set -T` is `CDABLE_VARS`: only `e`, `u`, `x` and
+                // `-o` with one of `SET_OPTIONS`.
+                if std::mem::take(&mut option_name) {
+                    if !SET_OPTIONS.contains(&word.as_str()) {
+                        return None;
+                    }
+                    continue;
+                }
+                let letters = word.get(1..).unwrap_or_default();
+                let letters = letters.strip_suffix('o').map_or(letters, |rest| {
+                    option_name = true;
+                    rest
+                });
+                if !word.starts_with(['-', '+'])
+                    || word.len() < 2
+                    || !letters.chars().all(|letter| "eux".contains(letter))
+                {
+                    return None;
+                }
+                continue;
+            }
             if starts && !value {
                 found.named |= matches!(word.as_str(), "." | "r");
+                setting = word == "set";
                 // bash and zsh go on when a builtin's redirection fails.
                 found.exit_redirected |= word == "exit" && redirected;
             }

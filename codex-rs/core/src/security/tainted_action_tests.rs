@@ -6822,6 +6822,8 @@ fn d194_commands_after_a_certain_cd_run_where_it_went() {
         "cd a && cd b && cd c && git log --output=out.txt",
         "cd a && cd b && cd c && ls . > list.txt",
         "[ -d a ] || mkdir a; cd a && cd b && cd c && make 2>&1 | tee log",
+        "set -e; cd a && cd b && cd c && make > log",
+        "set -euo pipefail; cd a || exit 1; cd b && cd c && make > log",
     ]
     .into_iter()
     .filter(|command| script(command).is_some())
@@ -6918,6 +6920,15 @@ fn d194_uncertain_changes_still_ask() {
         "cd /home/fixture; read HOM? < q; cd /tmp && echo x >> .zshenv",
         "cd /home/fixture; cd /tm[p] && echo x >> .zshenv",
         "cd /home/fixture; cd ~/x && echo x >> .zshenv",
+        // Review 4.
+        "cd /home/fixture; a=<-> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; a=<0-9> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; h=/home/fixture; set -T; cd h && echo x >> .zshenv",
+        "cd /home/fixture; h=/home/fixture; set -eT; cd h || exit; echo x >> .zshenv",
+        "cd /home/fixture; h=/home/fixture; builtin set -T; cd h && echo x >> .zshenv",
+        "cd /home/fixture; h=/home/fixture; setopt -T; cd h && echo x >> .zshenv",
+        "cd /home/fixture; set -o cdablevars; cd h && echo x >> .zshenv",
+        "cd /home/fixture; declare -n r; read r < f; read r < g; cd u && echo x >> .zshenv",
         // Words the word lexer splits otherwise (review 1).
         "cd /home/fixture; cd /nope || exit,; echo x >> .zshenv",
         "cd /home/fixture; cd /nope || exit\r\necho x >> .zshenv",
