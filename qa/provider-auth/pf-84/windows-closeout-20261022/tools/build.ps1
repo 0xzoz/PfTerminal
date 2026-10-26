@@ -18,6 +18,10 @@ if (!(Test-Path "$root\src")) {
 }
 $actual = (& git -C "$root\src" rev-parse HEAD).Trim()
 if ($actual -ne $commit) { throw "Unexpected candidate commit" }
+# A reused worktree must be clean (no tracked changes, no untracked non-ignored files) so BUILD_OK is attributable to $commit.
+$dirty = & git -C "$root\src" status --porcelain --untracked-files=all
+if ($LASTEXITCODE -ne 0) { throw "Source status check failed" }
+if ($dirty) { throw "Source worktree is not clean; refusing to build. Inspect or recreate $root\src" }
 Set-Location "$root\src"
 Write-Output "BUILD_START $commit"
 & "C:\CorbanuQA\cargo\bin\cargo.exe" +1.99.1 build --locked --manifest-path codex-rs/Cargo.toml --profile dev-small -j8 -p codex-cli --bin corbanu *> "$root\build.log"
