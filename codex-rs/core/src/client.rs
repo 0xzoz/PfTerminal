@@ -385,7 +385,8 @@ type SharedServerConversationState = Arc<StdMutex<Option<ServerConversationState
 /// account and user, or the API key), as a digest, never the credential. A
 /// session whose sign-in was replaced by another user's or another key never
 /// reuses a connection opened with the old one; a refreshed token of the same
-/// sign-in keeps it.
+/// sign-in keeps it. Providers without a `CodexAuth` identity use a digest of
+/// their resolved API auth headers instead (#1326).
 #[derive(Clone, PartialEq, Eq)]
 struct ConnectionIdentity([u8; 32]);
 
@@ -396,7 +397,7 @@ impl std::fmt::Debug for ConnectionIdentity {
 }
 
 impl ConnectionIdentity {
-    fn of(auth: Option<&CodexAuth>) -> Self {
+    fn of(auth: Option<&CodexAuth>, api_auth: &dyn AuthProvider) -> Self {
         use sha2::Digest;
         let mut digest = sha2::Sha256::new();
         let mut field = |value: Option<&str>| match value {
@@ -412,6 +413,22 @@ impl ConnectionIdentity {
         field(auth.and_then(CodexAuth::get_account_id).as_deref());
         field(auth.and_then(CodexAuth::get_chatgpt_user_id).as_deref());
         field(auth.and_then(CodexAuth::api_key));
+        if auth.is_none() {
+            // No semantic sign-in identity is available for this provider.
+            // Hash the actual resolved header bytes, not the auth object's
+            // address or Debug output. Keep duplicate-value order, but ignore
+            // insertion order between different header names.
+            let headers = api_auth.to_auth_headers();
+            let mut fields = headers.iter().collect::<Vec<_>>();
+            fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+            digest.update(b"api-auth-headers");
+            for (name, value) in fields {
+                digest.update((name.as_str().len() as u64).to_le_bytes());
+                digest.update(name.as_str().as_bytes());
+                digest.update((value.as_bytes().len() as u64).to_le_bytes());
+                digest.update(value.as_bytes());
+            }
+        }
         Self(digest.finalize().into())
     }
 }
@@ -3735,7 +3752,8 @@ impl ModelClientSession {
                 "failed to build websocket prewarm client setup: {err}"
             ))
         })?;
-        let identity = ConnectionIdentity::of(client_setup.auth.as_ref());
+        let identity =
+            ConnectionIdentity::of(client_setup.auth.as_ref(), client_setup.api_auth.as_ref());
         let auth_context = AuthRequestTelemetryContext::new(
             client_setup.auth.as_ref().map(CodexAuth::auth_mode),
             client_setup.api_auth.as_ref(),
@@ -4469,7 +4487,8 @@ impl ModelClientSession {
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
             let client_setup = self.client.current_client_setup().await?;
-            let identity = ConnectionIdentity::of(client_setup.auth.as_ref());
+            let identity =
+                ConnectionIdentity::of(client_setup.auth.as_ref(), client_setup.api_auth.as_ref());
             self.drop_websocket_of_another_sign_in(&identity);
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),

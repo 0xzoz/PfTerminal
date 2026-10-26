@@ -41,6 +41,7 @@ mod outbound;
 mod outputs;
 mod paths;
 mod quoted;
+mod rerun;
 mod sed;
 mod shadow;
 mod shell;
@@ -336,6 +337,8 @@ const RECURSIVE_READERS: &[(&str, &[&str])] = &[
 pub(super) const WRITERS: &[&str] = &[
     "tee", "cp", "mv", "install", "ln", "rsync", "dd", "truncate", "touch", "ditto", "sed", "perl",
     "ed", "ex", "patch", "chmod", "unzip", "tar", "curl", "wget", "rm", "rmdir", "unlink", "mkdir",
+    // #1159: `script FILE` writes its typescript to FILE.
+    "script",
 ];
 /// `git config` keys that make git run a program (PF-23-S02).
 const GIT_RUN_KEYS: &[&str] = &[
@@ -883,10 +886,14 @@ struct Folders {
     /// #1283: a `cd`/`pushd` took a word the quote-aware reading cannot
     /// know (`D=~; cd "$D"`), so that reading's folder may be wrong.
     unchecked: bool,
-    /// #1309: other folders the quote-aware reading's line may be in: a
-    /// change it followed may not have happened (`cd /nonexistent`,
-    /// `false && cd x`, `(cd x)`, `cd x &`). Only that reading keeps them.
+    /// #1309: other folders the line may be in: a change it followed may
+    /// not have happened (`cd /nonexistent`, `false && cd x`, `(cd x)`,
+    /// `cd x &`).
     others: Vec<String>,
+    /// #1309: past `MAX_POSSIBLE_FOLDERS` the line may be in too many
+    /// folders to follow, so a file it names relative to its folder may
+    /// be anywhere.
+    lost: bool,
 }
 
 struct Classifier {
@@ -1248,6 +1255,7 @@ impl Classifier {
             unfollowed: false,
             unchecked: self.unknown_folder > 0,
             others: Vec::new(),
+            lost: false,
         };
         let mut variables: HashMap<String, String> = HashMap::new();
         for (name, value) in [
@@ -1414,6 +1422,13 @@ impl Classifier {
                 }
             }
         }
+        // #1064: a nameref (`declare -n r=v`) reads another variable's
+        // value, which the substituted words do not follow: its value is
+        // unseen.
+        for name in rerun::namerefs(command.as_ref(), words) {
+            work::step();
+            variables.insert(name.to_string(), shell::UNSEEN_OUTPUT.to_string());
+        }
         if self.rebuilt == 0 && indirect::misread_command(simple, words) {
             self.note(ProtectedActionKind::UnseenCode);
         }
@@ -1433,8 +1448,10 @@ impl Classifier {
             });
             // #988: `trap` runs its action later, like `eval` now. The word
             // lexer splits a quoted action, so every operand counts.
-            let eval_unseen = matches!(name.as_str(), "eval" | "trap")
-                && unseen[index + 1..].iter().any(|unseen| *unseen);
+            // #1064: and other commands that run an operand as code.
+            let eval_unseen = (matches!(name.as_str(), "eval" | "trap")
+                && unseen[index + 1..].iter().any(|unseen| *unseen))
+                || rerun::runs_unseen(name, words, unseen, *index);
             if self.rebuilt == 0 && (unseen[*index] || inline_unseen || eval_unseen) {
                 self.note(ProtectedActionKind::UnseenCode);
             }
@@ -1445,7 +1462,10 @@ impl Classifier {
             if unknown_folder::stack_change(name, args) {
                 folders.unfollowed = true;
             } else {
-                self.change_folder(name, args, folders, variables);
+                // #1309: this reading knows the words of `cd "$d"`; it loses
+                // its folder only past the possible folders.
+                let unknown = folders.lost;
+                self.follow_change(name, args, folders, variables, unknown);
             }
         }
         let mut git_config = GitConfigWrites::new(&lower, &hidden, &unchecked);
@@ -1461,6 +1481,7 @@ impl Classifier {
             },
         );
         let mut later = LaterWords::new(&lower);
+        let mut git_programs_read = false;
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
         // `timeout 9`, `eval`, `npx`, nested `sh -c`) put the real command later.
         for (index, word) in lower.iter().enumerate() {
@@ -1475,7 +1496,7 @@ impl Classifier {
             // #1276: or a finder's exec option with git attached
             // (`fd --exec=git`).
             let git_word = launched_git.attached(index).unwrap_or(word);
-            let is_git = basename(git_word) == "git";
+            let is_git = basename(git_word) == "git" || indirect::equals_git(git_word);
             let helper = git_helpers::git_name(git_word);
             let subcommand = helper.as_ref().and_then(Option::as_deref);
             if persistence_command(name, &mut later, index + 1)
@@ -1506,8 +1527,13 @@ impl Classifier {
                 &words[index + 1..],
                 simple.words.get(index + 1..).unwrap_or_default(),
             );
+            // #1159: programs git runs or copies, read once per command.
+            let git_program = (is_git || helper.is_some())
+                && !std::mem::replace(&mut git_programs_read, true)
+                && rerun::git_runs_program(git_args.0, subcommand);
             if (is_git && code_variables::git_runs_code_after_git(git_args.0, git_args.1))
                 || (helper == Some(None) && code_variables::git_runs_code(git_args.0, git_args.1))
+                || git_program
             {
                 self.note(ProtectedActionKind::UnseenCode);
             }
@@ -1568,6 +1594,15 @@ impl Classifier {
                 WRITERS.contains(&name.as_str()) || outputs.is_some(),
             )
         });
+        let path_writer = command
+            .as_ref()
+            .filter(|(_, name)| outputs::PATH_WRITERS.contains(&name.as_str()))
+            .map(|(index, _)| *index);
+        // #1159: `time -o FILE cmd` writes FILE.
+        let wrapper_outputs = command
+            .as_ref()
+            .map(|(index, _)| outputs::wrapper_output_files(&words[..*index]))
+            .unwrap_or_default();
         let cwd = folders.cwd.clone();
         // Words resolve against the folder of a `-C`/`--directory` flag
         // (`tar -C ~ ...`, `git -C ~/.codex ...`) once one has been given.
@@ -1579,6 +1614,10 @@ impl Classifier {
         let mut chained: Vec<String> = Vec::new();
         let mut previous: Option<&str> = None;
         let mut bases = vec![cwd.clone()];
+        // #1309: the folders written words resolve against from each other
+        // folder the line may be in, after the folder flags given so far.
+        let mut flags: Vec<&str> = Vec::new();
+        let mut other_bases = std::borrow::Cow::Borrowed(folders.others.as_slice());
         for (position, word) in words.iter().enumerate() {
             work::step();
             let written = simple.writes_to.contains(&position)
@@ -1591,17 +1630,32 @@ impl Classifier {
                 folder = self.homes.resolve(word, &cwd);
                 self.chain_folder(&mut chained, word, &cwd);
                 folder_value = true;
+                flags.push(word);
             } else if let Some((flag, value)) = word.split_once('=')
                 && FOLDER_FLAGS.contains(&flag)
             {
                 folder = self.homes.resolve(value, &cwd);
                 self.chain_folder(&mut chained, value, &cwd);
                 folder_value = true;
+                flags.push(value);
             }
             if folder_value {
                 bases = folder_bases(&folder, &chained, &cwd);
+                if flags.len() <= MAX_CHAINED_FOLDERS {
+                    other_bases = self.other_bases(&folders.others, &flags, &bases).into();
+                }
             }
             previous = Some(word.as_str());
+            // #1159: a file written whose name holds output the classifier
+            // cannot see (`tee "$(cat f)"`, `> $(cat f)`) may be any file.
+            if (simple.writes_to.contains(&position)
+                || (path_writer.is_some_and(|index| position > index)
+                    && simple.stdin_from != Some(position)
+                    && simple.here_string != Some(position)))
+                && outputs::unseen_place(word)
+            {
+                self.note(ProtectedActionKind::Persistence);
+            }
             // Attached, assigned and volume forms (`-o/path`, `f=@/path`,
             // `~/.aws:/c`) are paths too.
             let pieces = std::iter::once(word.as_str()).chain(
@@ -1625,7 +1679,8 @@ impl Classifier {
                     let resolved = self.homes.resolve(candidate, base);
                     self.word_path(&resolved, candidate, depth);
                     if written
-                        && (self.homes.is_persistence(&resolved) || self.unknown_place(candidate))
+                        && (self.homes.is_persistence(&resolved)
+                            || self.unknown_place(folders, candidate))
                     {
                         self.note(ProtectedActionKind::Persistence);
                     }
@@ -1633,14 +1688,38 @@ impl Classifier {
                         self.note(ProtectedActionKind::Credentials);
                     }
                 }
+                // #1309: a file written in each other folder the line may be in.
+                for base in other_bases.iter().filter(|_| written) {
+                    work::step();
+                    let resolved = self.homes.resolve(candidate, base);
+                    self.word_path(&resolved, candidate, depth);
+                    if self.homes.is_persistence(&resolved) {
+                        self.note(ProtectedActionKind::Persistence);
+                    }
+                }
             }
             if let Some(payload) = indirect::decoded_payload(word) {
                 self.script(&payload, &cwd, depth + 1);
             }
         }
-        for file in outputs.iter().flatten() {
+        // #1159: git writing the working tree in a folder that is or holds
+        // a home.
+        if command
+            .as_ref()
+            .is_some_and(|(index, name)| outputs::writes_working_tree(name, &words[index + 1..]))
+            && bases
+                .iter()
+                .chain(other_bases.iter())
+                .any(|base| self.homes.holds_a_home(&self.homes.resolve(".", base)))
+        {
+            self.note(ProtectedActionKind::Persistence);
+        }
+        for file in outputs.iter().flatten().chain(&wrapper_outputs) {
             work::step();
-            for base in &bases {
+            if outputs::unseen_place(file) {
+                self.note(ProtectedActionKind::Persistence);
+            }
+            for base in bases.iter().chain(other_bases.iter()) {
                 work::step();
                 let resolved = self.homes.resolve(file, base);
                 self.word_path(&resolved, file, depth);
@@ -1648,7 +1727,7 @@ impl Classifier {
                 // ~`, `--output-directory ~/`) may be the home's.
                 if self.homes.is_persistence(&resolved)
                     || (file.ends_with('/') && self.homes.holds_a_home(&resolved))
-                    || self.unknown_place(file)
+                    || self.unknown_place(folders, file)
                 {
                     self.note(ProtectedActionKind::Persistence);
                 }
@@ -1919,13 +1998,18 @@ impl Classifier {
 
     /// #1283: in a folder the classifier cannot know, a file named relative
     /// to it (`.zshenv`, `../x`, `$d/x`) may be any file.
-    fn unknown_place(&self, word: &str) -> bool {
-        self.unknown_folder > 0
-            && (word.contains("..")
-                // #1261: under Windows path rules `C:x` is relative to drive
-                // `C:`'s own folder, which the probes below do not change.
-                || (self.homes.windows_paths() && windows_reads::drive_relative(word))
-                || self.homes.resolve(word, "/a") != self.homes.resolve(word, "/b"))
+    /// #1309: so too past `MAX_POSSIBLE_FOLDERS`.
+    fn unknown_place(&self, folders: &Folders, word: &str) -> bool {
+        (self.unknown_folder > 0 || folders.lost) && self.relative_place(word)
+    }
+
+    /// Whether `word` names a file relative to the folder it is used in.
+    fn relative_place(&self, word: &str) -> bool {
+        word.contains("..")
+            // #1261: under Windows path rules `C:x` is relative to drive
+            // `C:`'s own folder, which the probes below do not change.
+            || (self.homes.windows_paths() && windows_reads::drive_relative(word))
+            || self.homes.resolve(word, "/a") != self.homes.resolve(word, "/b")
     }
 
     /// Follow `cd`, `pushd` and `popd` (also behind `builtin`/`command`).
