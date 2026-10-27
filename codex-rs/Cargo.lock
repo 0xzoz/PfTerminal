@@ -3986,7 +3986,6 @@ dependencies = [
 name = "codex-otel"
 version = "0.1.48"
 dependencies = [
- "async-trait",
  "bytes",
  "chrono",
  "codex-api",

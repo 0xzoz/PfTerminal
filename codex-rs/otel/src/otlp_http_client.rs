@@ -9,8 +9,11 @@
 //! Like the upstream adapters, these return non-success HTTP statuses as
 //! `Ok(response)` so the exporter can classify them, and reject response bodies
 //! larger than 4 MiB.
+//!
+//! `HttpClient` is declared with `#[async_trait]`; the impls below spell out
+//! the expanded signature because the workspace bans depending on
+//! `async-trait` directly.
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use bytes::BytesMut;
 use http::Request;
@@ -18,7 +21,11 @@ use http::Response;
 use opentelemetry_http::HttpClient;
 use opentelemetry_http::HttpError;
 use opentelemetry_http::ResponseBodyTooLarge;
+use std::future::Future;
 use std::io::Read;
+use std::pin::Pin;
+
+type SendFuture<'a> = Pin<Box<dyn Future<Output = Result<Response<Bytes>, HttpError>> + Send + 'a>>;
 
 /// Same limit as the built-in `opentelemetry-http` clients.
 const MAX_RESPONSE_BODY_BYTES: usize = 4 * 1024 * 1024;
@@ -31,11 +38,8 @@ impl BlockingOtlpHttpClient {
     pub(crate) fn new(client: reqwest::blocking::Client) -> Self {
         Self(client)
     }
-}
 
-#[async_trait]
-impl HttpClient for BlockingOtlpHttpClient {
-    async fn send_bytes(&self, request: Request<Bytes>) -> Result<Response<Bytes>, HttpError> {
+    fn send_blocking(&self, request: Request<Bytes>) -> Result<Response<Bytes>, HttpError> {
         let mut response = self.0.execute(request.try_into()?)?;
         let status = response.status();
         let headers = std::mem::take(response.headers_mut());
@@ -50,6 +54,19 @@ impl HttpClient for BlockingOtlpHttpClient {
     }
 }
 
+impl HttpClient for BlockingOtlpHttpClient {
+    fn send_bytes<'life0, 'async_trait>(
+        &'life0 self,
+        request: Request<Bytes>,
+    ) -> SendFuture<'async_trait>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.send_blocking(request) })
+    }
+}
+
 /// Async client for the Tokio batch span processor.
 #[derive(Debug)]
 pub(crate) struct AsyncOtlpHttpClient(reqwest::Client);
@@ -58,11 +75,8 @@ impl AsyncOtlpHttpClient {
     pub(crate) fn new(client: reqwest::Client) -> Self {
         Self(client)
     }
-}
 
-#[async_trait]
-impl HttpClient for AsyncOtlpHttpClient {
-    async fn send_bytes(&self, request: Request<Bytes>) -> Result<Response<Bytes>, HttpError> {
+    async fn send_async(&self, request: Request<Bytes>) -> Result<Response<Bytes>, HttpError> {
         let mut response = self.0.execute(request.try_into()?).await?;
         let status = response.status();
         let headers = std::mem::take(response.headers_mut());
@@ -74,6 +88,19 @@ impl HttpClient for AsyncOtlpHttpClient {
             body.extend_from_slice(&chunk);
         }
         build_response(status, headers, body.freeze())
+    }
+}
+
+impl HttpClient for AsyncOtlpHttpClient {
+    fn send_bytes<'life0, 'async_trait>(
+        &'life0 self,
+        request: Request<Bytes>,
+    ) -> SendFuture<'async_trait>
+    where
+        'life0: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(self.send_async(request))
     }
 }
 
