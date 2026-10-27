@@ -61,6 +61,13 @@ const PROTECTED_CODEX_HOME_ENTRIES: &[&str] = &[
     // #651: the database init lock (#586); a command holding it would stall
     // every new launch on this home.
     super::preflight::DB_INIT_LOCK,
+    // #1107: the rest of what Corbanu keeps beside the databases
+    // (`preflight::DATABASE_FOLDER_ENTRIES`), as in a separate database
+    // folder: the GPU controller's lock, pending accounting records and the
+    // databases recovery set aside.
+    "gpu-controller.lock",
+    "accounting-pending",
+    "db-backups",
 ];
 
 /// The entries of [`PROTECTED_CODEX_HOME_ENTRIES`] that are directories. On
@@ -74,6 +81,8 @@ const PROTECTED_CODEX_HOME_DIRS: &[&str] = &[
     "log",
     "sessions",
     "archived_sessions",
+    "accounting-pending",
+    "db-backups",
 ];
 
 /// Credential files under `$HOME` that tools read for the user: CLI tokens
@@ -99,6 +108,11 @@ static ACTIVE: OnceLock<LaunchContract> = OnceLock::new();
 pub(crate) enum KeptFile {
     /// A CLI token ([`PROTECTED_HOME_ENTRIES`] and their Windows places).
     CliToken,
+    /// The Google Cloud CLI's folder on Windows (`%APPDATA%\gcloud`), which
+    /// holds its credentials and config.
+    GoogleCloudCliFolder,
+    /// A file or folder inside it.
+    InGoogleCloudCliFolder,
     /// The macOS keychains folder.
     Keychain,
     /// Corbanu's own files: its sign-in, vault, config, history, databases
@@ -206,6 +220,9 @@ pub(crate) struct LaunchContract {
     cli_token_paths: Vec<AbsolutePathBuf>,
     /// #1077: the keychain folders among [`Self::protected_read_paths`].
     keychain_paths: Vec<AbsolutePathBuf>,
+    /// The Google Cloud CLI's folder among [`Self::protected_read_paths`]
+    /// (Windows only).
+    google_cloud_cli_folders: Vec<AbsolutePathBuf>,
     managed_values: Vec<Zeroizing<String>>,
     hardened: bool,
     /// #651: database folders set apart from `CODEX_HOME` (`sqlite_home`)
@@ -350,6 +367,7 @@ impl LaunchContract {
         // file is.
         let mut cli_token_paths = Vec::new();
         let mut keychain_paths = Vec::new();
+        let mut google_cloud_cli_folders = Vec::new();
         // Windows has no HOME by default; its profile directory is USERPROFILE.
         let home = std::env::var_os("HOME").or_else(|| {
             cfg!(windows)
@@ -372,7 +390,7 @@ impl LaunchContract {
             && let Ok(app_data) = AbsolutePathBuf::from_absolute_path(app_data)
         {
             cli_token_paths.push(app_data.join("GitHub CLI").join("hosts.yml"));
-            cli_token_paths.push(app_data.join("gcloud"));
+            google_cloud_cli_folders.push(app_data.join("gcloud"));
         }
         if cfg!(windows)
             && let Some(cargo_home) = std::env::var_os("CARGO_HOME").or_else(|| {
@@ -394,6 +412,7 @@ impl LaunchContract {
         }
         protected_read_paths.extend(cli_token_paths.iter().cloned());
         protected_read_paths.extend(keychain_paths.iter().cloned());
+        protected_read_paths.extend(google_cloud_cli_folders.iter().cloned());
         if let Some(dir) = codex_network_proxy::credential_broker_user_runtime_dir()
             && let Ok(dir) = AbsolutePathBuf::from_absolute_path(dir)
         {
@@ -404,6 +423,7 @@ impl LaunchContract {
             protected_read_paths,
             cli_token_paths,
             keychain_paths,
+            google_cloud_cli_folders,
             managed_values,
             hardened,
             database_folders: std::sync::Mutex::new(Vec::new()),
@@ -641,6 +661,16 @@ impl LaunchContract {
             KeptFile::CliToken
         } else if among(&self.keychain_paths) {
             KeptFile::Keychain
+        } else if among(&self.google_cloud_cli_folders) {
+            if self
+                .google_cloud_cli_folders
+                .iter()
+                .any(|folder| folder.as_path() == path)
+            {
+                KeptFile::GoogleCloudCliFolder
+            } else {
+                KeptFile::InGoogleCloudCliFolder
+            }
         } else {
             KeptFile::CorbanuOwn
         })

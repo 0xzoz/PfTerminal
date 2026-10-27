@@ -102,6 +102,9 @@ use wiremock::matchers::path;
 const TEST_CHATGPT_ID_TOKEN: &str = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJlbWFpbCI6InVzZXJAZXhhbXBsZS5jb20iLCJlbWFpbF92ZXJpZmllZCI6dHJ1ZSwiaHR0cHM6Ly9hcGkub3BlbmFpLmNvbS9hdXRoIjp7ImNoYXRncHRfdXNlcl9pZCI6InVzZXItMTIzNDUiLCJ1c2VyX2lkIjoidXNlci0xMjM0NSIsImNoYXRncHRfcGxhbl90eXBlIjoicHJvIiwiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjb3VudC0xMjMifX0.c2ln";
 const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 
+#[path = "client_connection_identity_tests.rs"]
+mod connection_identity;
+
 #[test]
 fn pf_30_s01_all_native_wire_builders_reject_missing_admission() {
     for level in [
@@ -2743,6 +2746,68 @@ async fn openai_unauthorized_without_credentials_names_the_variables_to_set() {
     assert!(message.contains("corbanu login"), "{message}");
 }
 
+/// #1311 (D171): a request on a named account that gets a 401 because the
+/// account was removed meanwhile (removal revokes its tokens) is reported
+/// with the account's recovery, as the next request would be, not with a
+/// generic unauthorized error. While the account still holds a sign-in, the
+/// provider's error is kept.
+#[tokio::test]
+async fn unauthorized_after_the_named_account_was_removed_names_the_recovery() {
+    let home = TempDir::new().expect("home");
+    let work = codex_login::NamedChatgptAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    };
+    codex_login::login_named_account_with_api_key(home.path(), &work, "sk-work-canary")
+        .expect("named sign-in");
+    let base = AuthManager::from_auth_for_testing_with_home(
+        CodexAuth::from_api_key("sk-default-canary"),
+        home.path().to_path_buf(),
+    );
+    let named = base.for_named_account_loaded(work).await;
+    let mut info = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    info.account = Some(codex_model_provider_info::NamedProviderAccount {
+        provider_id: "openai".to_string(),
+        name: "work".to_string(),
+    });
+    let provider = create_model_provider(info, Some(Arc::clone(&named)));
+
+    let signed_in = openai_unauthorized_error(&provider).await;
+    assert!(
+        !signed_in.contains("corbanu login --account work"),
+        "{signed_in}"
+    );
+
+    let name = codex_vault::ProviderAccountName::parse("work").expect("name");
+    assert!(
+        codex_vault::Vault::new(home.path().to_path_buf())
+            .remove_provider_account("openai", &name)
+            .expect("remove")
+    );
+    let mut auth_recovery = Some(named.unauthorized_recovery());
+    let removed = super::handle_unauthorized(
+        TransportError::Http {
+            status: http::StatusCode::UNAUTHORIZED,
+            url: Some("wss://api.openai.com/v1/responses".to_string()),
+            headers: None,
+            body: Some(r#"{"error":{"message":"token revoked"}}"#.to_string()),
+        },
+        &mut auth_recovery,
+        &test_session_telemetry(),
+        &provider,
+    )
+    .await
+    .expect_err("401 should fail")
+    .to_string();
+
+    assert!(
+        removed.contains("account `work` has no sign-in (it may have been removed or signed out)")
+            && removed.contains("corbanu login --account work"),
+        "{removed}"
+    );
+    assert!(!removed.contains("sk-"), "{removed}");
+}
+
 #[tokio::test]
 async fn openai_unauthorized_without_env_fallback_asks_for_a_sign_in() {
     let home = TempDir::new().expect("home");
@@ -3018,7 +3083,8 @@ async fn pf_60_s03_memory_summarize_is_recorded() -> anyhow::Result<()> {
         .await;
 
     let home = tempfile::tempdir()?;
-    let mut config = crate::session::tests::build_test_config(home.path()).await;
+    let test_cwd = tempfile::tempdir()?;
+    let mut config = crate::session::tests::build_test_config(home.path(), test_cwd.path()).await;
     config.model_provider = codex_model_provider_info::ModelProviderInfo {
         request_max_retries: Some(0),
         stream_max_retries: Some(0),

@@ -2,6 +2,7 @@
 #![cfg(unix)]
 
 use super::*;
+use crate::security::launch_contract::KeptFile;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -304,6 +305,23 @@ fn issue_1077_the_kept_read_note_names_the_file_and_what_it_is() {
     }
 }
 
+/// The Google Cloud CLI's folder on Windows (`%APPDATA%\gcloud`) holds its
+/// credentials and config, so the note calls it that folder, not a CLI
+/// token file; a file inside it is "in" the folder.
+#[test]
+fn the_kept_read_note_names_the_google_cloud_cli_folder() {
+    let notes = [
+        (r"%APPDATA%\gcloud", KeptFile::GoogleCloudCliFolder),
+        (
+            r"%APPDATA%\gcloud\credentials.db",
+            KeptFile::InGoogleCloudCliFolder,
+        ),
+        ("~/.netrc", KeptFile::CliToken),
+    ]
+    .map(|(path, kept)| super::super::moderate_kept_read_note(path, kept));
+    insta::assert_snapshot!(notes.join("\n\n"));
+}
+
 /// #839: what an explained denial was, for the inspector's recent denials:
 /// Moderate's own, or kept by the secretless launch contract.
 #[test]
@@ -323,6 +341,7 @@ fn issue_839_explained_denials_say_what_was_denied() {
             &command,
             &fixture.project,
             &lines,
+            /*failed*/ true,
         )
         .map(|(denied, _)| denied)
     };
@@ -336,6 +355,34 @@ fn issue_839_explained_denials_say_what_was_denied() {
             "denied by the sandbox under Moderate"
         )
     );
+}
+
+/// #1312: a command that exited 0 is explained only by a protected path it
+/// names itself (a later command hid the failure); a denial line in its
+/// output alone (a search printing old denial lines) explains nothing.
+#[test]
+fn issue_1312_exit_zero_needs_a_path_the_command_names() {
+    let fixture = Fixture::new();
+    let auth = format!("{}/auth.json", fixture.home.display());
+    let lines = [format!("notes.md:3:cat: {auth}: Operation not permitted")];
+    let denied = |script: String, failed: bool| {
+        explain_denied(
+            &fixture.inputs(Fixture::profile()),
+            /*contract*/ None,
+            &["/bin/bash".to_string(), "-c".to_string(), script],
+            &fixture.project,
+            &lines,
+            failed,
+        )
+        .map(|(denied, _)| denied)
+    };
+    let named = format!("cat '{auth}'; echo \"exit=$?\"");
+    assert_eq!(denied(named.clone(), /*failed*/ true), Some(Denied::Read));
+    assert_eq!(denied(named, /*failed*/ false), Some(Denied::Read));
+    // The output alone: explained only for a failed command (#621).
+    let search = "rg -n 'not permitted' notes.md".to_string();
+    assert_eq!(denied(search.clone(), /*failed*/ true), Some(Denied::Read));
+    assert_eq!(denied(search, /*failed*/ false), None);
 }
 
 /// #1087 (MOD-09 item 5): an in-process file tool's read (the image tool's)
@@ -408,4 +455,151 @@ fn issue_1087_file_tool_denials_name_the_level() {
             super::super::explanation(&shown),
         ))
     );
+}
+
+/// #1139 (D94, MOD-11): under Moderate, a write into the project's `.git`
+/// (a hook, its config) that the sandbox stops names Moderate and the way
+/// forward, both where the command names the path and where only git's
+/// denial line reports it; under secretless launch, no level change is
+/// offered. Nothing outside a writable folder's `.git` is attributed.
+#[test]
+fn issue_1139_moderate_git_folder_write_names_the_level() {
+    let fixture = Fixture::new();
+    std::fs::create_dir_all(fixture.project.join(".git/hooks")).expect(".git/hooks");
+    std::fs::write(fixture.project.join(".git/config"), "").expect(".git/config");
+
+    let hook = "printf 'echo hi\\n' > .git/hooks/pre-commit";
+    let hook_line = "bash: line 1: .git/hooks/pre-commit: Operation not permitted";
+    let explained = fixture.explain(Fixture::profile(), /*contract*/ None, hook, hook_line);
+    assert_eq!(
+        explained,
+        Some(git_write_explanation(".git/hooks/pre-commit"))
+    );
+    insta::assert_snapshot!(
+        "moderate_git_folder_write_explanation",
+        explained.expect("explained")
+    );
+
+    let config = "git config user.name injected";
+    let config_line = "error: could not lock config file .git/config: Operation not permitted";
+    assert_eq!(
+        fixture.explain(
+            Fixture::profile(),
+            /*contract*/ None,
+            config,
+            config_line
+        ),
+        Some(git_write_explanation(".git/config"))
+    );
+
+    let contract = fixture.contract();
+    let explained = fixture.explain(Fixture::profile(), Some(&contract), config, config_line);
+    assert_eq!(explained, Some(kept_git_write_explanation(".git/config")));
+    insta::assert_snapshot!(
+        "moderate_git_folder_write_kept_explanation",
+        explained.expect("explained")
+    );
+
+    // Not a `.git` the sandbox keeps inside a writable folder: one in a
+    // folder the person's own sandbox cannot write. With the person's own
+    // full access, Moderate's own rules keep git config read-only and say so
+    // as before (#748).
+    let other = format!("{}/repo/.git/config", fixture.home.display());
+    assert_eq!(
+        fixture.explain(
+            Fixture::profile(),
+            /*contract*/ None,
+            &format!("printf x > '{other}'"),
+            &format!("bash: {other}: Operation not permitted")
+        ),
+        None
+    );
+    assert_eq!(
+        fixture.explain(
+            PermissionProfile::Disabled,
+            /*contract*/ None,
+            config,
+            config_line
+        ),
+        Some(write_explanation(".git/config", WayForward::Permissive))
+    );
+    // #1139 review: a command that changed folder may have written another
+    // repository's `.git`; a relative path it reports is not attributed.
+    let outside = format!("{}/repo", fixture.home.display());
+    for (script, line) in [
+        (
+            format!("cd '{outside}' && git config user.name x"),
+            config_line,
+        ),
+        (
+            format!("git -C '{outside}' config user.name x"),
+            config_line,
+        ),
+        (
+            format!("GIT_DIR='{outside}/.git' git config user.name x"),
+            config_line,
+        ),
+        (
+            format!("cd '{outside}' && printf x > .git/hooks/pre-commit"),
+            hook_line,
+        ),
+    ] {
+        assert_eq!(
+            fixture.explain(Fixture::profile(), /*contract*/ None, &script, line),
+            None,
+            "{script}"
+        );
+    }
+    // An absolute path in the project still is.
+    let project_config = format!("{}/.git/config", fixture.project.display());
+    assert_eq!(
+        fixture.explain(
+            Fixture::profile(),
+            /*contract*/ None,
+            &format!(
+                "cd /tmp && git -C '{}' config user.name x",
+                fixture.project.display()
+            ),
+            &format!("error: could not lock config file {project_config}: Operation not permitted")
+        ),
+        Some(git_write_explanation(&project_config))
+    );
+
+    // A denied write that involves no `.git` is not attributed either.
+    assert_eq!(
+        fixture.explain(
+            Fixture::profile(),
+            /*contract*/ None,
+            "printf x > notes/a.txt",
+            "bash: notes/a.txt: Operation not permitted"
+        ),
+        None
+    );
+}
+
+/// #1323: under Moderate, a search that exited 0 is not explained by its
+/// pattern when its output prints an old denial line naming it; a path the
+/// search reads, and a failed search, are explained as before.
+#[test]
+fn issue_1323_a_search_pattern_is_not_a_denied_path() {
+    let fixture = Fixture::new();
+    let auth = format!("{}/auth.json", fixture.home.display());
+    let denied = |script: String, line: String, failed: bool| {
+        explain_denied(
+            &fixture.inputs(Fixture::profile()),
+            /*contract*/ None,
+            &["/bin/bash".to_string(), "-c".to_string(), script],
+            &fixture.project,
+            &[line],
+            failed,
+        )
+        .map(|(denied, _)| denied)
+    };
+    let old_line = format!("notes.md:3:cat: {auth}: Operation not permitted");
+    let search = format!("rg -F '{auth}' notes.md");
+    assert_eq!(denied(search.clone(), old_line.clone(), false), None);
+    assert_eq!(denied(search, old_line, true), Some(Denied::Read));
+    let read = format!("grep -c token '{auth}'; echo \"exit=$?\"");
+    let line = format!("grep: {auth}: Operation not permitted");
+    assert_eq!(denied(read, line, false), Some(Denied::Read));
 }

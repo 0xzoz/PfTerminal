@@ -6,9 +6,28 @@ Owner decisions (Travis, 2026-10-15): S06–S09 accepted; S10 may run code-blind
 on VM "macOS 3"; #824 (realtime) is included only if merged before the freeze — it was not, so realtime is the tracked
 known gap. **Not accepted: S10 needs Travis's acceptance.**
 
-## Result
+## Current status (2026-10-27)
 
-37 cases: **29 passed, 1 failed, 7 blocked** ([dispositions.md](dispositions.md), [results.json](results.json)).
+- **33 passed, 0 failed, 4 blocked** of 37 cases. Two dated results after the first run, below, produced this count:
+  - **Re-run R1 (2026-10-27):** ACC-06, ACC-15 and ACC-18 passed. ACC-11 and ACC-14 stay blocked, each on one result
+    that the tester judged but did not capture. Record: [rerun-r1-20261022/](rerun-r1-20261022/README.md).
+  - **D113 (2026-10-21):** ACC-04 is recorded as passed.
+- The 4 blocked cases:
+  - ACC-11 and ACC-14 (blockers), see the next point;
+  - ACC-22 (advisory; its starting condition was not met);
+  - ACC-35 (optional; D3 was not granted).
+- No case failed. ACC-11 and ACC-14 have every other result observed and passing:
+  - ACC-11's missing result is "exactly one link contains Reopen warm-up". It shows only in a later capture.
+  - ACC-14's missing result is the exact-cost comparison of its two oldest requests. Those were read only rounded in
+    ACC-14, and exactly later, in ACC-18.
+- [dispositions.md](dispositions.md) and [results.json](results.json) carry the R1 dispositions for the five re-run
+  cases. Each keeps its first-run entry under `prior_run`. Their totals read 32 passed and 5 blocked, because ACC-04
+  stays blocked there and D113 is recorded only in the addendum below.
+
+## Result (first run, 2026-10-16)
+
+37 cases: **29 passed, 1 failed, 7 blocked**. The first-run dispositions of the five re-run cases are under
+`prior_run` in [results.json](results.json).
 
 - **Failed (1):** ACC-06 (#898): after `/review`, `/cost` shows no `code-review:` request and no new request anywhere. The
   run's ledger (integrator's read, [runs/A/ledger-attempts.txt](runs/A/ledger-attempts.txt)) holds the review's six
@@ -104,7 +123,7 @@ installed at this run's request because the earlier build lacked #859 ([candidat
 - Realtime (#824, fix #882 unmerged at the freeze), TensorCash, DeepSeek holiday calendar, BigModel, older records,
   Windows and Linux; `fork:` (no client makes one); Moonshot unlisted models and K2.7 HighSpeed/K2.6 rates; the 5-minute
   cache lifetime; same-conversation `/resume`; a real Moonshot cache hit (D3 not granted).
-- Request-ID stability across reopens was not observed (ACC-11, 14, 18): the executors re-read costs, not IDs.
+- Request-ID stability across reopens was not observed (ACC-11, 14, 18): the executors re-read costs, not IDs. Observed and passed in re-run R1.
 - `harness/agms-product` was replaced (harness fix 1, corbanu route only) while group F's executor was running, before
   its first product start; packet v2 was installed while group D ran; the fix check used lane agmx0 concurrently with F.
 - Gate attempts 1 and 2 each sent one real Z.AI smoke turn although they failed (see the addendum).
@@ -121,3 +140,40 @@ installed at this run's request because the earlier build lacked #859 ([candidat
 ## Review budget
 
 5 of 5 used ([review-ledger.md](review-ledger.md)): design, design review, evidence checks r1-r3. The last verdict (r3) is **fail** on written statements only; its corrections are applied but not independently re-checked; no extension requested.
+
+## After this record: ACC-04 on the local model (2026-10-21)
+
+Dated addendum; the record above is unchanged.
+
+- ACC-04 was re-run with the owner's local model as the product's model (D74, D75) in the
+  [second local-model re-run](../../../security-levels/milestones/localmodel-rerun2-20261021/README.md)
+  ([#1191](https://github.com/CorbanuCore/CorbanuTerminal/pull/1191), candidate `bc1deda532`, the record's neutral
+  profile). Inside `/side` the model started a sub-agent. Its request is labelled `Turn: side:agent:…`, listed once
+  under the conversation, and no other conversation shows a request.
+- **D113** (owner, 2026-10-21): ACC-04 is recorded as **passed**. The 37 cases are now **30 passed, 1 failed (ACC-06),
+  6 blocked**. It ran on the local model only, with none of this record's routes or prices (named limit of that
+  record).
+
+## After this record: re-run R1 (2026-10-27)
+
+Dated addendum. The first-run sections above are unchanged in substance. This PR adds a current-status section,
+renames the result heading, and adds one note to a named limit.
+
+- ACC-06 (#898 is closed as fixed), ACC-11, ACC-14, ACC-15 and ACC-18 were re-run under amendment R1.
+  - A fresh designer wrote it. A separate reviewer returned CHANGES with a full revised text, and that revised text was
+    frozen word for word, before the first VM started.
+  - The candidate was a private signed build of `63c9daca26`.
+  - Testers were GLM 5.3 Flash, running code-blind on fresh Tart clones. Host relays held the keys, so no real key
+    entered a guest.
+- **ACC-06 passed:** each of the review's five requests shows `Turn: code-review:…`.
+- **ACC-15 passed:** the side turn shows `Turn: side:…`, and exactly one new notice appeared.
+- **ACC-18 passed:** after all the group's reopens, every earlier Request ID comes back with its exact cost, and the per-conversation
+  sums hold for both conversations.
+- **ACC-11 and ACC-14 stay blocked**, each on one result the tester judged without a capture (dispositions.md).
+  - Their first-run gap, re-reading earlier Request IDs after the reopen, is now observed and passes.
+  - The tester reported both as passed.
+- **Attempts that did not count:**
+  - A-R1 on 2026-10-22 (Z.AI balance);
+  - C-R1 attempt 1 (the tester's stream stalled mid-ACC-14).
+- The expired synthetic mediation CA was re-issued.
+- Details, evidence and integrator checks: [rerun-r1-20261022/README.md](rerun-r1-20261022/README.md).

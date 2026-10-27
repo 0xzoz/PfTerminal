@@ -92,6 +92,7 @@ mod hooks;
 mod hooks_mcp;
 mod image_rollout;
 mod issue_1087;
+mod issue_1139;
 mod issue_443;
 mod issue_445;
 mod issue_505;
