@@ -57,6 +57,7 @@ The R1 executor reported all five passed. The integrator's dispositions differ f
 The rule is the first run's: a result counts only if a captured screen shows it (G7, G11, G16). Later captures support both results (see the rows), but they do not replace the case's own observation.
 
 Not re-run: ACC-04, ACC-22 (advisory) and ACC-35 (optional, D3).
+
 ## Owner decisions after the record (2026-10-27)
 
 The rows and totals above are the integrator's dispositions and stay as recorded. Owner acceptance is not a clean pass,

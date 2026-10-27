@@ -16,7 +16,7 @@ known gap. **Signed off by Travis on 2026-10-27 (D208)**, with ACC-22 and ACC-35
   results.json `owner_decisions`).
 - On the record alone: 32 passed, 0 failed, 5 blocked.
 
-## Status before the owner decisions (2026-10-27)
+## Status before D207–D209 (2026-10-27)
 
 - **33 passed, 0 failed, 4 blocked** of 37 cases. Two dated results after the first run, below, produced this count:
   - **Re-run R1 (2026-10-27):** ACC-06, ACC-15 and ACC-18 passed. ACC-11 and ACC-14 stay blocked, each on one result
