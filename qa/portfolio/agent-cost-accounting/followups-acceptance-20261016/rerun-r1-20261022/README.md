@@ -1,0 +1,121 @@
+# PF-60-S10 re-run R1: ACC-06, ACC-11, ACC-14, ACC-15, ACC-18 (2026-10-22 to 2026-10-27)
+
+A targeted code-blind re-run of the one failed and four blocked S10 cases ([../README.md](../README.md)). Decided QA
+work; no new owner decision. **Result: all five passed** (raw executor verdicts and the integrator's dispositions agree).
+ACC-35 (needs a live Moonshot cache-read grant, D3) and the advisory cases ACC-04 and ACC-22 were not re-run.
+
+| Case | First run (2026-10-16) | R1 | Run |
+| --- | --- | --- | --- |
+| ACC-06 | failed (#898) | **passed** | [A-R1](runs/acc-A-R1-agmx1-20261027T175348Z/evidence/result.md) |
+| ACC-11 | blocked | **passed** | [C-R1](runs/acc-C-R1-agmx1-20261027T190341Z/evidence/result.md) |
+| ACC-14 | blocked | **passed** | C-R1 |
+| ACC-15 | blocked | **passed** | C-R1 |
+| ACC-18 | blocked | **passed** | C-R1 |
+
+Per-case summaries are in [../dispositions.md](../dispositions.md) and [../results.json](../results.json) (each re-run
+case keeps its first-run entry under `prior_run`).
+
+## Candidate
+
+- A private build of origin/main `63c9daca2629fe216d3887c53399a6fb7a75a334`, the newest main commit with a green
+  `postmerge-ci` (run 39751860243) when the build was made on 2026-10-22.
+- Signed with Developer ID K5N2T25C23. `corbanu` 0.1.48, SHA-256 `e942b095de975f95ca3fa1f09b9576f6bb408d91499e05235e35ab37b9d6aa42`
+  ([candidate/](candidate/)).
+- Used only inside Tart guests. It was never installed as the coordinator's binary.
+
+## Design
+
+- A fresh designer wrote amendment R1 from an intent packet ([design-r1/run-observations-r1.md](design-r1/run-observations-r1.md)).
+  It replaces only these five cases and adds the steps needed to observe the results that were left unjudged.
+- A separate fresh reviewer checked it. The amendment was frozen on 2026-10-22T12:05:59Z
+  ([design-r1/FROZEN.sha256](design-r1/FROZEN.sha256), `c03044a2…`), before the first VM started.
+- The executors got the staged packet in [executor-packet-r1/](executor-packet-r1/). Its `amendment-r1.md` is
+  byte-identical to the frozen file.
+
+## Harness
+
+- acc-tart1's accounting harness ([harness/](harness/)) ran on one fresh Tart clone of `corbanu-qa-base` per group,
+  one VM at a time, under the shared Tart lock.
+- pf84-rerun's host-relay pattern was used: no real key entered a guest. Two host relays
+  ([harness/host_key_relay.py](harness/host_key_relay.py)) added the Z.AI key (vault `zai_key_3`) and the OpenAI key.
+  The guest reached them through one SSH reverse tunnel bound to its loopback, and only the coordinator account's
+  mediator could use it.
+- Every clone passed the 110-probe isolation gate before its group ran ([common/](common/)`<clone>/gate`).
+- Testers: GLM 5.3 Flash (`corbanu exec`, code-blind, fresh context), executor account `agmx1`. No model declined a
+  step, so the local-model fallback was not needed.
+
+## Attempts
+
+Every attempt is kept as evidence ([logs/resume-driver.log](logs/resume-driver.log), [logs/seq.log](logs/seq.log)).
+
+1. **2026-10-22, A-R1 attempt 1** ([runs/acc-A-R1-agmx1-20261022T121009Z](runs/acc-A-R1-agmx1-20261022T121009Z)):
+   **does not count.** The tester died on a Z.AI 429 with code 1113 (insufficient balance), after `/review` and before
+   judging. The work paused until the balance was restored ([logs/zai-balance-poll.txt](logs/zai-balance-poll.txt)).
+2. **2026-10-27, clones A-R1-…1744Z and C-R1-…1748Z: gate failed, no group ran and nothing was spent.**
+   - Cause: the synthetic mediation CA and relay leaf inherited from acc-tart1 expired at 2026-10-27T01:48:51Z. The guest
+     mediator reported `CERTIFICATE_EXPIRED`, and the lanes' mediator probes saw EPERM instead of 403.
+   - Fix: both certificates were re-issued from the same keys, with new validity and the same extensions
+     ([harness/ca-reissue-20261027.md](harness/ca-reissue-20261027.md)).
+   - No design, packet, package or expected-result file changed.
+3. **2026-10-27, A-R1** ([runs/acc-A-R1-agmx1-20261027T175348Z](runs/acc-A-R1-agmx1-20261027T175348Z)): gate 110/110;
+   ACC-06 passed.
+4. **2026-10-27, C-R1 attempt 1** ([runs/acc-C-R1-agmx1-20261027T182928Z](runs/acc-C-R1-agmx1-20261027T182928Z)):
+   **does not count.**
+   - The tester's Z.AI stream stalled twice, each time hitting the product's 180 s actionable-silence timeout
+     (18:54 to 19:00Z, with a request near 625 KB). The executor turn failed in the middle of ACC-14.
+   - ACC-11 had already been observed as passing. ACC-18 needs the whole group's history, so C-R1 was re-run in full
+     on a fresh clone.
+5. **2026-10-27, C-R1 attempt 2** ([runs/acc-C-R1-agmx1-20261027T190341Z](runs/acc-C-R1-agmx1-20261027T190341Z)):
+   gate 110/110; ACC-11, ACC-14, ACC-15 and ACC-18 passed.
+
+## Integrator checks
+
+The integrator checked the deciding observations against the captured screens (`evidence/screens.jsonl.gz`), not just
+the executor's report.
+
+- **ACC-06:**
+  - `r1a-acc06-after-req5-tech` through `-req9-tech` each show `Turn: code-review:01a17e90-…`.
+  - Requests 1–4 show the same Request IDs on the before and after pages.
+- **ACC-11, ACC-14 (the result left unjudged in the first run):**
+  - After the restart, the earlier IDs `950fc3fe…` and `06d205ef…` are on `r1c-acc11-after-req1` and `-req2`.
+  - After `/resume`, all four ALPHA IDs are on request pages captured between 19:19 and 19:21Z.
+- **ACC-15 (the `side:` label):**
+  - `r1c-acc15-side-req6-tech` shows `Turn: side:01a17ed0-6a0d-70e3-8ad2-b455f7ffdad9`.
+  - The warm-up page shows `Turn: side:prewarm:reopen:…`.
+  - Notice placement: `r1c-acc15-pre` and the ALPHA view after Ctrl+C (`r1c-acc15-back`) show the same single notice
+    under `• ALPHA`, which is ACC-14's.
+  - The side view (`r1c-acc15-side-open`, and again `-side-reply`) shows one notice and none of ALPHA's transcript
+    lines. That is exactly one new notice, which matches the executor's reading.
+- **ACC-18:**
+  - All eight IDs from ACC-11, ACC-14 and ACC-15 are found again on `r1c-acc18-alpha-*` and `r1c-acc18-charlie-*`
+    pages. Request 5's page was captured under the label `r1c-acc18-alpha-links-2`, and its money page is
+    `r1c-acc18-alpha-req5-tech-money`.
+  - Neither `r1c-acc18-open-1` nor `r1c-acc18-open-2` shows a notice.
+- **Keys:**
+  - Every clone's teardown reported the real key files absent (never placed), `auth.json` a synthetic placeholder, and
+    the mediator leaf key removed.
+  - The key scan of this record is in [keyscan-r1.txt](keyscan-r1.txt).
+- **Relays** ([logs/](logs/), 2026-10-27):
+  - Z.AI: 402 chat completions, all 200, plus 3 model listings.
+  - OpenAI: 8 WebSocket upgrades (101) and 3 model listings.
+  - No 429s and no other non-success status.
+- **Spend** (estimated at the published rates the product itself shows):
+  - Testers on Z.AI GLM 5.3 Flash: about $0.28 for A-R1 and $0.52 for C-R1 attempt 2, from the executors' reported
+    usage. C-R1 attempt 1 reported no usage before it failed; it was comparable.
+  - Products under test: Z.AI $0.0048 (ACC-06); OpenAI about $0.014 (C-R1 attempt 2) plus a few thousandths in
+    attempt 1.
+- **Clean-up:** the Tart lock was released, every clone was deleted (`tart list` shows only `corbanu-qa-base`), and
+  the relays were stopped.
+
+## Observations (not case failures)
+
+- `/review` of one changed file made five requests on Z.AI, all labelled `code-review:` with the review's own thread
+  (ACC-06).
+- In ACC-18, `resume --last` opened CHARLIE, although ALPHA was used last: `/resume` to ALPHA, then a `/side` turn in
+  ALPHA. ALPHA's last turn of its own came before CHARLIE's.
+  - The first run saw the same in ACC-36: `resume --last` opened the edit branch.
+  - It looks like "last" means the conversation with the latest turn of its own.
+- On ALPHA's Request 2 technical page the executor did not find a `Turn:` line in its capture (C-R1, ACC-11). No
+  expected result depends on it.
+- The tester model's stream can stall at long contexts (C-R1 attempt 1). The executor's long-failure cap of 1 then ends
+  the run.
