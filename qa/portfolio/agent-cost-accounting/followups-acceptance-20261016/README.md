@@ -167,7 +167,7 @@ renames the result heading, and adds one note to a named limit.
     entered a guest.
 - **ACC-06 passed:** each of the review's five requests shows `Turn: code-review:…`.
 - **ACC-15 passed:** the side turn shows `Turn: side:…`, and exactly one new notice appeared.
-- **ACC-18 passed:** after every reopen, the earlier Request IDs come back with exact costs, and the per-conversation
+- **ACC-18 passed:** after all the group's reopens, every earlier Request ID comes back with its exact cost, and the per-conversation
   sums hold for both conversations.
 - **ACC-11 and ACC-14 stay blocked**, each on one result the tester judged without a capture (dispositions.md).
   - Their first-run gap, re-reading earlier Request IDs after the reopen, is now observed and passes.

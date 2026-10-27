@@ -1,6 +1,8 @@
 #!/bin/bash
 # Copy the re-run R1 evidence into the record folder (no product-home, no collected.tar; large files gzipped).
 set -euo pipefail
+# Note (acct-rerun2, review round 2): after assembly, every copied *.log file was renamed *.log.txt (the repository
+# .gitignore excludes *.log).
 W=/Volumes/CorbanuDrive/Corbanu/.codex-work/acct-rerun-20261022
 D=/Volumes/CorbanuDrive/Corbanu/worktrees/acct-rerun/qa/portfolio/agent-cost-accounting/followups-acceptance-20261016/rerun-r1-20261022
 mkdir -p "$D/candidate" "$D/harness" "$D/common" "$D/runs" "$D/logs"

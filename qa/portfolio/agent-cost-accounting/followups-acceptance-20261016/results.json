@@ -4813,7 +4813,7 @@
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "0c0925f0c8356a8a867bd646b5a807dcd3aa5a0767b8fcf3dd19781f48c35fa5"
+   "sha256": "dcaca7755aa5b92c289ee85e4fd34169fb33cdade9addf5779addd4cb53dd14e"
   }
  },
  "evidence_check": {
@@ -4851,14 +4851,14 @@
   },
   "record": {
    "path": "rerun-r1-20261022/README.md",
-   "sha256": "f94a62d55307ef3273a1110bed7db961bf54c4b01088b7588ab835d278f8a0b1"
+   "sha256": "66171dfcb0794256055f91dfc4f8c7e29229767c5ac3d7e55f2a4e9e20dba8de"
   },
   "review_budget": {
    "limit": 3,
    "scope": "independent read-only Opus 5.5 High review of the record PR (acct-rerun brief); designer and design review are separate sessions required by the brief",
    "ledger": {
     "path": "review-ledger.md",
-    "sha256": "0c0925f0c8356a8a867bd646b5a807dcd3aa5a0767b8fcf3dd19781f48c35fa5"
+    "sha256": "dcaca7755aa5b92c289ee85e4fd34169fb33cdade9addf5779addd4cb53dd14e"
    }
   },
   "raw_vs_disposition": "executor: all five passed; integrator: ACC-11 and ACC-14 blocked (one result each NOT OBSERVED, G7/G11/G16)",

@@ -45,8 +45,7 @@ case keeps its first-run entry under `prior_run`).
   - In this run they resolved as follows:
     1. `agms-tui help` lists no file-writing control, so A-S1 used the fallback product turn.
     2. ACC-15's rule would count a notice in the side view and another in the saved view as two (a FAIL). That did not
-       arise: the saved view showed one notice both before (`-pre`) and after (`-back`) `/side`, so no second notice
-       was added there.
+       arise: the saved view's notice count stayed at 1, before (`-pre`) and after (`-back`) `/side`.
     3. No request was reached only through Descendant attempts.
     4. Calibration: the executors read exact costs from technical pages.
     5. Group A took 31 minutes.
@@ -67,7 +66,7 @@ case keeps its first-run entry under `prior_run`).
 
 ## Attempts
 
-Every attempt is kept as evidence ([logs/resume-driver.log](logs/resume-driver.log), [logs/seq.log](logs/seq.log)).
+Every attempt is kept as evidence ([logs/resume-driver.log.txt](logs/resume-driver.log.txt), [logs/seq.log.txt](logs/seq.log.txt); `*.log` files are stored as `*.log.txt` because the repository ignores `*.log`).
 
 1. **2026-10-22, A-R1 attempt 1** ([runs/acc-A-R1-agmx1-20261022T121009Z](runs/acc-A-R1-agmx1-20261022T121009Z)):
    **does not count.** The tester died on a Z.AI 429 with code 1113 (insufficient balance), after `/review` and before
@@ -110,7 +109,8 @@ the executor's report.
     - The executor's report claims `r1c-acc11-after-links` shows the links. It does not.
   - ACC-14, expected result 3, first part (every earlier ID found again "with the same cost", G11):
     - `950fc3fe…` and `06d205ef…` were re-read in ACC-14 only on request pages showing rounded costs.
-    - ACC-14's only technical money pages are those of the two warm-ups (19:20:19Z and 19:21:39Z).
+    - ACC-14's only technical money pages for ALPHA are those of its two warm-ups (19:20:19Z and 19:21:39Z). CHARLIE's
+      money pages (19:18:29Z, 19:18:54Z) are CHARLIE's own requests.
 - **ACC-15 (the `side:` label):**
   - `r1c-acc15-side-req6-tech` shows `Turn: side:01a17ed0-6a0d-70e3-8ad2-b455f7ffdad9`.
   - The warm-up page shows `Turn: side:prewarm:reopen:…`.
