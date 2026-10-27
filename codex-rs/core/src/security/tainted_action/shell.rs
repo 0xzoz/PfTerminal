@@ -5,6 +5,8 @@
 //! split into commands too. Command boundaries, pipes and substitutions are
 //! kept so wrappers, pipelines and code fed to an interpreter can be followed.
 
+use super::certain_cd;
+use super::certain_cd::Joint;
 use super::work;
 
 /// Shells whose `-c` argument is its own command line.
@@ -72,6 +74,8 @@ pub(super) struct SimpleCommand {
     /// misreads (`${c:-eval}`, `${!c}`, `${c}al`, `"$c"al`, zsh `$c:t`): it
     /// drops braces and quotes, so the substituted word is not its value.
     pub(super) operated: Vec<usize>,
+    /// D194: what joins it to the command before it.
+    pub(super) after: Joint,
 }
 
 /// Lexed simple commands, in the order they finish (a substitution comes
@@ -101,7 +105,10 @@ pub(super) fn basename(word: &str) -> &str {
 
 /// Simple commands of the argv and of any script inside it (`bash -lc "..."`).
 pub(super) fn simple_commands(command: &[String]) -> Lexed {
-    let mut lexer = Lexer::default();
+    let mut lexer = Lexer {
+        joint: Some(Joint::Start),
+        ..Lexer::default()
+    };
     let mut incomplete = false;
     let mut previous: Option<&str> = None;
     for arg in command {
@@ -118,6 +125,7 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
             })
         {
             lexer.start(Start::Plain);
+            lexer.joint = Some(Joint::Start);
         }
         previous = Some(arg.as_str());
         let (expanded, complete) = expand_braces(&replace_ifs(arg));
@@ -520,9 +528,21 @@ struct Lexer {
     too_deep: bool,
     /// Open substitutions that are not past `MAX_SUBSTITUTION_DEPTH`.
     real_open: usize,
+    /// D194: the operators since the last word (`None`: a word).
+    joint: Option<Joint>,
 }
 
 impl Lexer {
+    /// D194: the operator at `chars[index]`.
+    fn operator(&mut self, chars: &[char], index: usize) {
+        let previous = index.checked_sub(1).map(|at| chars[at]);
+        if let Some(op) =
+            certain_cd::operator(previous, chars[index], chars.get(index + 1).copied())
+        {
+            self.joint = Some(Joint::then(self.joint, op));
+        }
+    }
+
     fn flush(&mut self) {
         if !self.word.is_empty() {
             let index = Some(self.current.words.len());
@@ -542,6 +562,10 @@ impl Lexer {
                 self.current.operated.push(self.current.words.len());
             }
             let word = std::mem::take(&mut self.word);
+            let joint = self.joint.take();
+            if self.current.words.is_empty() {
+                self.current.after = joint.unwrap_or_default();
+            }
             self.current.words.push(word);
         }
     }
@@ -609,6 +633,7 @@ impl Lexer {
             None
         };
         self.start(Start::Plain);
+        self.joint = Some(Joint::Other);
         self.open_group(Group::Bracket, piped);
         if self.current.pipe_from.is_none() {
             self.current.pipe_from = self.group_pipe();
@@ -617,6 +642,7 @@ impl Lexer {
 
     fn close_bracket(&mut self) {
         self.start(Start::Plain);
+        self.joint = Some(Joint::Other);
         self.close_group(Group::Bracket);
         self.current.pipe_from = self.group_pipe();
     }
@@ -655,6 +681,7 @@ impl Lexer {
             arithmetic,
             skip,
         });
+        self.joint = Some(Joint::Other);
     }
 
     /// Close the innermost substitution and continue the command it
@@ -666,6 +693,8 @@ impl Lexer {
         let Some(open) = self.open.pop() else {
             return;
         };
+        // Back in the command it interrupted.
+        self.joint = None;
         if open.skip {
             // The command it interrupted continues; what it printed is
             // unseen.
@@ -812,6 +841,7 @@ impl Lexer {
                 '<' if next == Some('<') => {
                     // A here-document: its text follows in the script.
                     self.flush();
+                    self.joint = Some(Joint::Other);
                     index += 2;
                     continue;
                 }
@@ -850,8 +880,12 @@ impl Lexer {
                 '|' => {
                     let pipe = next != Some('|') && (index == 0 || chars[index - 1] != '|');
                     self.start(if pipe { Start::Piped } else { Start::Plain });
+                    self.operator(&chars, index);
                 }
-                ';' | '&' | '\n' => self.start(Start::Plain),
+                ';' | '&' | '\n' => {
+                    self.start(Start::Plain);
+                    self.operator(&chars, index);
+                }
                 ch if ch.is_whitespace() || matches!(ch, '<' | '>' | ',') => self.flush(),
                 ch => self.word.push(literal_char(ch)),
             }
