@@ -130,13 +130,16 @@ fn prints_prompt(args: &[String]) -> bool {
 }
 
 /// #1405: whether `mapfile`/`readarray` may run a callback (`-C eval`) on
-/// each line it reads, so its input is code. Any option word may hold `C`
-/// (`-tC`, `-Ceval`) or a glob that may match a file `-C` (`-?`); a value
-/// the classifier cannot see (`$o`, `-$x`) may spell it, and a known one
-/// (`o=' -C'`, `IFS=,`) may split into it. A length (`"${#a[@]}"`, the
-/// append idiom) is a number. Redirection targets (`< <(ls)`) are not its
-/// words. `words`/`unseen`: the command's words with known values filled
-/// in, index for index with `simple.words`.
+/// each line it reads, so its input is code. A literal option word may
+/// hold `C` (`-tC`, `-Ceval`), and any word a glob (`-?`, extglob `-!(t)`)
+/// that may match a file `-C`. A value the classifier cannot see (`$o`,
+/// `-$x`, `${o^}`, `$IFS`) may spell it, unless it is a length
+/// (`"${#a[@]}"`, the append idiom); a known one may split, glob or change
+/// case into it (`o=' -C'`, `IFS=,`, `declare -u o=-c`). Redirection
+/// targets holding a value (`< "$f"`, `< <(ls)`) are not its words, but
+/// one right after an option that takes a value is (`-d '<' -C`: the
+/// lexer ignores quotes). `words`/`unseen`: the command's words with known
+/// values filled in, index for index with `simple.words`.
 pub(super) fn mapfile_callback(
     simple: &SimpleCommand,
     name: &str,
@@ -144,22 +147,42 @@ pub(super) fn mapfile_callback(
     unseen: &[bool],
     index: usize,
 ) -> bool {
+    use std::collections::HashSet;
     if !matches!(name, "mapfile" | "readarray") {
         return false;
     }
-    let writes: std::collections::HashSet<usize> = simple.writes_to.iter().copied().collect();
-    let globbed = |word: &str| word.contains(['*', '?', '[']);
+    let set = |indexes: &[usize]| indexes.iter().copied().collect::<HashSet<usize>>();
+    let (writes, misread) = (set(&simple.writes_to), set(&simple.operated));
+    let hidden = set(&simple.hidden);
+    let globbed = |word: &str| word.contains(['*', '?', '[', ']', '(', ')', '!', '@', '+']);
+    // An option word whose last letter takes the next word as its value.
+    let takes_value = |word: &str| {
+        word.starts_with('-')
+            && !word.starts_with("--")
+            && word.ends_with(['d', 'n', 'O', 's', 'u', 'C', 'c'])
+    };
     words.iter().enumerate().skip(index + 1).any(|(at, word)| {
         work::step();
-        if simple.stdin_from == Some(at) || simple.here_string == Some(at) || writes.contains(&at) {
+        let raw = simple.words.get(at).map_or(word.as_str(), String::as_str);
+        let built = super::may_be_built(raw) || unseen.get(at).is_some_and(|unseen| *unseen);
+        let target =
+            simple.stdin_from == Some(at) || simple.here_string == Some(at) || writes.contains(&at);
+        let after_option = at
+            .checked_sub(1)
+            .and_then(|before| simple.words.get(before))
+            .is_some_and(|before| takes_value(before));
+        if target && built && !after_option {
             return false;
         }
-        let raw = simple.words.get(at).map_or(word.as_str(), String::as_str);
-        if unseen.get(at).is_some_and(|unseen| *unseen) || super::may_be_built(word) {
+        if misread.contains(&at)
+            || hidden.contains(&at)
+            || unseen.get(at).is_some_and(|unseen| *unseen)
+            || super::may_be_built(word)
+        {
             return !length(raw);
         }
-        if super::may_be_built(raw) {
-            return word.contains('-') && (word.contains('C') || globbed(word));
+        if built {
+            return globbed(word) || (word.contains('-') && word.contains(['c', 'C']));
         }
         globbed(word) || (word.starts_with('-') && !word.starts_with("--") && word.contains('C'))
     })

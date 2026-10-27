@@ -240,7 +240,7 @@ impl Family {
                 "command" if self == Self::Shell => Opt::Inline,
                 // #1405: an interactive shell sources its start-up file
                 // first (`bash --rcfile f -i`, yash `--profile=f -l`).
-                "rcfile" | "init-file" | "profile" if self == Self::Shell => {
+                _ if self == Self::Shell && start_up_file(key) => {
                     attached.map_or(Opt::Preload, Opt::PreloadAttached)
                 }
                 "check-hash-based-pycs" if self == Self::Python => {
@@ -295,4 +295,20 @@ impl Family {
         }
         Opt::Flag
     }
+}
+
+/// #1405: whether a shell's long option `key` names a start-up file it
+/// sources: `--rcfile`, `--init-file`, yash `--profile`. yash also takes
+/// any case, ignores other than letters and digits, and takes a prefix of
+/// two letters or more (`--rc=f`, `--RC-FILE=f`, `--prof f`).
+fn start_up_file(key: &str) -> bool {
+    let key: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    key.len() >= 2
+        && ["rcfile", "initfile", "profile"]
+            .iter()
+            .any(|name| name.starts_with(key.as_str()))
 }
