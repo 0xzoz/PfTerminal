@@ -5,6 +5,8 @@
 //! Substitutions are read as commands of their own; here-documents and
 //! here-strings are kept as the text fed to their command.
 
+use super::certain_cd;
+use super::certain_cd::Joint;
 use super::shell::UNSEEN_OUTPUT;
 use super::shell::ansi_c;
 use super::work;
@@ -50,6 +52,8 @@ pub(super) struct Command {
     pub(super) other_text: Vec<Word>,
     /// It runs inside a substitution, in a shell of its own.
     pub(super) substituted: bool,
+    /// D194: what joins it to the command before it.
+    pub(super) after: Joint,
 }
 
 impl Command {
@@ -187,6 +191,8 @@ struct List {
     case_at: Option<usize>,
     /// The list is a substitution's, which a `)` closes.
     nested: bool,
+    /// D194: the operators since the last word (`None`: a word).
+    joint: Option<Joint>,
 }
 
 /// Reserved words after which `case` is still a command's first word.
@@ -237,7 +243,13 @@ impl Reader<'_> {
             list.keyword = false;
         }
         match redirect {
-            Redirect::None => command.words.push(word),
+            Redirect::None => {
+                let joint = list.joint.take();
+                if command.words.is_empty() {
+                    command.after = joint.unwrap_or_default();
+                }
+                command.words.push(word);
+            }
             Redirect::Stdin | Redirect::Descriptor => command.other_text.push(word),
             Redirect::Stdout => command.writes_to.push(word),
             Redirect::HereString => command.input.push(Word {
@@ -308,6 +320,11 @@ impl Reader<'_> {
             keyword: true,
             case_at: None,
             nested,
+            joint: Some(if nested || self.nesting > 0 {
+                Joint::Other
+            } else {
+                Joint::Start
+            }),
         };
         // The `case` counts of the brackets around the text being read.
         let mut opened: Vec<usize> = Vec::new();
@@ -329,14 +346,17 @@ impl Reader<'_> {
                         }
                     }
                     self.finish_command(&mut list);
+                    list.joint = Some(Joint::Other);
                 }
                 '(' => {
                     self.finish_command(&mut list);
                     opened.push(std::mem::take(&mut list.cases));
+                    list.joint = Some(Joint::Other);
                 }
                 ' ' | '\t' => self.finish_word(&mut list),
                 '\n' => {
                     self.finish_command(&mut list);
+                    list.joint = Some(Joint::then(list.joint, Joint::Seq));
                     index = self.here_documents(index + 1, &mut list.pending);
                     continue;
                 }
@@ -351,12 +371,20 @@ impl Reader<'_> {
                     };
                     continue;
                 }
-                ';' | '&' => self.finish_command(&mut list),
+                ';' | '&' => {
+                    self.finish_command(&mut list);
+                    if let Some(op) = certain_cd::operator(previous, ch, next) {
+                        list.joint = Some(Joint::then(list.joint, op));
+                    }
+                }
                 '|' => {
                     self.finish_word(&mut list);
                     let from = list.command;
                     let pipe = next != Some('|') && previous != Some('|');
                     self.finish_command(&mut list);
+                    if let Some(op) = certain_cd::operator(previous, ch, next) {
+                        list.joint = Some(Joint::then(list.joint, op));
+                    }
                     if pipe {
                         // After a group (`( ... ) | tee f`) the piped
                         // command is the group's empty one.
@@ -369,11 +397,13 @@ impl Reader<'_> {
                 }
                 '{' if !list.has_word && next.is_none_or(char::is_whitespace) => {
                     self.finish_command(&mut list);
+                    list.joint = Some(Joint::Other);
                 }
                 '}' if !list.has_word
                     && next.is_none_or(|next| next.is_whitespace() || ";|&)".contains(next)) =>
                 {
                     self.finish_command(&mut list);
+                    list.joint = Some(Joint::Other);
                 }
                 // A comment is judged too (the word lexer reads it as words).
                 '#' if !list.has_word => {
