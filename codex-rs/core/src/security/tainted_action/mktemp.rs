@@ -19,8 +19,9 @@
 //! defines a function, or assigns a variable it names at run time (`(( $n
 //! = 1 ))`); and unless the bash grammar reads every command as named by
 //! plain text (not `{r..r}ead`, `rea?`, `$(printf %s read)`) with
-//! `printf`/`print`/`set` options spelled out (all of zsh `print`'s words). An action that asks for
-//! anything else asks as on main, for the strongest prompt.
+//! `printf`/`print`/`set` options spelled out (every word of zsh `print`).
+//! An action that asks for anything else asks as on main, for the strongest
+//! prompt.
 //!
 //! What is promised is what a literal temp path (`/tmp/x`) already gets:
 //! the classifier does not follow a link that the line, or a program it
@@ -604,8 +605,8 @@ impl Scope {
 
 /// Whether the bash grammar reads `text` as zsh would and finds every
 /// command named by plain text that is not a builtin setting variables,
-/// with `printf`, `print` and `set` options (all of `print`'s words before
-/// `--`) spelled out too. The word lexer does not expand `{r..r}ead`,
+/// with `printf`, `print` and `set` options (every word of `print`)
+/// spelled out too. The word lexer does not expand `{r..r}ead`,
 /// `rea?` or `$(printf %s read)`, which the shell may turn into `read`; nor
 /// `printf -? "$n"` into `printf -v`. Used only to refuse.
 fn commands_named_as_written(text: &str) -> bool {
@@ -636,15 +637,15 @@ fn commands_named_as_written(text: &str) -> bool {
         }
         // Options come first: as written, up to `--` or the first other
         // word, and none sets a variable (`-v`, zsh `set -A`). zsh `print`
-        // reads options again after an option's value (`print -f %s -v n`):
-        // all its words up to `--`.
+        // reads options again after an option's value, which may itself be
+        // `--` (`print -f %s -v n`, `print -f -- -v n`): all its words.
         let print = name.text == "print";
         for word in args {
             work::step();
             if !word.data {
                 return false;
             }
-            if word.text == "--" || (!print && !word.text.starts_with(['-', '+'])) {
+            if !print && (word.text == "--" || !word.text.starts_with(['-', '+'])) {
                 break;
             }
             if !word.text.starts_with(['-', '+']) {

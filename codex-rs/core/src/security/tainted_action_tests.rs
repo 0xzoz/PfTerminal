@@ -6866,6 +6866,10 @@ fn d191_other_mktemp_spellings_still_ask() {
             Persistence,
         ),
         (
+            "tmp=$(mktemp); n=$(printf t%s mp); o=$(cat f); p=$(cat dest.txt); print -f -- \"$o\" \"$n\" -f %s \"$p\"; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
             "tmp=$(mktemp); n=$(printf t%s mp); {r..r}ead -r $n < notes.txt; cat payload >> \"$tmp\"",
             Persistence,
         ),
