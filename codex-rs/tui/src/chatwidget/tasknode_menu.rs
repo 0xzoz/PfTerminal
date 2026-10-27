@@ -1,10 +1,10 @@
 //! Task Node menu, terminal auth, and task actions.
 
+mod team_context;
+
 use super::*;
-use codex_vault::AddCredential;
-use codex_vault::CredentialType;
+use codex_config::ConfigLayerSource;
 use codex_vault::Vault;
-use codex_vault::VaultError;
 use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
@@ -21,12 +21,10 @@ const TASKNODE_TASK_ACTIONS_VIEW_ID: &str = "tasknode-task-actions";
 const TASKNODE_REQUESTS_VIEW_ID: &str = "tasknode-requests";
 const TASKNODE_CONTEXT_VIEW_ID: &str = "tasknode-context";
 const TASKNODE_CHAT_VIEW_ID: &str = "tasknode-chat";
-const TASKNODE_SESSION_LABEL: &str = "tasknode/session";
 const TASKNODE_MENU_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 // Task Node requests run on dedicated worker threads, so tolerate a temporarily saturated
 // production web process without freezing the TUI or retrying mutation requests. Fly health and
 // route telemetry can exceed the former 15-second deadline during load spikes.
-const TASKNODE_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TaskNodeMenuCountsCache {
@@ -49,15 +47,19 @@ impl TaskNodeMenuCountsCache {
 impl ChatWidget {
     pub(crate) fn open_tasknode_menu(&mut self) {
         let codex_home = self.config.codex_home.as_path().to_path_buf();
-        let state = TaskNodeLocalState::load(&codex_home);
+        let scope = tasknode_session_scope(&self.config);
+        let state = load_tasknode_local_state(&codex_home, &scope);
         let counts = self.tasknode_menu_counts.clone();
         let should_refresh_counts = state
             .as_ref()
-            .ok()
-            .and_then(|session| session.as_ref())
-            .is_some_and(|session| session.terminal_token.is_some());
+            .is_ok_and(|state| state.active.as_ref().is_some_and(|a| !a.is_expired()));
         self.show_or_replace_tasknode_selection(TASKNODE_MENU_VIEW_ID, || {
-            tasknode_menu_params(state, counts.as_ref(), None)
+            tasknode_menu_params(
+                state,
+                scope.profile(),
+                counts.as_ref(),
+                /*refresh_error*/ None,
+            )
         });
         if should_refresh_counts {
             self.tasknode_menu_poll_generation = self.tasknode_menu_poll_generation.wrapping_add(1);
@@ -72,7 +74,7 @@ impl ChatWidget {
                 self.tasknode_menu_counts
                     .get_or_insert_with(TaskNodeMenuCountsCache::default)
                     .update_from_status(&status);
-                self.refresh_active_tasknode_menu(None);
+                self.refresh_active_tasknode_menu(/*refresh_error*/ None);
             }
             Err(err) => self.refresh_active_tasknode_menu(Some(err)),
         }
@@ -95,15 +97,27 @@ impl ChatWidget {
                 self.tasknode_menu_counts
                     .get_or_insert_with(TaskNodeMenuCountsCache::default)
                     .request_count = Some(requests.items.len());
-                self.refresh_active_tasknode_menu(None);
+                self.refresh_active_tasknode_menu(/*refresh_error*/ None);
             }
             Err(err) => self.refresh_active_tasknode_menu(Some(err)),
         }
     }
 
     pub(crate) fn open_tasknode_link(&mut self) {
-        self.add_info_message("Starting Task Node GitHub link...".to_string(), None);
+        self.tasknode_active_chat_stream_id = None;
+        self.add_info_message(
+            "Starting Task Node GitHub link...".to_string(),
+            /*hint*/ None,
+        );
         let codex_home = self.config.codex_home.as_path().to_path_buf();
+        let scope = tasknode_session_scope(&self.config);
+        let generation = self
+            .tasknode_response_generations
+            .entry("link")
+            .or_default();
+        *generation = generation.wrapping_add(1);
+        let generation = *generation;
+        let view = self.bottom_pane.active_view_id().map(str::to_string);
         let tx = self.app_event_tx.clone();
         let spawn_result = std::thread::Builder::new()
             .name("tasknode-link".to_string())
@@ -111,22 +125,33 @@ impl ChatWidget {
                 let result = TaskNodeClient::new_without_token()
                     .start_github_link()
                     .and_then(|started| {
-                        let session = TaskNodeLocalSession {
+                        // Record the attempt under the pending label only. The
+                        // active session, if any, must survive an abandoned or
+                        // failed link (see the auth failure analysis in
+                        // docs/archive/2026/).
+                        let pending = codex_tasknode_session::PendingLink {
                             origin: tasknode_origin(),
-                            account_id: None,
-                            github_username: None,
-                            terminal_token: None,
-                            expires_at: None,
-                            pending_request_id: Some(started.request_id.clone()),
-                            pending_poll_token: Some(started.poll_token.clone()),
-                            pending_verification_url: Some(started.verification_url.clone()),
+                            request_id: started.request_id.clone(),
+                            poll_token: started.poll_token.clone(),
+                            verification_url: started.verification_url.clone(),
+                            started_at: unix_timestamp_string(),
                         };
-                        session.save(&codex_home).map_err(|err| {
-                            format!("Failed to store Task Node link request: {err}")
-                        })?;
+                        codex_tasknode_session::save_pending_scoped(
+                            &Vault::new(codex_home.clone()),
+                            &scope,
+                            &pending,
+                        )
+                        .map_err(|err| format!("Failed to store Task Node link request: {err}"))?;
                         serde_json::to_value(started).map_err(|err| err.to_string())
                     });
-                tx.send(AppEvent::TaskNodeLinkResult { result });
+                tx.send(AppEvent::TaskNodeScopedResult {
+                    label: "link",
+                    generation,
+                    scope,
+                    identity: None,
+                    view,
+                    event: Box::new(AppEvent::TaskNodeLinkResult { result }),
+                });
             });
         if let Err(err) = spawn_result {
             self.add_error_message(format!("Task Node link worker failed: {err}"));
@@ -149,7 +174,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_tasknode_status(&mut self) {
-        self.add_info_message("Loading Task Node status...".to_string(), None);
+        self.add_info_message(
+            "Loading Task Node status...".to_string(),
+            /*hint*/ None,
+        );
         self.spawn_tasknode_value_request(
             "status",
             |client| client.status(),
@@ -159,7 +187,18 @@ impl ChatWidget {
 
     pub(crate) fn handle_tasknode_status_result(&mut self, result: Result<Value, String>) {
         match parse_tasknode_value::<TaskNodeStatusResponse>(result, "status") {
-            Ok(status) => self.add_plain_history_lines(tasknode_status_lines(&status)),
+            Ok(status) => {
+                let scope = tasknode_session_scope(&self.config);
+                let mut lines = tasknode_status_lines(&status);
+                lines.insert(
+                    1,
+                    Line::from(format!(
+                        "  profile: {}",
+                        scope.profile().unwrap_or("default")
+                    )),
+                );
+                self.add_plain_history_lines(lines);
+            }
             Err(err) => self.add_error_message(format!("Task Node status failed: {err}")),
         }
     }
@@ -446,11 +485,40 @@ impl ChatWidget {
 
     pub(crate) fn open_tasknode_task_request_prompt(&mut self) {
         let tx = self.app_event_tx.clone();
+        let scope = tasknode_session_scope(&self.config);
+        let saved = load_tasknode_local_state(self.config.codex_home.as_path(), &scope)
+            .ok()
+            .and_then(|state| state.active)
+            .and_then(|session| {
+                codex_tasknode_session::CommandStore::new(
+                    self.config.codex_home.as_path(),
+                    &scope,
+                    &session,
+                )
+                .ok()
+            })
+            .and_then(|store| store.list().ok())
+            .and_then(|commands| {
+                commands
+                    .into_iter()
+                    .rev()
+                    .find(|command| command.request_id.is_none())
+            });
         let view = CustomPromptView::new(
             "Request personal task".to_string(),
             "Describe the work you want Task Node to generate".to_string(),
-            String::new(),
-            Some("Uses your Task Node context, memory, recent chats, and task queue.".to_string()),
+            saved
+                .as_ref()
+                .map(|command| command.detail.clone())
+                .unwrap_or_default(),
+            Some(
+                if saved.is_some() {
+                    "Recovered saved input. Submit it again to retrieve the original receipt."
+                } else {
+                    "Uses your Task Node context, memory, recent chats, and task queue."
+                }
+                .to_string(),
+            ),
             Box::new(move |detail: String| {
                 tx.send(AppEvent::SubmitTaskNodeTaskRequest { detail });
             }),
@@ -464,7 +532,10 @@ impl ChatWidget {
             self.add_error_message("Task request text is required.".to_string());
             return;
         }
-        self.add_info_message("Submitting Task Node task request...".to_string(), None);
+        self.add_info_message(
+            "Submitting Task Node task request...".to_string(),
+            /*hint*/ None,
+        );
         self.spawn_tasknode_value_request(
             "task-request",
             move |client| client.request_task(&detail),
@@ -562,7 +633,10 @@ impl ChatWidget {
             self.add_error_message("Task Node context body is required.".to_string());
             return;
         }
-        self.add_info_message("Saving Task Node context...".to_string(), None);
+        self.add_info_message(
+            "Saving Task Node context...".to_string(),
+            /*hint*/ None,
+        );
         self.spawn_tasknode_value_request(
             "save-context",
             move |client| client.save_context(&title, &body, revision),
@@ -580,7 +654,7 @@ impl ChatWidget {
                     response
                         .message
                         .unwrap_or_else(|| "Task Node context saved.".to_string()),
-                    None,
+                    /*hint*/ None,
                 );
                 self.add_plain_history_lines(tasknode_context_lines(&response.context));
                 let header = tasknode_context_header(&response.context);
@@ -600,7 +674,35 @@ impl ChatWidget {
         }
     }
 
+    pub(crate) fn retry_tasknode_request(&mut self, request_id: String, attempt: u64) {
+        self.spawn_tasknode_value_request(
+            "retry-request",
+            move |client| {
+                let body = client
+                    .transport
+                    .as_ref()
+                    .map_err(Clone::clone)?
+                    .retry_body(&request_id, attempt);
+                client
+                    .post_json("/api/terminal/tasknode/requests", &body)
+                    .map_err(|err| err.to_string())
+            },
+            |result| AppEvent::RetryTaskNodeRequestResult { result },
+        );
+    }
+
+    pub(crate) fn handle_retry_tasknode_request_result(&mut self, result: Result<Value, String>) {
+        match result {
+            Ok(_) => self.open_tasknode_request_list(),
+            Err(error) => self.add_error_message(format!("Task Node retry failed: {error}")),
+        }
+    }
+
     pub(crate) fn open_tasknode_request_list(&mut self) {
+        self.open_tasknode_request_page(/*cursor*/ None);
+    }
+
+    pub(crate) fn open_tasknode_request_page(&mut self, cursor: Option<String>) {
         self.show_or_replace_tasknode_selection(TASKNODE_REQUESTS_VIEW_ID, || {
             tasknode_loading_selection_params(
                 TASKNODE_REQUESTS_VIEW_ID,
@@ -610,7 +712,7 @@ impl ChatWidget {
         });
         self.spawn_tasknode_value_request(
             "task-requests",
-            |client| client.task_requests(),
+            move |client| client.task_request_page(cursor.as_deref()),
             |result| AppEvent::OpenTaskNodeRequestListResult { result },
         );
     }
@@ -626,6 +728,25 @@ impl ChatWidget {
                 header.push(Line::from(
                     format!("{} active or recent request(s)", response.items.len()).dim(),
                 ));
+                let mut items = tasknode_request_items(response.items);
+                if let Some(cursor) = response.next_cursor {
+                    items.push(SelectionItem {
+                        name: "Next page".to_string(),
+                        actions: vec![Box::new(move |tx| {
+                            tx.send(AppEvent::OpenTaskNodeRequestPage {
+                                cursor: Some(cursor.clone()),
+                            })
+                        })],
+                        dismiss_on_select: false,
+                        ..Default::default()
+                    });
+                }
+                items.push(SelectionItem {
+                    name: "Newest requests".to_string(),
+                    actions: vec![Box::new(|tx| tx.send(AppEvent::OpenTaskNodeRequestList))],
+                    dismiss_on_select: false,
+                    ..Default::default()
+                });
                 self.show_or_replace_tasknode_selection(TASKNODE_REQUESTS_VIEW_ID, || {
                     SelectionViewParams {
                         view_id: Some(TASKNODE_REQUESTS_VIEW_ID),
@@ -633,7 +754,7 @@ impl ChatWidget {
                         is_searchable: true,
                         search_placeholder: Some("Search task requests".to_string()),
                         header: Box::new(header),
-                        items: tasknode_request_items(response.items),
+                        items,
                         ..Default::default()
                     }
                 });
@@ -652,7 +773,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_tasknode_balance(&mut self) {
-        self.add_info_message("Loading Task Node balance...".to_string(), None);
+        self.add_info_message(
+            "Loading Task Node balance...".to_string(),
+            /*hint*/ None,
+        );
         self.spawn_tasknode_value_request(
             "balance",
             |client| client.balance(),
@@ -670,7 +794,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn open_tasknode_rewards(&mut self) {
-        self.add_info_message("Loading Task Node rewards...".to_string(), None);
+        self.add_info_message(
+            "Loading Task Node rewards...".to_string(),
+            /*hint*/ None,
+        );
         self.spawn_tasknode_value_request(
             "rewards",
             |client| client.rewards(),
@@ -843,7 +970,12 @@ impl ChatWidget {
         self.tasknode_active_chat_stream_id = Some(stream_id.clone());
         self.add_plain_history_lines(tasknode_chat_user_message_lines(&title, &message));
         self.show_or_replace_tasknode_selection(TASKNODE_CHAT_VIEW_ID, || {
-            tasknode_chat_stream_params(&title, &conversation_id, "Waiting for Task Node...", false)
+            tasknode_chat_stream_params(
+                &title,
+                &conversation_id,
+                "Waiting for Task Node...",
+                /*done*/ false,
+            )
         });
         self.spawn_tasknode_chat_stream(stream_id, conversation_id, title, message);
     }
@@ -855,11 +987,13 @@ impl ChatWidget {
         title: String,
         text: String,
     ) {
-        if self.tasknode_active_chat_stream_id.as_deref() != Some(stream_id.as_str()) {
+        if self.tasknode_active_chat_stream_id.as_deref() != Some(stream_id.as_str())
+            || self.bottom_pane.active_view_id() != Some(TASKNODE_CHAT_VIEW_ID)
+        {
             return;
         }
         self.show_or_replace_tasknode_selection(TASKNODE_CHAT_VIEW_ID, || {
-            tasknode_chat_stream_params(&title, &conversation_id, &text, false)
+            tasknode_chat_stream_params(&title, &conversation_id, &text, /*done*/ false)
         });
     }
 
@@ -870,7 +1004,9 @@ impl ChatWidget {
         title: String,
         result: Result<Value, String>,
     ) {
-        if self.tasknode_active_chat_stream_id.as_deref() != Some(stream_id.as_str()) {
+        if self.tasknode_active_chat_stream_id.as_deref() != Some(stream_id.as_str())
+            || self.bottom_pane.active_view_id() != Some(TASKNODE_CHAT_VIEW_ID)
+        {
             return;
         }
         self.tasknode_active_chat_stream_id = None;
@@ -911,28 +1047,50 @@ impl ChatWidget {
 
     pub(crate) fn logout_tasknode(&mut self) {
         let codex_home = self.config.codex_home.as_path().to_path_buf();
+        let scope = tasknode_session_scope(&self.config);
         self.tasknode_menu_counts = None;
+        self.tasknode_active_chat_stream_id = None;
         self.tasknode_menu_poll_generation = self.tasknode_menu_poll_generation.wrapping_add(1);
-        self.add_info_message("Removing Task Node session...".to_string(), None);
+        self.add_info_message(
+            "Removing Task Node session...".to_string(),
+            /*hint*/ None,
+        );
+        let generation = self
+            .tasknode_response_generations
+            .entry("logout")
+            .or_default();
+        *generation = generation.wrapping_add(1);
+        let generation = *generation;
+        let view = self.bottom_pane.active_view_id().map(str::to_string);
         let tx = self.app_event_tx.clone();
         let spawn_result = std::thread::Builder::new()
             .name("tasknode-logout".to_string())
             .spawn(move || {
-                let session = TaskNodeLocalState::load(&codex_home).ok().flatten();
-                let revoke_error = session
-                    .as_ref()
-                    .and_then(|session| session.terminal_token.clone())
-                    .and_then(|token| TaskNodeClient::new(token).revoke().err());
-                let result = Vault::new(codex_home)
-                    .delete(TASKNODE_SESSION_LABEL)
-                    .map(|_| match revoke_error {
-                        Some(error) => format!(
-                            "Task Node session removed locally; remote revoke failed: {error}"
-                        ),
-                        None => "Task Node session removed.".to_string(),
-                    })
-                    .map_err(|err| format!("Failed to remove Task Node session: {err}"));
-                tx.send(AppEvent::TaskNodeLogoutResult { result });
+                let state = load_tasknode_local_state(&codex_home, &scope)
+                    .ok()
+                    .unwrap_or_default();
+                let revoke_error = state.active.as_ref().and_then(|active| {
+                    TaskNodeClient::from_session(active, &active.origin)
+                        .and_then(|client| client.revoke())
+                        .err()
+                });
+                let result =
+                    codex_tasknode_session::clear_all_scoped(&Vault::new(codex_home), &scope)
+                        .map(|_| match revoke_error {
+                            Some(error) => format!(
+                                "Task Node session removed locally; remote revoke failed: {error}"
+                            ),
+                            None => "Task Node session removed.".to_string(),
+                        })
+                        .map_err(|err| format!("Failed to remove Task Node session: {err}"));
+                tx.send(AppEvent::TaskNodeScopedResult {
+                    label: "logout",
+                    generation,
+                    scope,
+                    identity: None,
+                    view,
+                    event: Box::new(AppEvent::TaskNodeLogoutResult { result }),
+                });
             });
         if let Err(err) = spawn_result {
             self.add_error_message(format!("Task Node logout worker failed: {err}"));
@@ -941,24 +1099,70 @@ impl ChatWidget {
 
     pub(crate) fn handle_tasknode_logout_result(&mut self, result: Result<String, String>) {
         match result {
-            Ok(message) => self.add_info_message(message, None),
+            Ok(message) => self.add_info_message(message, /*hint*/ None),
             Err(error) => self.add_error_message(error),
         }
     }
 
-    fn spawn_tasknode_value_request(
+    pub(crate) fn tasknode_response_is_latest(&self, label: &str, generation: u64) -> bool {
+        self.tasknode_response_generations.get(label).copied() == Some(generation)
+    }
+
+    pub(crate) fn tasknode_response_is_current(
+        &self,
+        scope: &codex_tasknode_session::SessionScope,
+        identity: Option<&str>,
+        view: Option<&str>,
+    ) -> bool {
+        if tasknode_session_scope(&self.config) != *scope
+            || (view.is_some() && self.bottom_pane.active_view_id() != view)
+        {
+            return false;
+        }
+        let Some(identity) = identity else {
+            return true;
+        };
+        load_tasknode_local_state(self.config.codex_home.as_path(), scope)
+            .ok()
+            .and_then(|state| state.active)
+            .filter(|session| !session.is_expired())
+            .and_then(|session| {
+                codex_tasknode_session::Client::for_session(&session, &session.origin).ok()
+            })
+            .is_some_and(|client| client.identity() == identity)
+    }
+
+    pub(super) fn spawn_tasknode_value_request(
         &mut self,
         label: &'static str,
         fetch: impl FnOnce(TaskNodeClient) -> Result<Value, String> + Send + 'static,
         event: impl FnOnce(Result<Value, String>) -> AppEvent + Send + 'static,
     ) {
+        let generation = self.tasknode_response_generations.entry(label).or_default();
+        *generation = generation.wrapping_add(1);
+        let generation = *generation;
         let codex_home = self.config.codex_home.as_path().to_path_buf();
+        let scope = tasknode_session_scope(&self.config);
+        let view = self.bottom_pane.active_view_id().map(str::to_string);
         let tx = self.app_event_tx.clone();
         let spawn_result = std::thread::Builder::new()
             .name(format!("tasknode-{label}"))
             .spawn(move || {
-                let result = tasknode_client_for_codex_home(&codex_home).and_then(fetch);
-                tx.send(event(result));
+                let client = tasknode_client_for_codex_home(&codex_home, &scope);
+                let identity = client
+                    .as_ref()
+                    .ok()
+                    .and_then(|client| client.transport.as_ref().ok())
+                    .map(codex_tasknode_session::Client::identity);
+                let result = client.and_then(fetch);
+                tx.send(AppEvent::TaskNodeScopedResult {
+                    label,
+                    generation,
+                    scope,
+                    identity,
+                    view,
+                    event: Box::new(event(result)),
+                });
             });
         if let Err(err) = spawn_result {
             self.add_error_message(format!("Task Node {label} worker failed: {err}"));
@@ -994,10 +1198,9 @@ impl ChatWidget {
 
     fn has_linked_tasknode_session(&self) -> bool {
         let codex_home = self.config.codex_home.as_path().to_path_buf();
-        TaskNodeLocalState::load(&codex_home)
-            .ok()
-            .flatten()
-            .is_some_and(|session| session.terminal_token.is_some())
+        let scope = tasknode_session_scope(&self.config);
+        load_tasknode_local_state(&codex_home, &scope)
+            .is_ok_and(|state| state.active.as_ref().is_some_and(|a| !a.is_expired()))
     }
 
     fn refresh_active_tasknode_menu(&mut self, refresh_error: Option<String>) {
@@ -1005,12 +1208,19 @@ impl ChatWidget {
             return;
         }
         let codex_home = self.config.codex_home.as_path().to_path_buf();
-        let state = TaskNodeLocalState::load(&codex_home);
+        let scope = tasknode_session_scope(&self.config);
+        let state = load_tasknode_local_state(&codex_home, &scope);
         let counts = self.tasknode_menu_counts.clone();
-        let params = tasknode_menu_params(state, counts.as_ref(), refresh_error.as_deref());
-        let _ = self
-            .bottom_pane
-            .replace_selection_view_if_active(TASKNODE_MENU_VIEW_ID, params);
+        let params = tasknode_menu_params(
+            state,
+            scope.profile(),
+            counts.as_ref(),
+            refresh_error.as_deref(),
+        );
+        let _ = self.bottom_pane.refresh_selection_view_if_active(
+            TASKNODE_MENU_VIEW_ID,
+            tasknode_search_params(params),
+        );
     }
 
     fn refresh_tasknode_after_write(&mut self) {
@@ -1027,15 +1237,38 @@ impl ChatWidget {
         title: String,
         message: String,
     ) {
+        let generation = self
+            .tasknode_response_generations
+            .entry("chat-stream")
+            .or_default();
+        *generation = generation.wrapping_add(1);
+        let generation = *generation;
         let codex_home = self.config.codex_home.as_path().to_path_buf();
+        let scope = tasknode_session_scope(&self.config);
         let tx = self.app_event_tx.clone();
         let spawn_result = std::thread::Builder::new()
             .name("tasknode-chat-stream".to_string())
             .spawn(move || {
-                let result = tasknode_client_for_codex_home(&codex_home).and_then(|client| {
-                    client.stream_chat(&conversation_id, &message, &stream_id, &title, tx.clone())
+                let client = tasknode_client_for_codex_home(&codex_home, &scope);
+                let identity = client
+                    .as_ref()
+                    .ok()
+                    .and_then(|client| client.transport.as_ref().ok())
+                    .map(codex_tasknode_session::Client::identity);
+                let send = |event| {
+                    tx.send(AppEvent::TaskNodeScopedResult {
+                        label: "chat-stream",
+                        generation,
+                        scope: scope.clone(),
+                        identity: identity.clone(),
+                        view: Some(TASKNODE_CHAT_VIEW_ID.to_string()),
+                        event: Box::new(event),
+                    })
+                };
+                let result = client.and_then(|client| {
+                    client.stream_chat(&conversation_id, &message, &stream_id, &title, &send)
                 });
-                tx.send(AppEvent::TaskNodeChatStreamDone {
+                send(AppEvent::TaskNodeChatStreamDone {
                     stream_id,
                     conversation_id,
                     title,
@@ -1054,7 +1287,7 @@ impl ChatWidget {
         build: impl FnOnce() -> SelectionViewParams,
     ) {
         let replace_active = self.bottom_pane.active_view_id() == Some(view_id);
-        let params = build();
+        let params = tasknode_search_params(build());
         if replace_active {
             let _ = self
                 .bottom_pane
@@ -1088,12 +1321,17 @@ fn tasknode_should_open_browser() -> bool {
     }
 }
 
-fn tasknode_client_for_codex_home(codex_home: &std::path::Path) -> Result<TaskNodeClient, String> {
-    let session = ensure_tasknode_session(codex_home).map_err(|err| err.to_string())?;
-    let token = session
-        .terminal_token
-        .ok_or_else(|| "Task Node session is missing a terminal token.".to_string())?;
-    Ok(TaskNodeClient::new(token))
+fn tasknode_client_for_codex_home(
+    codex_home: &std::path::Path,
+    scope: &codex_tasknode_session::SessionScope,
+) -> Result<TaskNodeClient, String> {
+    let session = ensure_tasknode_session(codex_home, scope).map_err(|err| err.to_string())?;
+    let requested = std::env::var("PFT_TASKNODE_ORIGIN")
+        .or_else(|_| std::env::var("TASKNODE_ORIGIN"))
+        .unwrap_or_else(|_| session.origin.clone());
+    let mut client = TaskNodeClient::from_session(&session, &requested)?;
+    client.commands = codex_tasknode_session::CommandStore::new(codex_home, scope, &session);
+    Ok(client)
 }
 
 fn parse_tasknode_value<T: DeserializeOwned>(
@@ -1149,8 +1387,24 @@ fn tasknode_error_selection_params(
     }
 }
 
+fn tasknode_search_params(mut params: SelectionViewParams) -> SelectionViewParams {
+    if params.is_searchable {
+        for item in &mut params.items {
+            if item.search_value.is_none() {
+                item.search_value = Some(format!(
+                    "{} {}",
+                    item.name,
+                    item.description.as_deref().unwrap_or("")
+                ));
+            }
+        }
+    }
+    params
+}
+
 fn tasknode_menu_params(
-    state: Result<Option<TaskNodeLocalSession>, TaskNodeLocalError>,
+    state: Result<codex_tasknode_session::LocalState, TaskNodeLocalError>,
+    profile: Option<&str>,
     counts: Option<&TaskNodeMenuCountsCache>,
     refresh_error: Option<&str>,
 ) -> SelectionViewParams {
@@ -1160,32 +1414,53 @@ fn tasknode_menu_params(
         "GitHub-linked tasks, rewards, and account status.".dim(),
     ));
     header.push(Line::from(format!("Origin: {}", tasknode_origin()).dim()));
+    if let Some(profile) = profile {
+        header.push(Line::from(format!("Corbanu profile: {profile}").dim()));
+    }
     let linked = state
         .as_ref()
-        .ok()
-        .and_then(|session| session.as_ref())
-        .is_some_and(|session| session.terminal_token.is_some());
-    if let Ok(Some(session)) = &state {
-        if session.terminal_token.is_some() {
-            let username = session.github_username.as_deref().unwrap_or("");
-            header.push(Line::from(
-                format!(
-                    "Linked{}",
-                    if username.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" as {username}")
-                    }
-                )
-                .cyan(),
-            ));
-            if counts.is_none() && refresh_error.is_none() {
-                header.push(Line::from("Counts refreshing...".dim()));
+        .is_ok_and(|state| state.active.as_ref().is_some_and(|a| !a.is_expired()));
+    if let Ok(local) = &state {
+        match &local.active {
+            Some(active) if !active.is_expired() => {
+                let username = active.github_username.as_deref().unwrap_or("");
+                header.push(Line::from(
+                    format!(
+                        "Linked{}",
+                        if username.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" as {username}")
+                        }
+                    )
+                    .cyan(),
+                ));
+                if local.pending.is_some() {
+                    header.push(Line::from(
+                        "Relink pending; the current session stays usable until the new one is proven."
+                            .dim(),
+                    ));
+                }
+                if counts.is_none() && refresh_error.is_none() {
+                    header.push(Line::from("Counts refreshing...".dim()));
+                }
             }
-        } else if session.pending_request_id.is_some() {
-            header.push(Line::from(
-                "Link pending; run Status after browser auth.".cyan(),
-            ));
+            Some(_) if local.pending.is_some() => {
+                header.push(Line::from(
+                    "Session expired; finish GitHub auth in the browser, then run Status.".cyan(),
+                ));
+            }
+            Some(_) => {
+                header.push(Line::from(
+                    "Session expired; run Link to re-authenticate.".cyan(),
+                ));
+            }
+            None if local.pending.is_some() => {
+                header.push(Line::from(
+                    "Link pending; run Status after browser auth.".cyan(),
+                ));
+            }
+            None => {}
         }
     }
     if let Some(err) = refresh_error {
@@ -1210,12 +1485,18 @@ fn tasknode_menu_count_badge(count: Option<usize>) -> String {
 }
 
 fn tasknode_menu_items(
-    state: Result<Option<TaskNodeLocalSession>, TaskNodeLocalError>,
+    state: Result<codex_tasknode_session::LocalState, TaskNodeLocalError>,
     counts: Option<&TaskNodeMenuCountsCache>,
 ) -> Vec<SelectionItem> {
-    let session = state.as_ref().ok().and_then(|session| session.as_ref());
-    let linked = session.is_some_and(|session| session.terminal_token.is_some());
-    let pending = session.is_some_and(|session| session.pending_request_id.is_some());
+    let local = state.as_ref().ok();
+    let linked = local.is_some_and(|state| state.active.as_ref().is_some_and(|a| !a.is_expired()));
+    let pending = local.is_some_and(|state| {
+        state.pending.is_some()
+            || state
+                .active
+                .as_ref()
+                .is_some_and(codex_tasknode_session::ActiveSession::is_expired)
+    });
     let mut items = Vec::new();
     if linked || pending {
         items.push(SelectionItem {
@@ -1251,6 +1532,18 @@ fn tasknode_menu_items(
         });
     }
     if linked {
+        items.push(SelectionItem {
+            name: "Campaign Tracker".to_string(),
+            description: Some("Record work, review prompts and replay shared activity".to_string()),
+            actions: vec![Box::new(|tx| {
+                tx.send(AppEvent::CampaignTrackerOpen {
+                    path: "/status".to_string(),
+                    body: None,
+                })
+            })],
+            dismiss_on_select: false,
+            ..Default::default()
+        });
         items.extend([
             SelectionItem {
                 name: format!(
@@ -1287,6 +1580,13 @@ fn tasknode_menu_items(
                     tx.send(AppEvent::OpenTaskNodeTaskRequestPrompt)
                 })],
                 dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Team Context".to_string(),
+                description: Some("Read collaborators' shared work summaries".to_string()),
+                actions: vec![Box::new(|tx| tx.send(AppEvent::OpenTaskNodeTeamContext))],
+                dismiss_on_select: false,
                 ..Default::default()
             },
             SelectionItem {
@@ -2076,7 +2376,7 @@ fn tasknode_context_lines(context: &TaskNodeContextDocument) -> Vec<Line<'static
             lines.push(Line::from(""));
             continue;
         }
-        for wrapped in tasknode_soft_wrap_line(source_line, 100) {
+        for wrapped in tasknode_soft_wrap_line(source_line, /*width*/ 100) {
             lines.push(Line::from(wrapped));
         }
     }
@@ -2188,6 +2488,9 @@ fn tasknode_request_items(requests: Vec<TaskNodeRequestRow>) -> Vec<SelectionIte
         .map(|request| {
             let generated_task_id = request.generated_task_id.clone().unwrap_or_default();
             let is_pending = generated_task_id.is_empty();
+            let can_retry =
+                is_pending && request.can_retry && request.status.as_deref() == Some("failed");
+            let attempt = request.worker_attempt_count;
             let request_id = request.request_id.clone();
             let text = request.user_detail_text.clone().unwrap_or_default();
             let description = [
@@ -2203,10 +2506,21 @@ fn tasknode_request_items(requests: Vec<TaskNodeRequestRow>) -> Vec<SelectionIte
                 name: if request_id.is_empty() {
                     "Task request".to_string()
                 } else {
-                    request_id
+                    if can_retry {
+                        format!("Retry {request_id}")
+                    } else {
+                        request_id.clone()
+                    }
                 },
                 description: Some(description),
-                actions: if is_pending {
+                actions: if can_retry {
+                    vec![Box::new(move |tx| {
+                        tx.send(AppEvent::RetryTaskNodeRequest {
+                            request_id: request_id.clone(),
+                            attempt,
+                        })
+                    })]
+                } else if is_pending {
                     Vec::new()
                 } else {
                     vec![Box::new(move |tx| {
@@ -2215,8 +2529,8 @@ fn tasknode_request_items(requests: Vec<TaskNodeRequestRow>) -> Vec<SelectionIte
                         });
                     })]
                 },
-                is_disabled: is_pending,
-                disabled_reason: is_pending
+                is_disabled: is_pending && !can_retry,
+                disabled_reason: (is_pending && !can_retry)
                     .then(|| "Request has not generated a visible task yet.".to_string()),
                 dismiss_on_select: false,
                 ..Default::default()
@@ -2435,7 +2749,7 @@ fn tasknode_chat_history_lines(
                 lines.push(Line::from(""));
                 continue;
             }
-            for wrapped in tasknode_soft_wrap_line(source_line, 100) {
+            for wrapped in tasknode_soft_wrap_line(source_line, /*width*/ 100) {
                 lines.push(Line::from(format!("  {wrapped}")));
             }
         }
@@ -2450,7 +2764,7 @@ fn tasknode_chat_user_message_lines(title: &str, message: &str) -> Vec<Line<'sta
         Line::from("You".bold()),
     ];
     for source_line in message.lines() {
-        for wrapped in tasknode_soft_wrap_line(source_line, 100) {
+        for wrapped in tasknode_soft_wrap_line(source_line, /*width*/ 100) {
             lines.push(Line::from(format!("  {wrapped}")));
         }
     }
@@ -2547,7 +2861,7 @@ fn tasknode_chat_stream_result_lines(response: &TaskNodeChatStreamResponse) -> V
             lines.push(Line::from(""));
             continue;
         }
-        for wrapped in tasknode_soft_wrap_line(source_line, 100) {
+        for wrapped in tasknode_soft_wrap_line(source_line, /*width*/ 100) {
             lines.push(Line::from(format!("  {wrapped}")));
         }
     }
@@ -2567,102 +2881,50 @@ fn tasknode_response_hint(value: &Value) -> Option<String> {
         })
 }
 
-fn ensure_tasknode_session(codex_home: &Path) -> Result<TaskNodeLocalSession, TaskNodeLocalError> {
-    let Some(mut session) = TaskNodeLocalState::load(codex_home)? else {
-        return Err(TaskNodeLocalError::NoSession);
-    };
-    if session.terminal_token.is_some() {
-        return Ok(session);
-    }
-    let request_id = session
-        .pending_request_id
-        .clone()
-        .ok_or(TaskNodeLocalError::NoSession)?;
-    let poll_token = session
-        .pending_poll_token
-        .clone()
-        .ok_or(TaskNodeLocalError::NoSession)?;
-    match TaskNodeClient::new_without_token().poll_session(&request_id, &poll_token) {
-        Ok(poll) => {
-            session.account_id = Some(poll.account_id);
-            session.github_username = poll.github_username;
-            session.terminal_token = Some(poll.terminal_token);
-            session.expires_at = poll.expires_at;
-            session.pending_request_id = None;
-            session.pending_poll_token = None;
-            session.pending_verification_url = None;
-            session.save(codex_home)?;
-            Ok(session)
-        }
-        Err(TaskNodeClientError::Pending) => Err(TaskNodeLocalError::Pending {
-            verification_url: session.pending_verification_url.unwrap_or_default(),
-        }),
-        Err(err) => Err(TaskNodeLocalError::Client(err.to_string())),
-    }
+fn load_tasknode_local_state(
+    codex_home: &Path,
+    scope: &codex_tasknode_session::SessionScope,
+) -> Result<codex_tasknode_session::LocalState, TaskNodeLocalError> {
+    codex_tasknode_session::load_scoped(&Vault::new(codex_home.to_path_buf()), scope)
+        .map_err(|err| TaskNodeLocalError::Vault(err.to_string()))
 }
 
-#[derive(Debug)]
-enum TaskNodeLocalState {}
-
-impl TaskNodeLocalState {
-    fn load(codex_home: &Path) -> Result<Option<TaskNodeLocalSession>, TaskNodeLocalError> {
-        let vault = Vault::new(codex_home.to_path_buf());
-        match vault.reveal(TASKNODE_SESSION_LABEL) {
-            Ok(secret) => serde_json::from_str(&secret).map(Some).map_err(|err| {
-                TaskNodeLocalError::Client(format!("invalid local Task Node session: {err}"))
-            }),
-            Err(VaultError::NotFound { .. }) => Ok(None),
-            Err(err) => Err(TaskNodeLocalError::Vault(err.to_string())),
-        }
-    }
+/// Complete this profile's relink before reusing a previously saved token.
+fn ensure_tasknode_session(
+    codex_home: &Path,
+    scope: &codex_tasknode_session::SessionScope,
+) -> Result<codex_tasknode_session::ActiveSession, TaskNodeLocalError> {
+    let requested = std::env::var("PFT_TASKNODE_ORIGIN")
+        .or_else(|_| std::env::var("TASKNODE_ORIGIN"))
+        .ok();
+    codex_tasknode_session::resolve_scoped(codex_home, scope, requested.as_deref())
+        .map_err(TaskNodeLocalError::Client)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct TaskNodeLocalSession {
-    origin: String,
-    account_id: Option<String>,
-    github_username: Option<String>,
-    terminal_token: Option<String>,
-    expires_at: Option<String>,
-    pending_request_id: Option<String>,
-    pending_poll_token: Option<String>,
-    pending_verification_url: Option<String>,
+pub(super) fn tasknode_session_scope(
+    config: &crate::legacy_core::config::Config,
+) -> codex_tasknode_session::SessionScope {
+    let profile = config
+        .config_layer_stack
+        .get_active_user_layer()
+        .and_then(|layer| match layer.metadata().name {
+            ConfigLayerSource::User { profile, .. } => profile,
+            _ => None,
+        });
+    profile
+        .map(codex_tasknode_session::SessionScope::for_profile)
+        .unwrap_or_default()
 }
 
-impl TaskNodeLocalSession {
-    fn save(&self, codex_home: &Path) -> Result<(), TaskNodeLocalError> {
-        let vault = Vault::new(codex_home.to_path_buf());
-        let secret = serde_json::to_string(self).map_err(|err| {
-            TaskNodeLocalError::Client(format!("serialize session failed: {err}"))
-        })?;
-        match vault.add(AddCredential {
-            label: TASKNODE_SESSION_LABEL.to_string(),
-            credential_type: CredentialType::BearerToken,
-            provider: Some("tasknode".to_string()),
-            notes: Some("Task Node terminal session; token is not printed to chat.".to_string()),
-            revocation_notes: Some(format!("{}/settings/accounts", self.origin)),
-            secret: secret.clone(),
-        }) {
-            Ok(()) => Ok(()),
-            Err(VaultError::CredentialExists { .. }) => vault
-                .update(
-                    TASKNODE_SESSION_LABEL,
-                    Some(secret),
-                    Some(Some("tasknode".to_string())),
-                    None,
-                    None,
-                )
-                .map(|_| ())
-                .map_err(|err| TaskNodeLocalError::Vault(err.to_string())),
-            Err(err) => Err(TaskNodeLocalError::Vault(err.to_string())),
-        }
-    }
+fn unix_timestamp_string() -> Option<String> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|elapsed| elapsed.as_secs().to_string())
 }
 
 #[derive(Debug)]
 enum TaskNodeLocalError {
-    NoSession,
-    Pending { verification_url: String },
     Vault(String),
     Client(String),
 }
@@ -2670,13 +2932,6 @@ enum TaskNodeLocalError {
 impl std::fmt::Display for TaskNodeLocalError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NoSession => write!(f, "Task Node is not linked. Run /tasknode link."),
-            Self::Pending { verification_url } => {
-                write!(
-                    f,
-                    "Task Node link is pending. Finish GitHub auth: {verification_url}"
-                )
-            }
             Self::Vault(err) | Self::Client(err) => write!(f, "{err}"),
         }
     }
@@ -2684,42 +2939,62 @@ impl std::fmt::Display for TaskNodeLocalError {
 
 impl std::error::Error for TaskNodeLocalError {}
 
-struct TaskNodeClient {
-    origin: String,
-    token: Option<String>,
+pub(super) struct TaskNodeClient {
+    transport: Result<codex_tasknode_session::Client, String>,
+    commands: Result<codex_tasknode_session::CommandStore, String>,
 }
 
 impl TaskNodeClient {
-    fn new(token: String) -> Self {
-        Self {
-            origin: tasknode_origin(),
-            token: Some(token),
+    pub(super) fn tracker_request(
+        &self,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, String> {
+        let method = if body.is_some() {
+            reqwest::Method::POST
+        } else {
+            reqwest::Method::GET
+        };
+        let response = self
+            .transport
+            .as_ref()
+            .map_err(Clone::clone)?
+            .request_blocking(method, path, body)
+            .map_err(|error| error.to_string())?;
+        if response.is_ok() {
+            Ok(response.body)
+        } else {
+            Err(response.message())
         }
     }
 
+    fn from_session(
+        session: &codex_tasknode_session::ActiveSession,
+        origin: &str,
+    ) -> Result<Self, String> {
+        let transport = codex_tasknode_session::Client::for_session(session, origin)
+            .map_err(|error| error.to_string())?;
+        Ok(Self {
+            transport: Ok(transport),
+            commands: Err("Saved requests require a linked Task Node account.".to_string()),
+        })
+    }
+
     fn new_without_token() -> Self {
+        Self::anonymous_at(&tasknode_origin())
+    }
+
+    fn anonymous_at(origin: &str) -> Self {
         Self {
-            origin: tasknode_origin(),
-            token: None,
+            transport: codex_tasknode_session::Client::anonymous(origin)
+                .map_err(|error| error.to_string()),
+            commands: Err("Link Task Node to save and recover requests.".to_string()),
         }
     }
 
     fn start_github_link(&self) -> Result<TerminalAuthStartResponse, String> {
         self.post_json("/api/auth/terminal/start/github", &serde_json::json!({}))
             .map_err(|err| err.to_string())
-    }
-
-    fn poll_session(
-        &self,
-        request_id: &str,
-        poll_token: &str,
-    ) -> Result<TerminalSessionResponse, TaskNodeClientError> {
-        let path = format!(
-            "/api/auth/terminal/session?requestId={}&pollToken={}",
-            urlencoding::encode(request_id),
-            urlencoding::encode(poll_token)
-        );
-        self.get_json(&path)
     }
 
     fn status(&self) -> Result<Value, String> {
@@ -2786,22 +3061,27 @@ impl TaskNodeClient {
     }
 
     fn task_requests(&self) -> Result<Value, String> {
-        self.get_json("/api/terminal/tasknode/requests?limit=20")
-            .map_err(|err| err.to_string())
+        self.task_request_page(/*cursor*/ None)
+    }
+
+    fn task_request_page(&self, cursor: Option<&str>) -> Result<Value, String> {
+        let path = format!(
+            "/api/terminal/tasknode/requests?limit=20&cursor={}",
+            urlencoding::encode(cursor.unwrap_or_default())
+        );
+        self.get_json(&path).map_err(|err| err.to_string())
     }
 
     fn request_task(&self, detail: &str) -> Result<Value, String> {
-        self.post_json(
-            "/api/terminal/tasknode/requests",
-            &serde_json::json!({
-                "userDetailText": detail,
-                "requestedTaskKind": "personal",
-                "source": "pfterminal",
-                "sourceConversationTitle": "PFTerminal",
-                "idempotencyKey": format!("pfterminal-request:{}", Uuid::new_v4()),
-            }),
-        )
-        .map_err(|err| err.to_string())
+        let store = self.commands.as_ref().map_err(Clone::clone)?;
+        let command = store.begin(detail, "personal")?;
+        let value = self
+            .post_json("/api/terminal/tasknode/requests", &command.body())
+            .map_err(|error| {
+                format!("{error} Your input is saved. Reopen Request personal task to recover it.")
+            })?;
+        store.acknowledge(&command.key, &value)?;
+        Ok(value)
     }
 
     fn context(&self) -> Result<Value, String> {
@@ -2841,7 +3121,7 @@ impl TaskNodeClient {
         message: &str,
         stream_id: &str,
         title: &str,
-        tx: AppEventSender,
+        send: &impl Fn(AppEvent),
     ) -> Result<Value, String> {
         let body = serde_json::json!({
             "conversationId": conversation_id,
@@ -2856,7 +3136,7 @@ impl TaskNodeClient {
                     && let Some(delta) = value.get("delta").and_then(Value::as_str)
                 {
                     accumulated.push_str(delta);
-                    tx.send(AppEvent::TaskNodeChatStreamDelta {
+                    send(AppEvent::TaskNodeChatStreamDelta {
                         stream_id: stream_id.to_string(),
                         conversation_id: conversation_id.to_string(),
                         title: title.to_string(),
@@ -2877,16 +3157,7 @@ impl TaskNodeClient {
         &self,
         path: &str,
     ) -> Result<T, TaskNodeClientError> {
-        let url = format!("{}{}", self.origin, path);
-        let token = self.token.clone();
-        tasknode_blocking_http(move || {
-            let http = tasknode_http_client()?;
-            let mut request = http.get(url);
-            if let Some(token) = &token {
-                request = request.bearer_auth(token);
-            }
-            parse_tasknode_response(request.send())
-        })
+        self.json_request(reqwest::Method::GET, path, /*body*/ None)
     }
 
     fn post_json<T: DeserializeOwned + Send + 'static>(
@@ -2894,16 +3165,37 @@ impl TaskNodeClient {
         path: &str,
         body: &Value,
     ) -> Result<T, TaskNodeClientError> {
-        let url = format!("{}{}", self.origin, path);
-        let token = self.token.clone();
-        let body = body.clone();
+        self.json_request(reqwest::Method::POST, path, Some(body.clone()))
+    }
+
+    fn json_request<T: DeserializeOwned + Send + 'static>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<Value>,
+    ) -> Result<T, TaskNodeClientError> {
+        let transport = self
+            .transport
+            .as_ref()
+            .map_err(|error| TaskNodeClientError::Http(error.clone()))?
+            .clone();
+        let path = path.to_string();
         tasknode_blocking_http(move || {
-            let http = tasknode_http_client()?;
-            let mut request = http.post(url).json(&body);
-            if let Some(token) = &token {
-                request = request.bearer_auth(token);
+            let response = transport
+                .request_blocking(method, &path, body.as_ref())
+                .map_err(|error| TaskNodeClientError::Http(error.to_string()))?;
+            if response.status == 202 && path.starts_with("/api/auth/") {
+                return Err(TaskNodeClientError::Pending);
             }
-            parse_tasknode_response(request.send())
+            if !response.is_ok() {
+                let message = response.message();
+                if response.status == 404 || response.status == 409 {
+                    return Err(TaskNodeClientError::Gone(message));
+                }
+                return Err(TaskNodeClientError::Http(message));
+            }
+            serde_json::from_value(response.body)
+                .map_err(|error| TaskNodeClientError::Http(error.to_string()))
         })
     }
 
@@ -2913,17 +3205,13 @@ impl TaskNodeClient {
         body: &Value,
         mut on_event: impl FnMut(&str, &Value, &mut String),
     ) -> Result<Value, TaskNodeClientError> {
-        let url = format!("{}{}", self.origin, path);
-        let token = self.token.clone();
-        let body = body.clone();
-        let http = tasknode_streaming_http_client()?;
-        let mut request = http.post(url).json(&body);
-        if let Some(token) = &token {
-            request = request.bearer_auth(token);
-        }
-        let response = request
-            .send()
-            .map_err(|err| TaskNodeClientError::Http(tasknode_reqwest_error(err)))?;
+        let transport = self
+            .transport
+            .as_ref()
+            .map_err(|error| TaskNodeClientError::Http(error.clone()))?;
+        let response = transport
+            .stream_blocking(path, body)
+            .map_err(|error| TaskNodeClientError::Http(error.to_string()))?;
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -2935,7 +3223,7 @@ impl TaskNodeClient {
             return parse_tasknode_response::<Value>(Ok(response));
         }
 
-        let mut buffer = String::new();
+        let mut decoder = codex_tasknode_session::StreamDecoder::default();
         let mut accumulated = String::new();
         let mut done: Option<Value> = None;
         let mut response = response;
@@ -2947,11 +3235,10 @@ impl TaskNodeClient {
             if read == 0 {
                 break;
             }
-            buffer.push_str(&String::from_utf8_lossy(&chunk[..read]));
-            for block in tasknode_sse_drain_blocks(&mut buffer) {
-                let Some((event, value)) = tasknode_parse_sse_block(&block)? else {
-                    continue;
-                };
+            for (event, value) in decoder
+                .push(&chunk[..read])
+                .map_err(TaskNodeClientError::Http)?
+            {
                 match event.as_str() {
                     "delta" => on_event(&event, &value, &mut accumulated),
                     "done" => done = Some(value),
@@ -2969,45 +3256,13 @@ impl TaskNodeClient {
                 }
             }
         }
-        for block in tasknode_sse_drain_remainder(&mut buffer) {
-            let Some((event, value)) = tasknode_parse_sse_block(&block)? else {
-                continue;
-            };
-            if event == "done" {
-                done = Some(value);
-            } else if event == "error" {
-                return Err(TaskNodeClientError::Http(
-                    value
-                        .get("message")
-                        .or_else(|| value.get("error"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("Task Node chat stream failed.")
-                        .to_string(),
-                ));
-            }
-        }
+        decoder.finish().map_err(TaskNodeClientError::Http)?;
         done.ok_or_else(|| {
             TaskNodeClientError::Http(
                 "Task Node chat stream ended without a final response.".to_string(),
             )
         })
     }
-}
-
-fn tasknode_http_client() -> Result<reqwest::blocking::Client, TaskNodeClientError> {
-    reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(TASKNODE_HTTP_TIMEOUT)
-        .build()
-        .map_err(|err| TaskNodeClientError::Http(tasknode_reqwest_error(err)))
-}
-
-fn tasknode_streaming_http_client() -> Result<reqwest::blocking::Client, TaskNodeClientError> {
-    reqwest::blocking::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(300))
-        .build()
-        .map_err(|err| TaskNodeClientError::Http(tasknode_reqwest_error(err)))
 }
 
 fn tasknode_blocking_http<T: Send + 'static>(
@@ -3045,11 +3300,20 @@ fn parse_tasknode_response<T: DeserializeOwned>(
                     .map(ToString::to_string)
             })
             .unwrap_or(text);
+        if status == 404 || status == 409 {
+            return Err(TaskNodeClientError::Gone(message));
+        }
+        if status == 401 {
+            return Err(TaskNodeClientError::Http(format!(
+                "{message} (session expired or revoked — run /tasknode link)"
+            )));
+        }
         return Err(TaskNodeClientError::Http(message));
     }
     serde_json::from_str(&text).map_err(|err| TaskNodeClientError::Http(err.to_string()))
 }
 
+#[cfg(test)]
 fn tasknode_sse_separator(buffer: &str) -> Option<(usize, usize)> {
     match (buffer.find("\n\n"), buffer.find("\r\n\r\n")) {
         (Some(lf), Some(crlf)) if crlf < lf => Some((crlf, 4)),
@@ -3059,6 +3323,7 @@ fn tasknode_sse_separator(buffer: &str) -> Option<(usize, usize)> {
     }
 }
 
+#[cfg(test)]
 fn tasknode_sse_drain_blocks(buffer: &mut String) -> Vec<String> {
     let mut blocks = Vec::new();
     while let Some((index, separator_len)) = tasknode_sse_separator(buffer) {
@@ -3068,15 +3333,7 @@ fn tasknode_sse_drain_blocks(buffer: &mut String) -> Vec<String> {
     blocks
 }
 
-fn tasknode_sse_drain_remainder(buffer: &mut String) -> Vec<String> {
-    let remainder = std::mem::take(buffer);
-    if remainder.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec![remainder]
-    }
-}
-
+#[cfg(test)]
 fn tasknode_parse_sse_block(block: &str) -> Result<Option<(String, Value)>, TaskNodeClientError> {
     let normalized = block.replace("\r\n", "\n");
     let mut event = "message".to_string();
@@ -3139,6 +3396,9 @@ fn evidence_items_from_summary(summary: &str) -> Vec<Value> {
 #[derive(Debug)]
 enum TaskNodeClientError {
     Pending,
+    /// 404/409: the resource (for example a link attempt) no longer exists
+    /// server-side, so retrying the same request cannot succeed.
+    Gone(String),
     Http(String),
 }
 
@@ -3146,7 +3406,7 @@ impl std::fmt::Display for TaskNodeClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Pending => write!(f, "pending"),
-            Self::Http(err) => write!(f, "{err}"),
+            Self::Gone(err) | Self::Http(err) => write!(f, "{err}"),
         }
     }
 }
@@ -3159,18 +3419,6 @@ struct TerminalAuthStartResponse {
     poll_token: String,
     #[serde(rename = "verificationUrl")]
     verification_url: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TerminalSessionResponse {
-    #[serde(rename = "accountId")]
-    account_id: String,
-    #[serde(rename = "githubUsername")]
-    github_username: Option<String>,
-    #[serde(rename = "terminalToken")]
-    terminal_token: String,
-    #[serde(rename = "expiresAt")]
-    expires_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3322,6 +3570,8 @@ struct TaskNodeEvidencePrompt {
 struct TaskNodeRequestsResponse {
     #[serde(default)]
     items: Vec<TaskNodeRequestRow>,
+    #[serde(rename = "nextCursor")]
+    next_cursor: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -3366,6 +3616,10 @@ struct TaskNodeContextTerminal {
 
 #[derive(Debug, Default, Deserialize)]
 struct TaskNodeRequestRow {
+    #[serde(default, rename = "canRetry")]
+    can_retry: bool,
+    #[serde(default, rename = "workerAttemptCount")]
+    worker_attempt_count: u64,
     #[serde(rename = "requestId")]
     request_id: String,
     status: Option<String>,
@@ -3448,6 +3702,130 @@ struct TaskNodeChatUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn tasknode_refresh_preserves_keyboard_selection_and_search() {
+        let (mut chat, _, _, _) =
+            crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+        let params = || {
+            tasknode_search_params(SelectionViewParams {
+                view_id: Some(TASKNODE_MENU_VIEW_ID),
+                is_searchable: true,
+                items: ["Status", "Request personal task", "Active task requests"]
+                    .into_iter()
+                    .map(|name| SelectionItem {
+                        name: name.to_string(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+        };
+        chat.bottom_pane.show_selection_view(params());
+        chat.bottom_pane
+            .handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        chat.bottom_pane
+            .handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            chat.bottom_pane
+                .selected_index_for_active_view(TASKNODE_MENU_VIEW_ID),
+            Some(2)
+        );
+        assert!(
+            chat.bottom_pane
+                .refresh_selection_view_if_active(TASKNODE_MENU_VIEW_ID, params())
+        );
+        assert_eq!(
+            chat.bottom_pane
+                .selected_index_for_active_view(TASKNODE_MENU_VIEW_ID),
+            Some(2)
+        );
+        for character in "Active".chars() {
+            chat.bottom_pane
+                .handle_key_event(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+        assert!(
+            chat.bottom_pane
+                .refresh_selection_view_if_active(TASKNODE_MENU_VIEW_ID, params())
+        );
+        let rendered =
+            crate::chatwidget::tests::helpers::render_bottom_popup(&chat, /*width*/ 84);
+        assert!(rendered.contains("Active task requests"));
+        assert!(!rendered.contains("Request personal task"));
+        assert_eq!(
+            chat.bottom_pane
+                .selected_index_for_active_view(TASKNODE_MENU_VIEW_ID),
+            Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn request_prompt_matches_the_terminal_and_stale_views_are_rejected() {
+        let (mut chat, _, _, _) =
+            crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+        assert!(!chat.tasknode_response_is_current(
+            &codex_tasknode_session::SessionScope::for_profile("another-account"),
+            /*identity*/ None,
+            /*view*/ None
+        ));
+        assert!(!chat.tasknode_response_is_current(
+            &tasknode_session_scope(&chat.config),
+            /*identity*/ None,
+            Some(TASKNODE_REQUESTS_VIEW_ID)
+        ));
+        chat.open_tasknode_task_request_prompt();
+        let rendered =
+            crate::chatwidget::tests::helpers::render_bottom_popup(&chat, /*width*/ 84);
+        insta::assert_snapshot!("tasknode_personal_request_recovery_prompt", rendered);
+    }
+
+    #[tokio::test]
+    async fn tasknode_menu_renders_the_selected_profile_scope() {
+        let (mut chat, _tx, _event_rx, _op_rx) =
+            crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+        let profile = "goodalexander"
+            .parse::<codex_config::ProfileV2Name>()
+            .expect("valid profile");
+        let profile_path = crate::legacy_core::config::resolve_profile_v2_config_path(
+            chat.config.codex_home.as_path(),
+            &profile,
+        );
+        chat.config.config_layer_stack = chat
+            .config
+            .config_layer_stack
+            .with_user_config_profile(
+                &profile_path,
+                Some(&profile),
+                toml::Value::Table(Default::default()),
+            )
+            .expect("install profile layer");
+
+        chat.open_tasknode_menu();
+        let rendered =
+            crate::chatwidget::tests::helpers::render_bottom_popup(&chat, /*width*/ 84);
+
+        assert!(rendered.contains("Corbanu profile: goodalexander"));
+        assert!(!rendered.contains("secondfoundation"));
+    }
+
+    #[tokio::test]
+    async fn tasknode_relink_error_uses_current_corbanu_guidance() {
+        let (mut chat, _, _, _) =
+            crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+        let message = codex_tasknode_session::Response {
+            status: 401,
+            body: serde_json::json!({"error":"terminal_login_required","message":"Legacy server instructions"}),
+        }.message();
+        chat.bottom_pane
+            .show_selection_view(tasknode_error_selection_params(
+                TASKNODE_MENU_VIEW_ID,
+                "Task Node".to_string(),
+                message,
+            ));
+        let rendered =
+            crate::chatwidget::tests::helpers::render_bottom_popup(&chat, /*width*/ 100);
+        insta::assert_snapshot!("tasknode_relink_corbanu_guidance", rendered);
+    }
 
     #[test]
     fn tasknode_sse_parser_handles_delta_and_done_events() {

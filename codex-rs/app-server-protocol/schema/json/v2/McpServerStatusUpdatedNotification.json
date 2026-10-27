@@ -3,7 +3,8 @@
   "definitions": {
     "McpServerStartupFailureReason": {
       "enum": [
-        "reauthenticationRequired"
+        "reauthenticationRequired",
+        "openAiAccountReauthenticationRequired"
       ],
       "type": "string"
     },
@@ -12,7 +13,8 @@
         "starting",
         "ready",
         "failed",
-        "cancelled"
+        "cancelled",
+        "stopped"
       ],
       "type": "string"
     }

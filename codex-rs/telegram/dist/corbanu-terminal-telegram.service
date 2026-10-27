@@ -1,0 +1,27 @@
+# Corbanu Terminal Telegram connector systemd user service.
+#
+# Install with:
+#   mkdir -p ~/.config/systemd/user
+#   cp codex-rs/telegram/dist/corbanu-terminal-telegram.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now corbanu-terminal-telegram.service
+#
+# The setup script can install this file with:
+#   codex-rs/scripts/setup-telegram.sh --install-systemd
+#
+# Run only one poller per Telegram bot token.
+
+[Unit]
+Description=Corbanu Terminal Telegram connector
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/corbanu/telegram.env
+ExecStart=corbanu telegram
+Restart=always
+RestartSec=30s
+
+[Install]
+WantedBy=default.target

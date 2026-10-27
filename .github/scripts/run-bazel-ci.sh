@@ -256,10 +256,8 @@ if [[ ${#bazel_args[@]} -eq 0 || ${#bazel_targets[@]} -eq 0 ]]; then
 fi
 
 if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
-  # Windows cross-compilation depends on authenticated RBE. Preserve the local
-  # Windows build shape when credentials are unavailable.
-  ci_config=ci-windows
-  windows_msvc_host_platform=1
+  echo "Windows gnullvm cross-compilation requires authenticated remote execution; use the native Windows validation lane when BuildBuddy credentials are unavailable." >&2
+  exit 2
 fi
 
 post_config_bazel_args=()
@@ -297,13 +295,6 @@ if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -n "${BUI
   # an explicit shell executable, remote Linux actions can be asked to run
   # `C:\Program Files\Git\usr\bin\bash.exe`.
   post_config_bazel_args+=(--host_platform=//:rbe --shell_executable=/bin/bash)
-fi
-
-if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 1 && -z "${BUILDBUDDY_API_KEY:-}" ]]; then
-  # The Windows cross-compile config depends on authenticated remote
-  # execution. When credentials are unavailable, keep the local build shape
-  # and its lower concurrency cap.
-  post_config_bazel_args+=(--jobs=8)
 fi
 
 if [[ -n "${BAZEL_REPO_CONTENTS_CACHE:-}" ]]; then
@@ -388,6 +379,13 @@ if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
   bazel_run_args+=("--config=${ci_config}")
 else
   echo "BuildBuddy API key is not available; using local Bazel configuration."
+  # `ci` would have set this: one failed action in a multi-hour cold build
+  # must not hide every other target's result.
+  bazel_run_args+=(--keep_going)
+  if [[ "${RUNNER_OS:-}" == "Windows" && $windows_cross_compile -eq 0 ]]; then
+    # Keep the Windows test skip list that `ci-windows` would have applied.
+    bazel_run_args+=("--config=windows-native-tests")
+  fi
 fi
 if (( ${#post_config_bazel_args[@]} > 0 )); then
   bazel_run_args+=("${post_config_bazel_args[@]}")

@@ -42,7 +42,7 @@ pub(crate) enum StatusSurfacePreviewItem {
 impl StatusSurfacePreviewItem {
     fn placeholder(self) -> &'static str {
         match self {
-            StatusSurfacePreviewItem::AppName => "pfterminal",
+            StatusSurfacePreviewItem::AppName => "corbanu",
             StatusSurfacePreviewItem::ProjectName => "my-project",
             StatusSurfacePreviewItem::ProjectRoot => "my-project",
             StatusSurfacePreviewItem::CurrentDir => "~/my-project/subdir",
@@ -70,7 +70,7 @@ impl StatusSurfacePreviewItem {
             StatusSurfacePreviewItem::ModelWithReasoning => "gpt-5.2-codex medium",
             StatusSurfacePreviewItem::Reasoning => "medium",
             StatusSurfacePreviewItem::TaskProgress => "Tasks 0/0",
-            StatusSurfacePreviewItem::Brand => "Post Fiat Terminal",
+            StatusSurfacePreviewItem::Brand => "Corbanu Terminal",
             StatusSurfacePreviewItem::Tps => "TPS: -- tok/s",
         }
     }

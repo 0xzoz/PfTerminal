@@ -197,6 +197,24 @@ impl fmt::Debug for ProviderApiKeySecret {
     }
 }
 
+pub(crate) struct ClaudeSubscriptionTokenSecret(zeroize::Zeroizing<String>);
+
+impl ClaudeSubscriptionTokenSecret {
+    pub(crate) fn new(value: String) -> Self {
+        Self(zeroize::Zeroizing::new(value))
+    }
+
+    pub(crate) fn into_inner(self) -> String {
+        self.0.to_string()
+    }
+}
+
+impl fmt::Debug for ClaudeSubscriptionTokenSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted Claude subscription token>")
+    }
+}
+
 pub(crate) struct TelegramBotSecret(String);
 
 impl TelegramBotSecret {
@@ -227,6 +245,11 @@ impl WalletSecret {
     pub(crate) fn new(value: String) -> Self {
         Self(value)
     }
+
+    pub(crate) fn expose(&self) -> &str {
+        &self.0
+    }
+
     pub(crate) fn into_inner(mut self) -> String {
         std::mem::take(&mut self.0)
     }
@@ -289,9 +312,25 @@ pub(crate) struct WalletUnlockedResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum WalletUnlockContinuation {
     WalletMenu,
+    OpenCorbanuApi {
+        deferred: Option<crate::onboarding::provider_setup::DeferredProviderSetup>,
+    },
+    // Only the unlock tests construct this; see WalletPlanPurchaseMode.
+    #[cfg_attr(not(test), allow(dead_code))]
     OpenPlans {
         mode: crate::chatwidget::wallet_menu::WalletPlanPurchaseMode,
     },
+    CorbanuApiOperation {
+        operation: codex_wallet::CorbanuApiOperation,
+        deferred: Option<crate::onboarding::provider_setup::DeferredProviderSetup>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DeferredWalletPreflight {
+    Missing,
+    Locked,
+    Unlocked,
 }
 
 #[derive(Debug)]
@@ -305,6 +344,38 @@ pub(crate) struct WalletPlanProvisionedResult {
 pub(crate) enum WalletPlanProvisioningOperation {
     Purchase,
     Recovery,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WalletPlanReceiptSelectionPolicy {
+    SelectProviderOnSuccess,
+    PreserveCurrentProvider,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WalletPlanPersistenceAttemptId(u64);
+
+impl WalletPlanPersistenceAttemptId {
+    pub(crate) fn new(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WalletPlanCredentialPersistenceError {
+    StoreFailed,
+    WorkerUnavailable,
+}
+
+impl fmt::Display for WalletPlanCredentialPersistenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StoreFailed => f.write_str("the credential could not be stored"),
+            Self::WorkerUnavailable => {
+                f.write_str("the credential storage worker stopped unexpectedly")
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -336,6 +407,27 @@ pub(crate) enum AppEvent {
     SelectAgentThread(ThreadId),
     /// Open the user-pane picker for switching Codex/Claude panes.
     OpenPanePicker,
+    /// `/security` "restart now" (PF-24-S02): shut down like `/quit`, then
+    /// start Corbanu Terminal again so a saved level takes effect.
+    RestartForSecurityLevel,
+    /// #507: the kill switch was turned on in `/security`; stop the Claude
+    /// panes' running turns (Core stops its own sessions).
+    KillSwitchTurnedOn,
+    /// #507: the kill switch was turned off. Nothing restarts; the person is
+    /// told which Claude panes have a task waiting for their next turn.
+    KillSwitchTurnedOff,
+    /// #507 (Travis, 2026-10-12): another Corbanu Terminal process on this
+    /// home turned the kill switch on or off; Core already applied it to
+    /// this process's sessions.
+    KillSwitchChangedElsewhere {
+        on: bool,
+    },
+    /// #842 (Travis, 2026-10-15): Moderate confirmed in another Corbanu
+    /// Terminal process on this home; Core already raised this process's
+    /// sessions to it.
+    SecurityLevelRaisedElsewhere {
+        level: crate::legacy_core::security_revocation::SecurityLevel,
+    },
     /// Open the `/spawn` role picker.
     OpenSpawnRolePicker,
     /// Open the `/spawn` Nazgul pane-binding picker.
@@ -376,6 +468,8 @@ pub(crate) enum AppEvent {
     },
     /// Create the standard persistent crew: Nazgul (root) -> Troll -> 3 Orcs. No task is started.
     CreateSpawnStandardCrew,
+    /// Create the Corbanu API persistent crew: Kimi K3 Nazgul -> Luna Troll -> 3 Flash Orcs.
+    CreateSpawnCorbanuApiCrew,
     /// Open a prompt that sends work to an existing spawned-agent pane.
     OpenSpawnAgentTaskPrompt {
         thread_id: codex_protocol::ThreadId,
@@ -384,8 +478,22 @@ pub(crate) enum AppEvent {
     OpenSpawnClaudePaneTaskPrompt {
         pane_id: String,
     },
-    /// Start a normal turn in an existing spawned-agent pane.
+    /// An agent's task for a native pane, agent-opened or opened by the person
+    /// (D106, #1176): admitted to the pane's Core mailbox as an inter-agent
+    /// message, never as the person's input.
     SubmitSpawnAgentTask {
+        thread_id: codex_protocol::ThreadId,
+        task: String,
+        /// #660: another agent sent it while the security kill switch was
+        /// on: it waits in the mailbox for the pane's next turn even when it
+        /// is handled after the switch was turned off.
+        sent_while_kill_switch_on: bool,
+    },
+    /// D95 (#1146): a task the person typed into Spawn status's "Send task
+    /// to" prompt. It starts a turn in that pane as the person's own input,
+    /// as if typed there, not as a message from another agent. Only that
+    /// prompt sends it; tasks from agents use [`AppEvent::SubmitSpawnAgentTask`].
+    SubmitSpawnAgentTaskFromPerson {
         thread_id: codex_protocol::ThreadId,
         task: String,
     },
@@ -397,6 +505,10 @@ pub(crate) enum AppEvent {
     SubmitSpawnClaudePaneTask {
         pane_id: String,
         task: String,
+        /// #613: another agent sent it while the security kill switch was
+        /// on: it waits for the pane's next turn even when it is handled
+        /// after the switch was turned off.
+        sent_while_kill_switch_on: bool,
     },
     /// Show the current orchestration tree.
     OpenSpawnStatus,
@@ -546,11 +658,69 @@ pub(crate) enum AppEvent {
         pane_id: String,
         result: Result<crate::claude_panes::ClaudePaneTurnOutput, String>,
     },
+    /// A contained Claude pane (#218) asks to use a tool; a person answers.
+    ClaudePaneApprovalRequested(Box<crate::claude_panes::approval::ClaudeApprovalRequest>),
+    /// Some contained Claude pane requests stopped waiting (the turn ended,
+    /// was interrupted, timed out, or Claude Code cancelled them); their
+    /// popups close.
+    ClaudePaneApprovalsSettled,
+    /// #554: a new contained Claude pane cannot run the Claude Code on PATH
+    /// (too old, or it does not run); `problem` says why and what to do.
+    ClaudePaneLaunchProblem {
+        pane_id: String,
+        problem: String,
+    },
     /// A Claude Code headless pane emitted bounded live progress.
     ClaudePaneTurnProgress {
         progress: crate::claude_panes::ClaudePaneTurnProgress,
     },
+    /// A pane bridge sent a model request upstream and is reporting it.
+    ///
+    /// The bridge posts to a provider from inside this process, which does not
+    /// run the model client, so the request reaches no ledger unless it is
+    /// reported. The server decides which account the route bills and whether
+    /// to record it at all.
+    PaneBridgeModelRequestSent {
+        provider_id: String,
+        base_url: String,
+        path: String,
+        model: String,
+        /// The `usage` object the provider's response carried, if any.
+        usage: Option<serde_json::Value>,
+    },
 
+    AgentControlTick {
+        directory: PathBuf,
+    },
+
+    /// A response may only update the profile, credential and view which requested it.
+    TaskNodeScopedResult {
+        label: &'static str,
+        generation: u64,
+        scope: codex_tasknode_session::SessionScope,
+        identity: Option<String>,
+        view: Option<String>,
+        event: Box<AppEvent>,
+    },
+
+    CampaignTrackerDocument {
+        text: String,
+    },
+    CampaignTrackerTick,
+    CampaignTrackerOpen {
+        path: String,
+        body: Option<serde_json::Value>,
+    },
+    CampaignTrackerResult {
+        path: String,
+        enrollment: Option<bool>,
+        body: Option<serde_json::Value>,
+        result: Result<serde_json::Value, String>,
+    },
+    CampaignTrackerSync {
+        identity: String,
+        result: Result<usize, String>,
+    },
     /// Open the Task Node menu.
     OpenTaskNodeMenu,
     /// Task Node menu account/task counts loaded.
@@ -643,6 +813,16 @@ pub(crate) enum AppEvent {
         result: Result<serde_json::Value, String>,
     },
     /// Show the current Task Node context document.
+    TaskNodeTeamContextDocument {
+        text: String,
+    },
+
+    OpenTaskNodeTeamContext,
+
+    OpenTaskNodeTeamContextResult {
+        result: Result<serde_json::Value, String>,
+    },
+
     OpenTaskNodeContext,
     /// Task Node context document loaded.
     OpenTaskNodeContextResult {
@@ -665,8 +845,18 @@ pub(crate) enum AppEvent {
     SubmitTaskNodeContextEditResult {
         result: Result<serde_json::Value, String>,
     },
+    RetryTaskNodeRequest {
+        request_id: String,
+        attempt: u64,
+    },
+    RetryTaskNodeRequestResult {
+        result: Result<serde_json::Value, String>,
+    },
     /// Show active Task Node task requests.
     OpenTaskNodeRequestList,
+    OpenTaskNodeRequestPage {
+        cursor: Option<String>,
+    },
     /// Active Task Node task requests loaded.
     OpenTaskNodeRequestListResult {
         result: Result<serde_json::Value, String>,
@@ -921,6 +1111,32 @@ pub(crate) enum AppEvent {
 
     /// Open the default token-activity view selected from the `/usage` menu.
     OpenTokenActivity,
+
+    OpenAccountingInspector {
+        day: i64,
+    },
+    LoadAccountingInspector {
+        generation: uuid::Uuid,
+        thread: Option<ThreadId>,
+        day: i64,
+        range: Option<codex_state::accounting::InspectionRange>,
+    },
+    AccountingInspectorLoaded {
+        generation: uuid::Uuid,
+        thread: Option<ThreadId>,
+        day: i64,
+        result: Result<codex_state::accounting::InspectionDay, String>,
+    },
+    NavigateAccountingInspector {
+        generation: uuid::Uuid,
+        page: usize,
+    },
+    CloseAccountingInspector {
+        generation: uuid::Uuid,
+    },
+    RefreshAccountingInspector {
+        generation: uuid::Uuid,
+    },
 
     /// Open the reset-credit flow selected from the `/usage` menu.
     OpenRateLimitResetCredits,
@@ -1356,6 +1572,7 @@ pub(crate) enum AppEvent {
     /// Open the explicit Max/Ultra reasoning selection popup for a model.
     OpenAdvancedReasoningPopup {
         model: ModelPreset,
+        purpose: crate::chatwidget::ModelSelectionPurpose,
     },
 
     /// Apply an advanced reasoning effort to the active conversation without changing defaults.
@@ -1436,6 +1653,121 @@ pub(crate) enum AppEvent {
         display_name: String,
         api_key: ProviderApiKeySecret,
     },
+    OpenSharedProviderSetup,
+    ProviderAccountMetadataResolved {
+        metadata: crate::provider_status_host::ProviderAccountMetadata,
+    },
+    SharedProviderSetupBegin {
+        provider_id: codex_provider_auth::ProviderCatalogId,
+        capability: codex_provider_auth::ProviderSetupCapability,
+    },
+    SharedProviderSetupSelectExisting {
+        provider_id: codex_provider_auth::ProviderCatalogId,
+        runtime_provider_id: codex_provider_auth::ProviderRuntimeId,
+    },
+    SharedProviderSetupQueueCorbanu(bool),
+    SaveSharedProviderApiKey {
+        target: codex_provider_auth::ApiKeyAuthTarget,
+        api_key: ProviderApiKeySecret,
+    },
+    SharedProviderApiKeyFinished {
+        target: codex_provider_auth::ApiKeyAuthTarget,
+        result: Result<codex_provider_auth::ProviderStatusSnapshot, String>,
+    },
+    SharedProviderSetupDone,
+    SharedProviderSetupCancelled,
+    ProviderAccountLoginCompleted {
+        login_id: Option<String>,
+        success: bool,
+    },
+    SharedProviderAuthAction(codex_provider_auth::ProviderAuthAction),
+
+    OpenProviderManager,
+    ProviderManagerStatusesResolved {
+        generation: u64,
+        status_host: crate::provider_status_host::ProviderStatusHost,
+        statuses: Vec<codex_provider_auth::ProviderStatusSnapshot>,
+        /// PF-84-S04: named accounts, when the `named_accounts` feature is on.
+        accounts: Option<Vec<crate::provider_named_accounts::NamedAccountRow>>,
+    },
+    /// PF-84-S04: a named-account action from `/providers`.
+    ProviderAccount(crate::provider_named_accounts::ProviderAccountEvent),
+    /// PF-84 (#572): whether the vault holds a named Bedrock account (`None`
+    /// when it could not be read), for the check numbered `generation`.
+    NamedBedrockAccountChecked {
+        generation: u64,
+        offered: Option<bool>,
+    },
+    ProviderManagerMetadataResolved {
+        generation: u64,
+        metadata: crate::provider_status_host::ProviderAccountMetadata,
+    },
+    OpenProviderManagerActions {
+        provider_id: codex_provider_auth::ProviderCatalogId,
+    },
+    OpenProviderManagerRecovery {
+        provider_id: codex_provider_auth::ProviderCatalogId,
+    },
+    ProviderManagerApiKeyCancelled {
+        attempt_id: codex_provider_auth::ProviderManagementAttemptId,
+        provider_id: codex_provider_auth::ProviderCatalogId,
+    },
+    ProviderManagerBeginAuthentication {
+        provider_id: codex_provider_auth::ProviderCatalogId,
+        capability: codex_provider_auth::ProviderSetupCapability,
+    },
+    ProviderManagerClaudeRecoverySourceResolved {
+        attempt_id: codex_provider_auth::ProviderManagementAttemptId,
+        target: codex_provider_auth::claude_account_flow::ClaudeAccountTarget,
+        status: codex_provider_auth::ProviderStatusSnapshot,
+        source: codex_provider_auth::claude_account_flow::ClaudeUnauthorizedRecoverySource,
+    },
+    SaveProviderManagerApiKey {
+        attempt_id: codex_provider_auth::ProviderManagementAttemptId,
+        target: codex_provider_auth::ApiKeyAuthTarget,
+        api_key: ProviderApiKeySecret,
+    },
+    ProviderManagerApiKeyFinished {
+        attempt_id: codex_provider_auth::ProviderManagementAttemptId,
+        target: codex_provider_auth::ApiKeyAuthTarget,
+        status: Option<codex_provider_auth::ProviderStatusSnapshot>,
+    },
+    ProviderManagerRequestPolicy {
+        provider_id: codex_provider_auth::ProviderCatalogId,
+        policy: codex_provider_auth::ProviderActivationPolicy,
+    },
+    ProviderManagerChooseReplacement {
+        target_provider_id: codex_provider_auth::ProviderCatalogId,
+        replacement: codex_provider_auth::ExplicitProviderSelection,
+    },
+    ProviderManagerCancelReplacement {
+        target_provider_id: codex_provider_auth::ProviderCatalogId,
+    },
+    ProviderManagerPersistenceFinished {
+        attempt_id: codex_provider_auth::ProviderManagementAttemptId,
+        result: codex_provider_auth::ProviderManagementPersistenceResult,
+    },
+    ProviderManagerReplacementPersisted {
+        attempt_id: codex_provider_auth::ProviderManagementAttemptId,
+        target_provider_id: codex_provider_auth::ProviderCatalogId,
+        replacement: codex_provider_auth::ExplicitProviderSelection,
+        success: bool,
+    },
+    ProviderManagerDeactivateAfterReplacement {
+        attempt_id: codex_provider_auth::ProviderManagementAttemptId,
+        target_provider_id: codex_provider_auth::ProviderCatalogId,
+    },
+
+    ProviderApiKeySaveDismissed {
+        save_id: String,
+    },
+
+    /// Finish a provider API-key save after app-server has persisted and reloaded auth.
+    ProviderApiKeySaveFinished {
+        save_id: String,
+        display_name: String,
+        result: Result<(), String>,
+    },
 
     OpenTelegram,
     OpenTelegramTokenEntry,
@@ -1475,8 +1807,37 @@ pub(crate) enum AppEvent {
     /// Start OpenAI Codex account device-code login from the Providers screen.
     OpenCodexAccountDeviceLogin,
 
-    /// Start Claude Code's subscription OAuth flow from the Providers screen.
+    /// Open the explicit Claude Plan authentication-method choice.
     OpenClaudeCodePlanLogin,
+
+    /// Open the safe handoff for the official long-lived `claude setup-token` flow.
+    RunClaudeSetupToken,
+
+    /// Use or repair Claude Code's rotating subscription login.
+    UseClaudeCodePlanLogin,
+
+    /// Persist an explicitly configured legacy environment token as the exact source.
+    UseLegacyClaudeEnvironmentToken,
+
+    /// Completion of the metadata-only legacy environment-token recovery.
+    LegacyClaudeEnvironmentTokenSelected {
+        result: Result<String, String>,
+    },
+
+    /// Completion of the off-event-loop Claude Code status probe.
+    ClaudeCodePlanLoginSelectionChecked {
+        result: Result<bool, String>,
+    },
+
+    /// Store and select a masked long-lived Claude subscription token.
+    SaveClaudeManagedSubscriptionToken {
+        token: ClaudeSubscriptionTokenSecret,
+    },
+
+    /// Completion of the encrypted managed-token enrollment transaction.
+    ClaudeManagedSubscriptionTokenSaved {
+        result: Result<String, String>,
+    },
 
     /// Claude Code opened a browser login URL and is waiting for its authorization code.
     ClaudeCodePlanLoginReady {
@@ -1499,6 +1860,9 @@ pub(crate) enum AppEvent {
     },
 
     /// Latest provider credential statuses loaded away from the TUI event thread.
+    // Unreachable since provider management was unified (3db6321294); remove
+    // with the rest of this status plumbing or wire it back in.
+    #[allow(dead_code)]
     ProviderCredentialStatusesReady {
         claude_status: crate::chatwidget::claude_code_login::ClaudeCodePlanStatus,
         pfterminal_plan_status: crate::chatwidget::provider_credentials::PfTerminalPlanStatus,
@@ -1584,6 +1948,35 @@ pub(crate) enum AppEvent {
         generation: u64,
         result: Result<crate::chatwidget::wallet_menu::WalletOverview, String>,
     },
+    OpenCorbanuApi {
+        deferred: Option<crate::onboarding::provider_setup::DeferredProviderSetup>,
+    },
+    CorbanuApiLoaded {
+        result: Result<crate::chatwidget::wallet_api::CorbanuApiView, String>,
+        deferred: Option<crate::onboarding::provider_setup::DeferredProviderSetup>,
+        /// The daemon refused the held wallet capability as lapsed.
+        capability_lapsed: bool,
+    },
+    OpenCorbanuApiTopUp {
+        deferred: Option<crate::onboarding::provider_setup::DeferredProviderSetup>,
+    },
+    ConfirmCorbanuApiTopUp {
+        amount_usd: String,
+        deferred: Option<crate::onboarding::provider_setup::DeferredProviderSetup>,
+    },
+    ConfirmCorbanuApiKeyRevocation {
+        key_id: String,
+        display_prefix: String,
+        deferred: Option<crate::onboarding::provider_setup::DeferredProviderSetup>,
+    },
+    CorbanuApiOperationRequested {
+        operation: codex_wallet::CorbanuApiOperation,
+        deferred: Option<crate::onboarding::provider_setup::DeferredProviderSetup>,
+    },
+    CorbanuApiOperationFinished {
+        result: Result<codex_wallet::CorbanuApiOperationResult, String>,
+        deferred: Option<crate::onboarding::provider_setup::DeferredProviderSetup>,
+    },
     WalletCreateFinished {
         operation: WalletPersistenceOperation,
         result: Result<WalletCreatedResult, String>,
@@ -1595,6 +1988,13 @@ pub(crate) enum AppEvent {
     },
     OpenWalletPlans {
         mode: crate::chatwidget::wallet_menu::WalletPlanPurchaseMode,
+    },
+    BeginDeferredCorbanuPlan {
+        deferred: crate::onboarding::provider_setup::DeferredProviderSetup,
+    },
+    DeferredWalletPreflightFinished {
+        deferred: crate::onboarding::provider_setup::DeferredProviderSetup,
+        result: Result<DeferredWalletPreflight, String>,
     },
     WalletPlansReady {
         mode: crate::chatwidget::wallet_menu::WalletPlanPurchaseMode,
@@ -1609,14 +2009,38 @@ pub(crate) enum AppEvent {
     WalletPlanProvisioned {
         operation: WalletPlanProvisioningOperation,
         result: Result<WalletPlanProvisionedResult, String>,
+        deferred_setup: Option<crate::onboarding::provider_setup::DeferredProviderSetup>,
+    },
+    WalletPlanCredentialPersistenceFinished {
+        attempt_id: WalletPlanPersistenceAttemptId,
+        operation: WalletPlanProvisioningOperation,
+        plan_id: String,
+        purchase: Option<WalletPlanPurchaseSummary>,
+        deferred_setup: Option<crate::onboarding::provider_setup::DeferredProviderSetup>,
+        api_key: Option<WalletSecret>,
+        result: Result<(), WalletPlanCredentialPersistenceError>,
+    },
+    DeferredCorbanuPlanCancelled {
+        deferred: crate::onboarding::provider_setup::DeferredProviderSetup,
+    },
+    DeferredCorbanuPlanConfigured {
+        deferred: crate::onboarding::provider_setup::DeferredProviderSetup,
     },
     WalletPlanReceiptReady {
+        attempt_id: WalletPlanPersistenceAttemptId,
+        selection_policy: WalletPlanReceiptSelectionPolicy,
         receipt: crate::chatwidget::wallet_receipt::WalletPlanReceipt,
     },
+    // Unreachable since the legacy plan state was retired (66ff6579d7); remove
+    // or wire back in.
+    #[allow(dead_code)]
     OpenWalletPlanReceipt {
         receipt: crate::chatwidget::wallet_receipt::WalletPlanReceipt,
     },
     CloseWalletPlanReceipt,
+    // Unreachable since the legacy plan state was retired (66ff6579d7); remove
+    // or wire back in.
+    #[allow(dead_code)]
     WalletRecoverPlanRequested,
 
     /// Open the vault credential list.
@@ -1754,17 +2178,23 @@ pub(crate) enum AppEvent {
         profile_selection: Option<PermissionProfileSelection>,
     },
 
-    /// Update the Windows sandbox feature mode without changing approval presets.
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-
+    // Handled when sent; nothing constructs it in this build.
+    #[allow(dead_code)]
     /// Update the current approval policy in the running app and widget.
     UpdateAskForApprovalPolicy(AskForApproval),
 
+    // Handled when sent; nothing constructs it in this build.
+    #[allow(dead_code)]
     /// Update the current built-in active permission profile in the running app and widget.
     UpdateActivePermissionProfile(ActivePermissionProfile),
 
     /// Select a named permission profile, optionally applying built-in mode settings too.
     SelectPermissionProfile(PermissionProfileSelection),
+    SelectPermissionPreset(PermissionProfileSelection),
+    PermissionConfirmationCompleted {
+        selection_id: uuid::Uuid,
+        result: crate::app_server_session::PermissionConfirmationResult,
+    },
 
     /// Update the current approvals reviewer in the running app and widget.
     UpdateApprovalsReviewer(ApprovalsReviewer),

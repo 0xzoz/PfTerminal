@@ -16,20 +16,86 @@ from codex_package.targets import TARGET_SPECS
 
 
 class SourceBinariesForTargetTest(unittest.TestCase):
+    def test_corbanu_package_contains_only_corbanu_commands(self) -> None:
+        variant = PACKAGE_VARIANTS["corbanu"]
+
+        self.assertEqual(variant.cargo_bin, "corbanu")
+        self.assertEqual(
+            [binary.cargo_bin for binary in variant.extra_binaries],
+            [
+                "corbanu-debug",
+                "corbanu-acp",
+                "corbanu-walletd",
+            ],
+        )
+        self.assertEqual(
+            {
+                binary.executable_stem: binary.alias_of
+                for binary in variant.extra_binaries
+            },
+            {
+                "corbanu-debug": "corbanu",
+                "corbanu-acp": None,
+                "corbanu-walletd": None,
+            },
+        )
+
     def test_release_workflow_prebuilds_every_package_binary(self) -> None:
         workflow = (
             Path(__file__).resolve().parents[2]
             / ".github"
             / "workflows"
-            / "pfterminal-release.yml"
+            / "corbanu-terminal-release.yml"
         ).read_text(encoding="utf-8")
 
-        self.assertEqual(workflow.count("--bin pfterminal-debug \\"), 3)
+        self.assertEqual(workflow.count("--bin corbanu \\"), 3)
+        self.assertEqual(workflow.count("--bin corbanu-acp \\"), 3)
+        self.assertEqual(workflow.count("--bin corbanu-walletd \\"), 3)
         self.assertEqual(workflow.count("--bin codex-code-mode-host"), 3)
-        self.assertEqual(workflow.count('--extra-bin "pfterminal-debug='), 3)
+        self.assertEqual(workflow.count("--variant corbanu \\"), 3)
+        self.assertEqual(workflow.count('--extra-bin "corbanu-debug='), 3)
+        self.assertNotIn("--bin pfterminal", workflow)
+        self.assertNotIn('--extra-bin "pfterminal', workflow)
         self.assertEqual(workflow.count("--code-mode-host-bin "), 3)
         self.assertEqual(workflow.count("--bin bwrap"), 1)
         self.assertEqual(workflow.count("--bwrap-bin "), 1)
+        self.assertEqual(workflow.count("--symbols-dir "), 2)
+
+    def test_unix_source_build_reuses_corbanu_debug_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            entrypoint = touch_file(root / "corbanu")
+            code_mode_host = touch_file(root / "codex-code-mode-host")
+            acp = touch_file(root / "corbanu-acp")
+            walletd = touch_file(root / "corbanu-walletd")
+            outputs = build_source_binaries(
+                TARGET_SPECS["aarch64-apple-darwin"],
+                PACKAGE_VARIANTS["corbanu"],
+                cargo=str(root / "cargo-that-should-not-run"),
+                profile="release",
+                entrypoint_bin=entrypoint,
+                code_mode_host_bin=code_mode_host,
+                extra_bins={"corbanu-acp": acp, "corbanu-walletd": walletd},
+                bwrap_bin=None,
+                codex_command_runner_bin=None,
+                codex_windows_sandbox_setup_bin=None,
+            )
+
+        self.assertEqual(outputs.extra_bins["corbanu-debug"], entrypoint)
+        self.assertEqual(outputs.extra_bins["corbanu-acp"], acp)
+        self.assertEqual(outputs.extra_bins["corbanu-walletd"], walletd)
+
+    def test_release_workflow_can_reuse_qualified_platform_artifacts(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[2]
+            / ".github"
+            / "workflows"
+            / "corbanu-terminal-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("reuse_run_id:", workflow)
+        self.assertIn("run-id: ${{ inputs.reuse_run_id }}", workflow)
+        self.assertEqual(workflow.count("if: ${{ inputs.reuse_run_id == '' }}"), 2)
 
     def test_cli_accepts_repeated_prebuilt_extra_binaries(self) -> None:
         with patch.object(
@@ -182,6 +248,7 @@ class SourceBinariesForTargetTest(unittest.TestCase):
             command_runner = touch_file(root / "codex-command-runner.exe")
             sandbox_setup = touch_file(root / "codex-windows-sandbox-setup.exe")
             pfterminal = touch_file(root / "pfterminal.exe")
+            walletd = touch_file(root / "pfterminal-walletd.exe")
 
             outputs = build_source_binaries(
                 TARGET_SPECS["x86_64-pc-windows-msvc"],
@@ -193,13 +260,17 @@ class SourceBinariesForTargetTest(unittest.TestCase):
                 bwrap_bin=None,
                 codex_command_runner_bin=command_runner,
                 codex_windows_sandbox_setup_bin=sandbox_setup,
-                extra_bins={"pfterminal.exe": pfterminal},
+                extra_bins={
+                    "pfterminal.exe": pfterminal,
+                    "pfterminal-walletd.exe": walletd,
+                },
             )
 
         self.assertEqual(outputs.entrypoint_bin, entrypoint)
         self.assertEqual(outputs.code_mode_host_bin, code_mode_host)
         self.assertEqual(outputs.codex_command_runner_bin, command_runner)
         self.assertEqual(outputs.codex_windows_sandbox_setup_bin, sandbox_setup)
+        self.assertEqual(outputs.extra_bins["pfterminal-walletd.exe"], walletd)
 
 
 def touch_file(path: Path) -> Path:

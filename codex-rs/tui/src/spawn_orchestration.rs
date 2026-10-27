@@ -8,6 +8,7 @@ use crate::bottom_pane::custom_prompt_view::CustomPromptView;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::claude_panes::CODEX_MAIN_PANE_ID;
 use crate::claude_panes::ClaudeProviderProfileKind;
+#[cfg(test)]
 use crate::crew_presets;
 use crate::multi_agents::agent_picker_status_dot_spans;
 use crate::multi_agents::format_agent_picker_item_name;
@@ -18,6 +19,7 @@ use codex_app_server_protocol::SessionSource as AppServerSessionSource;
 use codex_app_server_protocol::ThreadAgentMessageParams;
 use codex_app_server_protocol::ThreadStatus;
 use codex_features::Feature;
+use codex_product_brand::MAIN_PANE_TITLE;
 use codex_protocol::ThreadId;
 use codex_protocol::crew::AgentClass;
 use codex_protocol::crew::CREW_AUTO_DISPATCH_CHAIN_LIMIT;
@@ -150,10 +152,10 @@ impl SpawnRole {
         match self {
             Self::Nazgul => None,
             Self::Troll => Some(
-                "<pfterminal_spawn_role>\nBehavior:\nYou are the PFTerminal Troll: an engineering manager / VP-of-engineering style supervisor. You report to the Nazgul, the effective CTO. Orcs are IC executors who report to you. You are not an IC.\n\nMandate:\nPrefer delegation, review, coordination, and enforcement over implementation yourself. Work against spec docs, and after work is done make sure the docs reflect what shipped. You may do code reviews yourself or have one Orc review another Orc's work. If a review finds a bug, send the fix back to the responsible Orc. Do not claim completion without concrete evidence.\n\nPersonality:\nHold a very high bar for correctness, business objective fit, tests, evidence, and documentation. Be blunt, adversarial, and demanding about weak work; pick apart Orc output, reject shortcuts, and force rework when the evidence is not good enough. Critique the work product directly.\n\nFinal Report Standards:\nYour final report to the Nazgul must include: Orcs used, what each did, evidence, issues forced back for rework, remaining risk.\n</pfterminal_spawn_role>",
+                "<pfterminal_spawn_role>\nBehavior:\nYou are the Corbanu Terminal Troll: an engineering manager / VP-of-engineering style supervisor. You report to the Nazgul, the effective CTO. Orcs are IC executors who report to you. You are not an IC.\n\nMandate:\nPrefer delegation, review, coordination, and enforcement over implementation yourself. Work against spec docs, and after work is done make sure the docs reflect what shipped. You may do code reviews yourself or have one Orc review another Orc's work. If a review finds a bug, send the fix back to the responsible Orc. Do not claim completion without concrete evidence.\n\nPersonality:\nHold a very high bar for correctness, business objective fit, tests, evidence, and documentation. Be blunt, adversarial, and demanding about weak work; pick apart Orc output, reject shortcuts, and force rework when the evidence is not good enough. Critique the work product directly.\n\nFinal Report Standards:\nYour final report to the Nazgul must include: Orcs used, what each did, evidence, issues forced back for rework, remaining risk.\n</pfterminal_spawn_role>",
             ),
             Self::Orc => Some(
-                "<pfterminal_spawn_role>\nYou are the PFTerminal Orc: an IC executor at the bottom of the chain of command. You report to your supervising Troll engineering manager, who reports to the Nazgul CTO, who reports to Sauron/the human CEO. Do exactly what the Troll tells you. Do not expand scope, reinterpret the assignment, or wander into unrelated work. Execute directly, produce concrete evidence, and report changed files, tests, benchmark output, or findings. Do not spawn child agents. Do not declare done without evidence. If your work is rejected, fix it precisely.\n</pfterminal_spawn_role>",
+                "<pfterminal_spawn_role>\nYou are the Corbanu Terminal Orc: an IC executor at the bottom of the chain of command. You report to your supervising Troll engineering manager, who reports to the Nazgul CTO, who reports to Sauron/the human CEO. Do exactly what the Troll tells you. Do not expand scope, reinterpret the assignment, or wander into unrelated work. Execute directly, produce concrete evidence, and report changed files, tests, benchmark output, or findings. Do not spawn child agents. Do not declare done without evidence. If your work is rejected, fix it precisely.\n</pfterminal_spawn_role>",
             ),
         }
     }
@@ -175,11 +177,24 @@ impl App {
             SelectionItem {
                 name: "Create standard crew: Nazgul + Troll + 3 Orcs".to_string(),
                 description: Some(
-                    "Create persistent named panes (Nazgul Claude Fable Plan, Troll GPT-5.6-Sol xhigh, Orcs GPT-5.6-Luna xhigh, GPT-5.6-Terra xhigh, and OpenRouter Grok 4.5). No task is started."
+                    "Create persistent named panes (Nazgul Claude Fable Plan, Troll GPT-5.6-Sol xhigh, Orcs GPT-5.6-Luna xhigh, GPT-5.6-Terra xhigh, and OpenRouter Grok 4.6). No task is started."
                         .to_string(),
                 ),
                 actions: vec![Box::new(|tx| {
                     tx.send(AppEvent::CreateSpawnStandardCrew);
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            },
+            SelectionItem {
+                name: "Create Corbanu API crew: Kimi K3 Nazgul + Luna Troll + 3 Flash Orcs"
+                    .to_string(),
+                description: Some(
+                    "Create persistent named panes using wallet-funded Corbanu API routes (Nazgul Kimi K3, Troll GPT-5.6 Luna xhigh, and 3 Orcs on GLM 5.3 Flash). No task is started."
+                        .to_string(),
+                ),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::CreateSpawnCorbanuApiCrew);
                 })],
                 dismiss_on_select: true,
                 ..Default::default()
@@ -296,8 +311,8 @@ impl App {
         items.push(section_item("Existing User Panes"));
         items.push(self.nazgul_pane_item(
             CODEX_MAIN_PANE_ID.to_string(),
-            "PFTerminal - Main".to_string(),
-            "Current PFTerminal session".to_string(),
+            MAIN_PANE_TITLE.to_string(),
+            "Current Corbanu Terminal session".to_string(),
         ));
         for pane in self.claude_panes.panes() {
             items.push(self.nazgul_pane_item(
@@ -312,7 +327,7 @@ impl App {
         // primary Codex Main thread plus any additional Codex threads without a Troll/Orc role.
         let codex_panes = self.nazgul_codex_pane_picker_items();
         if !codex_panes.is_empty() {
-            items.push(section_item("PFTerminal Agent Panes"));
+            items.push(section_item("Corbanu Terminal Agent Panes"));
             items.extend(codex_panes);
         }
 
@@ -356,9 +371,9 @@ impl App {
                 is_primary,
             );
             let description = if is_primary {
-                "Primary PFTerminal Main thread".to_string()
+                "Primary Corbanu Terminal Main thread".to_string()
             } else {
-                "PFTerminal agent pane".to_string()
+                "Corbanu Terminal agent pane".to_string()
             };
             items.push(self.nazgul_pane_item(node_id, name, description));
         }
@@ -648,10 +663,11 @@ impl App {
             {
                 runtime.clone()
             } else {
-                let (model, provider, reasoning_effort) =
-                        Self::standard_native_spawn_runtime_for_role(role).ok_or_else(|| {
+                let (model, provider, reasoning_effort) = self
+                    .saved_crew_runtime_for_node(&old_node_id)
+                    .ok_or_else(|| {
                             eyre!(
-                                "Cannot materialize {}: the standard crew is missing an exact runtime for role {}.",
+                                "Cannot materialize {}: its persisted crew specification is missing an exact runtime for role {}.",
                                 self.thread_label(old_thread_id),
                                 role.label()
                             )
@@ -694,7 +710,7 @@ impl App {
                 nickname.clone(),
                 agent_type,
                 started,
-                false,
+                /*persist_layout*/ false,
             )
             .await;
             self.replace_saved_native_spawn_thread(old_thread_id, new_thread_id);
@@ -747,22 +763,11 @@ impl App {
         Ok((role, nickname))
     }
 
-    fn standard_native_spawn_runtime_for_role(
-        role: SpawnRole,
+    fn saved_crew_runtime_for_node(
+        &self,
+        node_id: &str,
     ) -> Option<(String, String, Option<ReasoningEffort>)> {
-        crew_presets::standard_crew_spec()
-            .members
-            .into_iter()
-            .find(|member| member.role_profile == role.agent_type().unwrap_or_default())
-            .and_then(|member| match member.runtime_request {
-                RuntimeRequest::Exact {
-                    provider_id,
-                    model_id,
-                    reasoning_effort,
-                    ..
-                } => Some((model_id, provider_id, reasoning_effort)),
-                RuntimeRequest::Selector { .. } => None,
-            })
+        exact_crew_runtime_for_node(self.spawn_crew.as_ref()?, node_id)
     }
 
     pub(crate) fn replace_saved_native_spawn_thread(
@@ -983,7 +988,7 @@ impl App {
         let troll_node_id = self.logical_native_node_for_thread(thread_id);
         let mut context = String::new();
         let _ = writeln!(context, "<pfterminal_spawn_context>");
-        let _ = writeln!(context, "You are the PFTerminal Troll pane: {label}.");
+        let _ = writeln!(context, "You are the Corbanu Terminal Troll pane: {label}.");
         let _ = writeln!(
             context,
             "Your persistent Troll doctrine and personality come from the built-in troll role; this application context contains only live identity, routing, and lifecycle state."
@@ -1022,7 +1027,7 @@ impl App {
     fn render_orc_spawn_context_for_thread(&self, thread_id: ThreadId, label: String) -> String {
         let mut context = String::new();
         let _ = writeln!(context, "<pfterminal_spawn_context>");
-        let _ = writeln!(context, "You are the PFTerminal Orc pane: {label}.");
+        let _ = writeln!(context, "You are the Corbanu Terminal Orc pane: {label}.");
         let _ = writeln!(
             context,
             "Your persistent Orc doctrine and personality come from the built-in orc role; this application context contains only live identity and reporting-line state."
@@ -1103,9 +1108,9 @@ impl App {
             footer_hint: Some(standard_popup_hint_line()),
             items: vec![
                 SelectionItem {
-                    name: "Harness: PFTerminal".to_string(),
+                    name: "Harness: Corbanu Terminal".to_string(),
                     description: Some(
-                        "Native PFTerminal agent pane; choose model and reasoning next."
+                        "Native Corbanu Terminal agent pane; choose model and reasoning next."
                             .to_string(),
                     ),
                     actions: vec![Box::new({
@@ -1165,6 +1170,10 @@ impl App {
         role: SpawnRole,
         parent_node_id: Option<String>,
     ) {
+        if let Some(reason) = crate::security::level::external_agent_block_reason() {
+            self.chat_widget.add_error_message(reason);
+            return;
+        }
         let mut items = Vec::new();
         for profile in ClaudeProviderProfileKind::creation_options() {
             let profile_config = profile.profile();
@@ -1221,15 +1230,12 @@ impl App {
 
     pub(crate) fn open_spawn_agent_task_prompt(&mut self, thread_id: ThreadId) {
         let title = self.thread_label(thread_id);
-        let tx = self.app_event_tx.clone();
         let view = CustomPromptView::new(
             format!("Send Task to {title}"),
             "Describe the work to run in this pane".to_string(),
             String::new(),
             Some("Task".to_string()),
-            Box::new(move |task| {
-                tx.send(AppEvent::SubmitSpawnAgentTask { thread_id, task });
-            }),
+            spawn_agent_task_prompt_submit(self.app_event_tx.clone(), thread_id),
         );
         self.chat_widget.show_custom_prompt_view(view);
     }
@@ -1245,6 +1251,57 @@ impl App {
         task.trim().to_string()
     }
 
+    /// Send an agent's task (assignment fires, model dispatch) to a native pane. Every native
+    /// pane takes it from its Core mailbox as inter-agent data, also a pane the person opened
+    /// (D106, #1176): an agent's task never arrives as the person's own input. The person's own
+    /// task from Spawn status takes [`AppEvent::SubmitSpawnAgentTaskFromPerson`] instead.
+    pub(crate) fn send_native_task_event(&self, thread_id: ThreadId, task: String) {
+        // #660: only agents (assignment fires, model dispatch) send through
+        // here; a task sent while the switch is on never starts a turn, even
+        // when it is handled just after switch-off.
+        let sent_while_kill_switch_on = self.kill_switch_on_now();
+        self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
+            thread_id,
+            task,
+            sent_while_kill_switch_on,
+        });
+    }
+
+    /// #660 follow-up: a task for the managed Codex pane `thread_id` waits in
+    /// its mailbox because of the kill switch, until that pane's next turn.
+    /// Not when the pane is running a turn: that turn takes the task. Reports
+    /// held in a mailbox are not tasks and are not listed (as for Claude panes).
+    pub(crate) fn note_kill_switch_held_native_task(&mut self, thread_id: ThreadId) {
+        let running = self
+            .agent_navigation
+            .get(&thread_id)
+            .is_some_and(|entry| entry.is_running);
+        if !running && !self.kill_switch_held_native_tasks.contains(&thread_id) {
+            self.kill_switch_held_native_tasks.push(thread_id);
+        }
+    }
+
+    /// #660 follow-up: a turn started in `thread_id` (its waiting task went
+    /// with it) or the pane closed; it no longer has a waiting task.
+    pub(crate) fn clear_kill_switch_held_native_task(&mut self, thread_id: ThreadId) {
+        self.kill_switch_held_native_tasks
+            .retain(|held| *held != thread_id);
+    }
+
+    /// #507/#660: what the person is told when a task for a managed Codex
+    /// pane waits in its mailbox because of the kill switch.
+    pub(crate) fn kill_switch_held_native_task_message(&self, label: &str) -> String {
+        if self.kill_switch_on_now() {
+            format!(
+                "A task for {label} waits: the security kill switch is on. Turning it off starts nothing: the task goes with that pane's next turn, when someone types in it or it gets new work."
+            )
+        } else {
+            format!(
+                "A task for {label} waits: it was sent while the security kill switch was on, and turning the switch off starts nothing. It goes with that pane's next turn, when someone types in it or it gets new work."
+            )
+        }
+    }
+
     pub(crate) fn open_spawn_claude_pane_task_prompt(&mut self, pane_id: String) {
         let title = self.user_pane_title(&pane_id);
         let tx = self.app_event_tx.clone();
@@ -1254,9 +1311,11 @@ impl App {
             String::new(),
             Some("Task".to_string()),
             Box::new(move |task| {
+                // A person's own task: held only while the switch is on.
                 tx.send(AppEvent::SubmitSpawnClaudePaneTask {
                     pane_id: pane_id.clone(),
                     task,
+                    sent_while_kill_switch_on: false,
                 });
             }),
         );
@@ -1346,7 +1405,7 @@ impl App {
                     &[ack],
                     "failed",
                     "ignored empty task dispatch",
-                    true,
+                    /*notify*/ true,
                 );
                 continue;
             }
@@ -1382,9 +1441,18 @@ impl App {
                         dispatch.target.trim().to_string(),
                         dispatch.seq,
                     );
-                    self.record_spawn_dispatch_acks(&[ack], "failed", &failure, true);
+                    self.record_spawn_dispatch_acks(
+                        &[ack],
+                        "failed",
+                        &failure,
+                        /*notify*/ true,
+                    );
                     if attempt == 0 {
-                        self.note_assignment_dispatch_failure(source_pane_id, &failure, true);
+                        self.note_assignment_dispatch_failure(
+                            source_pane_id,
+                            &failure,
+                            /*will_retry*/ true,
+                        );
                         pending.push_front((
                             (
                                 SpawnTaskDispatch {
@@ -1397,7 +1465,11 @@ impl App {
                             1,
                         ));
                     } else {
-                        self.note_assignment_dispatch_failure(source_pane_id, &failure, false);
+                        self.note_assignment_dispatch_failure(
+                            source_pane_id,
+                            &failure,
+                            /*will_retry*/ false,
+                        );
                     }
                     continue;
                 }
@@ -1431,7 +1503,7 @@ impl App {
                             &[ack],
                             "failed",
                             "native pane cannot dispatch a task to itself",
-                            true,
+                            /*notify*/ true,
                         );
                         continue;
                     }
@@ -1450,8 +1522,7 @@ impl App {
                             .insert(origin_id.to_string());
                     }
                     self.register_spawn_dispatch_acks_for_task(&target_node_id, &task, vec![ack]);
-                    self.app_event_tx
-                        .send(AppEvent::SubmitSpawnAgentTask { thread_id, task });
+                    self.send_native_task_event(thread_id, task);
                     any_queued = true;
                 }
                 Ok(SpawnTaskTarget::UnavailableNative(thread_id)) => {
@@ -1468,7 +1539,12 @@ impl App {
                         source_is_active,
                         message.clone(),
                     );
-                    self.record_spawn_dispatch_acks(&[ack], "failed", message, true);
+                    self.record_spawn_dispatch_acks(
+                        &[ack],
+                        "failed",
+                        message,
+                        /*notify*/ true,
+                    );
                 }
                 Ok(SpawnTaskTarget::ClaudePane(pane_id)) => {
                     if pane_id == source_pane_id {
@@ -1488,7 +1564,7 @@ impl App {
                             &[ack],
                             "failed",
                             "Claude pane cannot dispatch a task to itself",
-                            true,
+                            /*notify*/ true,
                         );
                         continue;
                     }
@@ -1518,8 +1594,12 @@ impl App {
                             .insert(origin_id.to_string());
                     }
                     self.register_spawn_dispatch_acks_for_task(&target_node_id, &task, vec![ack]);
-                    self.app_event_tx
-                        .send(AppEvent::SubmitSpawnClaudePaneTask { pane_id, task });
+                    let sent_while_kill_switch_on = self.kill_switch_on_now();
+                    self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
+                        pane_id,
+                        task,
+                        sent_while_kill_switch_on,
+                    });
                     self.record_spawn_dispatch_queued(
                         source_pane_id,
                         source_is_active,
@@ -1536,7 +1616,7 @@ impl App {
                         dispatch.seq,
                     );
                     self.record_spawn_dispatch_error(source_pane_id, source_is_active, err.clone());
-                    self.record_spawn_dispatch_acks(&[ack], "failed", err, true);
+                    self.record_spawn_dispatch_acks(&[ack], "failed", err, /*notify*/ true);
                 }
             }
         }
@@ -1598,6 +1678,19 @@ impl App {
             thread_node_id(source_thread_id)
         };
         self.dispatch_orchestrate_blocks_from_text(&source_node_id, &assistant_text);
+        if let Some((_, target)) = self.assignment_dispatch_target_for_holder(&source_node_id)
+            && self.assignment_dispatch_protocol_for_target(&target)
+                == crate::orchestrate::AssignmentDispatchProtocol::HostAdapter
+        {
+            let (visible_text, dispatches) = extract_spawn_task_dispatches(&assistant_text);
+            self.dispatch_spawn_task_blocks_from_model_turn(
+                &source_node_id,
+                &source_node_id,
+                &turn.id,
+                dispatches,
+            );
+            assistant_text = visible_text;
+        }
 
         // Core owns native-to-native mailbox delivery. The TUI still needs a durable projection
         // of the terminal result so `/spawn`, parent context, and restored pane state agree with
@@ -1614,7 +1707,12 @@ impl App {
             let report = spawn_child_report(&child_title, "completed", result, seq, &as_of);
             let notify =
                 node_id_pane(&parent_node_id).is_some_and(|pane_id| pane_id != CODEX_MAIN_PANE_ID);
-            self.record_spawn_parent_report_with_notify(parent_node_id, report, notify);
+            self.record_spawn_parent_report_with_notify(
+                parent_node_id,
+                report,
+                notify,
+                /*start_turns*/ true,
+            );
         }
     }
 
@@ -1731,11 +1829,28 @@ impl App {
         );
     }
 
+    /// Tests: a report that may start turns in the parent.
+    #[cfg(test)]
     pub(crate) fn record_spawn_child_report_for_claude_pane(
         &mut self,
         pane_id: &str,
         status: &str,
         result: Option<&str>,
+    ) {
+        self.record_spawn_child_report_for_claude_pane_with(
+            pane_id, status, result, /*start_turns*/ true,
+        );
+    }
+
+    /// Records a Claude pane's report for its parent. With `start_turns`
+    /// false the parent is told but no turn is started for it (#507: the
+    /// report of a turn the kill switch stopped).
+    pub(crate) fn record_spawn_child_report_for_claude_pane_with(
+        &mut self,
+        pane_id: &str,
+        status: &str,
+        result: Option<&str>,
+        start_turns: bool,
     ) {
         if !self.spawn_node_is_persistent_crew_member(&pane_node_id(pane_id)) {
             return;
@@ -1747,18 +1862,30 @@ impl App {
         let child_node_id = pane_node_id(pane_id);
         let (seq, as_of) = self.reserve_spawn_report_seq(&child_node_id);
         let report = spawn_child_report(&child_title, status, result, seq, &as_of);
-        self.record_spawn_parent_report(parent_node_id, report);
+        self.record_spawn_parent_report_with_notify(
+            parent_node_id,
+            report,
+            /*notify*/ true,
+            start_turns,
+        );
     }
 
+    #[cfg(test)]
     pub(crate) fn record_spawn_parent_report(&mut self, parent_node_id: String, report: String) {
-        self.record_spawn_parent_report_with_notify(parent_node_id, report, true);
+        self.record_spawn_parent_report_with_notify(
+            parent_node_id,
+            report,
+            /*notify*/ true,
+            /*start_turns*/ true,
+        );
     }
 
-    fn record_spawn_parent_report_with_notify(
+    pub(crate) fn record_spawn_parent_report_with_notify(
         &mut self,
         parent_node_id: String,
         report: String,
         notify: bool,
+        start_turns: bool,
     ) {
         let inserted = {
             let reports = self
@@ -1780,11 +1907,22 @@ impl App {
             }
         };
         if inserted && notify {
-            self.notify_spawn_parent_report(&parent_node_id, &report);
+            self.notify_spawn_parent_report(&parent_node_id, &report, start_turns);
         }
     }
 
-    fn notify_spawn_parent_report(&mut self, parent_node_id: &str, report: &str) {
+    fn notify_spawn_parent_report(
+        &mut self,
+        parent_node_id: &str,
+        report: &str,
+        start_turns: bool,
+    ) {
+        // #507: no turn is started for a report while the kill switch is on
+        // either (it would only wait, and could push a real waiting task out
+        // of a Claude pane); the parent has it with its next turn. #660: as
+        // this process last learned it too (a switch-off elsewhere is not
+        // handled here yet).
+        let start_turns = start_turns && !self.kill_switch_on_now();
         let summary = "Child report delivered.".to_string();
         let hint = Some(report.to_string());
         // `codex-main` is the native primary Codex thread, not a Claude pane. Route it through the
@@ -1801,12 +1939,13 @@ impl App {
                     Arc::new(crate::history_cell::new_info_event(summary, hint)),
                 );
             }
-            if !self.claude_panes.claude_pane_is_running(parent_pane_id) {
+            if start_turns && !self.claude_panes.claude_pane_is_running(parent_pane_id) {
                 if self.begin_spawn_auto_processing_turn(parent_node_id) {
                     let trigger_prompt = child_report_processing_prompt(report);
                     self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
                         pane_id: parent_pane_id.to_string(),
                         task: trigger_prompt,
+                        sent_while_kill_switch_on: self.kill_switch_on_now(),
                     });
                 } else {
                     if self.spawn_auto_processing_quarantined() {
@@ -1872,7 +2011,7 @@ impl App {
                             AgentMessageKind::Informational
                         },
                         content: report.to_string(),
-                        trigger_turn: true,
+                        trigger_turn: start_turns,
                     },
                 });
         }
@@ -1940,7 +2079,12 @@ impl App {
             self.note_assignment_dispatch_delivered(&ack.source_node_id, &ack.target_node_id);
         }
         self.evict_spawn_processed_dispatch_seq_ids();
-        self.record_spawn_dispatch_acks(&acks, "delivered", "target turn started", false);
+        self.record_spawn_dispatch_acks(
+            &acks,
+            "delivered",
+            "target turn started",
+            /*notify*/ false,
+        );
         self.persist_pane_state();
     }
 
@@ -1950,13 +2094,59 @@ impl App {
         task: &str,
         detail: impl AsRef<str>,
     ) {
-        let detail = detail.as_ref();
+        self.record_spawn_dispatch_failed_for_task_with_turns(
+            target_node_id,
+            task,
+            detail.as_ref(),
+            /*start_turns*/ true,
+        );
+    }
+
+    /// #660: as `record_spawn_dispatch_failed_for_task`, for a task held or
+    /// refused because of the kill switch: the senders are told, but no turn
+    /// starts for it in them, also when it is handled just after switch-off
+    /// (nothing restarts after switch-off, #507).
+    pub(crate) fn record_kill_switch_dispatch_failed_for_task(
+        &mut self,
+        target_node_id: &str,
+        task: &str,
+        detail: impl AsRef<str>,
+    ) {
+        self.record_spawn_dispatch_failed_for_task_with_turns(
+            target_node_id,
+            task,
+            detail.as_ref(),
+            /*start_turns*/ false,
+        );
+    }
+
+    /// `start_turns` false (#660): as `record_kill_switch_dispatch_failed_for_task`.
+    pub(crate) fn record_spawn_dispatch_failed_for_task_with_turns(
+        &mut self,
+        target_node_id: &str,
+        task: &str,
+        detail: &str,
+        start_turns: bool,
+    ) {
         let acks = self.take_spawn_dispatch_acks_for_task(target_node_id, task);
         self.release_spawn_dispatch_origins(&acks);
         for ack in &acks {
-            self.note_assignment_dispatch_failure(&ack.source_node_id, detail, false);
+            self.note_assignment_dispatch_failure_with_turns(
+                &ack.source_node_id,
+                detail,
+                /*will_retry*/ false,
+                start_turns,
+            );
         }
-        self.record_spawn_dispatch_acks(&acks, "failed", detail, true);
+        for ack in &acks {
+            self.record_spawn_dispatch_ack(
+                ack,
+                "failed",
+                detail,
+                /*notify*/ true,
+                start_turns,
+            );
+        }
     }
 
     pub(crate) fn release_spawn_dispatch_origins(&mut self, acks: &[SpawnDispatchAck]) {
@@ -1974,9 +2164,28 @@ impl App {
         detail: impl AsRef<str>,
         notify: bool,
     ) {
-        let detail = detail.as_ref();
+        self.record_spawn_dispatch_acks_with_turns(
+            acks,
+            status,
+            detail.as_ref(),
+            notify,
+            /*start_turns*/ true,
+        );
+    }
+
+    /// `start_turns` false (#660): the senders are told without a turn
+    /// starting in them (a task another agent sent while the kill switch was
+    /// on, also when it fails just after switch-off).
+    pub(crate) fn record_spawn_dispatch_acks_with_turns(
+        &mut self,
+        acks: &[SpawnDispatchAck],
+        status: &str,
+        detail: &str,
+        notify: bool,
+        start_turns: bool,
+    ) {
         for ack in acks {
-            self.record_spawn_dispatch_ack(ack, status, detail, notify);
+            self.record_spawn_dispatch_ack(ack, status, detail, notify, start_turns);
         }
     }
 
@@ -1986,6 +2195,7 @@ impl App {
         status: &str,
         detail: &str,
         notify: bool,
+        start_turns: bool,
     ) {
         let report = format!(
             "dispatch_ack; #{}; target={}; status={}; detail={}",
@@ -1994,7 +2204,12 @@ impl App {
             status,
             compact_spawn_context_value(detail)
         );
-        self.record_spawn_parent_report_with_notify(ack.source_node_id.clone(), report, notify);
+        self.record_spawn_parent_report_with_notify(
+            ack.source_node_id.clone(),
+            report,
+            notify,
+            start_turns,
+        );
     }
 
     fn make_spawn_dispatch_ack(
@@ -2026,7 +2241,7 @@ impl App {
     }
 
     pub(crate) fn reserve_spawn_dispatch_seq_without_persist(&mut self) -> u64 {
-        self.reserve_spawn_dispatch_seq_value_without_persist(None)
+        self.reserve_spawn_dispatch_seq_value_without_persist(/*seq*/ None)
     }
 
     fn reserve_spawn_dispatch_seq_value_without_persist(&mut self, seq: Option<u64>) -> u64 {
@@ -2057,7 +2272,7 @@ impl App {
     }
 
     fn reserve_spawn_report_seq(&mut self, node_id: &str) -> (u64, String) {
-        let seq = self.reserve_spawn_dispatch_seq(None);
+        let seq = self.reserve_spawn_dispatch_seq(/*seq*/ None);
         let as_of = Utc::now().to_rfc3339();
         self.spawn_last_report_seq_by_node
             .insert(node_id.to_string(), seq);
@@ -2217,12 +2432,22 @@ impl App {
         self.chat_widget.current_model().to_string()
     }
 
+    pub(crate) fn native_spawn_default_provider(&self, model: &str) -> Option<String> {
+        if model == self.chat_widget.current_model() {
+            return Some(self.config.model_provider_id.clone());
+        }
+        self.chat_widget
+            .model_catalog()
+            .provider_for_model(model)
+            .or_else(|| crate::chatwidget::ChatWidget::model_provider_for_selection(model))
+    }
+
     /// Standard crew model/effort mapping (all Codex-native):
     ///   Nazgul: Claude Fable 5 Plan (Claude Plan) @ provider default
     ///   Troll: GPT-5.6-Sol (OpenAI) @ xhigh
     ///   Orc 1: GPT-5.6-Luna (OpenAI) @ xhigh
     ///   Orc 2: GPT-5.6-Terra (OpenAI) @ xhigh
-    ///   Orc 3: Grok 4.5 (OpenRouter) @ provider default
+    ///   Orc 3: Grok 4.6 (OpenRouter) @ provider default
     #[cfg(test)]
     pub(crate) const STANDARD_NAZGUL_MODEL: &'static str = crew_presets::STANDARD_NAZGUL_MODEL;
     #[cfg(test)]
@@ -2283,26 +2508,51 @@ impl App {
         provider_id: Option<&str>,
     ) -> Result<()> {
         self.ensure_native_spawn_provider_authorized(provider_id)?;
-
-        if let Some(message) = self.native_spawn_provider_auth_error(provider_id) {
-            return Err(eyre!("{message}"));
-        }
-
         let provider_id = provider_id.unwrap_or(self.config.model_provider_id.as_str());
+        let model = self.native_spawn_default_model();
+        if let Some(decision) = self.chat_widget.model_catalog().provider_use_decision(
+            provider_id,
+            &model,
+            codex_provider_auth::ProviderUseContext::NativeSpawn,
+        ) && matches!(
+            decision,
+            codex_provider_auth::ProviderUseDecision::Blocked { .. }
+        ) {
+            return Err(eyre!(
+                "Cannot run a native Corbanu Terminal worker on provider `{provider_id}`: it is inactive or unavailable. Repair or reactivate it in /providers."
+            ));
+        }
         let provider = if provider_id == self.config.model_provider_id {
             Some(&self.config.model_provider)
         } else {
             self.config.model_providers.get(provider_id)
         };
+        // PF-84: check the worker's own account. A missing named account is
+        // refused before its command could run; a configured one is tested
+        // with that account, never the default account's command.
+        if let Some(provider) = provider
+            && let Some(message) = codex_model_provider::selected_account_error(
+                self.config.codex_home.as_path(),
+                provider,
+            )
+        {
+            return Err(eyre!(
+                "Cannot run a native Corbanu Terminal worker on provider `{provider_id}`: {message}"
+            ));
+        }
         if let Some(provider) = provider
             && let Some(auth) = provider.auth.as_ref()
         {
             let provider_name = provider_display_name(provider_id, provider.name.as_str());
-            codex_login::validate_provider_auth_command(auth)
+            let account = provider
+                .account
+                .as_ref()
+                .map(|account| account.name.as_str());
+            codex_login::validate_provider_auth_command_for_account(auth, account)
                 .await
                 .map_err(|err| {
                     eyre!(
-                        "Cannot run native PFTerminal worker on {provider_name}; provider authentication is unavailable: {err}"
+                        "Cannot run native Corbanu Terminal worker on {provider_name}; provider authentication is unavailable: {err}"
                     )
                 })?;
         }
@@ -2321,12 +2571,39 @@ impl App {
             .config
             .model_providers
             .keys()
+            .filter(|provider| {
+                self.chat_widget
+                    .model_catalog()
+                    .provider_use_decision(
+                        provider,
+                        &codex_model_provider_info::resolve_model_for_provider(
+                            self.config.model.clone(),
+                            provider,
+                        )
+                        .unwrap_or_default(),
+                        codex_provider_auth::ProviderUseContext::NativeSpawn,
+                    )
+                    .is_none_or(|decision| {
+                        !matches!(
+                            decision,
+                            codex_provider_auth::ProviderUseDecision::Blocked { .. }
+                        )
+                    })
+            })
             .cloned()
             .collect::<Vec<_>>();
         if !providers.contains(&self.config.model_provider_id) {
             providers.push(self.config.model_provider_id.clone());
         }
+        // #646: Claude Code panes record `external-claude:<profile>`, which is not a
+        // configured provider. Without an explicit allowlist, a crew must accept
+        // the panes a person can create, or a Claude Code member could not join.
+        providers.extend(
+            crate::claude_panes::ClaudeProviderProfileKind::restoration_options()
+                .map(crate::claude_panes::ClaudeProviderProfileKind::crew_runtime_provider_id),
+        );
         providers.sort();
+        providers.dedup();
         providers
     }
 
@@ -2351,59 +2628,35 @@ impl App {
             .map(|provider| provider_display_name(provider_id, provider.name.as_str()))
             .unwrap_or_else(|| provider_id.to_string());
         Err(eyre!(
-            "Cannot run a native PFTerminal worker on {provider_name}: provider `{provider_id}` is not in `agents.provider_allowlist` ({}). Add it to that setting to authorize spend on this provider.",
+            "Cannot run a native Corbanu Terminal worker on {provider_name}: provider `{provider_id}` is not in `agents.provider_allowlist` ({}). Add it to that setting to authorize spend on this provider.",
             allowlist.join(", ")
         ))
     }
 
+    #[cfg(test)]
     pub(crate) fn native_spawn_provider_auth_error(
         &self,
         provider_id: Option<&str>,
     ) -> Option<String> {
         let provider_id = provider_id.unwrap_or(self.config.model_provider_id.as_str());
-        let provider = if provider_id == self.config.model_provider_id {
-            Some(&self.config.model_provider)
-        } else {
-            self.config.model_providers.get(provider_id)
-        }?;
-        let provider_name = provider_display_name(provider_id, provider.name.as_str());
-
-        if provider.requires_openai_auth && !self.chat_widget.has_openai_auth() {
-            return Some(format!(
-                "Cannot run native PFTerminal worker on {provider_name}; OpenAI authentication is not configured. Run `pfterminal login --with-api-key`, add the OpenAI Codex account in /providers, or choose a non-OpenAI provider/model."
-            ));
-        }
-
-        if let Some(env_key) = provider.env_key.as_deref()
-            && !self.provider_key_is_available(env_key)
-        {
-            return Some(format!(
-                "Cannot run native PFTerminal worker on {provider_name}; missing `{env_key}`. Add it in /providers or choose a different model."
-            ));
-        }
-
-        None
+        let model = self.native_spawn_default_model();
+        self.chat_widget.model_catalog()
+            .provider_use_decision(
+                provider_id,
+                &model,
+                codex_provider_auth::ProviderUseContext::NativeSpawn,
+            )
+            .and_then(|decision| match decision {
+                codex_provider_auth::ProviderUseDecision::Blocked { .. } => Some(format!(
+                    "Cannot run native Corbanu Terminal worker on provider `{provider_id}`; it is inactive or unavailable. Repair or reactivate it in /providers."
+                )),
+                codex_provider_auth::ProviderUseDecision::Ready(_)
+                | codex_provider_auth::ProviderUseDecision::RequiresRuntimeAuthorization(_) => None,
+            })
     }
 
-    fn provider_key_is_available(&self, env_key: &str) -> bool {
-        if std::env::var(env_key)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            return true;
-        }
-
-        codex_login::auth::provider_api_key_from_auth_storage(
-            &self.config.codex_home,
-            env_key,
-            self.config.cli_auth_credentials_store_mode,
-            self.config.auth_keyring_backend_kind(),
-        )
-        .ok()
-        .flatten()
-        .is_some_and(|value| !value.trim().is_empty())
-    }
-
+    // These fields mirror the persisted pane identity and its app-server spawn response.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn register_spawn_agent_pane(
         &mut self,
         thread_id: ThreadId,
@@ -2722,7 +2975,7 @@ impl App {
         if self.spawn_legacy_read_only {
             self.chat_widget.add_error_message(
                 "Restored a legacy /spawn hierarchy in read-only mode. Existing panes remain \
-                 inspectable, but PfTerminal will not dispatch or replay work until you create a \
+                 inspectable, but Corbanu Terminal will not dispatch or replay work until you create a \
                  new CrewSpec-backed crew."
                     .to_string(),
             );
@@ -2998,6 +3251,24 @@ impl App {
             .spawn_native_runtime_by_node
             .get(&logical_node_id)
             .cloned();
+        if let Some(runtime) = saved_runtime.as_ref()
+            && let Some(decision) = self.chat_widget.model_catalog().provider_use_decision(
+                &runtime.provider,
+                &runtime.model,
+                codex_provider_auth::ProviderUseContext::Resume,
+            )
+            && matches!(
+                decision,
+                codex_provider_auth::ProviderUseDecision::Blocked { .. }
+            )
+        {
+            self.chat_widget.add_error_message(format!(
+                "Cannot restore pane {} because provider `{}` is inactive or unavailable. Repair or reactivate it in /providers.",
+                self.thread_label(thread_id),
+                runtime.provider,
+            ));
+            return false;
+        }
         let (resume_config, model_override, permission_settings) =
             self.native_spawn_resume_request(saved_runtime.as_ref());
         let model_settings = if model_override.is_some() {
@@ -3079,7 +3350,7 @@ impl App {
         &self,
         saved_runtime: Option<&crate::dispatch_queue::SavedNativeSpawnRuntime>,
     ) -> (
-        codex_core::config::Config,
+        crate::legacy_core::config::Config,
         Option<ResumeModelOverride>,
         crate::app_server_session::ResumePermissionSettings,
     ) {
@@ -3330,7 +3601,7 @@ impl App {
             {
                 Ok(()) => started.session.thread_name = Some(nickname.clone()),
                 Err(err) => self.chat_widget.add_error_message(format!(
-                    "Created PFTerminal pane {nickname}, but could not persist its name: {err}"
+                    "Created Corbanu Terminal pane {nickname}, but could not persist its name: {err}"
                 )),
             }
         }
@@ -3421,9 +3692,18 @@ impl App {
             items.push(disabled_item("No Trolls spawned yet"));
         }
         for (troll_thread_id, troll_entry) in trolls {
-            items.push(self.spawn_agent_item(troll_thread_id, troll_entry, 0, Some(TROLL_ROLE)));
+            items.push(self.spawn_agent_item(
+                troll_thread_id,
+                troll_entry,
+                /*indent*/ 0,
+                Some(TROLL_ROLE),
+            ));
             if show_task_actions {
-                items.push(self.spawn_agent_task_item(troll_thread_id, troll_entry, 2));
+                items.push(self.spawn_agent_task_item(
+                    troll_thread_id,
+                    troll_entry,
+                    /*indent*/ 2,
+                ));
             }
             let troll_node_id = thread_node_id(troll_thread_id);
             let (orcs, claude_orcs) = self.spawn_orc_children_for_node(&troll_node_id);
@@ -3431,38 +3711,56 @@ impl App {
                 items.push(disabled_item("  No Orcs for this Troll yet"));
             }
             for (orc_thread_id, orc_entry) in orcs {
-                items.push(self.spawn_agent_item(orc_thread_id, orc_entry, 2, Some(ORC_ROLE)));
+                items.push(self.spawn_agent_item(
+                    orc_thread_id,
+                    orc_entry,
+                    /*indent*/ 2,
+                    Some(ORC_ROLE),
+                ));
                 if show_task_actions {
-                    items.push(self.spawn_agent_task_item(orc_thread_id, orc_entry, 4));
+                    items.push(self.spawn_agent_task_item(
+                        orc_thread_id,
+                        orc_entry,
+                        /*indent*/ 4,
+                    ));
                 }
             }
             for pane in claude_orcs {
-                items.push(self.claude_spawn_pane_item(pane, 2));
+                items.push(self.claude_spawn_pane_item(pane, /*indent*/ 2));
                 if show_task_actions {
-                    items.push(self.claude_spawn_pane_task_item(pane, 4));
+                    items.push(self.claude_spawn_pane_task_item(pane, /*indent*/ 4));
                 }
             }
         }
         for pane in claude_trolls {
             let troll_node_id = pane_node_id(&pane.id);
-            items.push(self.claude_spawn_pane_item(pane, 0));
+            items.push(self.claude_spawn_pane_item(pane, /*indent*/ 0));
             if show_task_actions {
-                items.push(self.claude_spawn_pane_task_item(pane, 2));
+                items.push(self.claude_spawn_pane_task_item(pane, /*indent*/ 2));
             }
             let (orcs, claude_orcs) = self.spawn_orc_children_for_node(&troll_node_id);
             if orcs.is_empty() && claude_orcs.is_empty() {
                 items.push(disabled_item("  No Orcs for this Troll yet"));
             }
             for (orc_thread_id, orc_entry) in orcs {
-                items.push(self.spawn_agent_item(orc_thread_id, orc_entry, 2, Some(ORC_ROLE)));
+                items.push(self.spawn_agent_item(
+                    orc_thread_id,
+                    orc_entry,
+                    /*indent*/ 2,
+                    Some(ORC_ROLE),
+                ));
                 if show_task_actions {
-                    items.push(self.spawn_agent_task_item(orc_thread_id, orc_entry, 4));
+                    items.push(self.spawn_agent_task_item(
+                        orc_thread_id,
+                        orc_entry,
+                        /*indent*/ 4,
+                    ));
                 }
             }
             for pane in claude_orcs {
-                items.push(self.claude_spawn_pane_item(pane, 2));
+                items.push(self.claude_spawn_pane_item(pane, /*indent*/ 2));
                 if show_task_actions {
-                    items.push(self.claude_spawn_pane_task_item(pane, 4));
+                    items.push(self.claude_spawn_pane_task_item(pane, /*indent*/ 4));
                 }
             }
         }
@@ -3470,15 +3768,20 @@ impl App {
         if !orphan_orcs.is_empty() || !claude_orcs.is_empty() {
             items.push(section_item("Unassigned Orcs"));
             for (thread_id, entry) in orphan_orcs {
-                items.push(self.spawn_agent_item(thread_id, entry, 0, Some(ORC_ROLE)));
+                items.push(self.spawn_agent_item(
+                    thread_id,
+                    entry,
+                    /*indent*/ 0,
+                    Some(ORC_ROLE),
+                ));
                 if show_task_actions {
-                    items.push(self.spawn_agent_task_item(thread_id, entry, 2));
+                    items.push(self.spawn_agent_task_item(thread_id, entry, /*indent*/ 2));
                 }
             }
             for pane in claude_orcs {
-                items.push(self.claude_spawn_pane_item(pane, 0));
+                items.push(self.claude_spawn_pane_item(pane, /*indent*/ 0));
                 if show_task_actions {
-                    items.push(self.claude_spawn_pane_task_item(pane, 2));
+                    items.push(self.claude_spawn_pane_task_item(pane, /*indent*/ 2));
                 }
             }
         }
@@ -3494,8 +3797,13 @@ impl App {
             self.agent_navigation
                 .get(&thread_id)
                 .and_then(|entry| {
-                    self.spawn_agent_item(thread_id, entry, 0, Some(NAZGUL_ROLE_NAME))
-                        .description
+                    self.spawn_agent_item(
+                        thread_id,
+                        entry,
+                        /*indent*/ 0,
+                        Some(NAZGUL_ROLE_NAME),
+                    )
+                    .description
                 })
                 .unwrap_or_else(|| {
                     if self.primary_thread_id == Some(thread_id)
@@ -3512,7 +3820,7 @@ impl App {
                 .panes()
                 .iter()
                 .find(|pane| pane.id == bound_target)
-                .and_then(|pane| self.claude_spawn_pane_item(pane, 0).description)
+                .and_then(|pane| self.claude_spawn_pane_item(pane, /*indent*/ 0).description)
                 .unwrap_or_else(|| "status unavailable".to_string())
         };
 
@@ -3558,7 +3866,7 @@ impl App {
             SelectionItem {
                 name: "Create Nazgul pane".to_string(),
                 description: Some(
-                    "Spawn a new PFTerminal-native pane loaded with the built-in Nazgul role config and bind it as the root."
+                    "Spawn a new Corbanu Terminal-native pane loaded with the built-in Nazgul role config and bind it as the root."
                         .to_string(),
                 ),
                 actions: vec![Box::new(|tx| {
@@ -3574,7 +3882,7 @@ impl App {
             SelectionItem {
                 name: "Bind existing pane".to_string(),
                 description: Some(
-                    "Bind an existing user pane (PFTerminal Main, a PFTerminal agent pane, or a Claude pane) as the Nazgul root."
+                    "Bind an existing user pane (Corbanu Terminal Main, a Corbanu Terminal agent pane, or a Claude pane) as the Nazgul root."
                         .to_string(),
                 ),
                 actions: vec![Box::new(|tx| {
@@ -3719,7 +4027,7 @@ impl App {
 
     pub(crate) fn user_pane_title(&self, pane_id: &str) -> String {
         if pane_id == CODEX_MAIN_PANE_ID {
-            return "PFTerminal - Main".to_string();
+            return MAIN_PANE_TITLE.to_string();
         }
         self.claude_panes
             .panes()
@@ -3780,12 +4088,12 @@ impl App {
             let name = format_agent_picker_item_name(
                 entry.agent_nickname.as_deref(),
                 entry.agent_role.as_deref().or(Some(TROLL_ROLE)),
-                false,
+                /*is_primary*/ false,
             );
             let node_id = self.logical_native_node_for_thread(thread_id);
             items.push(SelectionItem {
                 name: format!("Troll: {name}"),
-                description: Some(format!("Native PFTerminal pane; {thread_id}")),
+                description: Some(format!("Native Corbanu Terminal pane; {thread_id}")),
                 actions: vec![Box::new(move |tx| {
                     tx.send(AppEvent::OpenSpawnHarnessPicker {
                         role: SpawnRole::Orc,
@@ -4027,7 +4335,8 @@ impl App {
                     .primary_thread_id
                     .map(SpawnTaskTarget::Native)
                     .ok_or_else(|| {
-                        "Cannot dispatch to Nazgul; PFTerminal Main is not loaded.".to_string()
+                        "Cannot dispatch to Nazgul; Corbanu Terminal Main is not loaded."
+                            .to_string()
                     });
             }
             if let Some(bound_thread_id) = self.nazgul_bound_thread_id() {
@@ -4388,7 +4697,7 @@ impl App {
         let _ = writeln!(context, "<pfterminal_spawn_context>");
         let _ = writeln!(
             context,
-            "You are the PFTerminal Troll pane: {}.",
+            "You are the Corbanu Terminal Troll pane: {}.",
             pane.title
         );
         let _ = writeln!(context, "Behavior:");
@@ -4446,7 +4755,11 @@ impl App {
     fn render_orc_spawn_context(&self, pane: &crate::claude_panes::ClaudePane) -> String {
         let mut context = String::new();
         let _ = writeln!(context, "<pfterminal_spawn_context>");
-        let _ = writeln!(context, "You are the PFTerminal Orc pane: {}.", pane.title);
+        let _ = writeln!(
+            context,
+            "You are the Corbanu Terminal Orc pane: {}.",
+            pane.title
+        );
         let _ = writeln!(
             context,
             "You are an IC executor. Chain of command: Orc -> Troll engineering manager -> Nazgul CTO -> Sauron/the human CEO."
@@ -4487,7 +4800,7 @@ impl App {
         let _ = writeln!(context, "<pfterminal_spawn_context>");
         let _ = writeln!(
             context,
-            "You are the PFTerminal Nazgul/root pane: {root_pane_title}.",
+            "You are the Corbanu Terminal Nazgul/root pane: {root_pane_title}.",
         );
         if include_role_prompt {
             let _ = writeln!(context, "Behavior:");
@@ -4559,7 +4872,7 @@ impl App {
         }
         let _ = writeln!(
             context,
-            "Troll and Orc are PFTerminal orchestration roles. They are panes/agents in this app."
+            "Troll and Orc are Corbanu Terminal orchestration roles. They are panes/agents in this app."
         );
         let _ = writeln!(
             context,
@@ -5241,7 +5554,7 @@ fn saved_spawn_child_identity_from_metadata(
         parent_node_id,
         metadata.and_then(|metadata| metadata.role.as_deref()),
         metadata.and_then(|metadata| metadata.nickname.as_deref()),
-        None,
+        /*agent_path*/ None,
     )
 }
 
@@ -5260,6 +5573,24 @@ fn saved_spawn_child_identity(
         role,
         identity,
     })
+}
+
+/// Whether a restored pane layout holds a pre-CrewSpec `/spawn` hierarchy, which stays read-only.
+///
+/// A `/spawn` hierarchy always has a pane root (`pane:codex-main` or a Claude pane), a bound
+/// Nazgul, Claude panes, or pending dispatches. Sub-agents started by the model's spawn-agent
+/// tool are recorded only as `thread:` -> `thread:` edges; they are not `/spawn` panes and keep
+/// working after resume, so they alone do not make the layout legacy (#1208).
+pub(crate) fn pane_layout_has_legacy_spawn_hierarchy(
+    layout: &crate::claude_panes::PaneLayoutState,
+) -> bool {
+    !layout.spawn_pending_dispatches.is_empty()
+        || layout.spawn_crew.is_none()
+            && (layout.spawn_nazgul_pane_id.is_some()
+                || layout.spawn_parent_by_node.iter().any(|(child, parent)| {
+                    node_id_thread(child).is_none() || node_id_thread(parent).is_none()
+                })
+                || !layout.claude_pane_ids.is_empty())
 }
 
 pub(crate) fn thread_node_id(thread_id: ThreadId) -> String {
@@ -5312,7 +5643,7 @@ fn task_with_dispatch_provenance(
 ) -> String {
     let utc = Utc::now().to_rfc3339();
     format!(
-        "Assigned by {source_title} to {target_title} through PFTerminal /spawn dispatch \
+        "Assigned by {source_title} to {target_title} through Corbanu Terminal /spawn dispatch \
          (dispatch #{seq}, {utc}). Execute once; ignore duplicates of this dispatch id.\n\n{task}"
     )
 }
@@ -5684,6 +6015,47 @@ fn format_spawn_agent_nickname(name: &str, nickname_reset_count: usize) -> Strin
     }
 }
 
+fn exact_crew_runtime_for_node(
+    crew: &crate::crew_state::CrewInstanceState,
+    node_id: &str,
+) -> Option<(String, String, Option<ReasoningEffort>)> {
+    let logical_member_id =
+        crew.member_node_by_id
+            .iter()
+            .find_map(|(member_id, member_node_id)| {
+                (member_node_id == node_id).then_some(member_id.as_str())
+            })?;
+    crew.spec
+        .members
+        .iter()
+        .find(|member| member.logical_member_id == logical_member_id)
+        .and_then(|member| match &member.runtime_request {
+            RuntimeRequest::Exact {
+                provider_id,
+                model_id,
+                reasoning_effort,
+                ..
+            } => Some((
+                model_id.clone(),
+                provider_id.clone(),
+                reasoning_effort.clone(),
+            )),
+            RuntimeRequest::Selector { .. } => None,
+        })
+}
+
+/// D95 (#1146): what Spawn status's "Send task to" prompt does with the text
+/// the person typed: it reaches the pane as the person's own input, as if
+/// typed there. Tasks from agents keep [`AppEvent::SubmitSpawnAgentTask`].
+pub(crate) fn spawn_agent_task_prompt_submit(
+    tx: crate::app_event_sender::AppEventSender,
+    thread_id: ThreadId,
+) -> crate::bottom_pane::custom_prompt_view::PromptSubmitted {
+    Box::new(move |task| {
+        tx.send(AppEvent::SubmitSpawnAgentTaskFromPerson { thread_id, task });
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5691,10 +6063,30 @@ mod tests {
     use codex_model_provider_info::CLAUDE_FABLE_5_PLAN_MODEL;
     use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
     use codex_model_provider_info::OPENAI_PROVIDER_ID;
+    use codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID;
     use codex_model_provider_info::VERCEL_ANTHROPIC_FAST_PROVIDER_ID;
     use codex_model_provider_info::ZAI_ANTHROPIC_PROVIDER_ID;
     use codex_model_provider_info::ZAI_DEFAULT_MODEL;
     use codex_model_provider_info::ZAI_PROVIDER_ID;
+
+    #[test]
+    fn saved_corbanu_api_crew_member_restores_its_exact_runtime() {
+        let mut crew =
+            crate::crew_state::CrewInstanceState::begin(crew_presets::corbanu_api_crew_spec())
+                .expect("valid Corbanu API crew");
+        let node_id = "thread:corbanu-api-orc-2";
+        crew.record_member("orc-2", node_id)
+            .expect("record Corbanu API Orc");
+
+        assert_eq!(
+            exact_crew_runtime_for_node(&crew, node_id),
+            Some((
+                crew_presets::CORBANU_API_ORC_MODEL.to_string(),
+                PFTERMINAL_PLAN_PROVIDER_ID.to_string(),
+                None,
+            ))
+        );
+    }
 
     #[test]
     fn corrected_native_spawn_provider_fixes_impossible_pairs_only() {
@@ -5857,11 +6249,11 @@ mod tests {
         let troll = SpawnRole::Troll
             .claude_pane_context()
             .expect("troll context");
-        assert!(troll.contains("You are the PFTerminal Troll"));
+        assert!(troll.contains("You are the Corbanu Terminal Troll"));
         assert!(troll.contains("report to the Nazgul"));
 
         let orc = SpawnRole::Orc.claude_pane_context().expect("orc context");
-        assert!(orc.contains("You are the PFTerminal Orc"));
+        assert!(orc.contains("You are the Corbanu Terminal Orc"));
         assert!(orc.contains("Do not spawn child agents"));
 
         assert!(SpawnRole::Nazgul.claude_pane_context().is_none());
@@ -6245,7 +6637,7 @@ Done."#;
             &troll_node_id,
             Some(ORC_ROLE),
             Some("Snaga"),
-            None,
+            /*agent_path*/ None,
         )
         .expect("identity")]);
 

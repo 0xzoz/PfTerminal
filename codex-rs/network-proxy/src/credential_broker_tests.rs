@@ -1,8 +1,29 @@
 use super::*;
 
+use codex_security_policy::ActorChain;
+use codex_security_policy::AuthorizationContext;
+use codex_security_policy::AuthorizationRequest;
+use codex_security_policy::BoundedGrant;
+use codex_security_policy::BoundedText;
+use codex_security_policy::CapabilityId;
+use codex_security_policy::CredentialCapabilityRequest;
+use codex_security_policy::CredentialDestination;
+use codex_security_policy::CredentialHttpMethod;
+use codex_security_policy::CredentialReference;
+use codex_security_policy::GrantContext;
+use codex_security_policy::GrantScope;
+use codex_security_policy::PolicyAction;
+use codex_security_policy::PolicyPrincipal;
+use codex_security_policy::PrincipalKind;
+use codex_security_policy::ProtectedResource;
+use codex_security_policy::ResourceKind;
+use codex_security_policy::RevocationState;
 use pretty_assertions::assert_eq;
 use rama_http::HeaderValue;
 use rama_http::header::AUTHORIZATION;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 fn env_map<const N: usize>(entries: [(&str, &str); N]) -> HashMap<String, String> {
     entries
@@ -217,4 +238,661 @@ fn github_enterprise_credentials_bind_to_gh_host() {
     assert_eq!(authorization(&headers), Some("Bearer ghp-enterprise-real"));
     assert!(broker.host_requires_mitm("github.example.com"));
     assert!(!broker.host_requires_mitm("api.github.com"));
+}
+
+const SCOPED_SECRET: &str = "sk-scoped-canary-never-retained";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UseSnapshot {
+    scheme: String,
+    host: String,
+    port: u16,
+    method: String,
+    path: String,
+    capability_id: String,
+    actors: Vec<String>,
+    session_id: String,
+    task_id: String,
+}
+
+#[derive(Clone, Copy)]
+enum ResolverOutcome {
+    Success,
+    Expired,
+    Revoked,
+}
+
+struct TestResolver {
+    outcome: ResolverOutcome,
+    requests: Mutex<Vec<UseSnapshot>>,
+}
+
+impl TestResolver {
+    fn new(outcome: ResolverOutcome) -> Self {
+        Self {
+            outcome,
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn requests(&self) -> Vec<UseSnapshot> {
+        self.requests.lock().expect("requests lock").clone()
+    }
+}
+
+impl ScopedCredentialResolver for TestResolver {
+    fn resolve(
+        &self,
+        request: &ScopedCredentialUse<'_>,
+        callback: &mut dyn FnMut(&str) -> Result<(), ScopedCredentialCallbackError>,
+    ) -> Result<(), ScopedCredentialResolverError> {
+        self.requests
+            .lock()
+            .expect("requests lock")
+            .push(UseSnapshot {
+                scheme: request.scheme.to_string(),
+                host: request.host.to_string(),
+                port: request.port,
+                method: request.method.to_string(),
+                path: request.path.to_string(),
+                capability_id: request.capability_id.as_str().to_string(),
+                actors: request
+                    .authority
+                    .actor_chain()
+                    .as_slice()
+                    .iter()
+                    .map(|actor| actor.id.as_str().to_string())
+                    .collect(),
+                session_id: request
+                    .authority
+                    .authorization
+                    .context
+                    .session_id
+                    .as_str()
+                    .to_string(),
+                task_id: request
+                    .authority
+                    .authorization
+                    .context
+                    .task_id
+                    .as_str()
+                    .to_string(),
+            });
+        match self.outcome {
+            ResolverOutcome::Success => {
+                callback(SCOPED_SECRET).map_err(|ScopedCredentialCallbackError::Failed| {
+                    ScopedCredentialResolverError::CallbackFailed
+                })
+            }
+            ResolverOutcome::Expired => Err(ScopedCredentialResolverError::Expired),
+            ResolverOutcome::Revoked => Err(ScopedCredentialResolverError::Revoked),
+        }
+    }
+}
+
+fn bounded(value: &str) -> BoundedText {
+    BoundedText::new(value).expect("bounded text")
+}
+
+fn scoped_authority() -> CredentialCapabilityRequest {
+    let human = PolicyPrincipal::new(PrincipalKind::Human, "human:owner").expect("human principal");
+    let actors = ActorChain::new(vec![
+        human.clone(),
+        PolicyPrincipal::new(PrincipalKind::Agent, "agent:root").expect("agent principal"),
+    ])
+    .expect("actor chain");
+    let revocations = RevocationState::new();
+    let destination =
+        CredentialDestination::https("api.openai.com", /*port*/ 443).expect("destination");
+    let credential =
+        CredentialReference::new("provider.openai", "responses.create").expect("credential");
+    let authorization = AuthorizationRequest::new(
+        actors.clone(),
+        ProtectedResource::new(ResourceKind::VaultCredential, "provider.openai").expect("resource"),
+        PolicyAction::Use,
+        AuthorizationContext {
+            now_unix_seconds: 100,
+            session_id: bounded("session:scoped-proxy"),
+            task_id: bounded("task:scoped-proxy"),
+            purpose: bounded("model-inference"),
+            operation: credential.scope.clone(),
+            destination: Some(destination.authority().expect("authority")),
+            quantity: None,
+            grant_id: None,
+        },
+    )
+    .expect("authorization");
+    let grant = BoundedGrant::issue(
+        human,
+        actors,
+        GrantScope::new(
+            authorization.resource.clone(),
+            [PolicyAction::Use],
+            GrantContext::new(
+                authorization.context.session_id.clone(),
+                authorization.context.task_id.clone(),
+                authorization.context.purpose.clone(),
+                authorization.context.operation.clone(),
+            ),
+            authorization.context.destination.clone(),
+            BTreeMap::new(),
+        )
+        .expect("grant scope"),
+        /*issued_at_unix_seconds*/ 90,
+        /*expires_at_unix_seconds*/ 200,
+        bounded("scoped-proxy-grant"),
+    )
+    .expect("grant");
+    CredentialCapabilityRequest::new(
+        authorization,
+        grant,
+        credential,
+        CredentialHttpMethod::Post,
+        destination,
+        "/v1/responses",
+        /*issued_at_unix_seconds*/ 100,
+        /*expires_at_unix_seconds*/ 180,
+        &revocations,
+        /*triggering_receipt*/ None,
+    )
+    .expect("credential authority")
+}
+
+fn scoped_broker(
+    outcome: ResolverOutcome,
+) -> (CredentialBroker, HashMap<String, String>, Arc<TestResolver>) {
+    let broker = CredentialBroker::new(/*enabled*/ true);
+    let resolver = Arc::new(TestResolver::new(outcome));
+    let route = ScopedCredentialRoute::new(
+        CapabilityId::from_sha256_hex("d".repeat(64)).expect("capability id"),
+        scoped_authority(),
+        resolver.clone(),
+    )
+    .expect("scoped route");
+    broker
+        .install_scoped_openai_route(route)
+        .expect("install scoped route");
+    let mut env = env_map([
+        ("OPENAI_API_KEY", "sk-raw-value-must-not-be-retained"),
+        ("GH_TOKEN", "ghp-permissive-still-works"),
+    ]);
+    broker.virtualize_child_env(&mut env);
+    (broker, env, resolver)
+}
+
+#[test]
+fn scoped_openai_route_injects_once_and_passes_complete_context() {
+    let (broker, env, resolver) = scoped_broker(ResolverOutcome::Success);
+    let dummy = env.get("OPENAI_API_KEY").expect("scoped dummy").to_string();
+    assert_ne!(dummy, "sk-raw-value-must-not-be-retained");
+    assert!(broker.host_requires_mitm("api.openai.com"));
+
+    let mut headers = headers_with_bearer(&dummy);
+    broker
+        .inject_request_headers_for_request(
+            "https",
+            "API.OPENAI.COM",
+            /*port*/ 443,
+            "POST",
+            "/v1/responses",
+            &mut headers,
+        )
+        .expect("scoped injection");
+    assert_eq!(
+        authorization(&headers),
+        Some("Bearer sk-scoped-canary-never-retained")
+    );
+    assert!(
+        headers
+            .get(AUTHORIZATION)
+            .expect("injected header")
+            .is_sensitive()
+    );
+    assert!(!format!("{headers:?}").contains("sk-scoped-canary-never-retained"));
+    assert_eq!(
+        resolver.requests(),
+        vec![UseSnapshot {
+            scheme: "https".to_string(),
+            host: "api.openai.com".to_string(),
+            port: 443,
+            method: "POST".to_string(),
+            path: "/v1/responses".to_string(),
+            capability_id: "d".repeat(64),
+            actors: vec!["human:owner".to_string(), "agent:root".to_string()],
+            session_id: "session:scoped-proxy".to_string(),
+            task_id: "task:scoped-proxy".to_string(),
+        }]
+    );
+
+    headers = headers_with_bearer(&dummy);
+    assert_eq!(
+        broker
+            .inject_request_headers_for_request(
+                "https",
+                "api.openai.com",
+                /*port*/ 443,
+                "POST",
+                "/v1/responses",
+                &mut headers,
+            )
+            .expect_err("redirect or retry reuse must fail"),
+        ScopedCredentialInjectionError::AlreadyUsed
+    );
+}
+
+#[test]
+fn scoped_openai_denial_matrix_fails_before_resolution() {
+    macro_rules! assert_denied {
+        ($scheme:expr, $host:expr, $port:expr, $method:expr, $path:expr, $authorization:expr, $expected:expr) => {{
+            let (broker, env, resolver) = scoped_broker(ResolverOutcome::Success);
+            let dummy = env.get("OPENAI_API_KEY").expect("dummy");
+            let mut headers = match $authorization {
+                None => headers_with_bearer(dummy),
+                Some("") => HeaderMap::new(),
+                Some(value) => {
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        AUTHORIZATION,
+                        HeaderValue::from_str(value).expect("authorization"),
+                    );
+                    headers
+                }
+            };
+            let error = broker
+                .inject_request_headers_for_request(
+                    $scheme,
+                    $host,
+                    $port,
+                    $method,
+                    $path,
+                    &mut headers,
+                )
+                .expect_err("denial case");
+            assert_eq!(error, $expected);
+            assert!(resolver.requests().is_empty());
+            assert!(!format!("{error:?} {error}").contains(SCOPED_SECRET));
+        }};
+    }
+
+    assert_denied!(
+        "http",
+        "api.openai.com",
+        443,
+        "POST",
+        "/v1/responses",
+        None,
+        ScopedCredentialInjectionError::SchemeDenied
+    );
+    for host in ["api.openai.com.evil.example", "sub.api.openai.com"] {
+        assert_denied!(
+            "https",
+            host,
+            443,
+            "POST",
+            "/v1/responses",
+            None,
+            ScopedCredentialInjectionError::HostDenied
+        );
+    }
+    assert_denied!(
+        "https",
+        "api.openai.com",
+        8443,
+        "POST",
+        "/v1/responses",
+        None,
+        ScopedCredentialInjectionError::PortDenied
+    );
+    assert_denied!(
+        "https",
+        "api.openai.com",
+        443,
+        "GET",
+        "/v1/responses",
+        None,
+        ScopedCredentialInjectionError::MethodDenied
+    );
+    for path in ["/v1/chat/completions", "/v1/responses?redirect=true"] {
+        assert_denied!(
+            "https",
+            "api.openai.com",
+            443,
+            "POST",
+            path,
+            None,
+            ScopedCredentialInjectionError::PathDenied
+        );
+    }
+    assert_denied!(
+        "https",
+        "api.openai.com",
+        443,
+        "POST",
+        "/v1/responses",
+        Some(""),
+        ScopedCredentialInjectionError::MissingReference
+    );
+    assert_denied!(
+        "https",
+        "api.openai.com",
+        443,
+        "POST",
+        "/v1/responses",
+        Some("Bearer sk-explicit"),
+        ScopedCredentialInjectionError::AuthorizationConflict
+    );
+}
+
+#[test]
+fn scoped_openai_stale_authority_and_unsupported_route_fail_closed() {
+    for outcome in [ResolverOutcome::Expired, ResolverOutcome::Revoked] {
+        let (broker, env, resolver) = scoped_broker(outcome);
+        let mut headers = headers_with_bearer(env.get("OPENAI_API_KEY").expect("dummy"));
+        assert_eq!(
+            broker
+                .inject_request_headers_for_request(
+                    "https",
+                    "api.openai.com",
+                    /*port*/ 443,
+                    "POST",
+                    "/v1/responses",
+                    &mut headers,
+                )
+                .expect_err("stale route"),
+            ScopedCredentialInjectionError::ResolutionFailed
+        );
+        assert_eq!(resolver.requests().len(), 1);
+        assert!(!authorization(&headers).is_some_and(|value| value.contains(SCOPED_SECRET)));
+    }
+
+    let resolver = Arc::new(TestResolver::new(ResolverOutcome::Success));
+    let mut wrong_host = scoped_authority();
+    wrong_host.destination = CredentialDestination::https("adjacent.openai.com", /*port*/ 443)
+        .expect("adjacent destination");
+    assert_eq!(
+        ScopedCredentialRoute::new(
+            CapabilityId::from_sha256_hex("e".repeat(64)).expect("capability id"),
+            wrong_host,
+            resolver,
+        )
+        .expect_err("invalid mutated host"),
+        ScopedCredentialRouteError::InvalidAuthority
+    );
+}
+
+#[derive(Default)]
+struct IsolatedTestDispatcher {
+    calls: Mutex<Vec<String>>,
+}
+
+impl IsolatedCredentialDispatcher for IsolatedTestDispatcher {
+    fn dispatch(
+        &self,
+        request: &IsolatedCredentialUse<'_>,
+    ) -> Result<IsolatedCredentialReceipt, IsolatedCredentialDispatchError> {
+        self.calls
+            .lock()
+            .expect("calls")
+            .push(request.path.to_string());
+        Ok(IsolatedCredentialReceipt {
+            response_status: 200,
+            uploaded_bytes: 10,
+            downloaded_bytes: 20,
+        })
+    }
+}
+
+#[test]
+fn pf_27_s04_isolated_route_never_injects_raw_auth_and_supports_fresh_dispatches() {
+    let broker = CredentialBroker::new(/*enabled*/ true);
+    let dispatcher = Arc::new(IsolatedTestDispatcher::default());
+    let route = IsolatedCredentialRoute::new(
+        CapabilityId::from_sha256_hex("f".repeat(64)).expect("capability id"),
+        scoped_authority(),
+        dispatcher.clone(),
+    )
+    .expect("isolated route");
+    broker
+        .install_isolated_openai_route(route)
+        .expect("install route");
+    assert!(broker.scoped_openai_enabled());
+    assert!(broker.scoped_openai_matches_host("API.OPENAI.COM"));
+    assert!(!broker.scoped_openai_matches_host("attacker.example"));
+    let mut env = env_map([("OPENAI_API_KEY", "sk-raw-must-not-enter-proxy")]);
+    broker.virtualize_child_env(&mut env);
+    let dummy = env.get("OPENAI_API_KEY").expect("dummy");
+    assert_ne!(dummy, "sk-raw-must-not-enter-proxy");
+
+    let mut headers = headers_with_bearer(dummy);
+    assert_eq!(
+        broker.inject_request_headers_for_request(
+            "https",
+            "api.openai.com",
+            /*port*/ 443,
+            "POST",
+            "/v1/responses",
+            &mut headers,
+        ),
+        Err(ScopedCredentialInjectionError::IsolatedBrokerRequired)
+    );
+    assert!(!format!("{headers:?}").contains("sk-raw-must-not-enter-proxy"));
+
+    for _ in 0..2 {
+        assert_eq!(
+            broker
+                .dispatch_isolated_openai(
+                    "https",
+                    "API.OPENAI.COM",
+                    /*port*/ 443,
+                    "POST",
+                    "/v1/responses",
+                )
+                .expect("broker receipt")
+                .response_status,
+            200
+        );
+    }
+    assert_eq!(dispatcher.calls.lock().expect("calls").len(), 2);
+    assert_eq!(
+        broker.dispatch_isolated_openai(
+            "https",
+            "api.openai.com",
+            /*port*/ 443,
+            "POST",
+            "/v1/chat/completions",
+        ),
+        Err(IsolatedCredentialDispatchError::Denied)
+    );
+}
+
+const PF27_S02_CORE_TOKEN: &str = "ghp_pf27s02CoreEnvironmentCanary00000000000";
+
+fn pf27_s02_core_env(key: &str) -> Option<String> {
+    (key == "GITHUB_TOKEN").then(|| PF27_S02_CORE_TOKEN.to_string())
+}
+
+#[test]
+fn pf_27_s02_stripped_child_env_still_gets_a_brokered_dummy() {
+    let permitted = ["GITHUB_TOKEN".to_string()];
+    let broker = CredentialBroker::new(/*enabled*/ true)
+        .with_process_env_lookup(Some(&permitted), pf27_s02_core_env);
+    // The launch allowlist removed GITHUB_TOKEN before the proxy saw the env.
+    let mut env = env_map([("PATH", "/usr/bin")]);
+    broker.virtualize_child_env(&mut env);
+
+    let dummy = env.get("GITHUB_TOKEN").expect("dummy inserted").clone();
+    assert_credential_shape(PF27_S02_CORE_TOKEN, &dummy, "ghp_");
+    assert!(env.values().all(|value| value != PF27_S02_CORE_TOKEN));
+
+    // A request carrying the dummy is authorized with Core's value.
+    let mut headers = headers_with_bearer(&dummy);
+    broker.inject_request_headers("api.github.com", &mut headers);
+    assert_eq!(
+        authorization(&headers),
+        Some(format!("Bearer {PF27_S02_CORE_TOKEN}").as_str())
+    );
+
+    // Re-applying to the same env keeps the same dummy.
+    broker.virtualize_child_env(&mut env);
+    assert_eq!(env.get("GITHUB_TOKEN"), Some(&dummy));
+}
+
+#[test]
+fn pf_27_s02_without_secretless_launch_the_child_env_is_the_only_source() {
+    let broker = CredentialBroker::new(/*enabled*/ true);
+    let mut env = env_map([("PATH", "/usr/bin")]);
+    broker.virtualize_child_env(&mut env);
+    assert_eq!(env.get("GITHUB_TOKEN"), None);
+}
+
+#[test]
+fn pf_27_s02_core_values_the_user_policy_excluded_are_not_brokered() {
+    // The user's shell environment policy dropped GITHUB_TOKEN, so it is not
+    // in the permitted list and the agent must not gain brokered access.
+    let broker = CredentialBroker::new(/*enabled*/ true)
+        .with_process_env_lookup(Some(&[]), pf27_s02_core_env);
+    let mut env = env_map([("PATH", "/usr/bin")]);
+    broker.virtualize_child_env(&mut env);
+    assert_eq!(env.get("GITHUB_TOKEN"), None);
+}
+
+fn pf_28_s02_gated_broker() -> (CredentialBroker, String) {
+    let broker = CredentialBroker::new(/*enabled*/ true).with_response_gate(/*enabled*/ true);
+    let mut env = env_map([("GH_TOKEN", PF28_S02_TOKEN)]);
+    broker.virtualize_child_env(&mut env);
+    (broker, env["GH_TOKEN"].clone())
+}
+
+const PF28_S02_TOKEN: &str = "ghp_pf28s02LegacyBindingCanary000000000000";
+
+#[test]
+fn pf_28_s02_legacy_credential_is_bound_to_https_method_and_path() {
+    let (broker, dummy) = pf_28_s02_gated_broker();
+    let route = |scheme: &str, host: &str, port: u16, method: &str, path: &str| {
+        let mut headers = headers_with_bearer(&dummy);
+        let result = broker
+            .route_request_credentials(scheme, host, port, method, path, &mut headers)
+            .map(|routing| match routing {
+                CredentialRouting::Direct(gate) => gate.is_some(),
+                #[cfg(any(unix, windows))]
+                CredentialRouting::Brokered(_) => false,
+            });
+        (result, authorization(&headers).map(str::to_string))
+    };
+    let injected = Some(format!("Bearer {PF28_S02_TOKEN}"));
+    let kept = Some(format!("Bearer {dummy}"));
+    for (request, expected) in [
+        (
+            ("https", "api.github.com", 443, "GET", "/user?per_page=1"),
+            Ok(true),
+        ),
+        (
+            (
+                "https",
+                "github.com",
+                443,
+                "POST",
+                "/o/r.git/git-upload-pack",
+            ),
+            Ok(true),
+        ),
+        (
+            ("https", "github.com", 443, "GET", "/settings/tokens"),
+            Err(ScopedCredentialInjectionError::PathDenied),
+        ),
+        (
+            ("https", "api.github.com", 443, "GET", "/repos/../user"),
+            Err(ScopedCredentialInjectionError::PathDenied),
+        ),
+        (
+            (
+                "https",
+                "github.com",
+                443,
+                "GET",
+                "/%2e%2e/o/r.git/info/refs",
+            ),
+            Err(ScopedCredentialInjectionError::PathDenied),
+        ),
+        (
+            ("https", "api.github.com", 443, "GET", "/repos/o/r/..;/user"),
+            Err(ScopedCredentialInjectionError::PathDenied),
+        ),
+        (
+            (
+                "https",
+                "api.github.com",
+                443,
+                "GET",
+                "/repos/%252e%252e/user",
+            ),
+            Err(ScopedCredentialInjectionError::PathDenied),
+        ),
+        (
+            ("https", "api.github.com", 8443, "GET", "/user"),
+            Err(ScopedCredentialInjectionError::PortDenied),
+        ),
+        (
+            ("http", "api.github.com", 443, "GET", "/user"),
+            Err(ScopedCredentialInjectionError::SchemeDenied),
+        ),
+        (
+            ("https", "api.github.com", 443, "TRACE", "/user"),
+            Err(ScopedCredentialInjectionError::MethodDenied),
+        ),
+    ] {
+        let (scheme, host, port, method, path) = request;
+        let header = if expected.is_ok() { &injected } else { &kept };
+        assert_eq!(
+            route(scheme, host, port, method, path),
+            (expected, header.clone()),
+            "{request:?}"
+        );
+    }
+    // Plain-HTTP injection is off while credentials are bound to HTTPS.
+    let mut headers = headers_with_bearer(&dummy);
+    broker.inject_request_headers("api.github.com", &mut headers);
+    assert_eq!(authorization(&headers), kept.as_deref());
+}
+
+#[test]
+fn pf_28_s02_legacy_route_returns_a_gate_for_the_injected_value() {
+    let (broker, dummy) = pf_28_s02_gated_broker();
+    let mut headers = headers_with_bearer(&dummy);
+    let Ok(CredentialRouting::Direct(Some(gate))) = broker.route_request_credentials(
+        "https",
+        "api.github.com",
+        /*port*/ 443,
+        "GET",
+        "/user",
+        &mut headers,
+    ) else {
+        panic!("expected a gated direct route");
+    };
+    let echoed = format!("{{\"authorization\":\"Bearer {PF28_S02_TOKEN}\"}}");
+    assert_eq!(
+        gate.scrub_header(echoed.as_bytes()),
+        Some(b"{\"authorization\":\"Bearer [REDACTED:broker:GH_TOKEN]\"}".to_vec())
+    );
+}
+
+#[test]
+fn pf_28_s02_legacy_route_is_unchanged_without_the_gate() {
+    let broker = CredentialBroker::new(/*enabled*/ true);
+    let mut env = env_map([("GH_TOKEN", PF28_S02_TOKEN)]);
+    broker.virtualize_child_env(&mut env);
+    let mut headers = headers_with_bearer(&env["GH_TOKEN"]);
+    let routing = broker.route_request_credentials(
+        "https",
+        "github.com",
+        /*port*/ 443,
+        "GET",
+        "/settings/tokens",
+        &mut headers,
+    );
+    assert!(matches!(routing, Ok(CredentialRouting::Direct(None))));
+    assert_eq!(
+        authorization(&headers),
+        Some(format!("Bearer {PF28_S02_TOKEN}").as_str())
+    );
 }

@@ -313,6 +313,16 @@ pub fn build_models_manager(
     config: &Config,
     auth_manager: Arc<AuthManager>,
 ) -> SharedModelsManager {
+    // PF-84: an OpenAI sign-in provider's list follows the account the
+    // active session uses.
+    if let Some(manager) = crate::account_models_manager::AccountModelsManager::for_provider(
+        &config.model_provider,
+        Arc::clone(&auth_manager),
+        config.codex_home.to_path_buf(),
+        config.model_catalog.clone(),
+    ) {
+        return Arc::new(manager);
+    }
     let provider = create_model_provider(config.model_provider.clone(), Some(auth_manager));
     provider.models_manager(
         config.codex_home.to_path_buf(),
@@ -822,6 +832,7 @@ impl ThreadManager {
             .prepare_durable_thread_spawn_parent(&session_source, options.config.ephemeral)
             .await?;
         let thread_source = options.thread_source.or(resumed_thread_source);
+        let configured_child_security_level = options.config.security_level;
         let new_thread = Box::pin(self.state.spawn_thread_with_source(
             options.config,
             options.initial_history,
@@ -845,6 +856,29 @@ impl ThreadManager {
             /*user_shell_override*/ None,
         ))
         .await?;
+        // Direct human pane creation does not pass through AgentControl::spawn_agent,
+        // which normally binds the child after spawn. Use the same live-parent
+        // inheritance here before publishing a usable pane. Resumed/detached
+        // bindings keep their existing (possibly fail-closed) policy.
+        if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        }) = &new_thread.thread.session_source
+            && agent_control
+                .effective_security_policy()
+                .snapshot_for_agent(new_thread.thread_id)
+                .is_err()
+            && let Err(error) = agent_control.effective_security_policy().inherit_child(
+                *parent_thread_id,
+                new_thread.thread_id,
+                format!("task:spawn:{}", new_thread.thread_id),
+                configured_child_security_level,
+            )
+        {
+            let _ = self.state.remove_thread(&new_thread.thread_id).await;
+            return Err(CodexErr::Fatal(format!(
+                "failed to inherit native pane security policy: {error}"
+            )));
+        }
         agent_control
             .persist_durable_thread_spawn(
                 new_thread.thread.as_ref(),
@@ -1825,6 +1859,20 @@ impl ThreadManagerState {
         supports_openai_form_elicitation: bool,
         user_shell_override: Option<crate::shell::Shell>,
     ) -> CodexResult<NewThread> {
+        if let Some(message) = thread_start_account_error(&config, &session_source) {
+            return Err(CodexErr::InvalidRequest(message));
+        }
+        // A sign-in made since (e.g. `corbanu login` elsewhere) may have
+        // replaced the hidden login; look again before refusing.
+        let default_manager = auth_manager.default_account_manager();
+        if default_manager.hidden_default_login_reason().is_some() {
+            default_manager.reload().await;
+        }
+        if let Some(message) =
+            crate::config::default_login_restriction_error(&config, &auth_manager)
+        {
+            return Err(CodexErr::InvalidRequest(message));
+        }
         let source_changed_during_startup = Arc::new(AtomicBool::new(false));
         {
             let mut starting = self
@@ -2259,7 +2307,7 @@ fn resolve_spawn_multi_agent_version(
     is_thread_spawn: bool,
     configured_multi_agent_version: MultiAgentVersion,
 ) -> Option<MultiAgentVersion> {
-    // A fresh app-server thread/spawnAgent request is an explicit runtime boundary. PFTerminal
+    // A fresh app-server thread/spawnAgent request is an explicit runtime boundary. Corbanu Terminal
     // enables V2 on the child config even when the long-lived user-facing parent predates V2 and
     // is pinned to V1. Preserve an explicitly disabled parent, but otherwise honor that V2 child
     // request instead of silently exposing the legacy send_input(interrupt=true) surface.
@@ -2271,6 +2319,18 @@ fn resolve_spawn_multi_agent_version(
     }
 
     resolve_multi_agent_version(initial_history, inherited_multi_agent_version)
+}
+
+/// PF-84: a session, resumed thread or spawned agent never starts on a named
+/// account that is missing; it is refused, never run on another. A session
+/// also checks an explicit account of another provider (#425); a spawned
+/// agent checks only the account it runs on.
+fn thread_start_account_error(config: &Config, session_source: &SessionSource) -> Option<String> {
+    if matches!(session_source, SessionSource::SubAgent(_)) {
+        crate::config::subagent_account_error(config)
+    } else {
+        crate::config::session_account_error(config)
+    }
 }
 
 #[cfg(test)]

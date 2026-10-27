@@ -28,7 +28,7 @@ pub(crate) const TELEGRAM_DISCOVERY_VIEW_ID: &str = "telegram-discovery";
 
 impl ChatWidget {
     pub(crate) fn open_telegram_menu(&mut self) {
-        self.show_selection_view(telegram_menu_params(None));
+        self.show_selection_view(telegram_menu_params(/*result*/ None));
         let codex_home = self.config.codex_home.clone().to_path_buf();
         let tx = self.app_event_tx.clone();
         tokio::spawn(async move {
@@ -60,7 +60,8 @@ impl ChatWidget {
                     token: TelegramBotSecret::new(token),
                 });
             }),
-        );
+        )
+        .rejecting_shown_errors(self.shown_error_texts());
         self.bottom_pane.show_view(Box::new(view));
     }
 

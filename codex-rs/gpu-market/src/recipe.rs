@@ -30,7 +30,7 @@ pub struct GpuRecipe {
     /// manifests retain the source model ID for backward compatibility.
     #[serde(default)]
     pub served_model_id: String,
-    /// OpenAI-compatible protocol used by PfTerminal after the runtime is
+    /// OpenAI-compatible protocol used by Corbanu Terminal after the runtime is
     /// registered. Older manifests used chat completions exclusively.
     #[serde(default = "default_wire_api")]
     pub wire_api: String,
@@ -80,7 +80,7 @@ impl Default for RecipeCatalog {
     fn default() -> Self {
         Self {
             recipes: vec![
-                deepseek_flash_recipe(2),
+                deepseek_flash_recipe(/*gpu_count*/ 2),
                 glm_5_2_recipe(),
                 crate::gguf_recipes::huihui_deepseek_v4_flash_recipe(),
                 crate::gguf_recipes::huihui_glm_5_2_recipe(),

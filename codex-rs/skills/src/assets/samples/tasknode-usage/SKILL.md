@@ -13,6 +13,8 @@ This skill is for using Task Node. For implementation work inside `/home/pfrpc/r
 
 ## Core Principles
 
+- Preserve the terminal-provided `CORBANU_TASKNODE_PROFILE` and `CODEX_HOME`. Missing or conflicting scope must stop account operations; never guess the default account or retry with another profile.
+
 - Treat Task Node chat as a context-aware second brain. It often knows the user's recent work, preferences, and durable operating context better than the current thread.
 - Prefer Task Node chat over asking the user when the uncertainty is about user-specific priorities, project direction, or historical context and the action is reversible.
 - Ask the user directly when the choice is high-stakes, irreversible, explicitly personal, or Task Node lacks enough context.
@@ -33,6 +35,10 @@ Good chat prompts include:
 - the exact form of answer needed.
 
 After using chat, continue the work. Summarize Task Node's visible answer only when it affects the user-facing decision or the user asked to see it. Do not invent or expose hidden reasoning.
+
+## Collaborator Context
+
+When the user needs collaborators' shared work context, read `"$CORBANU_BIN" tasknode team context --json` after the helper-resolution preamble and the Team Context capability check in `references/tooling.md`. The capability check handles an older installed release alongside a newer debug binary without changing account scope. It exposes the existing web Team Context report with the same account and task-history permissions. Preserve reported freshness and sharing limits. The user's `context get` document is a separate surface; do not conclude that Team Context is unavailable just because it is absent from that document.
 
 ## Context Document
 
@@ -73,22 +79,24 @@ When requesting a task, include enough relevant context to let Task Node scope i
 
 When accepting a task, inspect the full card before acting. Confirm objective, steps, reward, deadline, verification criteria, and current status.
 
-When submitting initial evidence for an accepted task, first inspect the task with `pfterminal tasknode task show <task-id> --json` and confirm `actions.canSubmitInitialEvidence` is true. Draft the response from the Initial Evidence template, save it to a temporary file, and submit it with `pfterminal tasknode task evidence <task-id> --body-file <path> --json`. Do not use the verification response command for this state.
+Before the first Task Node shell command, use the fail-closed helper-resolution preamble in references/tooling.md. It preserves this session's effective `CODEX_HOME`, prefers an installed Corbanu entrypoint, and uses a legacy PFTerminal alias only as a compatibility fallback. Never compile a terminal binary from source just to obtain the Task Node helper. A command that loses the session home reads a different vault and can falsely report "not linked".
+
+When submitting initial evidence for an accepted task, first inspect the task with `"$CORBANU_BIN" tasknode task show <task-id> --json` and confirm `actions.canSubmitInitialEvidence` is true. Draft the response from the Initial Evidence template, save it to a temporary file, and submit it with `"$CORBANU_BIN" tasknode task evidence <task-id> --body-file <path> --json`. Do not use the verification response command for this state.
 
 Initial evidence is not completion. After every initial evidence receipt:
 
 1. Read `pfterminalLifecycle` in the receipt and run its `nextCommand`.
-2. Re-read the task with `pfterminal tasknode task show <task-id> --json`.
-3. If `actions.canSubmitVerificationEvidence` is true, answer `currentVerificationRequest` using the Verification Response template and submit it with `pfterminal tasknode verification respond <task-id> --body-file <path> --json`.
+2. Re-read the task with `"$CORBANU_BIN" tasknode task show <task-id> --json`.
+3. If `actions.canSubmitVerificationEvidence` is true, answer `currentVerificationRequest` using the Verification Response template and submit it with `"$CORBANU_BIN" tasknode verification respond <task-id> --body-file <path> --json`.
 4. Re-read the task after the verification response. Claim completion only when `rewardOutcome` exists or the task is explicitly `rewarded`.
 
-Verification generation can be asynchronous. If the task is still submitted but has no verification request yet, keep it classified as awaiting verification, check `pfterminal tasknode tasks list --tab verification --json` before ending the Task Node work cycle, and do not report it as complete. At the beginning of later Task Node work, drain any pending verification requests before starting new submissions.
+Verification generation can be asynchronous. If the task is still submitted but has no verification request yet, keep it classified as awaiting verification, check `"$CORBANU_BIN" tasknode tasks list --tab verification --json` before ending the Task Node work cycle, and do not report it as complete. At the beginning of later Task Node work, drain any pending verification requests before starting new submissions.
 
 When submitting evidence, make it easy for the verifier to prove the work happened. Include artifacts, exact commands, test output summaries, PRs, commits, screenshots, route probes, or file references as applicable.
 
 The submission parser scans evidence prose for URLs and registers each one it finds as a formal evidence item. Because of this, only cite durable, reviewable artifacts in the evidence body: real file paths, commit hashes, task IDs, event IDs, or production URLs. Never embed transient or non-reviewable endpoints — localhost, 127.0.0.1, deliberately-broken origins (for example an invalid host used to trigger a failure), or throwaway stub-server URLs. Describe test setup by the exact command run and the observed output, not by citing the throwaway endpoint. A localhost URL registered as an evidence item is worthless to a reviewer and cannot be removed after submission.
 
-When responding to verification, first confirm `actions.canSubmitVerificationEvidence` is true. Answer the specific verifier request with `pfterminal tasknode verification respond <task-id> --body-file <path> --json`. If the verifier asks for a complete generated text, a pass/fail summary, a missing artifact, or a clearer proof point, provide exactly that. Do not dodge, summarize away required detail, or claim success if the work failed.
+When responding to verification, first confirm `actions.canSubmitVerificationEvidence` is true. Answer the specific verifier request with `"$CORBANU_BIN" tasknode verification respond <task-id> --body-file <path> --json`. If the verifier asks for a complete generated text, a pass/fail summary, a missing artifact, or a clearer proof point, provide exactly that. Do not dodge, summarize away required detail, or claim success if the work failed.
 
 ## Reward Standard
 

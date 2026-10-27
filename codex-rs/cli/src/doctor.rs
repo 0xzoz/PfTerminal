@@ -146,7 +146,7 @@ const TMUX_OPTION_NAMES: &[&str] = &[
 const NARROW_TERMINAL_COLUMNS: u16 = 80;
 const NARROW_TERMINAL_ROWS: u16 = 24;
 
-/// Options for building a local PFTerminal diagnostic report.
+/// Options for building a local Corbanu Terminal diagnostic report.
 ///
 /// The command always runs the full bounded diagnostic set. Human output includes
 /// detailed diagnostics by default; --summary keeps the terminal output compact.
@@ -192,6 +192,7 @@ struct DoctorReport {
     schema_version: u32,
     generated_at: String,
     overall_status: CheckStatus,
+    corbanu_terminal_version: String,
     #[serde(rename = "pfterminalVersion")]
     codex_version: String,
     checks: Vec<DoctorCheck>,
@@ -456,7 +457,7 @@ async fn build_report(
                             "config could not be loaded",
                         )
                         .detail(err.to_string())
-                        .remediation("Fix the reported config error, then rerun pfterminal doctor.")
+                        .remediation("Fix the reported config error, then rerun corbanu doctor.")
                     })
                 },
                 async { run_sync_check("network", progress.clone(), network_check) },
@@ -491,6 +492,7 @@ async fn build_report(
         schema_version: 1,
         generated_at: generated_at(),
         overall_status,
+        corbanu_terminal_version: env!("CARGO_PKG_VERSION").to_string(),
         codex_version: env!("CARGO_PKG_VERSION").to_string(),
         checks,
     }
@@ -521,7 +523,7 @@ async fn load_config(
         .harness_overrides(overrides)
         .build()
         .await
-        .context("failed to load PFTerminal config")
+        .context("failed to load Corbanu Terminal config")
 }
 
 fn config_overrides_from_interactive(
@@ -568,6 +570,7 @@ struct JsonDoctorReport {
     schema_version: u32,
     generated_at: String,
     overall_status: CheckStatus,
+    corbanu_terminal_version: String,
     #[serde(rename = "pfterminalVersion")]
     codex_version: String,
     checks: BTreeMap<String, JsonDoctorCheck>,
@@ -634,6 +637,7 @@ fn redacted_json_report(report: &DoctorReport) -> JsonDoctorReport {
         schema_version: report.schema_version,
         generated_at: report.generated_at.clone(),
         overall_status: report.overall_status,
+        corbanu_terminal_version: report.corbanu_terminal_version.clone(),
         codex_version: report.codex_version.clone(),
         checks,
     }
@@ -812,20 +816,23 @@ fn installation_check(show_details: bool) -> DoctorCheck {
         "CODEX_MANAGED_PACKAGE_ROOT",
     );
 
-    let path_entries = pfterminal_path_entries();
+    let path_entries = terminal_path_entries();
     let mut status = CheckStatus::Ok;
     let mut summary = "installation looks consistent".to_string();
     let mut remediation = None;
 
     if path_entries.len() > 1 {
-        details.push(format!("PATH pfterminal entries: {}", path_entries.len()));
+        details.push(format!(
+            "PATH Corbanu/legacy entries: {}",
+            path_entries.len()
+        ));
     }
     if show_details || path_entries.len() > 1 {
         details.extend(
             path_entries
                 .iter()
                 .enumerate()
-                .map(|(index, path)| format!("PATH pfterminal #{}: {path}", index + 1)),
+                .map(|(index, path)| format!("PATH terminal #{}: {path}", index + 1)),
         );
     }
 
@@ -856,7 +863,7 @@ fn installation_check(show_details: bool) -> DoctorCheck {
                 status = status.max(CheckStatus::Warning);
                 summary = "npm-managed launch is missing package-root provenance".to_string();
                 remediation = Some(
-                    "Reinstall or update PFTerminal so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
+                    "Reinstall or update Corbanu Terminal so the JS shim provides CODEX_MANAGED_PACKAGE_ROOT."
                         .to_string(),
                 );
             }
@@ -1050,19 +1057,42 @@ fn display_list<T: AsRef<str>>(items: &[T]) -> String {
     }
 }
 
-fn pfterminal_path_entries() -> Vec<String> {
-    #[cfg(windows)]
-    let result = run_command("where", ["pfterminal"]);
-    #[cfg(not(windows))]
-    let result = run_command("which", ["-a", "pfterminal"]);
+fn terminal_path_entries() -> Vec<String> {
+    let mut entries = Vec::new();
+    for binary in ["corbanu", "pfterminal"] {
+        #[cfg(windows)]
+        let result = run_command("where", [binary]);
+        #[cfg(not(windows))]
+        let result = run_command("which", ["-a", binary]);
 
-    result
-        .unwrap_or_default()
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .map(str::to_string)
-        .collect()
+        entries.extend(
+            result
+                .unwrap_or_default()
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .filter(|line| !is_process_arg0_alias(line))
+                .map(str::to_string),
+        );
+    }
+    entries.sort();
+    entries.dedup();
+    entries
+}
+
+fn is_process_arg0_alias(path: &str) -> bool {
+    let Some(alias_dir) = Path::new(path).parent() else {
+        return false;
+    };
+    let Some(alias_dir_name) = alias_dir.file_name().and_then(OsStr::to_str) else {
+        return false;
+    };
+    alias_dir_name.starts_with("codex-arg0")
+        && alias_dir
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(OsStr::to_str)
+            == Some("arg0")
 }
 
 fn run_command<I, S>(program: &str, args: I) -> Result<String, String>
@@ -1256,7 +1286,7 @@ fn auth_check(config: &Config) -> DoctorCheck {
                 DoctorCheck::new("auth.credentials", "auth", status, summary).details(details);
             if status == CheckStatus::Fail {
                 check = check
-                    .remediation("Run pfterminal login again or provide a supported auth env var.");
+                    .remediation("Run corbanu login again or provide a supported auth env var.");
             }
             check
         }
@@ -1271,12 +1301,10 @@ fn auth_check(config: &Config) -> DoctorCheck {
             "auth.credentials",
             "auth",
             CheckStatus::Fail,
-            "no PFTerminal credentials were found",
+            "no Corbanu Terminal credentials were found",
         )
         .details(details)
-        .remediation(
-            "Run pfterminal login or provide an API key through a supported auth env var.",
-        ),
+        .remediation("Run corbanu login or provide an API key through a supported auth env var."),
         Err(err) => DoctorCheck::new(
             "auth.credentials",
             "auth",
@@ -1284,7 +1312,7 @@ fn auth_check(config: &Config) -> DoctorCheck {
             "stored credentials could not be read",
         )
         .detail(err.to_string())
-        .remediation("Fix auth storage access or run pfterminal login again."),
+        .remediation("Fix auth storage access or run corbanu login again."),
     }
 }
 
@@ -3280,6 +3308,15 @@ mod tests {
     }
 
     #[test]
+    fn process_arg0_alias_is_not_reported_as_a_duplicate_install() {
+        let alias = PathBuf::from("/tmp/corbanu-home/tmp/arg0/codex-arg0-session/corbanu");
+        let installed = PathBuf::from("/opt/corbanu/bin/corbanu");
+
+        assert!(is_process_arg0_alias(&alias.to_string_lossy()));
+        assert!(!is_process_arg0_alias(&installed.to_string_lossy()));
+    }
+
+    #[test]
     fn startup_warning_counts_group_known_sources() {
         let warnings = vec![
             "Skipped loading 2 skill(s) due to invalid SKILL.md files.".to_string(),
@@ -3357,6 +3394,7 @@ mod tests {
             schema_version: 1,
             generated_at: "0s since unix epoch".to_string(),
             overall_status: CheckStatus::Warning,
+            corbanu_terminal_version: "0.0.0".to_string(),
             codex_version: "0.0.0".to_string(),
             checks: vec![
                 DoctorCheck::new(
@@ -3410,6 +3448,7 @@ mod tests {
         assert!(!redacted.contains("code --wait"));
         assert!(redacted.contains("https://example.com/mcp"));
         assert_eq!(json["pfterminalVersion"], "0.0.0");
+        assert_eq!(json["corbanuTerminalVersion"], "0.0.0");
         assert!(json.get("codexVersion").is_none());
         assert_eq!(json["checks"].is_object(), true);
         assert_eq!(
@@ -3592,7 +3631,7 @@ mod tests {
             provider_specific_auth_check(
                 /*requires_openai_auth*/ false,
                 Some("PROVIDER_API_KEY"),
-                Some("Set PROVIDER_API_KEY before running PFTerminal."),
+                Some("Set PROVIDER_API_KEY before running Corbanu Terminal."),
                 &config,
                 Vec::new(),
                 |_| false,
@@ -3607,7 +3646,7 @@ mod tests {
         );
         assert_eq!(
             check.remediation,
-            Some("Set PROVIDER_API_KEY before running PFTerminal.".to_string())
+            Some("Set PROVIDER_API_KEY before running Corbanu Terminal.".to_string())
         );
     }
 
@@ -4056,10 +4095,13 @@ mod tests {
         let addr = listener.local_addr().expect("listener address");
         let server = std::thread::spawn(move || {
             let (mut head_stream, _) = listener.accept().expect("accept HEAD probe request");
+            let (release_head, head_released) = std::sync::mpsc::channel::<()>();
+            // Never answer HEAD; hold the connection until GET has been answered
+            // so HEAD can only end by timing out.
             let head = std::thread::spawn(move || {
                 let mut request = [0; 1024];
                 let _ = head_stream.read(&mut request);
-                std::thread::sleep(Duration::from_millis(50));
+                let _ = head_released.recv();
             });
 
             let (mut get_stream, _) = listener.accept().expect("accept GET probe request");
@@ -4070,14 +4112,15 @@ mod tests {
                     b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                 )
                 .expect("write response");
+            let _ = release_head.send(());
             head.join().expect("HEAD holder should finish");
         });
 
-        let status = mcp_http_probe_url_with_timeout(
-            &format!("http://{addr}/mcp"),
-            Duration::from_millis(10),
-        )
-        .await;
+        // Each probe builds its own client inside this budget; 10 ms let a
+        // loaded CI runner time out the GET as well.
+        let status =
+            mcp_http_probe_url_with_timeout(&format!("http://{addr}/mcp"), Duration::from_secs(1))
+                .await;
         server.join().expect("probe server thread should finish");
 
         assert_eq!(status, Ok("HTTP 405".to_string()));

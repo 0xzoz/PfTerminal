@@ -542,7 +542,10 @@ async fn any_new_input_interrupts_sleep() {
     wait_for_sleep_item_completed(&codex, FIRST_SLEEP_CALL_ID, SLEEP_DURATION_MS).await;
     wait_for_sleep_item_started(&codex, SECOND_SLEEP_CALL_ID, SLEEP_DURATION_MS).await;
 
-    submit_agent_mail(&codex, "new mailbox input", AgentMailDelivery::QueueOnly).await;
+    // Not `submit_agent_mail`: its barrier wait discards other events, and the mail can end
+    // the sleep before the barrier's response arrives, which lost this completion (#349).
+    // The sleep's completion already shows the mail was handled.
+    enqueue_agent_mail(&codex, "new mailbox input", AgentMailDelivery::QueueOnly).await;
     wait_for_sleep_item_completed(&codex, SECOND_SLEEP_CALL_ID, SLEEP_DURATION_MS).await;
     wait_for_turn_complete(&codex).await;
 
@@ -766,7 +769,7 @@ async fn queued_inter_agent_mail_waits_for_terminal_event_after_reasoning_item()
     let _ = gate_reasoning_done_tx.send(());
 
     wait_for_agent_message(&codex, "first answer").await;
-    server.wait_for_request_count(2).await;
+    server.wait_for_request_count(/*count*/ 2).await;
     wait_for_turn_complete(&codex).await;
 
     let requests = server.requests().await;
@@ -831,7 +834,7 @@ async fn queued_inter_agent_mail_waits_for_terminal_event_after_commentary_messa
 
     wait_for_agent_message(&codex, "first answer").await;
     wait_for_agent_message(&codex, "final answer").await;
-    server.wait_for_request_count(2).await;
+    server.wait_for_request_count(/*count*/ 2).await;
 
     wait_for_turn_complete(&codex).await;
 

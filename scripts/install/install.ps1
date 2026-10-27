@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Release = $env:CODEX_RELEASE
+    [string]$Release
 )
 
 Set-StrictMode -Version Latest
@@ -8,19 +8,50 @@ $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 if ([string]::IsNullOrWhiteSpace($Release)) {
-    $Release = "latest"
+    $Release = if (-not [string]::IsNullOrWhiteSpace($env:CORBANU_RELEASE)) {
+        $env:CORBANU_RELEASE
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:PFTERMINAL_RELEASE)) {
+        $env:PFTERMINAL_RELEASE
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:CODEX_RELEASE)) {
+        $env:CODEX_RELEASE
+    } else {
+        "latest"
+    }
 }
 
-$NonInteractive = $env:CODEX_NON_INTERACTIVE -match "^(?i:1|true|yes)$"
-$DefaultPreferReleasesOpenAICom = $true
-$PreferReleasesOpenAICom = if ([string]::IsNullOrWhiteSpace($env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM)) {
+$NonInteractiveValue = if (-not [string]::IsNullOrWhiteSpace($env:CORBANU_NON_INTERACTIVE)) {
+    $env:CORBANU_NON_INTERACTIVE
+} elseif (-not [string]::IsNullOrWhiteSpace($env:PFTERMINAL_NON_INTERACTIVE)) {
+    $env:PFTERMINAL_NON_INTERACTIVE
+} else {
+    $env:CODEX_NON_INTERACTIVE
+}
+$NonInteractive = $NonInteractiveValue -match "^(?i:1|true|yes)$"
+$DefaultPreferReleasesOpenAICom = $false
+$PreferReleasesOpenAICom = if (-not [string]::IsNullOrWhiteSpace($env:CORBANU_INSTALLER_USE_RELEASES_OPENAI_COM)) {
+    $env:CORBANU_INSTALLER_USE_RELEASES_OPENAI_COM -match "^(?i:1|true|yes)$"
+} elseif (-not [string]::IsNullOrWhiteSpace($env:PFTERMINAL_INSTALLER_USE_RELEASES_OPENAI_COM)) {
+    $env:PFTERMINAL_INSTALLER_USE_RELEASES_OPENAI_COM -match "^(?i:1|true|yes)$"
+} elseif ([string]::IsNullOrWhiteSpace($env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM)) {
     $DefaultPreferReleasesOpenAICom
 } else {
     $env:CODEX_INSTALLER_USE_RELEASES_OPENAI_COM -match "^(?i:1|true|yes)$"
 }
 $ReleasesBaseUri = "https://releases.openai.com/codex"
+$GitHubRepository = "CorbanuCore/CorbanuTerminal"
+$GitHubApiBaseUri = "https://api.github.com/repos/$GitHubRepository"
+$GitHubReleaseBaseUri = "https://github.com/$GitHubRepository/releases/download"
 $ReleasesMetadataTimeoutSec = 30
 $ReleasesAssetTimeoutSec = 300
+$KeepReleases = 2
+if (-not [string]::IsNullOrWhiteSpace($env:CORBANU_KEEP_RELEASES)) {
+    $parsedKeepReleases = 0
+    if ([int]::TryParse($env:CORBANU_KEEP_RELEASES, [ref]$parsedKeepReleases) -and $parsedKeepReleases -ge 0) {
+        $KeepReleases = $parsedKeepReleases
+    } else {
+        Write-Warning "CORBANU_KEEP_RELEASES must be a non-negative integer; using the default of 2."
+    }
+}
 
 function Write-Step {
     param(
@@ -160,7 +191,7 @@ function Assert-ValidReleaseVersion {
     )
 
     if ($Version -cne "latest" -and $Version -cnotmatch "^[0-9]+\.[0-9]+\.[0-9]+(?:-alpha(?:\.[0-9]+){0,2}|-beta(?:\.[0-9]+)?)?$") {
-        throw "Invalid Codex release version: $Version. Expected latest or x.y.z[-alpha[.N[.M]]|-beta[.N]]."
+        throw "Invalid Corbanu Terminal release version: $Version. Expected latest or x.y.z[-alpha[.N[.M]]|-beta[.N]]."
     }
 }
 
@@ -243,27 +274,40 @@ function Resolve-ReleaseAssetSelection {
 
     $version = $ResolvedRelease.Version
     $releaseMetadata = $ResolvedRelease.Metadata
-    $packageAsset = "codex-package-$Target.tar.gz"
-    $checksumAsset = "codex-package_SHA256SUMS"
-    $packageUrl = $null
-    $packageFallbackUrl = $null
-    $checksumUrl = $null
-    $checksumFallbackUrl = $null
-    if ($ResolvedRelease.Source -eq "ReleasesOpenAICom") {
-        $packageUrl = "$ReleasesBaseUri/releases/$version/$packageAsset"
-        $packageFallbackUrl = "https://github.com/openai/codex/releases/download/rust-v$version/$packageAsset"
-        $checksumUrl = "$ReleasesBaseUri/releases/$version/$checksumAsset"
-        $checksumFallbackUrl = "https://github.com/openai/codex/releases/download/rust-v$version/$checksumAsset"
-    }
+    $packageFamilies = @(
+        [PSCustomObject]@{
+            PackageAsset = Get-WindowsPackageAssetName -Target $Target
+            ChecksumAsset = "corbanu-terminal-package_SHA256SUMS"
+        },
+        [PSCustomObject]@{
+            PackageAsset = "codex-package-$Target.tar.gz"
+            ChecksumAsset = "codex-package_SHA256SUMS"
+        }
+    )
+    foreach ($family in $packageFamilies) {
+        $packageAsset = $family.PackageAsset
+        $checksumAsset = $family.ChecksumAsset
+        $packageUrl = $null
+        $packageFallbackUrl = $null
+        $checksumUrl = $null
+        $checksumFallbackUrl = $null
+        if ($ResolvedRelease.Source -eq "ReleasesOpenAICom") {
+            $packageUrl = "$ReleasesBaseUri/releases/$version/$packageAsset"
+            $packageFallbackUrl = "$GitHubReleaseBaseUri/rust-v$version/$packageAsset"
+            $checksumUrl = "$ReleasesBaseUri/releases/$version/$checksumAsset"
+            $checksumFallbackUrl = "$GitHubReleaseBaseUri/rust-v$version/$checksumAsset"
+        }
 
-    $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ReleaseMetadata $releaseMetadata -Url $packageUrl -FallbackUrl $packageFallbackUrl
-    $checksumMetadata = Find-ReleaseAssetMetadata -AssetName $checksumAsset -ReleaseMetadata $releaseMetadata -Url $checksumUrl -FallbackUrl $checksumFallbackUrl
-    if ($null -ne $packageMetadata -and $null -ne $checksumMetadata) {
-        return [PSCustomObject]@{
-            PackageAsset = $packageAsset
-            PackageMetadata = $packageMetadata
-            ChecksumMetadata = $checksumMetadata
-            InstallLayout = "Package"
+        $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ReleaseMetadata $releaseMetadata -Url $packageUrl -FallbackUrl $packageFallbackUrl
+        $checksumMetadata = Find-ReleaseAssetMetadata -AssetName $checksumAsset -ReleaseMetadata $releaseMetadata -Url $checksumUrl -FallbackUrl $checksumFallbackUrl
+        if ($null -ne $packageMetadata -and $null -ne $checksumMetadata) {
+            return [PSCustomObject]@{
+                PackageAsset = $packageAsset
+                ChecksumAsset = $checksumAsset
+                PackageMetadata = $packageMetadata
+                ChecksumMetadata = $checksumMetadata
+                InstallLayout = "Package"
+            }
         }
     }
 
@@ -272,15 +316,16 @@ function Resolve-ReleaseAssetSelection {
     $packageFallbackUrl = $null
     if ($ResolvedRelease.Source -eq "ReleasesOpenAICom") {
         $packageUrl = "$ReleasesBaseUri/releases/$version/$packageAsset"
-        $packageFallbackUrl = "https://github.com/openai/codex/releases/download/rust-v$version/$packageAsset"
+        $packageFallbackUrl = "$GitHubReleaseBaseUri/rust-v$version/$packageAsset"
     }
     $packageMetadata = Find-ReleaseAssetMetadata -AssetName $packageAsset -ReleaseMetadata $releaseMetadata -Url $packageUrl -FallbackUrl $packageFallbackUrl
     if ($null -eq $packageMetadata) {
-        throw "Could not find Codex package or platform npm release assets for Codex $version."
+        throw "Could not find Corbanu Terminal package or compatible legacy release assets for $version."
     }
 
     return [PSCustomObject]@{
         PackageAsset = $packageAsset
+        ChecksumAsset = $checksumAsset
         PackageMetadata = $packageMetadata
         ChecksumMetadata = $null
         InstallLayout = "LegacyPlatformNpm"
@@ -295,7 +340,7 @@ function Test-ArchiveDigest {
 
     $actualDigest = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualDigest -ne $ExpectedDigest) {
-        throw "Downloaded PFTerminal archive checksum did not match expected digest. Expected $ExpectedDigest but got $actualDigest."
+        throw "Downloaded Corbanu Terminal archive checksum did not match expected digest. Expected $ExpectedDigest but got $actualDigest."
     }
 }
 
@@ -321,7 +366,7 @@ function Get-WindowsPackageAssetName {
         [string]$Target
     )
 
-    return "pfterminal-package-$Target.zip"
+    return "corbanu-terminal-package-$Target.zip"
 }
 
 function Expand-WindowsPackageArchive {
@@ -413,7 +458,7 @@ function Resolve-VersionFromReleaseMetadata {
     )
 
     if (-not $ReleaseMetadata.tag_name) {
-        throw "Failed to resolve the latest Codex release version."
+        throw "Failed to resolve the latest Corbanu Terminal release version."
     }
 
     $resolvedVersion = Normalize-Version -RawVersion $ReleaseMetadata.tag_name
@@ -428,17 +473,17 @@ function Resolve-ReleaseFromGitHub {
 
     if ($NormalizedVersion -eq "latest") {
         $requestedRelease = "latest"
-        $metadataUri = "https://api.github.com/repos/openai/codex/releases/latest"
+        $metadataUri = "$GitHubApiBaseUri/releases/latest"
     } else {
         $resolvedVersion = $NormalizedVersion
         $requestedRelease = $resolvedVersion
-        $metadataUri = "https://api.github.com/repos/openai/codex/releases/tags/rust-v$resolvedVersion"
+        $metadataUri = "$GitHubApiBaseUri/releases/tags/rust-v$resolvedVersion"
     }
 
     try {
         $releaseMetadata = Invoke-RestMethod -Uri $metadataUri
     } catch {
-        throw "Could not fetch GitHub release metadata for Codex $requestedRelease. GitHub API may be unavailable or rate limited. $($_.Exception.Message)"
+        throw "Could not fetch GitHub release metadata for Corbanu Terminal $requestedRelease. GitHub API may be unavailable or rate limited. $($_.Exception.Message)"
     }
 
     if ($NormalizedVersion -eq "latest") {
@@ -467,7 +512,7 @@ function Resolve-ReleaseFromReleases {
         $releaseMetadata = [string]$metadataResponse.Content | ConvertFrom-Json -ErrorAction Stop
         $resolvedVersion = Resolve-VersionFromReleaseMetadata -ReleaseMetadata $releaseMetadata
         if ($NormalizedVersion -ne "latest" -and $resolvedVersion -cne $NormalizedVersion) {
-            throw "Release metadata version did not match requested Codex version $NormalizedVersion."
+            throw "Release metadata version did not match requested Corbanu Terminal version $NormalizedVersion."
         }
         $resolvedRelease = [PSCustomObject]@{
             Version = $resolvedVersion
@@ -523,14 +568,21 @@ function Get-CurrentInstalledVersion {
         [string]$StandaloneCurrentDir
     )
 
+    $standaloneVersion = Get-VersionFromBinary -CodexPath (Join-Path $StandaloneCurrentDir "bin\corbanu.exe")
+    if (-not [string]::IsNullOrWhiteSpace($standaloneVersion)) {
+        return $standaloneVersion
+    }
+
     $standaloneVersion = Get-VersionFromBinary -CodexPath (Join-Path $StandaloneCurrentDir "bin\pfterminal.exe")
     if (-not [string]::IsNullOrWhiteSpace($standaloneVersion)) {
         return $standaloneVersion
     }
 
-    $standaloneVersion = Get-VersionFromBinary -CodexPath (Join-Path $StandaloneCurrentDir "pfterminal.exe")
-    if (-not [string]::IsNullOrWhiteSpace($standaloneVersion)) {
-        return $standaloneVersion
+    foreach ($name in @("corbanu.exe", "pfterminal.exe")) {
+        $standaloneVersion = Get-VersionFromBinary -CodexPath (Join-Path $StandaloneCurrentDir $name)
+        if (-not [string]::IsNullOrWhiteSpace($standaloneVersion)) {
+            return $standaloneVersion
+        }
     }
 
     return $null
@@ -590,9 +642,9 @@ function Move-OldStandaloneBinIfApproved {
         return $null
     }
 
-    Write-Step "We found an older PFTerminal install at $VisibleBinDir"
-    Write-WarningStep "To continue, PFTerminal needs to update the install at this path."
-    if (-not (Prompt-YesNo "Replace it with the current PFTerminal setup now?")) {
+    Write-Step "We found an older terminal install at $VisibleBinDir"
+    Write-WarningStep "To continue, Corbanu Terminal needs to update the install at this path."
+    if (-not (Prompt-YesNo "Replace it with the current Corbanu Terminal setup now?")) {
         throw "Cannot replace older standalone install without confirmation: $VisibleBinDir"
     }
 
@@ -787,6 +839,74 @@ function Ensure-Junction {
     throw "Refusing to replace file at $LinkPath with a junction."
 }
 
+function Remove-OldStandaloneReleases {
+    param(
+        [string]$ReleasesDir,
+        [string]$CurrentDir,
+        [int]$Keep
+    )
+
+    if (-not (Test-Path -LiteralPath $ReleasesDir -PathType Container) -or
+        -not (Test-Path -LiteralPath $CurrentDir -PathType Container) -or
+        -not (Test-IsJunction -Path $CurrentDir)) {
+        Write-WarningStep "current release junction is missing or dangling; skipping release pruning"
+        return
+    }
+
+    $currentItem = Get-Item -LiteralPath $CurrentDir -Force
+    $currentTarget = [IO.Path]::GetFullPath([string]$currentItem.Target).TrimEnd("\")
+    $managedRoot = [IO.Path]::GetFullPath($ReleasesDir).TrimEnd("\")
+    $managedPrefix = "$managedRoot\"
+    if (-not $currentTarget.StartsWith($managedPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not (Test-Path -LiteralPath $currentTarget -PathType Container)) {
+        Write-WarningStep "current release target is outside the managed releases directory or unavailable; skipping release pruning"
+        return
+    }
+
+    $candidates = Get-ChildItem -LiteralPath $ReleasesDir -Force -Directory -ErrorAction SilentlyContinue |
+        Where-Object {
+            -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -and
+            -not $_.FullName.Equals($currentTarget, [System.StringComparison]::OrdinalIgnoreCase)
+        } |
+        Sort-Object -Property LastWriteTimeUtc -Descending |
+        Select-Object -Skip $Keep
+    foreach ($candidate in $candidates) {
+        try {
+            Remove-Item -LiteralPath $candidate.FullName -Recurse -Force
+            Write-Step "Pruned old standalone release: $($candidate.Name)"
+        } catch {
+            Write-WarningStep "Could not prune old standalone release $($candidate.FullName): $($_.Exception.Message)"
+        }
+    }
+}
+
+function Ensure-CorbanuExecutables {
+    param(
+        [string]$PackageDir,
+        [string]$Layout
+    )
+
+    $binaryDir = if ($Layout -eq "Package") {
+        Join-Path $PackageDir "bin"
+    } else {
+        $PackageDir
+    }
+    $aliasPairs = @(
+        @("corbanu.exe", "pfterminal.exe"),
+        @("corbanu-debug.exe", "pfterminal-debug.exe"),
+        @("corbanu-acp.exe", "pfterminal-acp.exe"),
+        @("corbanu-walletd.exe", "pfterminal-walletd.exe")
+    )
+    foreach ($pair in $aliasPairs) {
+        $corbanuPath = Join-Path $binaryDir $pair[0]
+        $legacyPath = Join-Path $binaryDir $pair[1]
+        if (-not (Test-Path -LiteralPath $corbanuPath -PathType Leaf) -and
+            (Test-Path -LiteralPath $legacyPath -PathType Leaf)) {
+            Copy-Item -LiteralPath $legacyPath -Destination $corbanuPath
+        }
+    }
+}
+
 function Test-PackageContentsAreComplete {
     param(
         [string]$PackageDir
@@ -798,7 +918,9 @@ function Test-PackageContentsAreComplete {
 
     $expectedFiles = @(
         "codex-package.json",
-        "bin\codex.exe",
+        "bin\corbanu.exe",
+        "bin\corbanu-acp.exe",
+        "bin\corbanu-walletd.exe",
         "bin\codex-code-mode-host.exe",
         "codex-path\rg.exe",
         "codex-resources\codex-command-runner.exe",
@@ -823,6 +945,7 @@ function Test-LegacyPlatformNpmContentsAreComplete {
     }
 
     $expectedFiles = @(
+        "corbanu.exe",
         "pfterminal.exe",
         "codex-resources\codex-command-runner.exe",
         "codex-resources\codex-windows-sandbox-setup.exe",
@@ -850,16 +973,16 @@ function Test-ReleaseIsComplete {
             if (-not (Test-PackageContentsAreComplete -PackageDir $ReleaseDir)) {
                 return $false
             }
-            $codexPath = Join-Path $ReleaseDir "bin\codex.exe"
+            $codexPath = Join-Path $ReleaseDir "bin\corbanu.exe"
         }
         "LegacyPlatformNpm" {
             if (-not (Test-LegacyPlatformNpmContentsAreComplete -PackageDir $ReleaseDir)) {
                 return $false
             }
-            $codexPath = Join-Path $ReleaseDir "codex.exe"
+            $codexPath = Join-Path $ReleaseDir "corbanu.exe"
         }
         default {
-            throw "Unknown PFTerminal installer layout: $Layout"
+            throw "Unknown Corbanu Terminal installer layout: $Layout"
         }
     }
 
@@ -912,8 +1035,8 @@ function Get-ConflictingInstall {
         return $null
     }
 
-    Write-Step "Detected existing $manager-managed PFTerminal at $existingPath"
-    Write-WarningStep "Multiple managed PFTerminal installs can be ambiguous because PATH order decides which one runs."
+    Write-Step "Detected an existing $manager-managed legacy terminal at $existingPath"
+    Write-WarningStep "Multiple managed terminal installs are ambiguous because PATH order decides which command runs."
 
     return [PSCustomObject]@{
         Manager = $manager
@@ -933,33 +1056,35 @@ function Maybe-HandleConflictingInstall {
     $manager = $Conflict.Manager
 
     $uninstallArgs = if ($manager -eq "bun") {
-        @("remove", "-g", "@agticorp/pfterminal")
+        @("remove", "-g", "@corbanucore/terminal", "@agticorp/pfterminal")
     } else {
-        @("uninstall", "-g", "@agticorp/pfterminal")
+        @("uninstall", "-g", "@corbanucore/terminal", "@agticorp/pfterminal")
     }
     $uninstallCommand = if ($manager -eq "bun") { "bun" } else { "npm" }
 
-    if (Prompt-YesNo "Uninstall the existing $manager-managed PFTerminal now?") {
+    if (Prompt-YesNo "Uninstall the existing $manager-managed legacy terminal now?") {
         Write-Step "Running: $uninstallCommand $($uninstallArgs -join ' ')"
         try {
             & $uninstallCommand @uninstallArgs
         } catch {
-            Write-WarningStep "Failed to uninstall the existing $manager-managed PFTerminal. Continuing with the standalone install."
+            Write-WarningStep "Failed to uninstall the existing $manager-managed legacy terminal. Continuing with the standalone install."
         }
     } else {
-        Write-WarningStep "Leaving the existing $manager-managed PFTerminal installed. PATH order will determine which pfterminal runs."
+        Write-WarningStep "Leaving the existing $manager-managed legacy terminal installed. PATH order will determine which terminal command runs."
     }
 }
 
-function Test-VisiblePFTerminalCommand {
+function Test-VisibleTerminalCommands {
     param(
         [string]$VisibleBinDir
     )
 
-    $pfterminalCommand = Join-Path $VisibleBinDir "pfterminal.exe"
-    & $pfterminalCommand --version *> $null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Installed PFTerminal command failed verification: $pfterminalCommand --version"
+    foreach ($commandName in @("corbanu.exe")) {
+        $command = Join-Path $VisibleBinDir $commandName
+        & $command --version *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Installed Corbanu Terminal command failed verification: $command --version"
+        }
     }
 }
 
@@ -969,7 +1094,7 @@ if ($env:OS -ne "Windows_NT") {
 }
 
 if (-not [Environment]::Is64BitOperatingSystem) {
-    Write-Error "PFTerminal requires a 64-bit version of Windows."
+    Write-Error "Corbanu Terminal requires a 64-bit version of Windows."
     exit 1
 }
 
@@ -994,21 +1119,44 @@ switch ($architecture) {
     }
 }
 
-$codexHome = if ([string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
-    Join-Path $env:USERPROFILE ".codex"
-} else {
+$newDefaultHome = Join-Path $env:USERPROFILE ".corbanu"
+$legacyDefaultHome = Join-Path $env:USERPROFILE ".pfterminal"
+$codexHome = if (-not [string]::IsNullOrWhiteSpace($env:CORBANU_HOME)) {
+    $env:CORBANU_HOME
+} elseif (-not [string]::IsNullOrWhiteSpace($env:PFTERMINAL_HOME)) {
+    $env:PFTERMINAL_HOME
+} elseif (-not [string]::IsNullOrWhiteSpace($env:CODEX_HOME)) {
     $env:CODEX_HOME
+} elseif ((Test-Path -LiteralPath $newDefaultHome -PathType Container) -and
+    (Test-Path -LiteralPath $legacyDefaultHome -PathType Container)) {
+    Write-WarningStep "Both $newDefaultHome and $legacyDefaultHome exist; using $newDefaultHome without merging or deleting either home."
+    $newDefaultHome
+} elseif (Test-Path -LiteralPath $legacyDefaultHome -PathType Container) {
+    $legacyDefaultHome
+} else {
+    $newDefaultHome
 }
 $standaloneRoot = Join-Path $codexHome "packages\standalone"
 $releasesDir = Join-Path $standaloneRoot "releases"
 $currentDir = Join-Path $standaloneRoot "current"
 $lockPath = Join-Path $standaloneRoot "install.lock"
 
-$defaultVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\PFTerminal\bin"
-if ([string]::IsNullOrWhiteSpace($env:CODEX_INSTALL_DIR)) {
-    $visibleBinDir = $defaultVisibleBinDir
+$newDefaultVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Corbanu Terminal\bin"
+$legacyDefaultVisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\PFTerminal\bin"
+$defaultVisibleBinDir = if ((Test-Path -LiteralPath $newDefaultVisibleBinDir) -or
+    -not (Test-Path -LiteralPath $legacyDefaultVisibleBinDir)) {
+    $newDefaultVisibleBinDir
 } else {
+    $legacyDefaultVisibleBinDir
+}
+if (-not [string]::IsNullOrWhiteSpace($env:CORBANU_INSTALL_DIR)) {
+    $visibleBinDir = $env:CORBANU_INSTALL_DIR
+} elseif (-not [string]::IsNullOrWhiteSpace($env:PFTERMINAL_INSTALL_DIR)) {
+    $visibleBinDir = $env:PFTERMINAL_INSTALL_DIR
+} elseif (-not [string]::IsNullOrWhiteSpace($env:CODEX_INSTALL_DIR)) {
     $visibleBinDir = $env:CODEX_INSTALL_DIR
+} else {
+    $visibleBinDir = $defaultVisibleBinDir
 }
 
 $currentVersion = Get-CurrentInstalledVersion -StandaloneCurrentDir $currentDir
@@ -1019,11 +1167,11 @@ $releaseName = "$resolvedVersion-$target"
 $releaseDir = Join-Path $releasesDir $releaseName
 
 if (-not [string]::IsNullOrWhiteSpace($currentVersion) -and $currentVersion -ne $resolvedVersion) {
-    Write-Step "Updating PFTerminal CLI from $currentVersion to $resolvedVersion"
+    Write-Step "Updating Corbanu Terminal from $currentVersion to $resolvedVersion"
 } elseif (-not [string]::IsNullOrWhiteSpace($currentVersion)) {
-    Write-Step "Updating PFTerminal CLI"
+    Write-Step "Updating Corbanu Terminal"
 } else {
-    Write-Step "Installing PFTerminal CLI"
+    Write-Step "Installing Corbanu Terminal"
 }
 Write-Step "Detected platform: $platformLabel"
 Write-Step "Resolved version: $resolvedVersion"
@@ -1031,9 +1179,9 @@ Write-Step "Resolved version: $resolvedVersion"
 $conflictingInstall = Get-ConflictingInstall -VisibleBinDir $visibleBinDir
 $oldStandaloneBackup = $null
 
-$checksumAsset = "codex-package_SHA256SUMS"
 $assetSelection = Resolve-ReleaseAssetSelection -ResolvedRelease $resolvedRelease -Target $target -NpmTag $npmTag
 $packageAsset = $assetSelection.PackageAsset
+$checksumAsset = $assetSelection.ChecksumAsset
 $packageMetadata = $assetSelection.PackageMetadata
 $checksumMetadata = $assetSelection.ChecksumMetadata
 $installLayout = $assetSelection.InstallLayout
@@ -1053,7 +1201,7 @@ try {
             $checksumPath = Join-Path $tempDir $checksumAsset
             $stagingDir = Join-Path $releasesDir ".staging.$releaseName.$PID"
 
-            Write-Step "Downloading PFTerminal CLI"
+            Write-Step "Downloading Corbanu Terminal"
             if ($installLayout -eq "Package") {
                 Invoke-WebRequestWithFallback -Metadata $checksumMetadata -OutFile $checksumPath -ExpectedDigest $checksumMetadata.Sha256 -AssetName $checksumAsset -ReleaseVersion $resolvedVersion -RequiredManifestAsset $packageAsset
                 $expectedPackageDigest = Get-PackageArchiveDigest -ManifestPath $checksumPath -AssetName $packageAsset
@@ -1069,8 +1217,9 @@ try {
             New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
             if ($installLayout -eq "Package") {
                 Expand-WindowsPackageArchive -ArchivePath $archivePath -DestinationPath $stagingDir
+                Ensure-CorbanuExecutables -PackageDir $stagingDir -Layout $installLayout
                 if (-not (Test-PackageContentsAreComplete -PackageDir $stagingDir)) {
-                    throw "Downloaded PFTerminal package archive did not contain the expected package layout."
+                    throw "Downloaded Corbanu Terminal package archive did not contain the expected package layout."
                 }
             } else {
                 $extractDir = Join-Path $tempDir "extract"
@@ -1091,8 +1240,10 @@ try {
                     Copy-Item -LiteralPath (Join-Path $vendorRoot $relativeSource) -Destination (Join-Path $stagingDir $copyMap[$relativeSource])
                 }
 
+                Ensure-CorbanuExecutables -PackageDir $stagingDir -Layout $installLayout
+
                 if (-not (Test-LegacyPlatformNpmContentsAreComplete -PackageDir $stagingDir)) {
-                    throw "Downloaded PFTerminal npm archive did not contain the expected legacy platform package layout."
+                    throw "Downloaded Corbanu Terminal npm archive did not contain the expected legacy platform package layout."
                 }
             }
 
@@ -1103,7 +1254,7 @@ try {
         }
 
         if (-not (Test-ReleaseIsComplete -ReleaseDir $releaseDir -ExpectedVersion $resolvedVersion -ExpectedTarget $target -Layout $installLayout)) {
-            throw "Installed Codex command did not report expected version $resolvedVersion."
+            throw "Installed Corbanu Terminal command did not report expected version $resolvedVersion."
         }
 
         New-Item -ItemType Directory -Force -Path $standaloneRoot | Out-Null
@@ -1119,7 +1270,7 @@ try {
         $oldStandaloneBackup = Move-OldStandaloneBinIfApproved -VisibleBinDir $visibleBinDir -DefaultVisibleBinDir $defaultVisibleBinDir
         try {
             Ensure-Junction -LinkPath $visibleBinDir -TargetPath $currentBinDir -InstallerOwnedTargetPrefix $standaloneRoot
-            Test-VisiblePFTerminalCommand -VisibleBinDir $visibleBinDir
+            Test-VisibleTerminalCommands -VisibleBinDir $visibleBinDir
         } catch {
             if ($null -ne $oldStandaloneBackup -and (Test-Path -LiteralPath $oldStandaloneBackup)) {
                 if (Test-Path -LiteralPath $visibleBinDir) {
@@ -1132,6 +1283,7 @@ try {
         if ($null -ne $oldStandaloneBackup) {
             Remove-Item -LiteralPath $oldStandaloneBackup -Recurse -Force
         }
+        Remove-OldStandaloneReleases -ReleasesDir $releasesDir -CurrentDir $currentDir -Keep $KeepReleases
     }
 } finally {
     Remove-Item -Recurse -Force $tempDir -ErrorAction SilentlyContinue
@@ -1174,12 +1326,12 @@ if ($prioritizeVisibleBin) {
     }
 }
 
-Write-Step "Current PowerShell session: pfterminal"
-Write-Step "Future PowerShell windows: open a new PowerShell window and run: pfterminal"
-Write-Host "PFTerminal CLI $resolvedVersion installed successfully."
+Write-Step "Current PowerShell session: corbanu"
+Write-Step "Future PowerShell windows: open a new PowerShell window and run: corbanu"
+Write-Host "Corbanu Terminal $resolvedVersion installed successfully."
 
-$pfterminalCommand = Join-Path $visibleBinDir "pfterminal.exe"
-if (Prompt-YesNo "Start PFTerminal now?") {
-    Write-Step "Launching PFTerminal"
-    & $pfterminalCommand
+$corbanuCommand = Join-Path $visibleBinDir "corbanu.exe"
+if (Prompt-YesNo "Start Corbanu Terminal now?") {
+    Write-Step "Launching Corbanu Terminal"
+    & $corbanuCommand
 }

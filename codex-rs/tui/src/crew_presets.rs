@@ -2,12 +2,18 @@ use codex_model_provider_info::CLAUDE_FABLE_5_PLAN_MODEL;
 #[cfg(test)]
 use codex_model_provider_info::CLAUDE_PLAN_MODEL;
 use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
+use codex_model_provider_info::CORBANU_API_GLM_5_3_FLASH_MODEL;
+use codex_model_provider_info::CORBANU_API_GPT_5_6_LUNA_MODEL;
+use codex_model_provider_info::CORBANU_API_KIMI_K3_MODEL;
 #[cfg(test)]
 use codex_model_provider_info::KIMI_CODE_K3_MODEL;
 #[cfg(test)]
 use codex_model_provider_info::KIMI_CODE_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_model_provider_info::OPENROUTER_GROK_4_7_MODEL;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
+use codex_model_provider_info::PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID;
+use codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID;
 use codex_protocol::crew::CURRENT_CREW_SCHEMA_VERSION;
 use codex_protocol::crew::CrewMemberSpec;
 use codex_protocol::crew::CrewPolicy;
@@ -20,7 +26,10 @@ pub(crate) const STANDARD_NAZGUL_MODEL: &str = CLAUDE_FABLE_5_PLAN_MODEL;
 pub(crate) const STANDARD_TROLL_MODEL: &str = "gpt-5.6-sol";
 pub(crate) const STANDARD_ORC_MODEL: &str = "gpt-5.6-luna";
 pub(crate) const STANDARD_ORC_2_MODEL: &str = "gpt-5.6-terra";
-pub(crate) const STANDARD_ORC_3_MODEL: &str = "x-ai/grok-4.5";
+pub(crate) const STANDARD_ORC_3_MODEL: &str = OPENROUTER_GROK_4_7_MODEL;
+pub(crate) const CORBANU_API_NAZGUL_MODEL: &str = CORBANU_API_KIMI_K3_MODEL;
+pub(crate) const CORBANU_API_TROLL_MODEL: &str = CORBANU_API_GPT_5_6_LUNA_MODEL;
+pub(crate) const CORBANU_API_ORC_MODEL: &str = CORBANU_API_GLM_5_3_FLASH_MODEL;
 
 pub(crate) fn standard_crew_spec() -> CrewSpec {
     CrewSpec {
@@ -32,8 +41,12 @@ pub(crate) fn standard_crew_spec() -> CrewSpec {
                 "nazgul",
                 "Nazgul",
                 "nazgul",
-                None,
-                RuntimeRequest::exact(CLAUDE_PLAN_PROVIDER_ID, STANDARD_NAZGUL_MODEL, None),
+                /*parent_member_id*/ None,
+                RuntimeRequest::exact(
+                    CLAUDE_PLAN_PROVIDER_ID,
+                    STANDARD_NAZGUL_MODEL,
+                    /*reasoning_effort*/ None,
+                ),
             ),
             member(
                 "troll",
@@ -73,7 +86,11 @@ pub(crate) fn standard_crew_spec() -> CrewSpec {
                 "Orc 3",
                 "orc",
                 Some("troll"),
-                RuntimeRequest::exact(OPENROUTER_PROVIDER_ID, STANDARD_ORC_3_MODEL, None),
+                RuntimeRequest::exact(
+                    OPENROUTER_PROVIDER_ID,
+                    STANDARD_ORC_3_MODEL,
+                    /*reasoning_effort*/ None,
+                ),
             ),
         ],
         policy: CrewPolicy {
@@ -83,6 +100,80 @@ pub(crate) fn standard_crew_spec() -> CrewSpec {
                 CLAUDE_PLAN_PROVIDER_ID.to_string(),
                 OPENAI_PROVIDER_ID.to_string(),
                 OPENROUTER_PROVIDER_ID.to_string(),
+            ],
+            maximum_spend_usd: None,
+        },
+    }
+}
+
+pub(crate) fn corbanu_api_crew_spec() -> CrewSpec {
+    CrewSpec {
+        schema_version: CURRENT_CREW_SCHEMA_VERSION,
+        crew_id: "builtin-corbanu-api-v1".to_string(),
+        preset_id: Some("corbanu-api-v1".to_string()),
+        members: vec![
+            member(
+                "nazgul",
+                "Nazgul",
+                "nazgul",
+                /*parent_member_id*/ None,
+                RuntimeRequest::exact(
+                    PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID,
+                    CORBANU_API_NAZGUL_MODEL,
+                    /*reasoning_effort*/ None,
+                ),
+            ),
+            member(
+                "troll",
+                "Troll",
+                "troll",
+                Some("nazgul"),
+                RuntimeRequest::exact(
+                    PFTERMINAL_PLAN_PROVIDER_ID,
+                    CORBANU_API_TROLL_MODEL,
+                    Some(ReasoningEffort::XHigh),
+                ),
+            ),
+            member(
+                "orc-1",
+                "Orc 1",
+                "orc",
+                Some("troll"),
+                RuntimeRequest::exact(
+                    PFTERMINAL_PLAN_PROVIDER_ID,
+                    CORBANU_API_ORC_MODEL,
+                    /*reasoning_effort*/ None,
+                ),
+            ),
+            member(
+                "orc-2",
+                "Orc 2",
+                "orc",
+                Some("troll"),
+                RuntimeRequest::exact(
+                    PFTERMINAL_PLAN_PROVIDER_ID,
+                    CORBANU_API_ORC_MODEL,
+                    /*reasoning_effort*/ None,
+                ),
+            ),
+            member(
+                "orc-3",
+                "Orc 3",
+                "orc",
+                Some("troll"),
+                RuntimeRequest::exact(
+                    PFTERMINAL_PLAN_PROVIDER_ID,
+                    CORBANU_API_ORC_MODEL,
+                    /*reasoning_effort*/ None,
+                ),
+            ),
+        ],
+        policy: CrewPolicy {
+            delegation_mode: DelegationMode::Proactive,
+            allow_ephemeral_descendants: true,
+            provider_allowlist: vec![
+                PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID.to_string(),
+                PFTERMINAL_PLAN_PROVIDER_ID.to_string(),
             ],
             maximum_spend_usd: None,
         },
@@ -100,29 +191,45 @@ pub(crate) fn multimodel_qualification_crew_spec() -> CrewSpec {
             "manager",
             "Manager",
             "nazgul",
-            None,
-            RuntimeRequest::exact(CLAUDE_PLAN_PROVIDER_ID, CLAUDE_FABLE_5_PLAN_MODEL, None),
+            /*parent_member_id*/ None,
+            RuntimeRequest::exact(
+                CLAUDE_PLAN_PROVIDER_ID,
+                CLAUDE_FABLE_5_PLAN_MODEL,
+                /*reasoning_effort*/ None,
+            ),
         ),
         member(
             "opus-reviewer",
             "Opus reviewer",
             "orc",
             Some("manager"),
-            RuntimeRequest::exact(CLAUDE_PLAN_PROVIDER_ID, CLAUDE_PLAN_MODEL, None),
+            RuntimeRequest::exact(
+                CLAUDE_PLAN_PROVIDER_ID,
+                CLAUDE_PLAN_MODEL,
+                /*reasoning_effort*/ None,
+            ),
         ),
         member(
             "grok-reviewer",
             "Grok reviewer",
             "orc",
             Some("manager"),
-            RuntimeRequest::exact(OPENROUTER_PROVIDER_ID, "x-ai/grok-4.5", None),
+            RuntimeRequest::exact(
+                OPENROUTER_PROVIDER_ID,
+                OPENROUTER_GROK_4_7_MODEL,
+                /*reasoning_effort*/ None,
+            ),
         ),
         member(
             "kimi-reviewer",
             "Kimi reviewer",
             "orc",
             Some("manager"),
-            RuntimeRequest::exact(KIMI_CODE_PROVIDER_ID, KIMI_CODE_K3_MODEL, None),
+            RuntimeRequest::exact(
+                KIMI_CODE_PROVIDER_ID,
+                KIMI_CODE_K3_MODEL,
+                /*reasoning_effort*/ None,
+            ),
         ),
     ];
     crew.policy.provider_allowlist = vec![

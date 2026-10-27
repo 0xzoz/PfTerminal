@@ -4,6 +4,8 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use codex_uds::UnixStream;
+use codex_wallet::CorbanuApiOperation;
+use codex_wallet::CorbanuApiOperationResult;
 use codex_wallet::GatewayKey;
 use codex_wallet::PlanPurchaseIntent;
 use codex_wallet::ProvisionedPlan;
@@ -17,7 +19,10 @@ use crate::protocol::Response;
 use crate::protocol::UnlockPolicy;
 use crate::protocol::WalletDaemonError;
 
-const PING_TIMEOUT: Duration = Duration::from_millis(100);
+// A missing daemon fails the connect immediately, so this only bounds a live
+// daemon's reply. 100ms was too short on loaded Windows hosts, where a slow
+// pong made the client try to spawn a second daemon.
+const PING_TIMEOUT: Duration = Duration::from_secs(1);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCAL_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const NETWORK_OPERATION_TIMEOUT: Duration = Duration::from_secs(180);
@@ -33,6 +38,28 @@ impl WalletDaemonClient {
     }
 
     pub async fn ensure_running(&self) -> Result<(), WalletDaemonError> {
+        self.ensure_available().await?;
+        match self
+            .call_with_timeout(Request::ProtocolVersion, STATUS_TIMEOUT)
+            .await
+        {
+            Ok(Response::ProtocolVersion { version })
+                if version == crate::protocol::PROTOCOL_VERSION =>
+            {
+                Ok(())
+            }
+            Ok(Response::ProtocolVersion { .. }) => Err(upgrade_required(&self.codex_home)),
+            Err(WalletDaemonError::Refused { code, .. }) if code == "invalid_request" => {
+                Err(upgrade_required(&self.codex_home))
+            }
+            Ok(other) => response_error(other),
+            Err(error) => Err(error),
+        }
+    }
+
+    // A live socket is not proof that this installation's protocol is running.
+    // Older releases leave a detached daemon alive when the TUI exits.
+    async fn ensure_available(&self) -> Result<(), WalletDaemonError> {
         if matches!(
             self.call_with_timeout(Request::Ping, PING_TIMEOUT).await,
             Ok(Response::Pong)
@@ -42,7 +69,7 @@ impl WalletDaemonClient {
         let executable = daemon_executable().map_err(unavailable)?;
         if !executable.is_file() {
             return Err(WalletDaemonError::Unavailable(format!(
-                "required wallet daemon executable is missing from this PFTerminal installation: {}",
+                "required wallet daemon executable is missing from this Corbanu Terminal installation: {}",
                 executable.display()
             )));
         }
@@ -110,7 +137,9 @@ impl WalletDaemonClient {
     }
 
     pub async fn lock(&self) -> Result<(), WalletDaemonError> {
-        self.ensure_running().await?;
+        // Revocation remains available against a legacy daemon. Never use it
+        // as an upgrade/drain handshake: cancellation is not payment completion.
+        self.ensure_available().await?;
         match self
             .call_with_timeout(Request::Lock, STATUS_TIMEOUT)
             .await?
@@ -196,6 +225,29 @@ impl WalletDaemonClient {
         }
     }
 
+    pub async fn execute_corbanu_api_operation(
+        &self,
+        capability: String,
+        gateway_origin: String,
+        operation: CorbanuApiOperation,
+    ) -> Result<CorbanuApiOperationResult, WalletDaemonError> {
+        self.ensure_running().await?;
+        match self
+            .call_with_timeout(
+                Request::CorbanuApiOperation {
+                    capability,
+                    gateway_origin,
+                    operation,
+                },
+                NETWORK_OPERATION_TIMEOUT,
+            )
+            .await?
+        {
+            Response::CorbanuApiOperationCompleted(result) => Ok(result),
+            other => response_error(other),
+        }
+    }
+
     async fn call_with_timeout(
         &self,
         request: Request,
@@ -246,18 +298,32 @@ fn daemon_executable() -> std::io::Result<PathBuf> {
 }
 
 fn daemon_executable_beside(current: &Path) -> PathBuf {
-    let name = if cfg!(windows) {
-        "pfterminal-walletd.exe"
+    let directory = current.parent().unwrap_or_else(|| Path::new("."));
+    let canonical = directory.join(format!("corbanu-walletd{}", std::env::consts::EXE_SUFFIX));
+    let legacy = directory.join(format!(
+        "pfterminal-walletd{}",
+        std::env::consts::EXE_SUFFIX
+    ));
+    // Resolve only within this installation, never from PATH or another release.
+    if canonical.is_file() || !legacy.is_file() {
+        canonical
     } else {
-        "pfterminal-walletd"
-    };
-    current
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(name)
+        legacy
+    }
 }
+
 fn unavailable(error: impl std::fmt::Display) -> WalletDaemonError {
     WalletDaemonError::Unavailable(error.to_string())
+}
+
+fn upgrade_required(home: &Path) -> WalletDaemonError {
+    WalletDaemonError::Refused {
+        code: "daemon_upgrade_required".into(),
+        message: format!(
+            "A wallet daemon from a different Corbanu Terminal release is still running. No new wallet operation was sent. Let any existing payment finish and verify its outcome; then close Terminal sessions for this home and stop only the pfterminal-walletd (or corbanu-walletd) process whose --codex-home is {} using your operating system's process manager. Reopen Terminal to start the matching daemon. Restarting only the TUI does not stop the daemon. Do not delete the wallet directory, socket or ownership lock, and do not repeat a payment whose outcome is unknown.",
+            home.display()
+        ),
+    }
 }
 fn response_error<T>(response: Response) -> Result<T, WalletDaemonError> {
     match response {
@@ -267,25 +333,46 @@ fn response_error<T>(response: Response) -> Result<T, WalletDaemonError> {
 }
 
 #[cfg(test)]
+#[path = "client_upgrade_tests.rs"]
+mod upgrade_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use codex_uds::UnixListener;
     use codex_uds::prepare_private_socket_directory;
 
     #[test]
-    fn wallet_daemon_is_resolved_beside_the_running_executable() {
-        let executable = if cfg!(windows) {
-            Path::new(r"C:\PFTerminal\bin\pfterminal.exe")
-        } else {
-            Path::new("/opt/pfterminal/bin/pfterminal")
-        };
-        let expected = if cfg!(windows) {
-            Path::new(r"C:\PFTerminal\bin\pfterminal-walletd.exe")
-        } else {
-            Path::new("/opt/pfterminal/bin/pfterminal-walletd")
-        };
+    fn wallet_daemon_uses_the_shipped_package_name_and_legacy_fallback() {
+        let package = tempfile::tempdir().expect("package");
+        let executable = package.path().join("corbanu");
+        let canonical = package
+            .path()
+            .join(format!("corbanu-walletd{}", std::env::consts::EXE_SUFFIX));
+        let legacy = package.path().join(format!(
+            "pfterminal-walletd{}",
+            std::env::consts::EXE_SUFFIX
+        ));
 
-        assert_eq!(daemon_executable_beside(executable), expected);
+        // A missing package reports the canonical name users should have installed.
+        assert_eq!(daemon_executable_beside(&executable), canonical);
+        std::fs::write(&legacy, "legacy fixture").expect("legacy daemon");
+        assert_eq!(daemon_executable_beside(&executable), legacy);
+        std::fs::write(&canonical, "canonical fixture").expect("canonical daemon");
+        assert_eq!(daemon_executable_beside(&executable), canonical);
+        std::fs::remove_file(&legacy).expect("remove legacy daemon");
+        assert_eq!(daemon_executable_beside(&executable), canonical);
+    }
+
+    #[test]
+    fn wallet_daemon_uses_packaged_name_for_all_terminal_entrypoints() {
+        let directory = tempfile::tempdir().expect("package");
+        for entrypoint in ["corbanu", "corbanu-debug", "pfterminal", "codex"] {
+            let suffix = if cfg!(windows) { ".exe" } else { "" };
+            let executable = directory.path().join(format!("{entrypoint}{suffix}"));
+            let expected = directory.path().join(format!("corbanu-walletd{suffix}"));
+            assert_eq!(daemon_executable_beside(&executable), expected);
+        }
     }
 
     #[tokio::test]

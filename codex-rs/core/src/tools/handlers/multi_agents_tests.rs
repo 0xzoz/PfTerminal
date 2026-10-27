@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "multi_agents_source_identity_route_tests.rs"]
+mod source_identity_route_tests;
 use crate::StartThreadOptions;
 use crate::ThreadManager;
 use crate::config::AgentRoleConfig;
@@ -34,6 +37,7 @@ use codex_model_provider_info::CLAUDE_PLAN_MODEL;
 use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
 use codex_model_provider_info::KIMI_CODE_K3_MODEL;
 use codex_model_provider_info::KIMI_CODE_PROVIDER_ID;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
@@ -258,7 +262,13 @@ async fn spawn_model_switch_cannot_route_around_the_provider_allowlist() {
     // the outcome, the child must never end up on a provider the operator did not
     // authorize.
     let allowlist = vec!["claude-plan".to_string(), "openai".to_string()];
-    for model in ["claude-fable-5", "claude-opus-5", "x-ai/grok-4.5", "k3"] {
+    for model in [
+        "claude-fable-5",
+        "claude-opus-5",
+        "x-ai/grok-4.5",
+        "k3",
+        "glm-5.3",
+    ] {
         let mut config = (*turn.config).clone();
         config.agent_provider_allowlist = Some(allowlist.clone());
         let parent_provider = config.model_provider_id.clone();
@@ -268,7 +278,7 @@ async fn spawn_model_switch_cannot_route_around_the_provider_allowlist() {
             &turn,
             &mut config,
             Some(model),
-            None,
+            /*requested_reasoning_effort*/ None,
         )
         .await;
 
@@ -717,6 +727,7 @@ async fn spawn_agent_explicit_runtime_supports_required_multimodel_pairs() {
         (CLAUDE_PLAN_PROVIDER_ID, CLAUDE_FABLE_5_PLAN_MODEL),
         (OPENROUTER_PROVIDER_ID, "x-ai/grok-4.5"),
         (KIMI_CODE_PROVIDER_ID, KIMI_CODE_K3_MODEL),
+        (ZAI_PROVIDER_ID, "glm-5.3"),
     ];
 
     for (provider, model) in expected {
@@ -921,8 +932,9 @@ async fn multi_agent_v2_spawn_fork_turns_all_rejects_agent_type_override() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_spawn_rejects_child_model_from_different_backend() {
+async fn multi_agent_v2_selects_child_models_with_different_engine_defaults() {
     let (session, mut turn) = make_session_and_context().await;
+    set_turn_to_openai_provider(&mut turn);
     let mut config = (*turn.config).clone();
     config
         .features
@@ -930,29 +942,60 @@ async fn multi_agent_v2_spawn_rejects_child_model_from_different_backend() {
         .expect("test config should allow feature update");
     set_turn_config(&mut turn, config);
 
-    let err = SpawnAgentHandlerV2::default()
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "inspect this repo",
-                "task_name": "incompatible_model",
-                "model": "gpt-5.4",
-                "fork_turns": "none"
-            })),
-        ))
-        .await
-        .err()
-        .expect("model from a different multi-agent backend should be rejected");
-
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(
-            "Unknown model `gpt-5.4` for spawn_agent. Available models: gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna"
-                .to_string()
+    for (model, provider) in [
+        ("gpt-5.4", OPENAI_PROVIDER_ID),
+        ("k3", KIMI_CODE_PROVIDER_ID),
+    ] {
+        let mut child =
+            build_agent_spawn_config(&BaseInstructions::default(), &turn).expect("child config");
+        apply_requested_spawn_agent_model_overrides(
+            &session,
+            &turn,
+            &mut child,
+            Some(model),
+            /*requested_reasoning_effort*/ None,
         )
-    );
+        .await
+        .expect("model selection is independent of the model's engine default");
+        assert_eq!(
+            (
+                child.model.as_deref(),
+                child.model_provider_id.as_str(),
+                child.multi_agent_version_for_model(/*model_multi_agent_version*/ None)
+            ),
+            (Some(model), provider, MultiAgentVersion::V2)
+        );
+    }
+}
+
+#[tokio::test]
+async fn build_agent_config_inherits_model_selected_v2_for_spawn_and_resume() {
+    let (_session, mut turn) = make_session_and_context().await;
+    let mut parent = (*turn.config).clone();
+    parent
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("feature update");
+    turn.config = Arc::new(parent);
+    // The parent's model, not an explicit feature flag, selected the running engine.
+    turn.multi_agent_version = MultiAgentVersion::V2;
+    let spawn =
+        build_agent_spawn_config(&BaseInstructions::default(), &turn).expect("spawn config");
+    let resume = build_agent_resume_config(&turn).expect("resume config");
+    for preference in [
+        None,
+        Some(MultiAgentVersion::V1),
+        Some(MultiAgentVersion::V2),
+    ] {
+        assert_eq!(
+            (
+                spawn.multi_agent_version_for_model(preference),
+                resume.multi_agent_version_for_model(preference)
+            ),
+            (MultiAgentVersion::V2, MultiAgentVersion::V2)
+        );
+    }
+    assert!(!turn.config.features.enabled(Feature::MultiAgentV2));
 }
 
 #[tokio::test]
@@ -2773,7 +2816,7 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn() {
+async fn multi_agent_v2_followup_task_accepts_durable_thread_target_and_notifies_parent() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let mut config = turn.config.as_ref().clone();
@@ -2841,7 +2884,7 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
             turn,
             "followup_task",
             function_payload(json!({
-                "target": agent_id.to_string(),
+                "target": format!("thread:{agent_id}"),
                 "message": "continue",
             })),
         ))
@@ -3178,8 +3221,9 @@ async fn direct_spawn_troll_can_followup_task_two_named_orc_children() {
                     if communication.author == troll_path
                         && communication.recipient == first_orc_path
                         && communication.other_recipients.is_empty()
-                        && communication.content == first_delegated_message
-                        && communication.encrypted_content.is_none()
+                        && communication.content.is_empty()
+                        && communication.encrypted_content.as_deref()
+                            == Some(first_delegated_message)
                         && communication
                             .metadata
                             .as_ref()
@@ -3196,8 +3240,9 @@ async fn direct_spawn_troll_can_followup_task_two_named_orc_children() {
                     if communication.author == troll_path
                         && communication.recipient == second_orc_path
                         && communication.other_recipients.is_empty()
-                        && communication.content == second_delegated_message
-                        && communication.encrypted_content.is_none()
+                        && communication.content.is_empty()
+                        && communication.encrypted_content.as_deref()
+                            == Some(second_delegated_message)
                         && communication
                             .metadata
                             .as_ref()
@@ -3271,15 +3316,14 @@ async fn direct_spawn_troll_can_followup_task_two_named_orc_children() {
         agent.agent_name == first_orc_path.as_str()
             && agent.agent_nickname.as_deref() == Some("Snaga")
             && agent.agent_role.as_deref() == Some("orc")
-            && agent.last_task_message.as_deref()
-                == Some("Start another task while every execution slot is occupied.")
+            && agent.last_task_message.is_none()
             && agent.last_result_message.as_deref() == Some("animation shell complete")
     }));
     assert!(result.agents.iter().any(|agent| {
         agent.agent_name == second_orc_path.as_str()
             && agent.agent_nickname.as_deref() == Some("Ghash")
             && agent.agent_role.as_deref() == Some("orc")
-            && agent.last_task_message.as_deref() == Some(second_delegated_message)
+            && agent.last_task_message.is_none()
             && agent.last_result_message.as_deref() == Some("formula checks complete")
     }));
     let context = session
@@ -3291,7 +3335,7 @@ async fn direct_spawn_troll_can_followup_task_two_named_orc_children() {
         context.contains("orc_snaga: Snaga"),
         "Troll context should name the first Orc, got {context:?}"
     );
-    assert!(context.contains("Start another task while every execution slot is occupied."));
+    assert!(!context.contains("Start another task while every execution slot is occupied."));
     assert!(
         context.contains("animation shell complete"),
         "Troll context should expose the first Orc result, got {context:?}"
@@ -3300,7 +3344,7 @@ async fn direct_spawn_troll_can_followup_task_two_named_orc_children() {
         context.contains("orc_ghash: Ghash"),
         "Troll context should name the second Orc, got {context:?}"
     );
-    assert!(context.contains(second_delegated_message));
+    assert!(!context.contains(second_delegated_message));
     assert!(
         context.contains("formula checks complete"),
         "Troll context should expose the second Orc result, got {context:?}"
@@ -3342,8 +3386,9 @@ async fn direct_spawn_troll_can_followup_task_two_named_orc_children() {
                 Op::InterAgentCommunication { communication }
                     if communication.author == troll_path
                         && communication.recipient == first_orc_path
-                        && communication.content == first_improvement_message
-                        && communication.encrypted_content.is_none()
+                        && communication.content.is_empty()
+                        && communication.encrypted_content.as_deref()
+                            == Some(first_improvement_message)
                         && communication.trigger_turn
             )
     }));
@@ -3354,8 +3399,9 @@ async fn direct_spawn_troll_can_followup_task_two_named_orc_children() {
                 Op::InterAgentCommunication { communication }
                     if communication.author == troll_path
                         && communication.recipient == second_orc_path
-                        && communication.content == second_improvement_message
-                        && communication.encrypted_content.is_none()
+                        && communication.content.is_empty()
+                        && communication.encrypted_content.as_deref()
+                            == Some(second_improvement_message)
                         && communication.trigger_turn
             )
     }));
@@ -3376,13 +3422,13 @@ async fn direct_spawn_troll_can_followup_task_two_named_orc_children() {
     assert!(result.agents.iter().any(|agent| {
         agent.agent_name == first_orc_path.as_str()
             && agent.agent_nickname.as_deref() == Some("Snaga")
-            && agent.last_task_message.as_deref() == Some(first_improvement_message)
+            && agent.last_task_message.is_none()
             && agent.last_result_message.as_deref() == Some("animation shell complete")
     }));
     assert!(result.agents.iter().any(|agent| {
         agent.agent_name == second_orc_path.as_str()
             && agent.agent_nickname.as_deref() == Some("Ghash")
-            && agent.last_task_message.as_deref() == Some(second_improvement_message)
+            && agent.last_task_message.is_none()
             && agent.last_result_message.as_deref() == Some("formula checks complete")
     }));
     let context = session
@@ -3390,11 +3436,11 @@ async fn direct_spawn_troll_can_followup_task_two_named_orc_children() {
         .agent_control
         .format_environment_context_subagents(troll.thread_id)
         .await;
-    assert!(context.contains(first_improvement_message));
-    assert!(context.contains(second_improvement_message));
+    assert!(!context.contains(first_improvement_message));
+    assert!(!context.contains(second_improvement_message));
     assert!(
         context.contains("animation shell complete") && context.contains("formula checks complete"),
-        "provider-neutral rework and result previews should remain readable, got {context:?}"
+        "results should remain readable without exposing encrypted task text, got {context:?}"
     );
 }
 
@@ -3782,6 +3828,15 @@ async fn spawn_agent_allows_depth_up_to_configured_max_depth() {
         })
         .await
         .expect("live parent at the configured depth should start");
+    // Starting a sub-agent thread directly binds it to its live parent's policy,
+    // the same binding a live spawn receives.
+    root.thread
+        .session
+        .services
+        .agent_control
+        .effective_security_policy()
+        .snapshot_for_agent(parent.thread_id)
+        .expect("direct fixture parent should receive the same policy binding as a live spawn");
     session.services.agent_control = manager.agent_control();
     session.thread_id = parent.thread_id;
     turn.session_source = parent_source;
@@ -4422,6 +4477,110 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
     assert!(!submission_id.is_empty());
     assert_eq!(success, Some(true));
 
+    let _ = manager
+        .agent_control()
+        .shutdown_live_agent(agent_id)
+        .await
+        .expect("shutdown resumed agent");
+}
+
+/// #1074: resuming a closed agent goes through the #689 check: on a
+/// connection whose default key is nowhere while a sibling connection with
+/// the same key variable runs on a named account, it is refused before it
+/// starts; with a stored default key it resumes.
+#[tokio::test]
+async fn resume_on_a_connection_without_its_own_credential_is_refused() {
+    const KEY: &str = "CORBANU_TEST_1074_ZAI_KEY";
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let thread = manager
+        .resume_thread_with_history(
+            turn.config.as_ref().clone(),
+            InitialHistory::Forked(vec![RolloutItem::ResponseItem(ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "materialized".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            })]),
+            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
+            /*parent_trace*/ None,
+            /*supports_openai_form_elicitation*/ false,
+        )
+        .await
+        .expect("start thread");
+    let agent_id = thread.thread_id;
+    let _ = manager
+        .agent_control()
+        .shutdown_live_agent(agent_id)
+        .await
+        .expect("shutdown agent");
+
+    // The parent runs `zai-anthropic` on its default key; `zai`, which shares
+    // the key variable, runs on account `work`.
+    let mut config = (*turn.config).clone();
+    let mut zai = ModelProviderInfo::create_zai_provider();
+    zai.env_key = Some(KEY.to_string());
+    crate::config::stamp_provider_account(ZAI_PROVIDER_ID, &mut zai, "work").expect("stamp");
+    let mut anthropic = ModelProviderInfo::create_zai_anthropic_provider();
+    anthropic.env_key = Some(KEY.to_string());
+    config
+        .model_providers
+        .insert(ZAI_PROVIDER_ID.to_string(), zai);
+    config
+        .model_providers
+        .insert("zai-anthropic".to_string(), anthropic.clone());
+    config.model_provider_id = "zai-anthropic".to_string();
+    config.model_provider = anthropic.clone();
+    turn.provider = create_model_provider(anthropic, turn.auth_manager.clone());
+    let codex_home = config.codex_home.clone();
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let resume = || {
+        ResumeAgentHandler.handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "resume_agent",
+            function_payload(json!({"id": agent_id.to_string()})),
+        ))
+    };
+
+    let Err(error) = resume().await else {
+        panic!("resume_agent should be refused");
+    };
+    assert_eq!(
+        error,
+        FunctionCallError::RespondToModel(format!(
+            "Resuming this agent: `zai-anthropic` would run on its default account, which has \
+             no credential (`{KEY}` is not set and no default key is stored); accounts are \
+             selected per connection, and account `work` is selected for `zai` only. Ask the \
+             user to add a default `{KEY}` (`/providers`) before resuming it, or do the work \
+             without this agent. Do not retry on another account without the user's consent."
+        ))
+    );
+    assert_eq!(
+        manager.agent_control().get_status(agent_id).await,
+        AgentStatus::NotFound
+    );
+
+    // With a stored default key it resumes.
+    codex_login::login_with_provider_api_key(
+        &codex_home,
+        KEY,
+        "canary-1074-default",
+        codex_login::AuthCredentialsStoreMode::File,
+        codex_login::AuthKeyringBackendKind::default(),
+    )
+    .expect("store default key");
+    let output = resume().await.expect("resume_agent should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: resume_agent::ResumeAgentResult =
+        serde_json::from_str(&content).expect("resume_agent result should be json");
+    assert_ne!(result.status, AgentStatus::NotFound);
     let _ = manager
         .agent_control()
         .shutdown_live_agent(agent_id)
@@ -5531,6 +5690,100 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_interrupt_shutdown_agent_is_idempotent_and_preserves_identity() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": "worker"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let agent_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+        .await
+        .expect("worker path should resolve");
+    let worker = manager
+        .get_thread(agent_id)
+        .await
+        .expect("worker should be resident");
+    worker
+        .submit(Op::Shutdown {})
+        .await
+        .expect("worker shutdown should submit");
+    worker.wait_until_terminated().await;
+    assert_eq!(
+        session.services.agent_control.get_status(agent_id).await,
+        AgentStatus::Shutdown
+    );
+    let audit_count = manager
+        .captured_ops()
+        .iter()
+        .filter(|(thread_id, op)| {
+            *thread_id == agent_id && matches!(op, Op::InterAgentCommunication { .. })
+        })
+        .count();
+
+    for _ in 0..2 {
+        let output = InterruptAgentHandler
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "interrupt_agent",
+                function_payload(json!({"target": "worker", "reason": "review correction"})),
+            ))
+            .await
+            .expect("interrupting a shutdown agent should be idempotent");
+        let (content, success) = expect_text_output(output);
+        let result: InterruptAgentResult =
+            serde_json::from_str(&content).expect("interrupt_agent result should be json");
+        assert_eq!(result.previous_status, AgentStatus::Shutdown);
+        assert_eq!(success, Some(true));
+    }
+
+    assert_eq!(
+        manager
+            .captured_ops()
+            .iter()
+            .filter(|(thread_id, op)| {
+                *thread_id == agent_id && matches!(op, Op::InterAgentCommunication { .. })
+            })
+            .count(),
+        audit_count
+    );
+    assert!(
+        session
+            .services
+            .agent_control
+            .get_agent_metadata(agent_id)
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn multi_agent_v2_interrupt_agent_accepts_canonical_child_path() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -6445,4 +6698,527 @@ async fn build_agent_resume_config_clears_base_instructions() {
         .set_permission_profile(turn.permission_profile())
         .expect("permission profile set");
     assert_eq!(config, expected);
+}
+
+/// PF-84-S03: a parent on Z.AI (on `parent_account` when set) spawns a child
+/// with `extra` spawn arguments. Returns the spawn result and the accounts of
+/// the spawned children (`<provider>:<name>`).
+async fn spawn_with_account(
+    named_accounts: bool,
+    configure: impl FnOnce(&mut crate::config::Config, &mut TurnContext),
+    parent_account: Option<&str>,
+    extra: serde_json::Value,
+) -> (Result<(), FunctionCallError>, Vec<Option<String>>) {
+    let (result, children, _asked) = spawn_with_account_answering(
+        named_accounts,
+        configure,
+        parent_account,
+        extra,
+        /*answer*/ None,
+        /*raised_level*/ None,
+    )
+    .await;
+    (result, children)
+}
+
+/// [`spawn_with_account`] with a turn that can ask the human: a security
+/// question is answered with `answer` (`Allow once`, `Cancel`, or empty for no
+/// answer). Also returns whether a question was asked.
+async fn spawn_with_account_answering(
+    named_accounts: bool,
+    configure: impl FnOnce(&mut crate::config::Config, &mut TurnContext),
+    parent_account: Option<&str>,
+    extra: serde_json::Value,
+    answer: Option<&str>,
+    raised_level: Option<codex_security_policy::SecurityLevel>,
+) -> (Result<(), FunctionCallError>, Vec<Option<String>>, bool) {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let mut provider_info = ModelProviderInfo::create_zai_provider();
+    provider_info.account =
+        parent_account.map(|name| codex_model_provider_info::NamedProviderAccount {
+            provider_id: "zai".to_string(),
+            name: name.to_string(),
+        });
+    let mut config = (*turn.config).clone();
+    config.model_provider_id = "zai".to_string();
+    config.model_provider = provider_info;
+    config
+        .model_providers
+        .insert("zai".to_string(), ModelProviderInfo::create_zai_provider());
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    if named_accounts {
+        config
+            .features
+            .enable(Feature::NamedAccounts)
+            .expect("test config should allow feature update");
+    }
+    codex_vault::Vault::new(config.codex_home.to_path_buf())
+        .write_provider_account(
+            "zai",
+            &codex_vault::ProviderAccountName::parse("work").expect("name"),
+            codex_vault::ProviderAccountKind::ApiKey,
+            "canary-spawn-work",
+        )
+        .expect("write account");
+    configure(&mut config, &mut turn);
+    turn.provider = create_model_provider(config.model_provider.clone(), turn.auth_manager.clone());
+    set_turn_config(&mut turn, config);
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    // The root's own control plane carries its security policy binding.
+    session.services.agent_control = root.thread.session.services.agent_control.clone();
+    session.thread_id = root.thread_id;
+    if let Some(level) = raised_level {
+        let controller = session
+            .services
+            .agent_control
+            .trusted_security_controller()
+            .expect("root security controller");
+        let change = controller
+            .confirm_level_change(level, codex_security_policy::RevocationState::new())
+            .expect("confirm level change");
+        controller
+            .apply_confirmed_change(change)
+            .expect("apply level change");
+    }
+    let mut arguments = json!({
+        "message": "say pong",
+        "task_name": "worker",
+        "fork_turns": "none",
+    });
+    for (key, value) in extra.as_object().expect("object").clone() {
+        arguments[key] = value;
+    }
+    if answer.is_some() {
+        *session.active_turn.lock().await = Some(crate::state::ActiveTurn::default());
+    }
+    let session = Arc::new(session);
+    let sub_id = turn.sub_id.clone();
+    let handler = SpawnAgentHandlerV2::default();
+    let call = handler.handle(invocation(
+        Arc::clone(&session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(arguments),
+    ));
+    tokio::pin!(call);
+    let mut asked = false;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        loop {
+            tokio::select! {
+                result = &mut call => break result,
+                () = tokio::time::sleep(std::time::Duration::from_millis(10)),
+                    if answer.is_some() && !asked =>
+                {
+                    let turn_state = session
+                        .active_turn
+                        .lock()
+                        .await
+                        .as_ref()
+                        .map(|active| Arc::clone(&active.turn_state));
+                    let pending = match turn_state {
+                        Some(turn_state) => turn_state.lock().await.remove_pending_user_input(&sub_id),
+                        None => None,
+                    };
+                    if let (Some(pending), Some(answer)) = (pending, answer) {
+                        asked = true;
+                        // An empty answer stands for a client that cannot ask
+                        // (`corbanu exec` rejects the request with no answers).
+                        let answers = if answer.is_empty() {
+                            std::collections::HashMap::new()
+                        } else {
+                            std::collections::HashMap::from([(
+                                crate::security::protected_surface::question_id("call-1"),
+                                codex_protocol::request_user_input::RequestUserInputAnswer {
+                                    answers: vec![answer.to_string()],
+                                },
+                            )])
+                        };
+                        let response =
+                            codex_protocol::request_user_input::RequestUserInputResponse { answers };
+                        let _ = pending.send(response);
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("spawn must not wait for an unanswered approval")
+    .map(drop);
+    let mut children = Vec::new();
+    for thread_id in manager.list_thread_ids().await {
+        if thread_id != root.thread_id {
+            let thread = manager.get_thread(thread_id).await.expect("child thread");
+            children.push(thread.config_snapshot().await.provider_account);
+        }
+    }
+    (result, children, asked)
+}
+
+#[tokio::test]
+async fn spawn_account_needs_the_named_accounts_feature() {
+    let (result, _) = spawn_with_account(
+        /*named_accounts*/ false,
+        |_, _| {},
+        /*parent_account*/ None,
+        json!({"account": "work"}),
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(FunctionCallError::RespondToModel(
+            "spawn_agent `account` needs the `named_accounts` feature; omit it to use the parent's account.".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn spawn_account_must_be_configured_for_the_child_provider() {
+    let (result, _) = spawn_with_account(
+        /*named_accounts*/ true,
+        |_, _| {},
+        /*parent_account*/ None,
+        json!({"account": "gone"}),
+    )
+    .await;
+    assert_eq!(
+        result,
+        Err(FunctionCallError::RespondToModel(
+            "account `gone` of provider `zai` is not configured; add it with `corbanu account add zai gone` or pick another with `--account` (see `corbanu account list`). Configured accounts of `zai`: `default`, work. Do not retry on another account without the user's consent.".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn aggressive_spawn_account_switch_needs_an_approval() {
+    let (result, children) = spawn_with_account(
+        /*named_accounts*/ true,
+        |config, turn| {
+            config.security_level = codex_security_policy::SecurityLevel::Aggressive;
+            turn.approval_policy
+                .set(AskForApproval::Never)
+                .expect("approval policy should be set");
+        },
+        /*parent_account*/ None,
+        json!({"account": "work"}),
+    )
+    .await;
+    assert_eq!(children, Vec::<Option<String>>::new());
+    assert_eq!(
+        result,
+        Err(FunctionCallError::RespondToModel(
+            "Running a spawned agent on account `work` of `zai` needs the user's approval under the Aggressive security level, and approvals are off.".to_string()
+        ))
+    );
+}
+
+/// #428 (Travis 2026-10-11, option 1): the session's permissions as an
+/// Aggressive launch of Corbanu Terminal builds them while Core's level stays
+/// Permissive. `profile` selects the Aggressive permission profile; `marker`
+/// sets the origin marker. Both are set by every such launch: the states the
+/// TUI shows as "Aggressive is enforced; choose a level in /security" (level
+/// file missing, Aggressive rules present), "Aggressive is enforced, but the
+/// protected boundary is unverified" (saved without a preflight) and "Active
+/// in this session: Aggressive" (Permissive saved for the next start).
+async fn tui_aggressive_permissions(
+    codex_home: &std::path::Path,
+    profile: bool,
+    marker: bool,
+) -> crate::config::Permissions {
+    let profile_id = codex_security_level::level::AGGRESSIVE_PROFILE_ID;
+    let mut overrides = Vec::new();
+    if profile {
+        overrides.push((
+            format!("permissions.{profile_id}"),
+            toml::Value::Table(toml::toml! {
+                extends = ":workspace"
+                [network]
+                enabled = false
+            }),
+        ));
+        overrides.push((
+            "default_permissions".to_string(),
+            toml::Value::String(profile_id.to_string()),
+        ));
+    }
+    if marker {
+        overrides.push((
+            format!(
+                "shell_environment_policy.set.{}",
+                codex_security_level::nested::ORIGIN_ENV
+            ),
+            toml::Value::String(codex_home.to_string_lossy().into_owned()),
+        ));
+    }
+    let config = crate::config::ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
+        .cli_overrides(overrides)
+        .build()
+        .await
+        .expect("config with the Aggressive launch overrides");
+    assert_eq!(
+        (
+            config.security_level,
+            config.permissions.launch_enforces_aggressive()
+        ),
+        (
+            codex_security_policy::SecurityLevel::Permissive,
+            profile || marker
+        )
+    );
+    config.permissions
+}
+
+#[tokio::test]
+async fn tui_aggressive_spawn_account_switch_is_refused_with_approvals_off() {
+    for (profile, marker) in [(true, true), (true, false), (false, true)] {
+        let home = tempfile::tempdir().expect("home");
+        let permissions = tui_aggressive_permissions(home.path(), profile, marker).await;
+        let (result, children) = spawn_with_account(
+            /*named_accounts*/ true,
+            |config, turn| {
+                config.permissions = permissions;
+                turn.approval_policy
+                    .set(AskForApproval::Never)
+                    .expect("approval policy should be set");
+            },
+            /*parent_account*/ None,
+            json!({"account": "work"}),
+        )
+        .await;
+        assert_eq!(
+            (result, children),
+            (
+                Err(FunctionCallError::RespondToModel(
+                    "Running a spawned agent on account `work` of `zai` needs the user's approval under the Aggressive security level, and approvals are off.".to_string()
+                )),
+                Vec::new()
+            ),
+            "profile={profile} marker={marker}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn tui_aggressive_spawn_account_switch_asks_the_human() {
+    for (answer, expected) in [
+        (
+            "Cancel",
+            (
+                Err(FunctionCallError::RespondToModel(
+                    "The user declined running the spawned agent on account `work` of `zai`. Do not retry on another account without the user's consent.".to_string(),
+                )),
+                Vec::new(),
+                true,
+            ),
+        ),
+        (
+            "",
+            (
+                Err(FunctionCallError::RespondToModel(
+                    "Running a spawned agent on account `work` of `zai` needs the user's approval under the Aggressive security level, and no answer was given (this session cannot ask, or the question was dismissed). Do not retry on another account without the user's consent.".to_string(),
+                )),
+                Vec::new(),
+                true,
+            ),
+        ),
+        ("Allow once", (Ok(()), vec![Some("zai:work".to_string())], true)),
+    ] {
+        let home = tempfile::tempdir().expect("home");
+        let permissions = tui_aggressive_permissions(home.path(), /*profile*/ true, /*marker*/ true).await;
+        let outcome = spawn_with_account_answering(
+            /*named_accounts*/ true,
+            |config, turn| {
+                config.permissions = permissions;
+                turn.approval_policy
+                    .set(AskForApproval::UnlessTrusted)
+                    .expect("approval policy should be set");
+            },
+            /*parent_account*/ None,
+            json!({"account": "work"}),
+            Some(answer),
+            /*raised_level*/ None,
+        )
+        .await;
+        assert_eq!(outcome, expected, "{answer}");
+    }
+}
+
+#[tokio::test]
+async fn permissive_spawn_account_switch_asks_nothing_even_when_it_could() {
+    let (result, children, asked) = spawn_with_account_answering(
+        /*named_accounts*/ true,
+        |_, turn| {
+            turn.approval_policy
+                .set(AskForApproval::UnlessTrusted)
+                .expect("approval policy should be set");
+        },
+        /*parent_account*/ None,
+        json!({"account": "work"}),
+        Some("Cancel"),
+        /*raised_level*/ None,
+    )
+    .await;
+    assert_eq!(
+        (result, children, asked),
+        (Ok(()), vec![Some("zai:work".to_string())], false)
+    );
+}
+
+/// PF-84-S03 follow-up: D3 checks the level in force at spawn time, so a
+/// session started Permissive and raised to Aggressive mid-session needs the
+/// approval too.
+#[tokio::test]
+async fn spawn_account_switch_after_a_mid_session_raise_needs_an_approval() {
+    let (result, children, _asked) = spawn_with_account_answering(
+        /*named_accounts*/ true,
+        |config, turn| {
+            config.security_level = codex_security_policy::SecurityLevel::Permissive;
+            turn.approval_policy
+                .set(AskForApproval::Never)
+                .expect("approval policy should be set");
+        },
+        /*parent_account*/ None,
+        json!({"account": "work"}),
+        /*answer*/ None,
+        Some(codex_security_policy::SecurityLevel::Aggressive),
+    )
+    .await;
+    assert_eq!(children, Vec::<Option<String>>::new());
+    assert_eq!(
+        result,
+        Err(FunctionCallError::RespondToModel(
+            "Running a spawned agent on account `work` of `zai` needs the user's approval under the Aggressive security level, and approvals are off.".to_string()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn spawn_account_switch_needs_no_prompt_below_aggressive() {
+    let (result, children) = spawn_with_account(
+        /*named_accounts*/ true,
+        |_, _| {},
+        /*parent_account*/ None,
+        json!({"account": "work"}),
+    )
+    .await;
+    assert_eq!(
+        (result, children),
+        (Ok(()), vec![Some("zai:work".to_string())])
+    );
+}
+
+/// #689: a parent on Z.AI account `work` spawns on the Claude-style
+/// connection, which runs on the default account; with no default key that
+/// child would fail at its first request, so it is refused before it starts.
+/// Explicit `account: default` on the parent's own connection is refused the
+/// same way. With a default key the spawn goes ahead. The key variable is
+/// unique to this test so the ambient environment cannot supply it.
+#[tokio::test]
+async fn spawn_on_a_connection_without_its_own_credential_is_refused() {
+    const KEY: &str = "CORBANU_TEST_689_ZAI_KEY";
+    let use_test_key = |config: &mut crate::config::Config, _: &mut TurnContext| {
+        for id in [ZAI_PROVIDER_ID, "zai-anthropic"] {
+            let mut provider = if id == ZAI_PROVIDER_ID {
+                ModelProviderInfo::create_zai_provider()
+            } else {
+                ModelProviderInfo::create_zai_anthropic_provider()
+            };
+            provider.env_key = Some(KEY.to_string());
+            config.model_providers.insert(id.to_string(), provider);
+        }
+        config.model_provider.env_key = Some(KEY.to_string());
+    };
+    let refusal = |child: &str| {
+        format!(
+            "spawn_agent: `{child}` would run on its default account, which has no credential \
+             (`{KEY}` is not set and no default key is stored); accounts are selected per \
+             connection, and the parent runs on `zai` account `work`. Spawn without the \
+             `model_provider`, `account` or `agent_type` that chose this connection and account \
+             to run on the parent's, or ask the user to add a default `{KEY}` (`/providers`). \
+             Do not retry on another account without the user's consent."
+        )
+    };
+    for (extra, child) in [
+        (
+            json!({"model_provider": "zai-anthropic", "model": "glm-5.2"}),
+            "zai-anthropic",
+        ),
+        (json!({"account": "default"}), ZAI_PROVIDER_ID),
+    ] {
+        let (result, children) = spawn_with_account(
+            /*named_accounts*/ true,
+            use_test_key,
+            /*parent_account*/ Some("work"),
+            extra.clone(),
+        )
+        .await;
+        assert_eq!(
+            (result, children),
+            (
+                Err(FunctionCallError::RespondToModel(refusal(child))),
+                Vec::new()
+            ),
+            "{extra}"
+        );
+    }
+    // The parent's own connection and account still spawn.
+    let (result, children) = spawn_with_account(
+        /*named_accounts*/ true,
+        use_test_key,
+        /*parent_account*/ Some("work"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        (result, children),
+        (Ok(()), vec![Some("zai:work".to_string())])
+    );
+    // With a stored default key the Claude-style connection spawns.
+    let (result, children) = spawn_with_account(
+        /*named_accounts*/ true,
+        |config, turn| {
+            use_test_key(config, turn);
+            codex_login::login_with_provider_api_key(
+                &config.codex_home,
+                KEY,
+                "canary-689-default",
+                codex_login::AuthCredentialsStoreMode::File,
+                codex_login::AuthKeyringBackendKind::default(),
+            )
+            .expect("store default key");
+        },
+        /*parent_account*/ Some("work"),
+        json!({"model_provider": "zai-anthropic", "model": "glm-5.2"}),
+    )
+    .await;
+    assert_eq!(
+        (result, children),
+        (Ok(()), vec![Some("zai-anthropic:default".to_string())])
+    );
+}
+
+#[tokio::test]
+async fn spawned_children_inherit_the_parent_account_even_with_a_role() {
+    for extra in [json!({}), json!({"agent_type": "explorer"})] {
+        let (result, children) = spawn_with_account(
+            /*named_accounts*/ true,
+            |_, _| {},
+            /*parent_account*/ Some("work"),
+            extra.clone(),
+        )
+        .await;
+        assert_eq!(
+            (result, children),
+            (Ok(()), vec![Some("zai:work".to_string())]),
+            "{extra}"
+        );
+    }
 }

@@ -175,7 +175,9 @@ impl ChatWidget {
     }
 
     fn refresh_status_line_from_selections(&mut self, selections: &StatusSurfaceSelections) {
-        let enabled = !selections.status_line_items.is_empty() || self.gpu_spend_status.is_some();
+        let enabled = !selections.status_line_items.is_empty()
+            || self.gpu_spend_status.is_some()
+            || self.campaign_tracker_indicator.is_some();
         self.bottom_pane.set_status_line_enabled(enabled);
         if !enabled {
             self.set_status_line(/*status_line*/ None);
@@ -191,7 +193,10 @@ impl ChatWidget {
         }
 
         let line = status_line_from_segments(segments, self.config.tui_status_line_use_colors);
-        if line.is_none() && self.gpu_spend_status.is_none() {
+        if line.is_none()
+            && self.gpu_spend_status.is_none()
+            && self.campaign_tracker_indicator.is_none()
+        {
             self.set_status_line(/*status_line*/ None);
             self.set_status_line_hyperlink(/*url*/ None);
             return;
@@ -202,6 +207,12 @@ impl ChatWidget {
                 line.spans.push(" · ".dim());
             }
             line.spans.push(gpu_spend_status.clone().red().bold());
+        }
+        if let Some(tracker) = &self.campaign_tracker_indicator {
+            if !line.spans.is_empty() {
+                line.spans.insert(0, " · ".dim());
+            }
+            line.spans.insert(0, tracker.clone().cyan());
         }
         self.set_status_line(Some(line));
         let hyperlink_url = selections
@@ -762,7 +773,7 @@ impl ChatWidget {
             ),
             StatusLineItem::WorkspaceHeadline => self.status_line_workspace_headline.clone(),
             StatusLineItem::TaskProgress => self.terminal_title_task_progress(),
-            StatusLineItem::Brand => Some("Post Fiat Terminal".to_string()),
+            StatusLineItem::Brand => Some("Corbanu Terminal".to_string()),
             StatusLineItem::Tps => Some(self.tps_estimator.label(Instant::now())),
         }
     }
@@ -779,7 +790,7 @@ impl ChatWidget {
         item: StatusSurfacePreviewItem,
     ) -> Option<String> {
         let status_line_item = match item {
-            StatusSurfacePreviewItem::AppName => return Some("pfterminal".to_string()),
+            StatusSurfacePreviewItem::AppName => return Some("corbanu".to_string()),
             StatusSurfacePreviewItem::ProjectName => return self.terminal_title_project_name(),
             StatusSurfacePreviewItem::ProjectRoot => StatusLineItem::ProjectRoot,
             StatusSurfacePreviewItem::Status => return Some(self.run_state_status_text()),
@@ -822,7 +833,7 @@ impl ChatWidget {
         now: Instant,
     ) -> Option<String> {
         match item {
-            TerminalTitleItem::AppName => Some("pfterminal".to_string()),
+            TerminalTitleItem::AppName => Some("corbanu".to_string()),
             TerminalTitleItem::Project => self.terminal_title_project_name(),
             TerminalTitleItem::CurrentDir => Some(Self::truncate_terminal_title_part(
                 format_directory_display(self.status_line_cwd(), /*max_width*/ None),
@@ -891,7 +902,17 @@ impl ChatWidget {
     fn status_model_display_name(&self) -> String {
         self.active_external_model_display
             .clone()
-            .unwrap_or_else(|| self.model_display_name())
+            .unwrap_or_else(|| self.model_with_provider_display_name())
+    }
+
+    fn model_with_provider_display_name(&self) -> String {
+        let model = self.model_display_name();
+        let provider = &self.config.model_provider_id;
+        if provider == "openai" {
+            model
+        } else {
+            format!("{model} via {provider}")
+        }
     }
 
     fn reasoning_display_name(&self) -> String {
@@ -915,7 +936,10 @@ impl ChatWidget {
             .filter(|_| self.has_chatgpt_account)
             .map(|tier| format!(" {tier}"))
             .unwrap_or_default();
-        format!("{} {label}{service_tier_label}", self.model_display_name())
+        format!(
+            "{} {label}{service_tier_label}",
+            self.model_with_provider_display_name()
+        )
     }
 
     /// Computes the compact runtime status label used by word-based status items.

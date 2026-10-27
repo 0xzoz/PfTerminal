@@ -237,6 +237,7 @@ mod approval_requests;
 mod composer_submission;
 #[path = "tests/config_errors_tests.rs"]
 mod config_errors;
+mod custom_model_identity;
 mod exec_flow;
 mod goal_menu;
 mod goal_validation;
@@ -244,11 +245,13 @@ mod guardian;
 pub(crate) mod helpers;
 mod history_replay;
 mod mcp_startup;
+mod model_route_choice;
 mod permissions;
 mod plan_mode;
 #[path = "tests/plugin_catalog_tests.rs"]
 mod plugin_catalog;
 mod popups_and_settings;
+mod refusal_diagnostics;
 mod review_mode;
 mod side;
 mod slash_commands;
@@ -257,6 +260,7 @@ mod status_command_tests;
 mod status_surface_previews;
 mod terminal_title;
 mod usage;
+mod vault_add_failure;
 
 pub(crate) use helpers::make_chatwidget_manual_with_sender;
 pub(crate) use helpers::set_chatgpt_auth;

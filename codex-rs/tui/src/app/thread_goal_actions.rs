@@ -17,7 +17,7 @@ use codex_protocol::ThreadId;
 
 const EPHEMERAL_THREAD_GOAL_ERROR_MESSAGE: &str = concat!(
     "Goals need a saved session. This session is temporary.\n",
-    "Run `pfterminal` to start a saved session, or `pfterminal resume` / `/resume` to reopen one.",
+    "Run `corbanu` to start a saved session, or `corbanu resume` / `/resume` to reopen one.",
 );
 
 impl App {
@@ -200,7 +200,12 @@ impl App {
         };
 
         let result = app_server
-            .thread_goal_set(thread_id, Some(objective), Some(status), token_budget)
+            .thread_goal_set(
+                thread_id,
+                Some(objective.clone()),
+                Some(status),
+                token_budget,
+            )
             .await;
 
         match result {
@@ -208,6 +213,7 @@ impl App {
                 if self.current_displayed_thread_id() != Some(thread_id) {
                     return;
                 }
+                self.chat_widget.tracker_capture_goal_prompt(&objective);
                 self.chat_widget.add_info_message(
                     format!("Goal {}", goal_status_label(response.goal.status)),
                     Some(goal_usage_summary(&response.goal)),

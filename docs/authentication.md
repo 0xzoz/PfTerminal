@@ -1,18 +1,44 @@
-# Authentication And Vault
+# Authentication and Vault
 
-PFTerminal has three credential surfaces:
+## The pain
 
-1. OpenAI Codex account login for the `openai` provider;
+Provider credentials become unsafe when users must paste secrets into chat or
+cannot tell account authentication from stored API keys. Corbanu Terminal keeps
+credential entry masked, storage encrypted, and metadata inspectable without
+revealing raw values.
+
+For the user-facing vault workflow, start with
+[`/vault` and credentials](features/vault.md). This page covers the deeper
+account, storage, migration, and logout behavior.
+
+## Product contract
+
+| Field                      | Value                                                                                                                                                                                        |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status                     | **LIVE**                                                                                                                                                                                     |
+| Exact product-spec heading | **Shipping MVP — LIVE**                                                                                                                                                                      |
+| Vault excerpt              | “Vault and credentials: Encrypted `/vault`, masked entry, metadata-only inspection, and operational credential use without placing raw values in chat.”                                      |
+| Provider excerpt           | “Multi-provider inference: OpenAI, Anthropic/Claude Plan, Kimi, Z.AI, DeepSeek, OpenRouter, Ambient, Meta, Baseten, Vercel, Bedrock, Ollama, LM Studio, Corbanu Plan, and custom providers.” |
+
+## Credential surfaces
+
+Corbanu Terminal has three credential surfaces:
+
+1. account-backed provider login for OpenAI Codex Account and Claude Plan;
 2. provider API keys for Anthropic, Ambient, Kimi Code, Z.AI, DeepSeek,
    OpenRouter, Meta, Baseten, Vercel, and compatible providers; and
 3. the encrypted `/vault` credential store for provider keys and other
    user-managed secrets.
 
-OpenAI Codex account login uses device auth from `/providers` or the inherited
-`pfterminal login` command. Provider keys entered through PFTerminal onboarding
-or `/providers` are written to the vault.
+`/providers` is the common front door. OpenAI uses device authentication;
+Claude Plan uses Claude Code's native subscription login; supported API-key
+entries use masked entry and are written to the vault. See
+[`/providers`, account login, and `/model`](features/model-providers.md) for
+the complete user workflow.
 
-## OpenAI Codex Account
+## Account-backed providers
+
+### OpenAI Codex Account
 
 Use `/providers` and select:
 
@@ -20,39 +46,150 @@ Use `/providers` and select:
 Provider: OpenAI Codex Account
 ```
 
-PFTerminal starts a device-code login, shows the verification URL and one-time
+Corbanu Terminal starts a device-code login, shows the verification URL and one-time
 code, and stores the resulting Codex/OpenAI account auth in the configured
-PFTerminal home.
+Corbanu Terminal home.
 
-Installed `pfterminal` launchers and the source-built `pfterminal` binary
-default `CODEX_HOME` to `$HOME/.pfterminal`. To override that location, set:
+Installed `corbanu` launchers and the source-built `corbanu` binary use the
+same deterministic state resolution as the installer. To override the product
+home explicitly, set:
 
 ```bash
-export CODEX_HOME="${PFTERMINAL_HOME:-$HOME/.pfterminal}"
+export CORBANU_HOME="$HOME/.corbanu"
 ```
 
-That keeps PFTerminal account auth, vault data, sessions, and logs separate
-from a stock Codex install that uses `$HOME/.codex`.
+`PFTERMINAL_HOME` remains supported for existing automation, and an explicit
+`CODEX_HOME` remains authoritative when neither product-specific override is
+set. With no override, Corbanu Terminal prefers an existing `$HOME/.corbanu`,
+reuses a lone `$HOME/.pfterminal` in place, and otherwise creates
+`$HOME/.corbanu`. This keeps account auth, vault data, sessions, and logs
+separate from a stock Codex install using `$HOME/.codex`.
+
+The `corbanu` launcher never replaces a home you set yourself, so
+`CORBANU_HOME=<other home> corbanu exec ...` really runs on that home. A home
+variable exported by your login shell (including `CODEX_HOME`) is therefore used
+as well. If the home variables name different directories, Corbanu Terminal
+prints one warning naming the home it uses; to use another home, set
+`CORBANU_HOME` to it. Inside a Corbanu session every tool shell exports
+`CODEX_HOME` for the session's home, so a worker started there with
+`CORBANU_HOME=<other home>` prints this warning once, confirming the worker's
+home. A worker that sets only `CODEX_HOME` gets the warning too, because the
+inherited `CORBANU_HOME` still wins.
+
+`corbanu-debug` uses its own debug home: `CORBANU_DEBUG_HOME`, then
+`PFTERMINAL_DEBUG_HOME`, and otherwise `$HOME/.corbanu-debug`. A
+`CORBANU_HOME`, `PFTERMINAL_HOME` or `CODEX_HOME` you set yourself is kept,
+just as `corbanu` keeps it, so `CORBANU_HOME=<other home> corbanu-debug ...`
+runs on that home. If a debug home variable and a stable home variable name
+different directories, the debug home wins and `corbanu-debug` prints one
+warning naming it.
+
+### Claude Plan
+
+On first run, choose **Provider: Anthropic Claude Account** to enter this flow
+directly; that option is the default when provider-account onboarding is
+allowed, and Corbanu persists `claude-plan` only after authentication succeeds.
+For an existing installation, use `/providers` and select:
+
+```text
+Provider: Claude Code Plan
+```
+
+Corbanu Terminal presents an explicit choice. The recommended option runs
+`claude setup-token`, then stores the approximately one-year subscription token
+through masked entry in the encrypted vault. The compatibility option selects
+Claude Code's normal rotating platform login. A successful choice persists;
+Corbanu never silently falls back to another source, account, or billing path.
+Claude Code must be installed, and neither option uses an Anthropic API key.
+
+In `/model`, **Claude Opus 5.5 Plan** selects `claude-opus-5-5-plan` on
+`claude-plan`, using the exact upstream `claude-opus-5-5` model. The separate
+**Claude Opus 5.5** entry uses Anthropic API billing. The Plan entry does not
+substitute Opus 5 when access is unavailable; provider access errors remain
+visible. Its orchestration weight inherits the existing Opus Plan weight, not
+a vendor-published subscription price.
+
+OpenAI and Claude account state have separate owners and lifecycles. Signing in
+or out of one does not authenticate or erase the other.
+
+See [Reliable Claude Plan authentication](features/claude-plan-authentication.md)
+for eligibility, platform-store precedence, replacement, and recovery.
+
+## Reauthentication in the PF-58 candidate
+
+Use `/providers`, select the affected provider, and press **r** for its
+source-specific recovery. A definite authentication rejection is shown separately
+from configuration and activation. OpenAI connected-app authentication belongs to
+the OpenAI account even while Claude is the current model. Cancel preserves the
+existing credential and selection; successful managed replacement is usable
+without restarting. Externally owned credentials instead show renewal/restart
+instructions and are not silently replaced by vault credentials.
+
+See [credential recovery](features/model-providers.md#credential-recovery-pf-58-candidate)
+and the [candidate qualification record](../qa/provider-auth/pf-58/README.md).
+
+### OpenAI API keys
+
+The built-in `openai` provider uses the first of these that is present:
+
+1. `CODEX_API_KEY` (`corbanu exec` only);
+2. a sign-in supplied for the session: external ChatGPT tokens or
+   `CODEX_ACCESS_TOKEN`;
+3. a ChatGPT sign-in or API key saved with `corbanu login` or `/providers`;
+4. `OPENAI_API_KEY`.
+
+`OPENAI_API_KEY` works the same in `corbanu exec`, the TUI and the app
+server. Anything saved comes first, so a key exported in your shell never
+replaces a sign-in or changes how usage is billed. After `corbanu logout`,
+though, requests fall back to `OPENAI_API_KEY` if it is set (pay per use);
+unset it to stop that. `corbanu login status` reports saved credentials only.
+
+When a model turn, `/review` or compaction is billed to `OPENAI_API_KEY`,
+Corbanu says so the first time in each thread (a new thread, such as `/new`,
+says it again), and again if the credential switches to it mid-thread: a notice
+in the TUI, a `warning:` line on stderr in `corbanu exec` (a warning item with
+`--json`), and a thread `warning` notification in the app server. A review or
+compaction announces on the thread that started it. A spawned agent, which may
+use a different provider from its parent, announces in its own thread
+(`corbanu exec` prints only its main thread's notices). Realtime voice sessions
+don't show it. `/status` shows the
+variable as the account source. A saved sign-in, `CODEX_API_KEY` or a session
+sign-in shows no notice, and neither do providers that don't use OpenAI
+sign-in.
+
+`OPENAI_API_KEY` is sent only to providers that use OpenAI sign-in, never to
+local or custom endpoints, and it is ignored when
+`forced_login_method = "chatgpt"`. With no credential, a rejected request says
+what to set.
 
 ## Provider Keys
 
 Built-in providers use these key names:
 
-| Provider   | Provider id  | Key name             | Vault label                    |
-| ---------- | ------------ | -------------------- | ------------------------------ |
-| Anthropic  | `anthropic`  | `ANTHROPIC_API_KEY`  | `provider/anthropic_api_key`   |
-| Ambient    | `ambient`    | `AMBIENT_API_KEY`    | `provider/ambient_api_key`     |
-| Kimi Code  | `kimi-code`  | `KIMI_API_KEY`       | `provider/kimi_api_key`        |
-| Z.AI       | `zai`        | `ZAI_API_KEY`        | `provider/zai_api_key`         |
-| DeepSeek   | `deepseek`   | `DEEPSEEK_API_KEY`   | `provider/deepseek_api_key`    |
-| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `provider/openrouter_api_key`  |
-| Meta       | `meta`       | `MODEL_API_KEY`      | `provider/model_api_key`       |
-| Baseten    | `baseten`    | `BASETEN_API_KEY`    | `provider/baseten_api_key`     |
-| Vercel     | `vercel`     | `AI_GATEWAY_API_KEY` | `provider/ai_gateway_api_key`  |
+| Provider   | Provider id  | Key name             | Vault label                   |
+| ---------- | ------------ | -------------------- | ----------------------------- |
+| Anthropic  | `anthropic`  | `ANTHROPIC_API_KEY`  | `provider/anthropic_api_key`  |
+| Ambient    | `ambient`    | `AMBIENT_API_KEY`    | `provider/ambient_api_key`    |
+| Kimi Code  | `kimi-code`  | `KIMI_API_KEY`       | `provider/kimi_api_key`       |
+| Z.AI       | `zai`        | `ZAI_API_KEY`        | `provider/zai_api_key`        |
+| DeepSeek   | `deepseek`   | `DEEPSEEK_API_KEY`   | `provider/deepseek_api_key`   |
+| OpenRouter | `openrouter` | `OPENROUTER_API_KEY` | `provider/openrouter_api_key` |
+| Meta       | `meta`       | `MODEL_API_KEY`      | `provider/model_api_key`      |
+| Baseten    | `baseten`    | `BASETEN_API_KEY`    | `provider/baseten_api_key`    |
+| Vercel     | `vercel`     | `AI_GATEWAY_API_KEY` | `provider/ai_gateway_api_key` |
 
-Provider key resolution checks the encrypted vault first. Legacy
-`provider_auth.json` is still read for migration compatibility, and a successful
-vault write removes the migrated plaintext key when possible.
+Provider key resolution uses one exact provider-key identity across onboarding,
+`/providers`, startup, requests, restarts, and resumed sessions. A present
+environment variable is authoritative for that process, including an invalid
+value that requires recovery; when it is absent, Corbanu checks encrypted
+managed storage and then the legacy migration source. Legacy
+`provider_auth.json` remains readable for migration compatibility, and a
+successful vault write removes the migrated plaintext key when possible.
+
+Newly configured providers become active by default. Deactivation changes only
+eligibility and preserves the credential in its existing owner. Reactivation
+therefore does not copy, reveal, or rewrite the key. Metadata and status can
+cross the UI event boundary; raw credential values cannot.
 
 Environment variables are still supported for temporary shells and automation:
 
@@ -82,7 +219,7 @@ The vault is backed by the Codex managed-secrets store:
 - metadata: labels, types, providers, and timestamps are listable without
   revealing raw secrets.
 
-The vault is global to the PFTerminal home directory, so stored credentials are
+The vault is global to the Corbanu Terminal home directory, so stored credentials are
 available from any working directory that uses the same `CODEX_HOME`.
 
 ## Using `/vault`
@@ -111,21 +248,36 @@ handled through secure UI, not chat output.
 
 ## Login And Logout Commands
 
-PFTerminal still includes inherited Codex login commands:
+Corbanu Terminal includes inherited Codex login commands:
 
 ```bash
-pfterminal login
-pfterminal login --with-api-key
-pfterminal login status
-pfterminal logout
-pfterminal logout --all
+corbanu login
+corbanu login --with-api-key
+corbanu login status
+corbanu logout
+corbanu logout --all
 ```
 
-`pfterminal logout` removes Codex/OpenAI account auth and preserves provider
-API keys in the vault. Use `pfterminal logout --all` only when you also want to
+`corbanu login status` never shows any part of an API key. It says that an
+API key is configured. When the home's vault has its fingerprint salt, it
+adds the key's per-home fingerprint, the same one a named OpenAI account
+holding that key shows. Reading it decrypts the vault, which can read the
+operating system's keychain, as `/providers` does.
+
+`corbanu logout` removes Codex/OpenAI account auth and preserves provider
+API keys in the vault. Use `corbanu logout --all` only when you also want to
 remove provider API keys from the vault and legacy provider auth storage.
+Neither command owns Claude Code's separate subscription account state.
 
 For API-key providers, use the onboarding picker, `/providers`, `/vault`, or
-the provider environment variables above. Claude Plan and PFTerminal Plan are
-account/entitlement routes rather than API-key rows; `/providers` reports their
-actual status separately.
+the provider environment variables above. Claude Plan remains an account route.
+Corbanu API is wallet-linked and stores its generated API credential through the
+same encrypted provider-key boundary; `/providers` reports both routes separately.
+
+Corbanu API also accepts environment credentials in this order: `CORBANU_API_KEY`,
+`CORBANU_PLAN_API_KEY`, then `PFTERMINAL_PLAN_API_KEY`. Unlike the single-name
+provider rule above, blank or non-Unicode Corbanu aliases are skipped so the next
+compatibility alias can be tried. The first non-blank value takes precedence over
+managed storage. Provider status, request authorization and read-only wallet
+account/usage views use the same aliases. Environment keys are never persisted by
+these reads; removing a stored key does not unset a shell environment variable.

@@ -5,19 +5,20 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
-#[cfg(unix)]
-use codex_exec_server::CODEX_ARG0_EXEC_HELPER_ARG1;
-use codex_exec_server::CODEX_FS_HELPER_ARG1;
 use codex_install_context::InstallContext;
 use codex_sandboxing::landlock::CODEX_LINUX_SANDBOX_ARG0;
 use codex_utils_home_dir::find_codex_home;
-#[cfg(target_os = "windows")]
-use codex_windows_sandbox::CODEX_WINDOWS_SANDBOX_ARG1;
+use private_helper::PrivateHelper;
 #[cfg(unix)]
 use std::os::unix::fs::symlink;
 use tempfile::TempDir;
 
+mod private_helper;
+
+pub use private_helper::is_private_helper_argv1;
+
 const APPLY_PATCH_ARG0: &str = "apply_patch";
+const CORBANU_ARG0: &str = "corbanu";
 const MISSPELLED_APPLY_PATCH_ARG0: &str = "applypatch";
 #[cfg(unix)]
 const EXECVE_WRAPPER_ARG0: &str = "codex-execve-wrapper";
@@ -100,53 +101,24 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
     }
 
     let argv1 = args.next().unwrap_or_default();
-    #[cfg(unix)]
-    if argv1 == CODEX_ARG0_EXEC_HELPER_ARG1 {
-        codex_exec_server::run_arg0_exec_helper_main();
-    }
-    if argv1 == CODEX_FS_HELPER_ARG1 {
-        codex_exec_server::run_fs_helper_main();
-    }
-    #[cfg(target_os = "windows")]
-    if argv1 == CODEX_WINDOWS_SANDBOX_ARG1 {
-        codex_windows_sandbox::run_windows_sandbox_wrapper_main();
-    }
-    if argv1 == CODEX_CORE_APPLY_PATCH_ARG1 {
-        let patch_arg = args.next().and_then(|s| s.to_str().map(str::to_owned));
-        let exit_code = match patch_arg {
-            Some(patch_arg) => {
-                let mut stdout = std::io::stdout();
-                let mut stderr = std::io::stderr();
-                let cwd = match codex_utils_absolute_path::AbsolutePathBuf::current_dir() {
-                    Ok(cwd) => cwd,
-                    Err(_) => std::process::exit(1),
-                };
-                let runtime = match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime,
-                    Err(_) => std::process::exit(1),
-                };
-                let cwd = cwd.into();
-                match runtime.block_on(codex_apply_patch::apply_patch(
-                    &patch_arg,
-                    &cwd,
-                    &mut stdout,
-                    &mut stderr,
-                    codex_exec_server::LOCAL_FS.as_ref(),
-                    /*sandbox*/ None,
-                )) {
-                    Ok(_) => 0,
-                    Err(_) => 1,
-                }
-            }
-            None => {
-                eprintln!("Error: {CODEX_CORE_APPLY_PATCH_ARG1} requires a UTF-8 PATCH argument.");
-                1
-            }
-        };
-        std::process::exit(exit_code);
+    match PrivateHelper::from_argv1(&argv1) {
+        #[cfg(any(unix, windows))]
+        Some(PrivateHelper::CredentialBroker) => {
+            // PF-27-S04 isolated credential broker; never returns. PF-27-S05:
+            // stored provider keys are decrypted here, never in Core (on Windows
+            // since PF-27-S09, the vault key read from Credential Manager under
+            // the broker's own token).
+            codex_network_proxy::run_credential_broker_main_with(Some(broker_stored_provider_key));
+        }
+        #[cfg(unix)]
+        Some(PrivateHelper::Arg0Exec) => codex_exec_server::run_arg0_exec_helper_main(),
+        Some(PrivateHelper::FsHelper) => codex_exec_server::run_fs_helper_main(),
+        #[cfg(target_os = "windows")]
+        Some(PrivateHelper::WindowsSandbox) => {
+            codex_windows_sandbox::run_windows_sandbox_wrapper_main();
+        }
+        Some(PrivateHelper::ApplyPatch) => run_apply_patch_helper(args.next()),
+        None => {}
     }
 
     // This modifies the environment, which is not thread-safe, so do this
@@ -168,6 +140,46 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
     path_entry_guard
 }
 
+/// `corbanu --codex-run-as-apply-patch PATCH`: applies PATCH in the current
+/// directory and exits.
+fn run_apply_patch_helper(patch_arg: Option<OsString>) -> ! {
+    let patch_arg = patch_arg.and_then(|s| s.to_str().map(str::to_owned));
+    let exit_code = match patch_arg {
+        Some(patch_arg) => {
+            let mut stdout = std::io::stdout();
+            let mut stderr = std::io::stderr();
+            let cwd = match codex_utils_absolute_path::AbsolutePathBuf::current_dir() {
+                Ok(cwd) => cwd,
+                Err(_) => std::process::exit(1),
+            };
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(_) => std::process::exit(1),
+            };
+            let cwd = cwd.into();
+            match runtime.block_on(codex_apply_patch::apply_patch(
+                &patch_arg,
+                &cwd,
+                &mut stdout,
+                &mut stderr,
+                codex_exec_server::LOCAL_FS.as_ref(),
+                /*sandbox*/ None,
+            )) {
+                Ok(_) => 0,
+                Err(_) => 1,
+            }
+        }
+        None => {
+            eprintln!("Error: {CODEX_CORE_APPLY_PATCH_ARG1} requires a UTF-8 PATCH argument.");
+            1
+        }
+    };
+    std::process::exit(exit_code);
+}
+
 fn prepare_path_env_var_with_aliases(
     install_context: &InstallContext,
     existing_path: Option<OsString>,
@@ -179,11 +191,25 @@ fn prepare_path_env_var_with_aliases(
     match prepare_aliases(path_for_aliases) {
         Ok((path_entry, updated_path_env_var)) => (Some(path_entry), Some(updated_path_env_var)),
         Err(err) => {
-            // It is possible that Codex will proceed successfully even if
-            // creating helper aliases fails, so warn the user and move on.
-            eprintln!("WARNING: proceeding, even though we could not create PATH aliases: {err}");
+            // Optional aliases can be denied in an otherwise usable protected
+            // home (#843): EPERM/EACCES on macOS, EROFS under the Linux
+            // bubblewrap read-only mounts. Keep the error visible without
+            // calling that a startup warning; unexpected failures still get
+            // the old warning.
+            eprintln!("{}", alias_setup_failure_message(&err));
             (None, package_path)
         }
+    }
+}
+
+fn alias_setup_failure_message(error: &std::io::Error) -> String {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    ) {
+        format!("note: temporary PATH aliases could not be created for this process: {error}")
+    } else {
+        format!("WARNING: proceeding, even though we could not create PATH aliases: {error}")
     }
 }
 
@@ -291,6 +317,31 @@ fn build_runtime() -> anyhow::Result<tokio::runtime::Runtime> {
 
 const ILLEGAL_ENV_VAR_PREFIX: &str = "CODEX_";
 
+/// PF-27-S05: the broker's reader for stored provider keys (encrypted vault,
+/// then the legacy file), with the same precedence and deletion rules Core
+/// used before.
+#[cfg(any(unix, windows))]
+fn broker_stored_provider_key(
+    codex_home: &Path,
+    provider_key_id: &str,
+    account: Option<&codex_network_proxy::StoredKeyAccount>,
+) -> std::io::Result<Option<String>> {
+    // PF-84: a named account reads only its own key.
+    if let Some(account) = account {
+        return codex_login::provider_account_api_key(
+            codex_home,
+            &account.provider_id,
+            &account.name,
+        );
+    }
+    codex_login::provider_api_key_from_auth_storage(
+        codex_home,
+        provider_key_id,
+        codex_login::AuthCredentialsStoreMode::default(),
+        codex_login::AuthKeyringBackendKind::default(),
+    )
+}
+
 /// Load env vars from ~/.codex/.env.
 ///
 /// Security: Do not allow `.env` files to create or modify any variables
@@ -319,9 +370,9 @@ where
 
 /// Creates a temporary directory with either:
 ///
-/// - UNIX: `apply_patch` symlink to the current executable
-/// - WINDOWS: `apply_patch.bat` batch script to invoke the current executable
-///   with the hidden `--codex-run-as-apply-patch` flag.
+/// - UNIX: `apply_patch` and `corbanu` symlinks to the current executable
+/// - WINDOWS: batch scripts that invoke the current executable as `apply_patch`
+///   or `corbanu`.
 ///
 /// Returns the temporary directory guard and the PATH value that prepends the
 /// temporary directory so `apply_patch` can be on the PATH without requiring the
@@ -379,6 +430,7 @@ fn prepare_path_entry_for_codex_aliases(
         .open(&lock_path)?;
     lock_file.try_lock()?;
 
+    let exe = std::env::current_exe()?;
     for filename in &[
         APPLY_PATCH_ARG0,
         MISSPELLED_APPLY_PATCH_ARG0,
@@ -387,8 +439,6 @@ fn prepare_path_entry_for_codex_aliases(
         #[cfg(unix)]
         EXECVE_WRAPPER_ARG0,
     ] {
-        let exe = std::env::current_exe()?;
-
         #[cfg(unix)]
         {
             let link = path.join(filename);
@@ -409,6 +459,7 @@ fn prepare_path_entry_for_codex_aliases(
             )?;
         }
     }
+    create_corbanu_alias(path, &exe)?;
 
     let updated_path_env_var = path_env_with_entry(path, existing_path);
 
@@ -440,6 +491,42 @@ fn prepare_path_entry_for_codex_aliases(
         Arg0PathEntryGuard::new(temp_dir, lock_file, paths),
         updated_path_env_var,
     ))
+}
+
+fn create_corbanu_alias(alias_dir: &Path, exe: &Path) -> std::io::Result<()> {
+    let Some(exe) = corbanu_cli_from_runtime_executable(exe) else {
+        return Ok(());
+    };
+
+    #[cfg(unix)]
+    symlink(&exe, alias_dir.join(CORBANU_ARG0))?;
+
+    #[cfg(windows)]
+    std::fs::write(
+        alias_dir.join(format!("{CORBANU_ARG0}.bat")),
+        format!(
+            r#"@echo off
+"{}" %*
+"#,
+            exe.display()
+        ),
+    )?;
+
+    Ok(())
+}
+
+fn corbanu_cli_from_runtime_executable(exe: &Path) -> Option<PathBuf> {
+    let file_stem = exe.file_stem()?.to_str()?;
+    if matches!(file_stem, "corbanu" | "corbanu-debug") {
+        return Some(exe.to_path_buf());
+    }
+
+    let sibling = exe.with_file_name(if cfg!(windows) {
+        "corbanu.exe"
+    } else {
+        "corbanu"
+    });
+    sibling.is_file().then_some(sibling)
 }
 
 fn path_env_with_package_path_dir(
@@ -521,7 +608,10 @@ fn try_lock_dir(dir: &Path) -> std::io::Result<Option<File>> {
 mod tests {
     use super::Arg0DispatchPaths;
     use super::Arg0PathEntryGuard;
+    use super::CORBANU_ARG0;
     use super::LOCK_FILENAME;
+    use super::corbanu_cli_from_runtime_executable;
+    use super::create_corbanu_alias;
     use super::janitor_cleanup;
     use super::linux_sandbox_exe_path;
     #[cfg(unix)]
@@ -555,6 +645,124 @@ mod tests {
             .create(true)
             .truncate(false)
             .open(lock_path)
+    }
+
+    #[test]
+    fn issue843_denied_optional_alias_keeps_an_informational_diagnostic() {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "synthetic read-only profile",
+        );
+        assert_eq!(
+            super::alias_setup_failure_message(&error),
+            "note: temporary PATH aliases could not be created for this process: synthetic read-only profile"
+        );
+    }
+
+    #[test]
+    fn issue843_read_only_filesystem_alias_keeps_an_informational_diagnostic() {
+        let error = std::io::Error::new(
+            std::io::ErrorKind::ReadOnlyFilesystem,
+            "synthetic read-only mount",
+        );
+        assert_eq!(
+            super::alias_setup_failure_message(&error),
+            "note: temporary PATH aliases could not be created for this process: synthetic read-only mount"
+        );
+    }
+
+    /// The Linux bubblewrap sandbox mounts the home read-only, so creating the
+    /// alias directory fails with the real EROFS errno, not a synthetic kind.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn issue843_linux_erofs_errno_is_informational() {
+        const EROFS: i32 = 30;
+        let error = std::io::Error::from_raw_os_error(EROFS);
+        assert_eq!(error.kind(), std::io::ErrorKind::ReadOnlyFilesystem);
+        assert!(
+            super::alias_setup_failure_message(&error).starts_with(
+                "note: temporary PATH aliases could not be created for this process: "
+            ),
+            "{}",
+            super::alias_setup_failure_message(&error)
+        );
+    }
+
+    #[test]
+    fn issue843_unexpected_alias_failures_keep_the_existing_warning() {
+        for kind in [
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::InvalidInput,
+        ] {
+            let error = std::io::Error::new(kind, "synthetic unexpected alias failure");
+            assert_eq!(
+                super::alias_setup_failure_message(&error),
+                "WARNING: proceeding, even though we could not create PATH aliases: synthetic unexpected alias failure"
+            );
+        }
+    }
+
+    #[test]
+    fn corbanu_alias_reexecutes_the_current_binary() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let executable = temp_dir.path().join(if cfg!(windows) {
+            "corbanu-debug.exe"
+        } else {
+            "corbanu-debug"
+        });
+        fs::write(&executable, b"")?;
+
+        create_corbanu_alias(temp_dir.path(), &executable)?;
+
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read_link(temp_dir.path().join(CORBANU_ARG0))?,
+            executable
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            fs::read_to_string(temp_dir.path().join(format!("{CORBANU_ARG0}.bat")))?,
+            format!("@echo off\n\"{}\" %*\n", executable.display())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn non_cli_runtime_uses_an_installed_sibling_corbanu() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let runtime = temp_dir.path().join(if cfg!(windows) {
+            "codex-app-server.exe"
+        } else {
+            "codex-app-server"
+        });
+        let corbanu = temp_dir.path().join(if cfg!(windows) {
+            "corbanu.exe"
+        } else {
+            "corbanu"
+        });
+        fs::write(&runtime, b"")?;
+        fs::write(&corbanu, b"")?;
+
+        assert_eq!(corbanu_cli_from_runtime_executable(&runtime), Some(corbanu));
+        Ok(())
+    }
+
+    #[test]
+    fn non_cli_runtime_without_a_sibling_does_not_create_a_corbanu_alias() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let runtime = temp_dir.path().join(if cfg!(windows) {
+            "codex-app-server.exe"
+        } else {
+            "codex-app-server"
+        });
+        fs::write(&runtime, b"")?;
+
+        create_corbanu_alias(temp_dir.path(), &runtime)?;
+
+        assert!(!temp_dir.path().join(CORBANU_ARG0).exists());
+        assert!(!temp_dir.path().join(format!("{CORBANU_ARG0}.bat")).exists());
+        Ok(())
     }
 
     fn package_path_test_fixture() -> anyhow::Result<PackagePathTestFixture> {

@@ -200,6 +200,26 @@ fn provider_is_inherited_for_models_outside_the_corrected_families() {
     assert!(!glm.changed);
 }
 
+/// `/model claude-opus-5-5` on a subscription chat: kept on `claude-plan`, the
+/// bare slug must run as its plan slug, or the subscription refuses the turn and
+/// the ledger records a metered model for subscription work.
+#[test]
+fn bare_claude_on_the_subscription_runs_as_its_plan_slug() {
+    use codex_model_provider_info::ANTHROPIC_OPUS_5_5_MODEL;
+    use codex_model_provider_info::CLAUDE_OPUS_5_5_PLAN_MODEL;
+
+    let choice = provider_for_model(ANTHROPIC_OPUS_5_5_MODEL, CLAUDE_PLAN_PROVIDER_ID);
+    assert_eq!(choice.provider, CLAUDE_PLAN_PROVIDER_ID);
+    assert!(!choice.changed);
+    assert_eq!(choice.model, CLAUDE_OPUS_5_5_PLAN_MODEL);
+
+    // Off the subscription the slug is untouched.
+    let metered = provider_for_model(ANTHROPIC_OPUS_5_5_MODEL, OPENAI_PROVIDER_ID);
+    assert_eq!(metered.model, ANTHROPIC_OPUS_5_5_MODEL);
+    let ambient = provider_for_model("ambient/large", ZAI);
+    assert_eq!(ambient.model, "ambient/large");
+}
+
 #[test]
 fn same_provider_correction_is_not_reported_as_a_change() {
     let choice = provider_for_model(CLAUDE_PLAN_MODEL, CLAUDE_PLAN_PROVIDER_ID);
@@ -255,15 +275,19 @@ fn missing_openai_auth_is_derived_from_provider_metadata_and_live_auth_state() {
     assert!(provider_is_missing_openai_auth(
         OPENAI_PROVIDER_ID,
         &map,
-        false
+        /*openai_auth_present*/ false
     ));
     assert!(!provider_is_missing_openai_auth(
         OPENAI_PROVIDER_ID,
         &map,
-        true
+        /*openai_auth_present*/ true
     ));
-    assert!(!provider_is_missing_openai_auth(ZAI, &map, false));
-    assert!(!provider_is_missing_openai_auth("unknown", &map, false));
+    assert!(!provider_is_missing_openai_auth(
+        ZAI, &map, /*openai_auth_present*/ false
+    ));
+    assert!(!provider_is_missing_openai_auth(
+        "unknown", &map, /*openai_auth_present*/ false
+    ));
 }
 
 #[test]
@@ -277,7 +301,7 @@ fn unknown_provider_is_not_reported_as_missing_a_credential() {
 /// while `ambient` and `zai` declare an `env_key` and must be caught.
 #[test]
 fn builtin_providers_split_correctly_on_credential_requirements() {
-    let builtin = built_in_model_providers(None);
+    let builtin = built_in_model_providers(/*openai_base_url*/ None);
 
     assert!(
         missing_provider_credential_with(CLAUDE_PLAN_PROVIDER_ID, &builtin, |_| false).is_none(),

@@ -5,8 +5,6 @@ use crate::chatwidget::wallet_menu::WalletPlanStatus;
 use crate::chatwidget::wallet_menu::title_case_plan;
 use crate::chatwidget::wallet_render::WalletTextStyle;
 use crate::chatwidget::wallet_render::push_wallet_text;
-use codex_model_provider_info::PFTERMINAL_PLAN_API_KEY_ENV_VAR;
-use zeroize::Zeroizing;
 
 const WALLET_PLAN_USAGE_VIEW_ID: &str = "wallet-plan-usage";
 
@@ -21,15 +19,13 @@ impl ChatWidget {
     pub(crate) fn open_wallet_plan_usage(&mut self) {
         self.show_selection_view(plan_usage_loading_params());
         let home = self.config.codex_home.as_path().to_path_buf();
-        let key = codex_login::provider_api_key_from_auth_storage(
+        let key = super::wallet_http::corbanu_account_key(
             &home,
-            PFTERMINAL_PLAN_API_KEY_ENV_VAR,
             self.config.cli_auth_credentials_store_mode,
             self.config.auth_keyring_backend_kind(),
         )
         .ok()
-        .flatten()
-        .map(Zeroizing::new);
+        .flatten();
         let tx = self.app_event_tx.clone();
         tokio::spawn(async move {
             let result = load_plan_usage(key).await;
@@ -52,29 +48,24 @@ impl ChatWidget {
 }
 
 async fn load_plan_usage(
-    key: Option<Zeroizing<String>>,
+    key: Option<super::wallet_http::CorbanuAccountKey>,
 ) -> Result<WalletPlanUsageOverview, String> {
     let key = key.ok_or_else(|| {
-        "PfTerminal Plan is disconnected. Reconnect it from /wallet to view usage.".to_string()
+        "Corbanu Plan is disconnected. Reconnect it from /wallet to view usage.".to_string()
     })?;
     let gateway = gateway_client()?;
-    let account_request = gateway
-        .client
-        .get(format!("{}/v1/account", gateway.origin))
-        .bearer_auth(key.as_str())
-        .send();
+    let account_request = super::wallet_http::account_get(&gateway, "/v1/account", &key);
     let catalog_request = gateway
         .client
         .get(format!("{}/v1/plans", gateway.origin))
         .send();
     let (account, catalog) = tokio::join!(account_request, catalog_request);
     let account = account.map_err(|error| format!("plan usage is unavailable: {error}"))?;
-    if !account.status().is_success() {
-        return Err(format!("plan usage returned HTTP {}", account.status()));
+    if !account.status.is_success() {
+        return Err(format!("plan usage returned HTTP {}", account.status));
     }
     let status = account
         .json::<WalletPlanStatus>()
-        .await
         .map_err(|error| format!("plan usage was malformed: {error}"))?;
     let plan_prices_usdc = match catalog {
         Ok(response) if response.status().is_success() => response
@@ -100,7 +91,7 @@ async fn load_plan_usage(
 
 fn plan_usage_loading_params() -> SelectionViewParams {
     let mut header = ColumnRenderable::new();
-    header.push(Line::from("PfTerminal Plan usage".bold()));
+    header.push(Line::from("Corbanu Plan usage".bold()));
     header.push(Line::from("Loading authoritative usage…".dim()));
     SelectionViewParams {
         view_id: Some(WALLET_PLAN_USAGE_VIEW_ID),
@@ -116,7 +107,7 @@ fn plan_usage_loading_params() -> SelectionViewParams {
 
 fn plan_usage_params(result: Result<WalletPlanUsageOverview, String>) -> SelectionViewParams {
     let mut header = ColumnRenderable::new();
-    header.push(Line::from("PfTerminal Plan usage".bold()));
+    header.push(Line::from("Corbanu Plan usage".bold()));
     let items = match result {
         Ok(overview) => {
             push_usage_summary(&mut header, &overview);
@@ -137,7 +128,7 @@ fn plan_usage_params(result: Result<WalletPlanUsageOverview, String>) -> Selecti
             header.push(Line::from(format!("Unavailable: {error}").red()));
             vec![crate::chatwidget::wallet_menu::item(
                 "Retry",
-                "Fetch PfTerminal Plan usage again",
+                "Fetch Corbanu Plan usage again",
                 || AppEvent::OpenWalletPlanUsage,
             )]
         }
@@ -160,7 +151,7 @@ fn push_usage_summary(header: &mut ColumnRenderable, overview: &WalletPlanUsageO
         push_wrapped(
             header,
             &format!("Spend: {price} USDC prepaid for this period · no recurring wallet charge"),
-            false,
+            /*dimmed*/ false,
         );
     }
     push_wrapped(
@@ -169,7 +160,7 @@ fn push_usage_summary(header: &mut ColumnRenderable, overview: &WalletPlanUsageO
             "Active {} to {}",
             status.period.starts_at, status.period.ends_at
         ),
-        true,
+        /*dimmed*/ true,
     );
     push_window(
         header,
@@ -210,13 +201,13 @@ fn push_usage_summary(header: &mut ColumnRenderable, overview: &WalletPlanUsageO
                 next.starts_at,
                 next.ends_at
             ),
-            true,
+            /*dimmed*/ true,
         );
     }
     push_wrapped(
         header,
         &format!("Refreshed {}", overview.refreshed_at),
-        true,
+        /*dimmed*/ true,
     );
 }
 
@@ -250,8 +241,8 @@ fn push_window(
     reset: &str,
 ) {
     let (usage_line, remaining_line) = window_lines(label, used, reserved, limit, remaining, reset);
-    push_wrapped(header, &usage_line, false);
-    push_wrapped(header, &remaining_line, true);
+    push_wrapped(header, &usage_line, /*dimmed*/ false);
+    push_wrapped(header, &remaining_line, /*dimmed*/ true);
 }
 
 fn push_wrapped(header: &mut ColumnRenderable, text: &str, dimmed: bool) {
@@ -386,10 +377,10 @@ mod tests {
 
     #[test]
     fn comma_format_is_exact() {
-        assert_eq!(commas(0), "0");
-        assert_eq!(commas(999), "999");
-        assert_eq!(commas(1_000), "1,000");
-        assert_eq!(commas(12_345_678), "12,345,678");
+        assert_eq!(commas(/*value*/ 0), "0");
+        assert_eq!(commas(/*value*/ 999), "999");
+        assert_eq!(commas(/*value*/ 1_000), "1,000");
+        assert_eq!(commas(/*value*/ 12_345_678), "12,345,678");
     }
 
     #[test]

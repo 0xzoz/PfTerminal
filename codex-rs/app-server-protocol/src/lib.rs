@@ -45,6 +45,7 @@ pub use protocol::v1::InitializeParams;
 pub use protocol::v1::InitializeResponse;
 pub use protocol::v1::InterruptConversationResponse;
 pub use protocol::v1::LoginApiKeyParams;
+pub use protocol::v1::RuledOutDefaultLoginPolicy;
 pub use protocol::v1::SandboxSettings;
 pub use protocol::v1::Tools;
 pub use protocol::v1::UserSavedConfig;
@@ -60,6 +61,22 @@ pub use schema_fixtures::read_schema_fixture_tree;
 pub use schema_fixtures::write_schema_fixtures;
 #[cfg(test)]
 pub use schema_fixtures::write_schema_fixtures_with_options;
+
+/// Tail of the `thread/read` error returned when a thread exists in memory but
+/// has no rollout yet, i.e. before its first user message.
+///
+/// This text is part of the wire contract: clients recover from this state by
+/// matching it, because the error carries no structured `data`. Producer and
+/// consumers share this constant so a reworded message cannot silently turn a
+/// recoverable state into a hard failure. `app-server` formats it into the raw
+/// `JSONRPCErrorError.message`; note that client-side `Display` implementations
+/// prepend the failing method, so consumers must match on a substring rather
+/// than a prefix.
+pub const THREAD_UNMATERIALIZED_INCLUDE_TURNS_MESSAGE: &str =
+    "is not materialized yet; includeTurns is unavailable before first user message";
+/// Stable machine-readable JSON-RPC error-data code for the same condition.
+/// Clients must match this value rather than English error text.
+pub const THREAD_UNMATERIALIZED_ERROR_CODE: &str = "thread_unmaterialized";
 
 #[cfg(not(test))]
 pub(crate) use codex_app_server_protocol_noop_macros::JsonSchema;

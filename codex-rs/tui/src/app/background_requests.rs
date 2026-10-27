@@ -19,8 +19,11 @@ use codex_app_server_protocol::MarketplaceRemoveParams;
 use codex_app_server_protocol::MarketplaceRemoveResponse;
 use codex_app_server_protocol::MarketplaceUpgradeParams;
 use codex_app_server_protocol::MarketplaceUpgradeResponse;
+use std::future::Future;
 
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadRecordSentModelRequestParams;
+use codex_app_server_protocol::ThreadRecordSentModelRequestResponse;
 
 use crate::hooks_rpc::fetch_hooks_list;
 use crate::hooks_rpc::write_hook_trust;
@@ -193,24 +196,52 @@ impl App {
     }
 
     /// Starts the initial skills refresh without delaying the first interactive frame.
-    ///
-    /// Startup only needs skill metadata to populate skill mentions and the skills UI; the prompt can be
-    /// rendered before that metadata arrives. The result is routed through the normal app event queue so
-    /// the same response handler updates the chat widget and emits invalid `SKILL.md` warnings once the
-    /// app-server RPC finishes. User-initiated skills refreshes still use the blocking app command path so
-    /// callers that explicitly asked for fresh skill state do not race ahead of their own refresh.
     pub(super) fn refresh_startup_skills(&mut self, app_server: &AppServerSession) {
-        let request_handle = app_server.request_handle();
-        let app_event_tx = self.app_event_tx.clone();
-        let cwd = self.config.cwd.to_path_buf();
-        tokio::spawn(async move {
-            let result = fetch_skills_list(request_handle, cwd)
-                .await
-                .map_err(|err| format!("{err:#}"));
-            app_event_tx.send(AppEvent::SkillsListLoaded { result });
-        });
+        self.refresh_skills(
+            app_server,
+            vec![self.config.cwd.to_path_buf()],
+            /*force_reload*/ true,
+        );
     }
 
+    /// Refreshes skills without holding the main TUI event loop on app-server work.
+    ///
+    /// A monotonic generation ensures an older completion cannot overwrite a newer refresh.
+    pub(super) fn refresh_skills(
+        &mut self,
+        app_server: &AppServerSession,
+        cwds: Vec<PathBuf>,
+        force_reload: bool,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        let generations = Arc::clone(&self.skills_refresh_generation);
+        let generation = generations.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        spawn_correlated_skills_refresh(generations, generation, app_event_tx, async move {
+            fetch_skills_list(request_handle, SkillsListParams { cwds, force_reload })
+                .await
+                .map_err(|err| format!("{err:#}"))
+        });
+    }
+}
+
+fn spawn_correlated_skills_refresh<F>(
+    generations: Arc<AtomicU64>,
+    generation: u64,
+    app_event_tx: AppEventSender,
+    request: F,
+) where
+    F: Future<Output = Result<SkillsListResponse, String>> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let result = request.await;
+        if generations.load(Ordering::Acquire) == generation {
+            app_event_tx.send(AppEvent::SkillsListLoaded { result });
+        }
+    });
+}
+
+impl App {
     pub(super) fn fetch_connectors_list(
         &mut self,
         app_server: &AppServerSession,
@@ -832,19 +863,13 @@ pub(super) async fn send_add_credits_nudge_email(
 
 pub(super) async fn fetch_skills_list(
     request_handle: AppServerRequestHandle,
-    cwd: PathBuf,
+    params: SkillsListParams,
 ) -> Result<SkillsListResponse> {
     let request_id = RequestId::String(format!("startup-skills-list-{}", Uuid::new_v4()));
     // Use the cloneable request handle so startup can issue this RPC from a background task without
     // extending a borrow of `AppServerSession` across the first frame render.
     request_handle
-        .request_typed(ClientRequest::SkillsList {
-            request_id,
-            params: SkillsListParams {
-                cwds: vec![cwd],
-                force_reload: true,
-            },
-        })
+        .request_typed(ClientRequest::SkillsList { request_id, params })
         .await
         .wrap_err("skills/list failed in TUI")
 }
@@ -1280,6 +1305,54 @@ pub(super) fn mcp_inventory_maps_from_statuses(statuses: Vec<McpServerStatus>) -
     (tools, resources, resource_templates, auth_statuses)
 }
 
+impl App {
+    /// Record a model request a pane bridge sent on the operator's credential.
+    ///
+    /// The bridge posts upstream from inside this process, which does not run
+    /// the model client, so nothing about that request reaches the ledger
+    /// unless it is reported. The report goes to the server, which decides
+    /// which account the route bills and whether to record it at all; this
+    /// side only says what it sent and what the provider answered.
+    ///
+    /// Best effort: a failed report leaves the request unrecorded and never
+    /// disturbs the pane turn that earned it.
+    pub(super) fn record_pane_bridge_model_request(
+        &mut self,
+        app_server: &AppServerSession,
+        provider_id: String,
+        base_url: String,
+        path: String,
+        model: String,
+        usage: Option<serde_json::Value>,
+    ) {
+        let Some(thread_id) = self.primary_thread_id else {
+            return;
+        };
+        let request_handle = app_server.request_handle();
+        tokio::spawn(async move {
+            let result: Result<ThreadRecordSentModelRequestResponse, _> = request_handle
+                .request_typed(ClientRequest::ThreadRecordSentModelRequest {
+                    request_id: RequestId::String(format!(
+                        "pane-bridge-accounting-{}",
+                        uuid::Uuid::new_v4()
+                    )),
+                    params: ThreadRecordSentModelRequestParams {
+                        thread_id: thread_id.to_string(),
+                        provider_id,
+                        base_url,
+                        path,
+                        model,
+                        usage,
+                    },
+                })
+                .await;
+            if let Err(err) = result {
+                tracing::debug!(error = %err, "pane bridge model request was not recorded");
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1291,6 +1364,48 @@ mod tests {
 
     fn test_absolute_path(path: &str) -> AbsolutePathBuf {
         AbsolutePathBuf::try_from(PathBuf::from(path)).expect("absolute test path")
+    }
+
+    #[tokio::test]
+    async fn stalled_skills_refresh_does_not_block_app_events() {
+        let generations = Arc::new(AtomicU64::new(1));
+        let (tx, mut rx) = unbounded_channel();
+        let sender = AppEventSender::new(tx);
+        spawn_correlated_skills_refresh(
+            generations,
+            /*generation*/ 1,
+            sender.clone(),
+            std::future::pending(),
+        );
+
+        sender.send(AppEvent::CodexOp(AppCommand::interrupt()));
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_millis(100), rx.recv()).await,
+            Ok(Some(AppEvent::CodexOp(AppCommand::Interrupt)))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stale_skills_refresh_completion_is_discarded() {
+        let generations = Arc::new(AtomicU64::new(2));
+        let (tx, mut rx) = unbounded_channel();
+        let sender = AppEventSender::new(tx);
+        let empty = || async { Ok(SkillsListResponse { data: Vec::new() }) };
+
+        spawn_correlated_skills_refresh(
+            Arc::clone(&generations),
+            /*generation*/ 1,
+            sender.clone(),
+            empty(),
+        );
+        tokio::task::yield_now().await;
+        assert!(rx.try_recv().is_err());
+
+        spawn_correlated_skills_refresh(generations, /*generation*/ 2, sender, empty());
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), rx.recv()).await,
+            Ok(Some(AppEvent::SkillsListLoaded { result: Ok(_) }))
+        ));
     }
 
     #[test]

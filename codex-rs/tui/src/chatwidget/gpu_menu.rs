@@ -35,7 +35,7 @@ impl ChatWidget {
             items.push(SelectionItem {
                 name: format!("Configure {display_name} API key"),
                 description: Some(
-                    "Masked entry stored in the PFTerminal vault; replacing a key is supported."
+                    "Masked entry stored in the Corbanu Terminal vault; replacing a key is supported."
                         .to_string(),
                 ),
                 actions: vec![Box::new(move |tx| {
@@ -92,7 +92,7 @@ impl ChatWidget {
         self.show_selection_view(SelectionViewParams {
             title: Some("GPU rentals".to_string()),
             subtitle: Some(
-                "Active and potentially billable rentals remain visible across PFTerminal processes."
+                "Active and potentially billable rentals remain visible across Corbanu Terminal processes."
                     .to_string(),
             ),
             items,
@@ -122,7 +122,8 @@ impl ChatWidget {
                     api_key: crate::app_event::ProviderApiKeySecret::new(secret),
                 });
             }),
-        );
+        )
+        .rejecting_shown_errors(self.shown_error_texts());
         self.bottom_pane.show_view(Box::new(view));
     }
 
@@ -246,7 +247,7 @@ impl ChatWidget {
         if offers.is_empty() {
             self.add_info_message(
                 "No compatible verified GPU capacity is currently available.".to_string(),
-                None,
+                /*hint*/ None,
             );
             return;
         }

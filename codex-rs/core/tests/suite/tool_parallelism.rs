@@ -15,12 +15,12 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
-use core_test_support::responses::ev_shell_command_call_with_args;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::skip_if_wine_exec;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::TestCodex;
@@ -153,6 +153,13 @@ async fn read_file_tools_run_in_parallel() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_tools_run_in_parallel() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    // A timing check: under Wine-exec every shell command starts through
+    // Wine, which alone takes most of the bound (1.7 s against 1.6 s on
+    // nightly-ci, #636), so it could not tell parallel from serial there.
+    skip_if_wine_exec!(
+        Ok(()),
+        "shell start-up under Wine exceeds the parallel-timing bound"
+    );
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_model("gpt-5.4");
@@ -188,6 +195,13 @@ async fn shell_tools_run_in_parallel() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mixed_parallel_tools_run_in_parallel() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
+    // A timing check: under Wine-exec every shell command starts through
+    // Wine, which alone takes most of the bound (1.7 s against 1.6 s on
+    // nightly-ci, #636), so it could not tell parallel from serial there.
+    skip_if_wine_exec!(
+        Ok(()),
+        "shell start-up under Wine exceeds the parallel-timing bound"
+    );
 
     let server = start_mock_server().await;
     let test = build_codex_with_test_tool(&server).await?;
@@ -308,24 +322,36 @@ async fn shell_tools_start_before_response_completed_when_stream_delayed() -> an
     let first_response_id = "resp-1";
     let second_response_id = "resp-2";
 
-    let command = format!(
-        "perl -MTime::HiRes -e 'print int(Time::HiRes::time()*1000), \"\\n\"' >> \"{}\"",
-        output_path.display()
-    );
+    let command = |marker: u8| {
+        format!(
+            "perl -MTime::HiRes -e 'print int(Time::HiRes::time()*1000), \"\\n\"' >> \"{}\" # call-{marker}",
+            output_path.display()
+        )
+    };
     // Use a non-login shell to avoid slow, user-specific shell init (e.g. zsh profiles)
     // from making this timing-based test flaky.
-    let args = json!({
-        "command": command,
-        "login": false,
-        "timeout_ms": 5_000,
-    });
-
     let first_chunk = sse(vec![
         ev_response_created(first_response_id),
-        ev_shell_command_call_with_args("call-1", &args),
-        ev_shell_command_call_with_args("call-2", &args),
-        ev_shell_command_call_with_args("call-3", &args),
-        ev_shell_command_call_with_args("call-4", &args),
+        ev_function_call(
+            "call-1",
+            "exec_command",
+            &serde_json::to_string(&json!({"cmd": command(1), "login": false}))?,
+        ),
+        ev_function_call(
+            "call-2",
+            "exec_command",
+            &serde_json::to_string(&json!({"cmd": command(2), "login": false}))?,
+        ),
+        ev_function_call(
+            "call-3",
+            "exec_command",
+            &serde_json::to_string(&json!({"cmd": command(3), "login": false}))?,
+        ),
+        ev_function_call(
+            "call-4",
+            "exec_command",
+            &serde_json::to_string(&json!({"cmd": command(4), "login": false}))?,
+        ),
     ]);
     let second_chunk = sse(vec![ev_completed(first_response_id)]);
     let follow_up = sse(vec![

@@ -82,6 +82,11 @@ pub struct ClaudePaneWorkflowEntry {
 pub async fn run_claude_pane_smoke(
     options: ClaudePaneSmokeOptions,
 ) -> Result<ClaudePaneSmokeReport> {
+    if let Some(reason) =
+        crate::security::level::external_agent_block_reason_for_home(&options.codex_home)
+    {
+        return Err(anyhow::anyhow!(reason));
+    }
     let uses_default_baseline = options.providers.is_empty();
     let provider_names = if uses_default_baseline {
         vec![
@@ -153,6 +158,11 @@ pub async fn run_claude_pane_smoke(
 pub async fn run_claude_pane_workflow_suite(
     options: ClaudePaneWorkflowOptions,
 ) -> Result<ClaudePaneWorkflowReport> {
+    if let Some(reason) =
+        crate::security::level::external_agent_block_reason_for_home(&options.codex_home)
+    {
+        return Err(anyhow::anyhow!(reason));
+    }
     let provider_names = if options.providers.is_empty() {
         vec!["ambient".to_string()]
     } else {
@@ -234,11 +244,11 @@ pub(crate) async fn run_single_workflow(
     let Some(profile) = smoke_provider_profile(&provider_name) else {
         return workflow_entry_error(
             provider_name,
-            None,
+            /*profile*/ None,
             workflow_name,
-            None,
-            None,
-            None,
+            /*artifact_path*/ None,
+            /*audit_path*/ None,
+            /*fixture_path*/ None,
             "unknown workflow provider".to_string(),
         );
     };
@@ -259,9 +269,9 @@ pub(crate) async fn run_single_workflow(
             provider_name,
             profile_title,
             workflow_name,
-            None,
-            None,
-            None,
+            /*artifact_path*/ None,
+            /*audit_path*/ None,
+            /*fixture_path*/ None,
             "unknown workflow".to_string(),
         ),
     }

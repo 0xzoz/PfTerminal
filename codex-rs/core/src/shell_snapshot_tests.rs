@@ -83,7 +83,13 @@ fn assert_posix_snapshot_sections(snapshot: &str) {
 async fn get_snapshot(shell_type: ShellType) -> Result<String> {
     let dir = tempdir()?;
     let path = dir.path().join("snapshot.sh");
-    write_shell_snapshot(shell_type, &path.abs(), &dir.path().abs()).await?;
+    write_shell_snapshot(
+        shell_type,
+        &path.abs(),
+        &dir.path().abs(),
+        /*removed_env_vars*/ &[],
+    )
+    .await?;
     let content = fs::read_to_string(&path).await?;
     Ok(content)
 }
@@ -128,7 +134,7 @@ fn snapshot_file_name_parser_supports_legacy_and_suffixed_names() {
 fn bash_snapshot_filters_secret_and_invalid_exports() -> Result<()> {
     let output = Command::new("/bin/bash")
         .arg("-c")
-        .arg(bash_snapshot_script())
+        .arg(bash_snapshot_script(/*removed_env_vars*/ &[]))
         .env("BASH_ENV", "/dev/null")
         .env("VALID_NAME", "ok")
         .env("KIMI_API_KEY", "must-not-be-persisted")
@@ -160,11 +166,90 @@ fn bash_snapshot_filters_secret_and_invalid_exports() -> Result<()> {
 
 #[cfg(unix)]
 #[test]
+fn bash_snapshot_filters_secrets_when_bashrc_shadows_filter_helpers() -> Result<()> {
+    let home = tempdir()?;
+    std::fs::write(
+        home.path().join(".bashrc"),
+        "tr() { printf 'BROKEN'; }\nshopt() { return 0; }\n",
+    )?;
+    let output = Command::new("/bin/bash")
+        .arg("-c")
+        .arg(bash_snapshot_script(/*removed_env_vars*/ &[]))
+        .env_remove("BASH_ENV")
+        .env("HOME", home.path())
+        .env("PATH", "/usr/bin:/bin")
+        .env("lowercase_api_key", "must-not-be-persisted")
+        .output()?;
+
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("lowercase_api_key"));
+    assert!(!stdout.contains("must-not-be-persisted"));
+
+    Ok(())
+}
+
+/// Issue #310: a provider credential exported by a startup file under a name
+/// the secret patterns miss must not reach the snapshot.
+#[cfg(unix)]
+#[test]
+fn snapshots_drop_provider_credentials_exported_by_startup_files() -> Result<()> {
+    let removed = vec!["CORP_LLM_CRED".to_string(), "bad name|*".to_string()];
+    let home = tempdir()?;
+    let rc = "export CORP_LLM_CRED=must-not-be-persisted\nexport corp_llm_cred=must-not-be-persisted\nexport VALID_NAME=ok\n";
+    std::fs::write(home.path().join(".bashrc"), rc)?;
+    std::fs::write(home.path().join(".zshrc"), rc)?;
+
+    let mut outputs = vec![
+        Command::new("/bin/bash")
+            .arg("-c")
+            .arg(bash_snapshot_script(&removed))
+            .env_remove("BASH_ENV")
+            .env("HOME", home.path())
+            .env("PATH", "/usr/bin:/bin")
+            .output()?,
+        // Non-interactive dash ignores `$ENV`, so pass the exports directly.
+        Command::new("/bin/sh")
+            .arg("-c")
+            .arg(sh_snapshot_script(&removed))
+            .env_remove("ENV")
+            .env("PATH", "/usr/bin:/bin")
+            .env("CORP_LLM_CRED", "must-not-be-persisted")
+            .env("corp_llm_cred", "must-not-be-persisted")
+            .env("VALID_NAME", "ok")
+            .output()?,
+    ];
+    if std::path::Path::new("/bin/zsh").exists() {
+        outputs.push(
+            Command::new("/bin/zsh")
+                .arg("-f")
+                .arg("-c")
+                .arg(zsh_snapshot_script(&removed))
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("ZDOTDIR", home.path())
+                .output()?,
+        );
+    }
+
+    for output in outputs {
+        assert!(output.status.success(), "{output:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("VALID_NAME"), "{stdout}");
+        assert!(!stdout.contains("must-not-be-persisted"), "{stdout}");
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
 fn bash_snapshot_preserves_multiline_exports() -> Result<()> {
     let multiline_cert = "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----";
     let output = Command::new("/bin/bash")
         .arg("-c")
-        .arg(bash_snapshot_script())
+        .arg(bash_snapshot_script(/*removed_env_vars*/ &[]))
         .env("BASH_ENV", "/dev/null")
         .env("MULTILINE_CERT", multiline_cert)
         .output()?;
@@ -220,7 +305,7 @@ fn zsh_snapshot_restores_tied_path() -> Result<()> {
     let snapshot = Command::new("/bin/zsh")
         .arg("-f")
         .arg("-c")
-        .arg(zsh_snapshot_script())
+        .arg(zsh_snapshot_script(/*removed_env_vars*/ &[]))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("ZDOTDIR", dir.path())
@@ -257,7 +342,7 @@ fn zsh_snapshot_restores_tied_path() -> Result<()> {
     let readonly_snapshot = Command::new("/bin/zsh")
         .arg("-f")
         .arg("-c")
-        .arg(zsh_snapshot_script())
+        .arg(zsh_snapshot_script(/*removed_env_vars*/ &[]))
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("ZDOTDIR", dir.path())
@@ -306,6 +391,7 @@ async fn try_create_creates_and_deletes_snapshot_file() -> Result<()> {
         &dir.path().abs(),
         &shell,
         /*state_db*/ None,
+        /*removed_env_vars*/ &[],
     )
     .await
     .expect("snapshot should be created");
@@ -335,6 +421,7 @@ async fn try_create_uses_distinct_generation_paths() -> Result<()> {
         &dir.path().abs(),
         &shell,
         /*state_db*/ None,
+        /*removed_env_vars*/ &[],
     )
     .await
     .expect("initial snapshot should be created");
@@ -344,6 +431,7 @@ async fn try_create_uses_distinct_generation_paths() -> Result<()> {
         &dir.path().abs(),
         &shell,
         /*state_db*/ None,
+        /*removed_env_vars*/ &[],
     )
     .await
     .expect("refreshed snapshot should be created");
@@ -387,7 +475,7 @@ async fn snapshot_shell_does_not_inherit_stdin() -> Result<()> {
     let home_display = home.display();
     let script = format!(
         "HOME=\"{home_display}\"; export HOME; {}",
-        bash_snapshot_script()
+        bash_snapshot_script(/*removed_env_vars*/ &[])
     );
     let output = run_script_with_timeout(
         &shell,
@@ -395,6 +483,7 @@ async fn snapshot_shell_does_not_inherit_stdin() -> Result<()> {
         Duration::from_secs(2),
         /*use_login_shell*/ true,
         &home,
+        /*removed_env_vars*/ &[],
     )
     .await
     .context("run snapshot command")?;
@@ -438,6 +527,7 @@ async fn timed_out_snapshot_shell_is_terminated() -> Result<()> {
         Duration::from_secs(1),
         /*use_login_shell*/ true,
         &dir.path().abs(),
+        /*removed_env_vars*/ &[],
     )
     .await
     .expect_err("snapshot shell should time out");

@@ -184,6 +184,8 @@ use tracing::debug;
 use tracing::warn;
 
 const DEFAULT_MODEL_DISPLAY_NAME: &str = "loading";
+/// #855: how many recent error messages a masked credential entry checks.
+const SHOWN_ERROR_TEXTS_KEPT: usize = 16;
 const MULTI_AGENT_ENABLE_TITLE: &str = "Enable subagents?";
 const MULTI_AGENT_ENABLE_YES: &str = "Yes, enable";
 const MULTI_AGENT_ENABLE_NO: &str = "Not now";
@@ -378,6 +380,10 @@ use self::plugins::PluginsCacheState;
 mod plan_implementation;
 use self::plan_implementation::PLAN_IMPLEMENTATION_TITLE;
 mod model_popups;
+mod model_route_rows;
+mod provider_health;
+pub(crate) mod provider_model_policy;
+mod provider_recovery;
 pub(crate) use model_popups::ModelSelectionPurpose;
 mod notifications;
 use self::notifications::Notification;
@@ -419,6 +425,7 @@ mod streaming;
 use self::status_surfaces::CachedProjectRootName;
 mod tokens;
 pub(crate) use self::tokens::TokenActivityView;
+pub(crate) use tokens::cost_command;
 mod tool_lifecycle;
 mod tool_requests;
 mod transcript;
@@ -428,15 +435,26 @@ use self::tps::TpsEstimator;
 mod turn_lifecycle;
 mod turn_runtime;
 use self::turn_lifecycle::TurnLifecycleState;
+pub(crate) mod agent_control;
+pub(crate) mod campaign_tracker;
+mod campaign_tracker_recovery;
+mod campaign_tracker_workflows;
+#[allow(dead_code)] // Hidden typed host adapter; PF-53/PF-54 own renderer adoption.
+pub(crate) mod claude_auth_adapter;
+pub(crate) mod claude_auth_presentation;
 pub(crate) mod claude_code_login;
+pub(crate) mod named_account_login;
 mod pfterminal_plan_status;
 pub(crate) mod provider_credentials;
+pub(crate) mod provider_manager;
+pub(crate) use provider_manager::provider_manager_rows;
 mod tasknode_menu;
 pub(crate) mod telegram_setup;
 mod usage;
 mod user_messages;
 mod vault_menu;
 mod wallet_account_actions;
+pub(crate) mod wallet_api;
 mod wallet_http;
 pub(crate) mod wallet_menu;
 pub(crate) mod wallet_receipt;
@@ -449,6 +467,9 @@ use self::user_messages::QueueDrain;
 use self::user_messages::QueuedUserMessage;
 use self::user_messages::ShellEscapePolicy;
 use self::user_messages::ThreadComposerState;
+/// #507/#554: the line under the kill switch's message for a turn it
+/// stopped, in Codex and Claude panes alike.
+pub(crate) const KILL_SWITCH_TURN_STOPPED: &str = "Turn stopped by the security kill switch.";
 pub(crate) use self::user_messages::ThreadInputState;
 pub(crate) use self::user_messages::ThreadInputStateRestoreMode;
 pub(crate) use self::user_messages::UserMessage;
@@ -499,8 +520,6 @@ const AUTO_REVIEW_DESCRIPTION: &str = "Only ask for actions detected as potentia
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_STATUS_LINE_ITEMS: [&str; 4] =
     ["model-with-reasoning", "current-dir", "brand", "tps"];
-const MAX_AGENT_COPY_HISTORY: usize = 32;
-
 /// Common initialization parameters shared by all `ChatWidget` constructors.
 pub(crate) struct ChatWidgetInit {
     pub(crate) config: Config,
@@ -577,10 +596,13 @@ pub(crate) struct ChatWidget {
     runtime_model_provider_base_url: Option<String>,
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
     token_info: Option<TokenUsageInfo>,
+    // PF-84: per-account usage of every thread in this session, for `/status`.
+    pub(crate) session_account_usage: crate::status::SessionAccountUsage,
     tps_estimator: TpsEstimator,
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
     refreshing_status_outputs: Vec<(u64, StatusHistoryHandle)>,
     next_status_refresh_request_id: u64,
+    accounting_inspector: Option<tokens::Inspector>,
     refreshing_token_activity_output: Option<tokens::PendingTokenActivityOutput>,
     completed_token_activity_output: Option<history_cell::CompositeHistoryCell>,
     next_token_activity_request_id: u64,
@@ -605,13 +627,29 @@ pub(crate) struct ChatWidget {
     // Stream lifecycle controller for proposed plan output.
     plan_stream_controller: Option<PlanStreamController>,
     pending_stream_consolidations: usize,
+    campaign_tracker_turn: Option<String>,
+    campaign_tracker_indicator: Option<String>,
+    campaign_tracker_automated_input: bool,
+    campaign_tracker_syncing: bool,
+    campaign_tracker_vault: std::cell::OnceCell<codex_vault::Vault>,
+    campaign_tracker_stores: std::cell::RefCell<
+        std::collections::HashMap<String, codex_tasknode_session::tracker::TrackerStore>,
+    >,
     tasknode_menu_counts: Option<tasknode_menu::TaskNodeMenuCountsCache>,
     tasknode_menu_poll_generation: u64,
+    tasknode_response_generations: HashMap<&'static str, u64>,
     tasknode_active_chat_stream_id: Option<String>,
     /// Holds the platform clipboard lease so copied text remains available while supported.
     clipboard_lease: Option<crate::clipboard_copy::ClipboardLease>,
+    /// #855: the latest error messages shown in the transcript, so a masked
+    /// credential entry can refuse one pasted in place of the credential.
+    shown_error_texts: std::collections::VecDeque<String>,
     wallet_capability: Option<zeroize::Zeroizing<String>>,
+    wallet_capability_policy: Option<codex_wallet_daemon::UnlockPolicy>,
     wallet_status_generation: u64,
+    next_wallet_plan_persistence_attempt: u64,
+    current_wallet_plan_persistence_attempt:
+        Option<crate::app_event::WalletPlanPersistenceAttemptId>,
     telegram_discovery_generation: u64,
     wallet_payment_config: Option<crate::chatwidget::wallet_menu::WalletPaymentConfig>,
     wallet_balances: Option<codex_wallet::WalletBalances>,
@@ -655,6 +693,7 @@ pub(crate) struct ChatWidget {
     plugin_install_apps_needing_auth: Vec<AppSummary>,
     plugin_install_auth_flow: Option<PluginInstallAuthFlowState>,
     pending_provider_codex_login_id: Option<String>,
+    pending_provider_api_key_save_id: Option<String>,
     plugins_active_tab_id: Option<String>,
     newly_installed_marketplace_tab_id: Option<String>,
     // Queue of interruptive UI events deferred during an active write cycle
@@ -731,6 +770,8 @@ pub(crate) struct ChatWidget {
     feedback: codex_feedback::CodexFeedback,
     // Current session rollout path (if known)
     current_rollout_path: Option<PathBuf>,
+    // PF-84: the account the app server reported for this thread (if any).
+    thread_provider_account: Option<String>,
     // Current working directory (if known)
     current_cwd: Option<PathBuf>,
     // App-server-backed command runner for status-line workspace metadata lookups.
@@ -1038,7 +1079,7 @@ impl ChatWidget {
             self.app_event_tx.clone(),
             self.bottom_pane.list_keymap(),
         );
-        self.bottom_pane.show_view(Box::new(view));
+        self.bottom_pane.show_app_link_view(view);
         self.request_redraw();
     }
 
@@ -1380,6 +1421,7 @@ impl ChatWidget {
     }
 
     fn request_redraw(&mut self) {
+        self.invalidate_accounting_inspector_for_thread();
         self.frame_requester.schedule_frame();
     }
 
@@ -1539,8 +1581,22 @@ impl ChatWidget {
     }
 
     pub(crate) fn add_error_message(&mut self, message: String) {
+        // A session that fails to start must not swallow its config warnings.
+        self.show_deferred_config_warnings();
+        if self.shown_error_texts.len() == SHOWN_ERROR_TEXTS_KEPT {
+            self.shown_error_texts.pop_front();
+        }
+        self.shown_error_texts.push_back(message.clone());
         self.add_to_history(history_cell::new_error_event(message));
         self.request_redraw();
+    }
+
+    /// #855: error messages recently shown in the transcript (see
+    /// [`VaultSecretEntryView::rejecting_shown_errors`]).
+    ///
+    /// [`VaultSecretEntryView::rejecting_shown_errors`]: crate::bottom_pane::vault_secret_entry::VaultSecretEntryView::rejecting_shown_errors
+    pub(crate) fn shown_error_texts(&self) -> Vec<String> {
+        self.shown_error_texts.iter().cloned().collect()
     }
 
     fn add_app_server_stub_message(&mut self, feature: &str) {
@@ -1674,6 +1730,7 @@ impl ChatWidget {
     pub(crate) fn on_terminal_resize(&mut self, width: u16) {
         let had_rendered_width = self.last_rendered_width.get().is_some();
         self.last_rendered_width.set(Some(width as usize));
+        self.reflow_accounting_inspector(width);
         let stream_width = self.current_stream_width(/*reserved_cols*/ 2);
         let plan_stream_width = self.current_stream_width(/*reserved_cols*/ 4);
         if let Some(controller) = self.stream_controller.as_mut() {
@@ -1790,6 +1847,16 @@ impl ChatWidget {
         T: Into<AppCommand>,
     {
         let op: AppCommand = op.into();
+        if matches!(
+            &op,
+            AppCommand::UserTurn { .. } | AppCommand::Review { .. } | AppCommand::Compact
+        ) && self
+            .model_catalog
+            .current_requires_recovery(&self.config.model_provider_id, self.current_model())
+        {
+            self.add_error_message(provider_model_policy::current_provider_blocked_message());
+            return false;
+        }
         if self.blocks_direct_input
             && matches!(
                 &op,

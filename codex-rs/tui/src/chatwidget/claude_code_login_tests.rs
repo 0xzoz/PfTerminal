@@ -3,10 +3,230 @@ use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-
 use super::*;
+
+/// Upper bound for fixture subprocesses that are expected to answer. These tests assert the
+/// answer, not its latency, so a loaded CI runner must not turn them into timeout checks.
+const FIXTURE_SUCCESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Writes an executable fixture script from a child process.
+///
+/// Writing it with `std::fs::write` leaves a write descriptor open in this process; a sibling
+/// test that forks in that window keeps a copy until it execs, and executing the fixture then
+/// fails with ETXTBSY ("Text file busy"). Only the short-lived child ever opens this file.
+#[cfg(unix)]
+fn write_fixture_executable(path: &Path, contents: impl AsRef<[u8]>) {
+    use std::io::Write as _;
+
+    let mut writer = std::process::Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 700 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn fixture writer");
+    writer
+        .stdin
+        .take()
+        .expect("fixture writer stdin")
+        .write_all(contents.as_ref())
+        .expect("write fixture contents");
+    let status = writer.wait().expect("wait for fixture writer");
+    assert!(status.success(), "fixture writer failed: {status}");
+}
+
+#[test]
+fn managed_token_normalization_removes_only_pasted_line_breaks() {
+    assert_eq!(
+        remove_line_breaks("fixture-token\r\ncontinued\nvalue".to_string()),
+        "fixture-tokencontinuedvalue"
+    );
+    assert_eq!(
+        remove_line_breaks("fixture token\tvalue".to_string()),
+        "fixture token\tvalue"
+    );
+}
+
+#[tokio::test]
+async fn login_output_reader_bounds_unterminated_lines_before_allocation() {
+    let oversized = vec![b'x'; MAX_LOGIN_LINE_BYTES * 4];
+    let mut reader = BufReader::new(oversized.as_slice());
+
+    let line = read_bounded_output_line(&mut reader)
+        .await
+        .expect("read bounded output")
+        .expect("output line");
+
+    assert_eq!(line.len(), MAX_LOGIN_LINE_BYTES + 1);
+}
+
+#[tokio::test]
+async fn login_output_reader_preserves_the_oversize_signal_across_a_utf8_boundary() {
+    let oversized = "€".repeat(MAX_LOGIN_LINE_BYTES);
+    let mut reader = BufReader::new(oversized.as_bytes());
+
+    let line = read_bounded_output_line(&mut reader)
+        .await
+        .expect("read bounded UTF-8 output")
+        .expect("output line");
+
+    assert!(line.len() > MAX_LOGIN_LINE_BYTES);
+    assert!(line.contains(char::REPLACEMENT_CHARACTER));
+}
+
+fn render_selection(params: SelectionViewParams, width: u16) -> String {
+    let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let app_event_tx = AppEventSender::new(event_tx);
+    let view = crate::bottom_pane::ListSelectionView::new(
+        params,
+        app_event_tx,
+        crate::keymap::RuntimeKeymap::defaults().list,
+    );
+    let area = Rect::new(0, 0, width, view.desired_height(width));
+    let mut buffer = Buffer::empty(area);
+    view.render(area, &mut buffer);
+    (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn auth_method_choice_is_recommended_by_default_and_dispatches_exact_actions() {
+    let params = auth_method_choice_params();
+    assert_eq!(params.initial_selected_idx, Some(0));
+    assert!(params.items[0].name.contains("Recommended"));
+    assert!(!params.allow_number_shortcuts);
+
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let app_event_tx = AppEventSender::new(event_tx);
+    (params.items[0].actions[0])(&app_event_tx);
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(AppEvent::RunClaudeSetupToken)
+    ));
+    (params.items[1].actions[0])(&app_event_tx);
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(AppEvent::UseClaudeCodePlanLogin)
+    ));
+}
+
+#[test]
+fn account_authority_accepts_optional_status_metadata_but_requires_email() {
+    let status = ClaudeCodePlanStatus::SignedIn {
+        email: Some("fixture@example.invalid".to_string()),
+        organization_id: None,
+        subscription: None,
+    };
+    assert!(status_authority_id(&status).is_ok());
+    let missing_email = ClaudeCodePlanStatus::SignedIn {
+        email: None,
+        organization_id: Some("org-fixture".to_string()),
+        subscription: Some("max".to_string()),
+    };
+    assert!(status_authority_id(&missing_email).is_err());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn relative_config_dir_matches_runtime_keychain_profile_identity() {
+    let relative = std::path::PathBuf::from("target/claude-relative-profile-fixture");
+    let absolute = std::path::absolute(&relative).expect("absolute fixture profile");
+    let home = std::path::Path::new("/unused-home");
+
+    assert_eq!(
+        macos_platform_login_source_id(home, Some(relative), /*custom_oauth*/ false)
+            .expect("relative source id"),
+        macos_platform_login_source_id(home, Some(absolute), /*custom_oauth*/ false)
+            .expect("absolute source id"),
+    );
+}
+
+#[test]
+fn selected_environment_token_status_requires_the_bound_token() {
+    let selection = ClaudeAuthSelection::new_environment_token("selected-environment-token")
+        .expect("selection");
+
+    assert!(environment_token_matches_selection_value(
+        &selection,
+        Some(" selected-environment-token "),
+    ));
+    assert!(!environment_token_matches_selection_value(
+        &selection,
+        Some("replaced-environment-token"),
+    ));
+    assert!(!environment_token_matches_selection_value(
+        &selection,
+        Some("   ")
+    ));
+
+    let legacy = ClaudeAuthSelection::new_at(
+        ClaudeAuthSource::EnvironmentToken,
+        ENVIRONMENT_CLAUDE_AUTH_SOURCE_ID,
+        /*selected_at*/ 10,
+    )
+    .expect("legacy selection");
+    assert!(!environment_token_matches_selection_value(
+        &legacy,
+        Some("selected-environment-token"),
+    ));
+}
+
+#[test]
+fn claude_auth_method_choice_snapshot() {
+    insta::assert_snapshot!(
+        "claude_auth_method_choice",
+        render_selection(auth_method_choice_params(), /*width*/ 76)
+    );
+}
+
+#[test]
+fn claude_auth_recovery_snapshot() {
+    insta::assert_snapshot!(
+        "claude_auth_recovery",
+        render_selection(
+            auth_recovery_params(
+                "Selected token missing. Restore it or explicitly choose another method."
+                    .to_string(),
+            ),
+            /*width*/ 76,
+        )
+    );
+}
+
+#[test]
+fn auth_recovery_exposes_explicit_legacy_environment_selection() {
+    let params = auth_recovery_params("recover".to_string());
+    let item = params
+        .items
+        .iter()
+        .find(|item| item.name.contains("CLAUDE_CODE_OAUTH_TOKEN"))
+        .expect("legacy environment recovery item");
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let app_event_tx = AppEventSender::new(event_tx);
+
+    (item.actions[0])(&app_event_tx);
+
+    assert!(matches!(
+        event_rx.try_recv(),
+        Ok(AppEvent::UseLegacyClaudeEnvironmentToken)
+    ));
+}
+
+#[test]
+fn managed_token_app_event_debug_is_redacted() {
+    let canary = "claude-token-canary-never-render";
+    let event = AppEvent::SaveClaudeManagedSubscriptionToken {
+        token: ClaudeSubscriptionTokenSecret::new(canary.to_string()),
+    };
+    assert!(!format!("{event:?}").contains(canary));
+}
 
 #[test]
 fn extracts_url_from_claude_osc8_link() {
@@ -67,7 +287,7 @@ fn claude_login_ready_view_snapshot() {
         "https://claude.com/oauth/authorize?code=true&state=example".to_string(),
         input_tx,
     );
-    let area = Rect::new(0, 0, 60, view.desired_height(60));
+    let area = Rect::new(0, 0, 60, view.desired_height(/*width*/ 60));
     let mut buffer = Buffer::empty(area);
     view.render(area, &mut buffer);
     let rendered = (0..area.height)
@@ -89,9 +309,15 @@ fn claude_login_ready_view_snapshot() {
 async fn claude_cli_owns_token_exchange_and_status_verification() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let fake_claude = temp_dir.path().join("claude");
-    std::fs::write(
+    let source_id = current_platform_login_source_id().expect("source id");
+    write_fixture_executable(
         &fake_claude,
-        r#"#!/bin/sh
+        format!(
+            r#"#!/bin/sh
+if [ "$1" = "internal-claude-login-health" ]; then
+  printf '%s\n' '{source_id}'
+  exit 0
+fi
 if [ "$1 $2" = "auth login" ]; then
   printf 'If the browser did not open: https://claude.example/oauth?state=test\n'
   IFS= read -r code
@@ -99,22 +325,22 @@ if [ "$1 $2" = "auth login" ]; then
   exit
 fi
 if [ "$1 $2 $3" = "auth status --json" ]; then
-  printf '{"loggedIn":true,"authMethod":"claude.ai"}\n'
+  printf '{{"loggedIn":true,"authMethod":"claude.ai","email":"fixture@example.invalid","orgId":"org-fixture","subscriptionType":"max"}}\n'
   exit 0
 fi
 exit 2
-"#,
-    )
-    .expect("write fake claude");
-    let mut permissions = std::fs::metadata(&fake_claude)
-        .expect("fake claude metadata")
-        .permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&fake_claude, permissions).expect("make fake claude executable");
+"#
+        ),
+    );
     let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
     let app_event_tx = AppEventSender::new(event_tx);
 
-    let _input_tx = start_with_executable(app_event_tx, &fake_claude);
+    let _input_tx = start_with_executable(
+        app_event_tx,
+        &fake_claude,
+        Some(&fake_claude),
+        temp_dir.path().to_path_buf(),
+    );
     let input_tx = match event_rx.recv().await {
         Some(AppEvent::ClaudeCodePlanLoginReady {
             verification_url,
@@ -127,16 +353,336 @@ exit 2
     };
     input_tx
         .send(ClaudeCodeLoginInput::AuthorizationCode(
-            "one-time-code".to_string(),
+            zeroize::Zeroizing::new("one-time-code".to_string()),
         ))
         .expect("send authorization code");
 
+    let finished = event_rx.recv().await;
+    assert!(
+        matches!(
+            finished,
+            Some(AppEvent::ClaudeCodePlanLoginFinished {
+                result: Some(Ok(ref message))
+            }) if message.contains("login selected")
+        ),
+        "unexpected login result: {finished:?}"
+    );
+    let selection = Vault::new(temp_dir.path().to_path_buf())
+        .load_claude_auth_selection()
+        .expect("load selection")
+        .expect("selection persisted");
+    assert_eq!(selection.source, ClaudeAuthSource::ClaudeCodeLogin);
+    assert!(selection.authority_id.is_some());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancel_after_code_submission_kills_login_without_persisting_selection() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let fake_claude = temp_dir.path().join("claude");
+    let code_received = temp_dir.path().join("code-received");
+    write_fixture_executable(
+        &fake_claude,
+        format!(
+            r#"#!/bin/sh
+if [ "$1 $2" = "auth login" ]; then
+  printf 'If the browser did not open: https://claude.example/oauth?state=test\n'
+  IFS= read -r code
+  [ "$code" = "one-time-code" ] || exit 3
+  touch '{}'
+  sleep 30
+  exit 0
+fi
+exit 2
+"#,
+            code_received.display()
+        ),
+    );
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let app_event_tx = AppEventSender::new(event_tx);
+
+    let _input_tx = start_with_executable(
+        app_event_tx,
+        &fake_claude,
+        Some(&fake_claude),
+        temp_dir.path().to_path_buf(),
+    );
+    let input_tx = match event_rx.recv().await {
+        Some(AppEvent::ClaudeCodePlanLoginReady { input_tx, .. }) => input_tx,
+        other => panic!("expected ready event, got {other:?}"),
+    };
+    input_tx
+        .send(ClaudeCodeLoginInput::AuthorizationCode(
+            zeroize::Zeroizing::new("one-time-code".to_string()),
+        ))
+        .expect("send authorization code");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !code_received.exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("fake Claude received code");
+    input_tx
+        .send(ClaudeCodeLoginInput::Cancel)
+        .expect("cancel login");
+
+    let finished = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("login cancellation completed");
     assert!(matches!(
-        event_rx.recv().await,
-        Some(AppEvent::ClaudeCodePlanLoginFinished {
-            result: Some(Ok(message))
-        }) if message.contains("login complete")
+        finished,
+        Some(AppEvent::ClaudeCodePlanLoginFinished { result: None })
     ));
+    assert_eq!(
+        Vault::new(temp_dir.path().to_path_buf())
+            .load_claude_auth_selection()
+            .expect("load selection"),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn existing_claude_login_is_selected_without_reauthorization() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let fake_claude = temp_dir.path().join("claude");
+    let source_id = current_platform_login_source_id().expect("source id");
+    write_fixture_executable(
+        &fake_claude,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"internal-claude-login-health\" ]; then printf '%s\\n' '{source_id}'; exit 0; fi\n[ \"$1 $2 $3\" = \"auth status --json\" ] || exit 2\nprintf '{{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"fixture@example.invalid\",\"orgId\":\"org-fixture\",\"subscriptionType\":\"max\"}}\\n'\n"
+        ),
+    );
+
+    assert!(
+        select_existing_claude_code_login(
+            &fake_claude,
+            Some(&fake_claude),
+            temp_dir.path(),
+            FIXTURE_SUCCESS_TIMEOUT,
+        )
+        .await
+        .expect("select existing login")
+    );
+    let selection = Vault::new(temp_dir.path().to_path_buf())
+        .load_claude_auth_selection()
+        .expect("load selection")
+        .expect("selection persisted");
+    assert_eq!(selection.source, ClaudeAuthSource::ClaudeCodeLogin);
+    assert!(selection.authority_id.is_some());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unhealthy_platform_record_does_not_replace_the_previous_selection() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let fake_claude = temp_dir.path().join("claude");
+    write_fixture_executable(
+        &fake_claude,
+        "#!/bin/sh\n[ \"$1\" = \"internal-claude-login-health\" ] && exit 1\n[ \"$1 $2 $3\" = \"auth status --json\" ] || exit 2\nprintf '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"fixture@example.invalid\",\"orgId\":\"org-fixture\",\"subscriptionType\":\"max\"}\\n'\n",
+    );
+    let vault = Vault::new(temp_dir.path().to_path_buf());
+    let previous = ClaudeAuthSelection::new(
+        ClaudeAuthSource::ManagedSubscriptionToken,
+        MANAGED_CLAUDE_AUTH_SOURCE_ID,
+    )
+    .expect("previous selection");
+    vault
+        .save_claude_auth_selection(&previous)
+        .expect("save previous selection");
+
+    let error = select_existing_claude_code_login(
+        &fake_claude,
+        Some(&fake_claude),
+        temp_dir.path(),
+        FIXTURE_SUCCESS_TIMEOUT,
+    )
+    .await
+    .expect_err("unhealthy platform record must fail before persistence");
+
+    assert!(error.contains("needs reauthorization"));
+    assert_eq!(
+        vault.load_claude_auth_selection().expect("load selection"),
+        Some(previous)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn providers_status_reports_selected_login_reauthorization_need() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let fake_claude = temp_dir.path().join("claude");
+    write_fixture_executable(
+        &fake_claude,
+        "#!/bin/sh\n[ \"$1\" = \"internal-claude-login-health\" ] && exit 1\n[ \"$1 $2 $3\" = \"auth status --json\" ] || exit 2\nprintf '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"fixture@example.invalid\",\"orgId\":\"org-fixture\",\"subscriptionType\":\"max\"}\\n'\n",
+    );
+    let selection = ClaudeAuthSelection::new(
+        ClaudeAuthSource::ClaudeCodeLogin,
+        current_platform_login_source_id().expect("current source id"),
+    )
+    .expect("selection");
+    Vault::new(temp_dir.path().to_path_buf())
+        .save_claude_auth_selection(&selection)
+        .expect("save selection");
+
+    let status = current_status_with_executables(
+        temp_dir.path(),
+        FIXTURE_SUCCESS_TIMEOUT,
+        &fake_claude,
+        Some(&fake_claude),
+        /*environment_token*/ None,
+    )
+    .await;
+
+    assert_eq!(status, ClaudeCodePlanStatus::NeedsReauthorization);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn providers_status_reports_health_probe_timeout_as_error() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let hanging_health = temp_dir.path().join("hanging-health");
+    write_fixture_executable(&hanging_health, "#!/bin/sh\nsleep 30\n");
+    let selection = ClaudeAuthSelection::new(
+        ClaudeAuthSource::ClaudeCodeLogin,
+        current_platform_login_source_id().expect("current source id"),
+    )
+    .expect("selection");
+    Vault::new(temp_dir.path().to_path_buf())
+        .save_claude_auth_selection(&selection)
+        .expect("save selection");
+
+    let status = current_status_with_executables(
+        temp_dir.path(),
+        Duration::from_millis(25),
+        Path::new("claude"),
+        Some(&hanging_health),
+        /*environment_token*/ None,
+    )
+    .await;
+
+    assert_eq!(status, ClaudeCodePlanStatus::Error);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn providers_status_preserves_unavailable_claude_after_a_healthy_probe() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let healthy_probe = temp_dir.path().join("healthy-probe");
+    let source_id = current_platform_login_source_id().expect("current source id");
+    write_fixture_executable(
+        &healthy_probe,
+        format!("#!/bin/sh\nprintf '%s\\n' '{source_id}'\n"),
+    );
+    let authority_id = codex_vault::claude_login_authority_id(
+        "fixture@example.invalid",
+        Some("org-fixture"),
+        Some("max"),
+    )
+    .expect("authority id");
+    let selection =
+        ClaudeAuthSelection::new_claude_code_login(source_id, authority_id).expect("selection");
+    Vault::new(temp_dir.path().to_path_buf())
+        .save_claude_auth_selection(&selection)
+        .expect("save selection");
+
+    let status = current_status_with_executables(
+        temp_dir.path(),
+        FIXTURE_SUCCESS_TIMEOUT,
+        &temp_dir.path().join("missing-claude"),
+        Some(&healthy_probe),
+        /*environment_token*/ None,
+    )
+    .await;
+
+    assert_eq!(status, ClaudeCodePlanStatus::Unavailable);
+}
+
+#[tokio::test]
+async fn unselected_environment_token_is_ready_like_exec() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+
+    let status = current_status_with_executables(
+        temp_dir.path(),
+        FIXTURE_SUCCESS_TIMEOUT,
+        &temp_dir.path().join("missing-claude"),
+        /*health_executable*/ None,
+        Some("fixture-environment-token"),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        ClaudeCodePlanStatus::EnvironmentTokenWithoutSelection
+    );
+}
+
+#[tokio::test]
+async fn blank_environment_token_still_requires_a_method() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+
+    let status = current_status_with_executables(
+        temp_dir.path(),
+        FIXTURE_SUCCESS_TIMEOUT,
+        &temp_dir.path().join("missing-claude"),
+        /*health_executable*/ None,
+        Some("  "),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        ClaudeCodePlanStatus::SelectionRequired {
+            existing_source_detected: false
+        }
+    );
+}
+
+#[tokio::test]
+async fn environment_token_after_a_lost_selection_still_requires_a_method() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    // A saved choice leaves the sentinel; without the choice itself the
+    // request path fails closed, so the token must not be reported as ready.
+    std::fs::write(
+        codex_vault::claude_auth_selection_sentinel_path(temp_dir.path()),
+        "",
+    )
+    .expect("write sentinel");
+
+    let status = current_status_with_executables(
+        temp_dir.path(),
+        FIXTURE_SUCCESS_TIMEOUT,
+        &temp_dir.path().join("missing-claude"),
+        /*health_executable*/ None,
+        Some("fixture-environment-token"),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        ClaudeCodePlanStatus::SelectionRequired {
+            existing_source_detected: true
+        }
+    );
+}
+
+#[tokio::test]
+async fn invalid_persisted_source_id_surfaces_recovery_status() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let selection = ClaudeAuthSelection::new(
+        ClaudeAuthSource::ClaudeCodeLogin,
+        "claude-login:copied-from-another-platform",
+    )
+    .expect("syntactically valid selection");
+    Vault::new(temp_dir.path().to_path_buf())
+        .save_claude_auth_selection(&selection)
+        .expect("save selection");
+
+    assert_eq!(
+        current_status_with_timeout(temp_dir.path(), Duration::from_secs(30)).await,
+        ClaudeCodePlanStatus::InvalidSelection
+    );
 }
 
 #[cfg(unix)]
@@ -144,12 +690,7 @@ exit 2
 async fn claude_status_timeout_resolves_to_error() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     let fake_claude = temp_dir.path().join("claude");
-    std::fs::write(&fake_claude, "#!/bin/sh\nsleep 30\n").expect("write fake claude");
-    let mut permissions = std::fs::metadata(&fake_claude)
-        .expect("fake claude metadata")
-        .permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(&fake_claude, permissions).expect("make fake claude executable");
+    write_fixture_executable(&fake_claude, "#!/bin/sh\nsleep 30\n");
 
     let status = tokio::time::timeout(
         Duration::from_secs(1),
@@ -159,4 +700,222 @@ async fn claude_status_timeout_resolves_to_error() {
     .expect("status check must remain bounded");
 
     assert_eq!(status, ClaudeCodePlanStatus::Error);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn provider_status_timeout_includes_vault_lock_contention() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let secrets_dir = temp_dir.path().join("secrets");
+    std::fs::create_dir_all(&secrets_dir).expect("create secrets dir");
+    let lock_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(secrets_dir.join(".vault.lock"))
+        .expect("open vault lock");
+    lock_file.lock().expect("hold vault lock");
+
+    let status = tokio::time::timeout(
+        Duration::from_secs(1),
+        current_status_with_timeout(temp_dir.path(), Duration::from_millis(25)),
+    )
+    .await
+    .expect("provider status must remain bounded while vault storage is locked");
+
+    assert_eq!(status, ClaudeCodePlanStatus::Error);
+    drop(lock_file);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn post_login_status_timeout_does_not_persist_a_selection() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let fake_claude = temp_dir.path().join("claude");
+    write_fixture_executable(&fake_claude, "#!/bin/sh\nsleep 30\n");
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        verify_login_with_timeout(
+            &fake_claude,
+            Some(&fake_claude),
+            temp_dir.path(),
+            Duration::from_millis(25),
+            /*expected_identity*/ None,
+        ),
+    )
+    .await
+    .expect("post-login verification must remain bounded")
+    .expect_err("hanging status must fail verification");
+
+    assert!(matches!(
+        error,
+        ClaudeCodeLoginBackendError::Other(message) if message.contains("timed out")
+    ));
+    assert_eq!(
+        Vault::new(temp_dir.path().to_path_buf())
+            .load_claude_auth_selection()
+            .expect("load selection"),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn claude_status_preserves_custom_oauth_profile_identity() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let fake_claude = temp_dir.path().join("claude");
+    write_fixture_executable(
+        &fake_claude,
+        "#!/bin/sh\n[ \"$CLAUDE_CODE_CUSTOM_OAUTH_URL\" = \"https://oauth.example.invalid\" ] || exit 3\nprintf '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"fixture@example.invalid\",\"orgId\":\"org-fixture\",\"subscriptionType\":\"max\"}\\n'\n",
+    );
+
+    assert!(matches!(
+        read_status_with_profile(
+            &fake_claude,
+            /*config_dir_override*/ None,
+            Some(std::ffi::OsStr::new("https://oauth.example.invalid")),
+        )
+        .await
+        .expect("status"),
+        ClaudeCodePlanStatus::SignedIn { .. }
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn selected_source_mismatch_is_typed_as_identity_conflict() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let health = temp_dir.path().join("health");
+    write_fixture_executable(
+        &health,
+        "#!/bin/sh\nprintf '%s\\n' 'claude-login:credentials-file:actual'\n",
+    );
+
+    assert!(matches!(
+        verify_current_platform_login_health(
+            Some(&health),
+            FIXTURE_SUCCESS_TIMEOUT,
+            Some("claude-login:credentials-file:expected"),
+        )
+        .await,
+        Err(PlatformLoginHealthCheckError::IdentityMismatch(_))
+    ));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn preserve_selected_source_change_is_identity_conflict_without_persistence() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let fake_claude = temp_dir.path().join("claude");
+    write_fixture_executable(
+        &fake_claude,
+        "#!/bin/sh\n[ \"$1 $2 $3\" = \"auth status --json\" ] || exit 2\nprintf '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"email\":\"fixture@example.invalid\",\"orgId\":\"org-fixture\",\"subscriptionType\":\"max\"}\\n'\n",
+    );
+    let current_source = current_platform_login_source_id().expect("current source");
+    let health = temp_dir.path().join("health");
+    write_fixture_executable(
+        &health,
+        format!("#!/bin/sh\nprintf '%s\\n' '{current_source}'\n"),
+    );
+
+    let authority_id =
+        claude_login_authority_id("fixture@example.invalid", Some("org-fixture"), Some("max"))
+            .expect("authority");
+    let expected = ExpectedClaudeCodeIdentity {
+        source_id: "claude-login:credentials-file:previous".to_string(),
+        authority_id: authority_id.clone(),
+    };
+    let prior =
+        ClaudeAuthSelection::new_claude_code_login(expected.source_id.clone(), authority_id)
+            .expect("prior selection");
+    let vault = Vault::new(temp_dir.path().to_path_buf());
+    vault
+        .save_claude_auth_selection(&prior)
+        .expect("save prior selection");
+
+    assert!(matches!(
+        verify_login_with_timeout(
+            &fake_claude,
+            Some(&health),
+            temp_dir.path(),
+            FIXTURE_SUCCESS_TIMEOUT,
+            Some(&expected),
+        )
+        .await,
+        Err(ClaudeCodeLoginBackendError::IdentityConflict)
+    ));
+    assert_eq!(
+        vault
+            .load_claude_auth_selection()
+            .expect("load prior selection"),
+        Some(prior)
+    );
+}
+
+#[test]
+fn bound_reauthorization_refuses_a_concurrent_selection_change() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let vault = Vault::new(temp_dir.path().to_path_buf());
+    let expected = ExpectedClaudeCodeIdentity {
+        source_id: "claude-login:credentials-file:expected".to_string(),
+        authority_id: claude_login_authority_id(
+            "expected@example.invalid",
+            Some("org-expected"),
+            Some("max"),
+        )
+        .expect("expected authority"),
+    };
+    let selected = ClaudeAuthSelection::new_claude_code_login(
+        expected.source_id.clone(),
+        expected.authority_id.clone(),
+    )
+    .expect("expected selection");
+    vault
+        .save_claude_auth_selection(&selected)
+        .expect("save expected selection");
+
+    let concurrent = ClaudeAuthSelection::new_claude_code_login(
+        "claude-login:credentials-file:concurrent",
+        claude_login_authority_id(
+            "concurrent@example.invalid",
+            Some("org-concurrent"),
+            Some("team"),
+        )
+        .expect("concurrent authority"),
+    )
+    .expect("concurrent selection");
+    vault
+        .save_claude_auth_selection(&concurrent)
+        .expect("save concurrent selection");
+
+    let result = persist_claude_code_login_selection_blocking(
+        temp_dir.path(),
+        expected.source_id.clone(),
+        expected.authority_id.clone(),
+        Some(&expected),
+    );
+    assert!(matches!(
+        result,
+        Err(ClaudeCodeLoginBackendError::IdentityConflict)
+    ));
+    assert_eq!(
+        vault
+            .load_claude_auth_selection()
+            .expect("load preserved selection"),
+        Some(concurrent)
+    );
+}
+
+#[tokio::test]
+async fn typed_managed_enrollment_preserves_invalid_classification() {
+    assert!(matches!(
+        enroll_managed_subscription_token_typed(
+            tempfile::tempdir().expect("temp dir").path().to_path_buf(),
+            ClaudeSubscriptionTokenSecret::new("\r\n".to_string()),
+        )
+        .await,
+        Err(ClaudeManagedEnrollmentError::Invalid(_))
+    ));
 }

@@ -42,6 +42,7 @@ use codex_config::CloudConfigBundleLoader;
 use codex_config::LoaderOverrides;
 use codex_feedback::CodexFeedback;
 use codex_login::AuthManager;
+use codex_model_provider_info::canonical_catalog_provider;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
@@ -229,7 +230,7 @@ fn run_setup() -> anyhow::Result<()> {
     #[cfg(windows)]
     {
         anyhow::bail!(
-            "interactive Telegram setup is not yet available on Windows; configure [telegram], run `pfterminal telegram --health`, then use the bundled install-telegram-task.ps1"
+            "interactive Telegram setup is not yet available on Windows; configure [telegram], run `corbanu telegram --health`, then use the bundled install-telegram-task.ps1"
         );
     }
 
@@ -249,7 +250,8 @@ fn run_setup() -> anyhow::Result<()> {
 
 #[cfg(not(windows))]
 fn locate_setup_script() -> anyhow::Result<PathBuf> {
-    let executable = std::env::current_exe().context("resolve current PFTerminal executable")?;
+    let executable =
+        std::env::current_exe().context("resolve current Corbanu Terminal executable")?;
     if let Some(package_root) = executable.parent().and_then(|bin_dir| bin_dir.parent()) {
         let packaged = package_root
             .join("codex-resources")
@@ -269,7 +271,7 @@ fn locate_setup_script() -> anyhow::Result<PathBuf> {
         return Ok(source);
     }
     anyhow::bail!(
-        "Telegram setup resources are missing; reinstall PFTerminal or configure [telegram] manually"
+        "Telegram setup resources are missing; reinstall Corbanu Terminal or configure [telegram] manually"
     )
 }
 
@@ -301,7 +303,7 @@ async fn run_health_check(
         .context("Telegram health failed: state directory is not writable")?;
     tokio::fs::remove_file(&state_probe).await?;
 
-    let workspace_probe = core_config.cwd.join(".pfterminal-telegram-health-probe");
+    let workspace_probe = core_config.cwd.join(".corbanu-telegram-health-probe");
     tokio::fs::write(&workspace_probe, b"ok")
         .await
         .context("Telegram health failed: workspace is not writable")?;
@@ -350,6 +352,10 @@ async fn build_core_config(
 ) -> anyhow::Result<codex_core::config::Config> {
     let overrides = codex_core::config::ConfigOverrides {
         model: telegram_config.default_model.clone(),
+        // `[telegram].default_model` is a scoped model selection, so pair it
+        // with its canonical provider instead of inheriting an unrelated
+        // top-level provider. Unknown/custom models continue to inherit.
+        model_provider: telegram_default_model_provider(telegram_config),
         cwd: telegram_config.default_cwd.clone(),
         approval_policy: telegram_config.approval_policy,
         sandbox_mode: telegram_config.sandbox_mode,
@@ -365,5 +371,33 @@ async fn build_core_config(
         .strict_config(strict_config)
         .build()
         .await
-        .context("failed to build PFTerminal config for Telegram")
+        .context("failed to build Corbanu Terminal config for Telegram")
+}
+
+fn telegram_default_model_provider(config: &TelegramConfig) -> Option<String> {
+    config
+        .default_model
+        .as_deref()
+        .and_then(canonical_catalog_provider)
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn telegram_default_model_uses_its_canonical_provider() {
+        let mut config = TelegramConfig {
+            default_model: Some(codex_model_provider_info::KIMI_CODE_K3_MODEL.to_string()),
+            ..TelegramConfig::default()
+        };
+        assert_eq!(
+            telegram_default_model_provider(&config).as_deref(),
+            Some(codex_model_provider_info::KIMI_CODE_PROVIDER_ID)
+        );
+
+        config.default_model = Some("custom-model".to_string());
+        assert_eq!(telegram_default_model_provider(&config), None);
+    }
 }

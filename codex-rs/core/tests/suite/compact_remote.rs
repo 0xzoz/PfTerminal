@@ -2284,6 +2284,11 @@ async fn remote_compact_trim_estimate_uses_session_base_instructions() -> Result
             .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
             .with_config(|config| {
                 config.model_context_window = Some(200_000);
+                // #866: the skills block is sized to the context window, so
+                // with the developer's own skills installed it was far smaller
+                // in the override session, and its estimate never reached the
+                // window calibrated here. It has no part in this test.
+                config.include_skill_instructions = false;
             }),
     )
     .await?;
@@ -2391,6 +2396,7 @@ async fn remote_compact_trim_estimate_uses_session_base_instructions() -> Result
                 move |config| {
                     config.model_context_window = Some(override_context_window);
                     config.base_instructions = Some(override_base_instructions);
+                    config.include_skill_instructions = false;
                 }
             }),
     )
@@ -4459,5 +4465,40 @@ async fn snapshot_request_shape_remote_manual_compact_without_previous_user_mess
         )
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_compact_v2_misalignment_stops_without_retry() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(|config| {
+                config.features.enable(Feature::RemoteCompactionV2).unwrap();
+                config.model_provider.stream_max_retries = Some(3);
+            }),
+    )
+    .await?;
+    let mock = responses::mount_response_sequence(harness.server(), vec![
+        responses::sse_response(sse(vec![responses::ev_assistant_message("m1", "Ready."), responses::ev_completed("first")])),
+        responses::sse_response(sse(vec![json!({"type": "response.failed", "response": {"id": "stopped", "error": {"code": "misalignment_policy_violation", "message": "Review agent activity."}}})])),
+    ]).await;
+    harness.submit("Prepare a summary.").await?;
+    let codex = harness.test().codex.clone();
+    codex.submit(Op::Compact).await?;
+    let error = wait_for_event_match(&codex, |event| match event {
+        EventMsg::Error(error) => Some(error.clone()),
+        _ => None,
+    })
+    .await;
+    assert!(error.message.contains("misalignment_policy_violation"));
+    assert!(error.message.contains("Automatic retries are disabled"));
+    wait_for_turn_complete(&codex).await;
+    assert_eq!(
+        mock.requests().len(),
+        2,
+        "one initial response and exactly one compaction attempt"
+    );
     Ok(())
 }

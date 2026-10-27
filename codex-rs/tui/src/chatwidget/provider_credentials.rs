@@ -24,13 +24,12 @@ use codex_model_provider_info::VERCEL_API_KEY_ENV_VAR;
 use codex_model_provider_info::VERCEL_PROVIDER_ID;
 use codex_model_provider_info::ZAI_API_KEY_ENV_VAR;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
-use std::path::Path;
-use std::time::Duration;
 
 const PROVIDER_CREDENTIALS_VIEW_ID: &str = "provider-credentials";
 const CODEX_ACCOUNT_DEVICE_LOGIN_VIEW_ID: &str = "codex-account-device-login";
-const PROVIDER_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+const PROVIDER_API_KEY_SAVE_VIEW_ID: &str = "provider-api-key-save";
 
+#[allow(dead_code)] // Statuses for the provider credentials view, which has no opener now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProviderApiKeyStatus {
     Checking,
@@ -104,16 +103,6 @@ const PROVIDER_CREDENTIAL_OPTIONS: &[ProviderCredentialOption] = &[
 ];
 
 impl ChatWidget {
-    pub(crate) fn open_provider_credentials_menu(&mut self) {
-        let params = self.provider_credentials_params(
-            &ClaudeCodePlanStatus::Checking,
-            &PfTerminalPlanStatus::Checking,
-            &[],
-        );
-        self.show_selection_view(params);
-        self.refresh_provider_credentials_status_in_background();
-    }
-
     pub(crate) fn refresh_provider_credentials_status(
         &mut self,
         claude_status: ClaudeCodePlanStatus,
@@ -131,43 +120,6 @@ impl ChatWidget {
         params.initial_selected_idx = selected_index;
         self.bottom_pane
             .replace_selection_view_if_present(PROVIDER_CREDENTIALS_VIEW_ID, params);
-    }
-
-    fn refresh_provider_credentials_status_in_background(&self) {
-        let codex_home = self.config.codex_home.clone();
-        let plan_home = codex_home.clone();
-        let auth_store_mode = self.config.cli_auth_credentials_store_mode;
-        let keyring_backend_kind = self.config.auth_keyring_backend_kind();
-        let app_event_tx = self.app_event_tx.clone();
-        tokio::spawn(async move {
-            let claude_status = crate::chatwidget::claude_code_login::current_status_with_timeout(
-                PROVIDER_STATUS_TIMEOUT,
-            );
-            let api_key_statuses = tokio::task::spawn_blocking(move || {
-                provider_api_key_statuses(codex_home.as_path())
-            });
-            let pfterminal_plan_status = super::pfterminal_plan_status::load(
-                plan_home.to_path_buf(),
-                auth_store_mode,
-                keyring_backend_kind,
-            );
-            let (claude_status, pfterminal_plan_status, api_key_statuses) = tokio::join!(
-                claude_status,
-                tokio::time::timeout(PROVIDER_STATUS_TIMEOUT, pfterminal_plan_status),
-                tokio::time::timeout(PROVIDER_STATUS_TIMEOUT, api_key_statuses)
-            );
-            let pfterminal_plan_status =
-                pfterminal_plan_status.unwrap_or(PfTerminalPlanStatus::Unavailable);
-            let api_key_statuses = match api_key_statuses {
-                Ok(Ok(statuses)) => statuses,
-                Ok(Err(_)) | Err(_) => provider_api_key_unavailable_statuses(),
-            };
-            app_event_tx.send(AppEvent::ProviderCredentialStatusesReady {
-                claude_status,
-                pfterminal_plan_status,
-                api_key_statuses,
-            });
-        });
     }
 
     fn provider_credentials_params(
@@ -228,8 +180,61 @@ impl ChatWidget {
                     api_key: crate::app_event::ProviderApiKeySecret::new(secret),
                 });
             }),
-        );
+        )
+        .rejecting_shown_errors(self.shown_error_texts());
         self.bottom_pane.show_view(Box::new(view));
+    }
+
+    pub(crate) fn open_provider_api_key_save_pending(
+        &mut self,
+        save_id: String,
+        display_name: String,
+    ) {
+        self.pending_provider_api_key_save_id = Some(save_id.clone());
+        self.bottom_pane
+            .show_view(Box::new(ProviderApiKeySavePendingView::new(
+                self.app_event_tx.clone(),
+                save_id,
+                display_name,
+            )));
+    }
+
+    pub(crate) fn on_provider_api_key_save_dismissed(&mut self, save_id: String) {
+        clear_matching_provider_api_key_save(&mut self.pending_provider_api_key_save_id, &save_id);
+    }
+
+    pub(crate) fn on_provider_api_key_save_finished(
+        &mut self,
+        save_id: String,
+        display_name: String,
+        result: Result<(), String>,
+    ) {
+        let was_active = clear_matching_provider_api_key_save(
+            &mut self.pending_provider_api_key_save_id,
+            &save_id,
+        );
+        if was_active {
+            self.bottom_pane
+                .dismiss_view_by_id(PROVIDER_API_KEY_SAVE_VIEW_ID);
+        }
+        match (was_active, result) {
+            (true, Ok(())) => self.add_info_message(
+                format!("Stored {display_name} in the vault."),
+                /*hint*/ None,
+            ),
+            (true, Err(message)) => {
+                self.add_error_message(format!("Failed to store {display_name}: {message}"));
+            }
+            (false, Ok(())) => self.add_info_message(
+                format!("Background save completed: stored {display_name} in the vault."),
+                /*hint*/ None,
+            ),
+            (false, Err(message)) => {
+                self.add_error_message(format!(
+                    "Background save failed for {display_name}: {message}"
+                ));
+            }
+        }
     }
 
     pub(crate) fn open_codex_account_device_login_pending(&mut self) {
@@ -265,6 +270,7 @@ impl ChatWidget {
         self.add_error_message(format!("OpenAI Codex account login failed: {message}"));
     }
 
+    #[allow(dead_code)]
     pub(crate) fn on_codex_account_login_completed(
         &mut self,
         notification: codex_app_server_protocol::AccountLoginCompletedNotification,
@@ -272,6 +278,15 @@ impl ChatWidget {
         let Some(login_id) = notification.login_id else {
             return;
         };
+        self.on_codex_account_login_result(login_id, notification.success, notification.error);
+    }
+
+    pub(crate) fn on_codex_account_login_result(
+        &mut self,
+        login_id: String,
+        success: bool,
+        failure_message: Option<String>,
+    ) {
         if self.pending_provider_codex_login_id.as_deref() != Some(login_id.as_str()) {
             return;
         }
@@ -279,16 +294,16 @@ impl ChatWidget {
         self.bottom_pane
             .dismiss_view_by_id(CODEX_ACCOUNT_DEVICE_LOGIN_VIEW_ID);
 
-        if notification.success {
+        if success {
             self.add_info_message(
                 "OpenAI Codex account login complete.".to_string(),
                 /*hint*/ None,
             );
         } else {
-            let message = notification
-                .error
-                .unwrap_or_else(|| "OpenAI Codex account login did not complete.".to_string());
-            self.add_error_message(message);
+            self.add_error_message(
+                failure_message
+                    .unwrap_or_else(|| "OpenAI Codex account login did not complete.".to_string()),
+            );
         }
     }
 }
@@ -309,49 +324,6 @@ fn provider_credential_items(
                 pfterminal_plan_status,
                 &api_key_status,
             )
-        })
-        .collect()
-}
-
-fn provider_api_key_statuses(codex_home: &Path) -> Vec<(String, ProviderApiKeyStatus)> {
-    let stored_labels = match codex_vault::Vault::new(codex_home.to_path_buf()).list() {
-        Ok(credentials) => credentials
-            .into_iter()
-            .map(|credential| credential.label)
-            .collect::<std::collections::HashSet<_>>(),
-        Err(_) => return provider_api_key_unavailable_statuses(),
-    };
-    PROVIDER_CREDENTIAL_OPTIONS
-        .iter()
-        .filter_map(|option| {
-            let ProviderCredentialOption::ProviderApiKey { env_key, .. } = option else {
-                return None;
-            };
-            let status = if std::env::var(env_key)
-                .ok()
-                .is_some_and(|value| !value.trim().is_empty())
-            {
-                ProviderApiKeyStatus::AvailableFromEnvironment
-            } else if stored_labels.contains(&provider_vault_label(env_key)) {
-                ProviderApiKeyStatus::Stored
-            } else {
-                ProviderApiKeyStatus::NotConfigured
-            };
-            Some((env_key.to_string(), status))
-        })
-        .collect()
-}
-
-fn provider_api_key_unavailable_statuses() -> Vec<(String, ProviderApiKeyStatus)> {
-    PROVIDER_CREDENTIAL_OPTIONS
-        .iter()
-        .filter_map(|option| match option {
-            ProviderCredentialOption::ProviderApiKey { env_key, .. } => {
-                Some((env_key.to_string(), ProviderApiKeyStatus::Unavailable))
-            }
-            ProviderCredentialOption::CodexAccount
-            | ProviderCredentialOption::ClaudeCodePlan
-            | ProviderCredentialOption::PfTerminalPlan => None,
         })
         .collect()
 }
@@ -409,7 +381,7 @@ fn provider_credential_item(
             }
         }
         ProviderCredentialOption::PfTerminalPlan => {
-            let name = "Provider: PfTerminal Plan".to_string();
+            let name = "Provider: Corbanu API".to_string();
             SelectionItem {
                 name: name.clone(),
                 search_value: Some(name),
@@ -449,9 +421,37 @@ fn provider_credential_item(
 fn claude_status_description(status: &ClaudeCodePlanStatus) -> String {
     match status {
         ClaudeCodePlanStatus::Checking => "Checking sign-in...".to_string(),
+        ClaudeCodePlanStatus::ManagedToken { stored: true } => {
+            "Selected · long-lived subscription token".to_string()
+        }
+        ClaudeCodePlanStatus::ManagedToken { stored: false } => {
+            "Recovery needed · selected token is missing".to_string()
+        }
+        ClaudeCodePlanStatus::EnvironmentToken { available: true } => {
+            "Selected · CLAUDE_CODE_OAUTH_TOKEN".to_string()
+        }
+        ClaudeCodePlanStatus::EnvironmentToken { available: false } => {
+            "Recovery needed · selected environment token is missing".to_string()
+        }
+        ClaudeCodePlanStatus::EnvironmentTokenWithoutSelection => {
+            "Ready · CLAUDE_CODE_OAUTH_TOKEN from the environment".to_string()
+        }
+        ClaudeCodePlanStatus::SelectionRequired {
+            existing_source_detected: true,
+        } => "Choose method · existing credentials detected".to_string(),
+        ClaudeCodePlanStatus::SelectionRequired {
+            existing_source_detected: false,
+        } => "Choose authentication method".to_string(),
+        ClaudeCodePlanStatus::InvalidSelection => {
+            "Recovery needed · selected method is not valid on this platform".to_string()
+        }
+        ClaudeCodePlanStatus::NeedsReauthorization => {
+            "Recovery needed · selected login needs reauthorization".to_string()
+        }
         ClaudeCodePlanStatus::SignedIn {
             email,
             subscription,
+            ..
         } => signed_in_description(email.as_deref(), subscription.as_deref()),
         ClaudeCodePlanStatus::SignedOut => "Not signed in".to_string(),
         ClaudeCodePlanStatus::Unavailable => "Claude Code not installed".to_string(),
@@ -493,6 +493,95 @@ fn provider_credential_display_name(provider_name: &str, env_key: &str) -> Strin
 
 fn provider_vault_label(env_key: &str) -> String {
     format!("provider/{}", env_key.to_ascii_lowercase())
+}
+
+fn clear_matching_provider_api_key_save(
+    pending_save_id: &mut Option<String>,
+    completed_save_id: &str,
+) -> bool {
+    if pending_save_id.as_deref() != Some(completed_save_id) {
+        return false;
+    }
+    *pending_save_id = None;
+    true
+}
+
+struct ProviderApiKeySavePendingView {
+    app_event_tx: AppEventSender,
+    save_id: String,
+    display_name: String,
+    complete: bool,
+}
+
+impl ProviderApiKeySavePendingView {
+    fn new(app_event_tx: AppEventSender, save_id: String, display_name: String) -> Self {
+        Self {
+            app_event_tx,
+            save_id,
+            display_name,
+            complete: false,
+        }
+    }
+
+    fn cancel(&mut self) {
+        if self.complete {
+            return;
+        }
+        self.complete = true;
+        self.app_event_tx
+            .send(AppEvent::ProviderApiKeySaveDismissed {
+                save_id: self.save_id.clone(),
+            });
+    }
+
+    fn lines(&self) -> Vec<Line<'static>> {
+        vec![
+            Line::from(format!("Saving {} securely...", self.display_name).bold()),
+            Line::from(""),
+            Line::from("Keep Corbanu Terminal open while the encrypted vault is updated.").dim(),
+        ]
+    }
+}
+
+impl BottomPaneView for ProviderApiKeySavePendingView {
+    fn handle_key_event(&mut self, key_event: crossterm::event::KeyEvent) {
+        if key_event.code == KeyCode::Esc {
+            self.cancel();
+        }
+    }
+
+    fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    fn completion(&self) -> Option<ViewCompletion> {
+        self.complete.then_some(ViewCompletion::Cancelled)
+    }
+
+    fn view_id(&self) -> Option<&'static str> {
+        Some(PROVIDER_API_KEY_SAVE_VIEW_ID)
+    }
+
+    fn on_ctrl_c(&mut self) -> CancellationEvent {
+        self.cancel();
+        CancellationEvent::Handled
+    }
+
+    fn prefer_esc_to_handle_key_event(&self) -> bool {
+        true
+    }
+}
+
+impl Renderable for ProviderApiKeySavePendingView {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        Paragraph::new(self.lines())
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
+    }
+
+    fn desired_height(&self, _width: u16) -> u16 {
+        3
+    }
 }
 
 struct CodexAccountDeviceLoginView {
@@ -652,7 +741,7 @@ mod tests {
             vec![
                 "Provider: OpenAI Codex Account",
                 "Provider: Claude Code Plan",
-                "Provider: PfTerminal Plan",
+                "Provider: Corbanu API",
                 "Provider: Anthropic API Key",
                 "Provider: Ambient API Key",
                 "Provider: Kimi Code API Key",
@@ -747,6 +836,7 @@ mod tests {
         assert_eq!(
             claude_status_description(&ClaudeCodePlanStatus::SignedIn {
                 email: Some("user@example.com".to_string()),
+                organization_id: Some("org-fixture".to_string()),
                 subscription: Some("max".to_string()),
             }),
             "Signed in · user@example.com · Max plan"
@@ -754,6 +844,32 @@ mod tests {
         assert_eq!(
             claude_status_description(&ClaudeCodePlanStatus::SignedOut),
             "Not signed in"
+        );
+        assert_eq!(
+            claude_status_description(&ClaudeCodePlanStatus::ManagedToken { stored: true }),
+            "Selected · long-lived subscription token"
+        );
+        assert_eq!(
+            claude_status_description(&ClaudeCodePlanStatus::ManagedToken { stored: false }),
+            "Recovery needed · selected token is missing"
+        );
+        assert_eq!(
+            claude_status_description(&ClaudeCodePlanStatus::SelectionRequired {
+                existing_source_detected: true,
+            }),
+            "Choose method · existing credentials detected"
+        );
+        assert_eq!(
+            claude_status_description(&ClaudeCodePlanStatus::EnvironmentTokenWithoutSelection),
+            "Ready · CLAUDE_CODE_OAUTH_TOKEN from the environment"
+        );
+        assert_eq!(
+            claude_status_description(&ClaudeCodePlanStatus::InvalidSelection),
+            "Recovery needed · selected method is not valid on this platform"
+        );
+        assert_eq!(
+            claude_status_description(&ClaudeCodePlanStatus::NeedsReauthorization),
+            "Recovery needed · selected login needs reauthorization"
         );
         assert_eq!(
             claude_status_description(&ClaudeCodePlanStatus::Unavailable),
@@ -848,6 +964,102 @@ mod tests {
             crossterm::event::KeyModifiers::NONE,
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn provider_api_key_save_view_describes_anthropic_progress() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let view = ProviderApiKeySavePendingView::new(
+            AppEventSender::new(tx),
+            "save-1".to_string(),
+            "Provider: Anthropic API Key".to_string(),
+        );
+        let area = Rect::new(0, 0, 72, view.desired_height(/*width*/ 72));
+        let mut buffer = Buffer::empty(area);
+        view.render(area, &mut buffer);
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        insta::assert_snapshot!(rendered);
+        assert_eq!(view.view_id(), Some(PROVIDER_API_KEY_SAVE_VIEW_ID));
+    }
+
+    #[test]
+    fn provider_api_key_save_view_blocks_text_but_allows_dismissal() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let sender = AppEventSender::new(tx);
+        let mut esc_view = ProviderApiKeySavePendingView::new(
+            sender.clone(),
+            "save-esc".to_string(),
+            "Provider: Anthropic API Key".to_string(),
+        );
+        esc_view.handle_key_event(crossterm::event::KeyEvent::new(
+            KeyCode::Char('x'),
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(!esc_view.is_complete());
+        assert!(rx.try_recv().is_err());
+
+        esc_view.handle_key_event(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(esc_view.is_complete());
+        assert_eq!(esc_view.completion(), Some(ViewCompletion::Cancelled));
+        assert!(esc_view.prefer_esc_to_handle_key_event());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AppEvent::ProviderApiKeySaveDismissed { save_id }) if save_id == "save-esc"
+        ));
+        esc_view.handle_key_event(crossterm::event::KeyEvent::new(
+            KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+        assert!(rx.try_recv().is_err());
+
+        let mut ctrl_c_view = ProviderApiKeySavePendingView::new(
+            sender,
+            "save-ctrl-c".to_string(),
+            "Provider: Anthropic API Key".to_string(),
+        );
+        assert_eq!(ctrl_c_view.on_ctrl_c(), CancellationEvent::Handled);
+        assert!(ctrl_c_view.is_complete());
+        assert_eq!(ctrl_c_view.completion(), Some(ViewCompletion::Cancelled));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AppEvent::ProviderApiKeySaveDismissed { save_id }) if save_id == "save-ctrl-c"
+        ));
+    }
+
+    #[test]
+    fn cancelled_save_completion_cannot_clear_a_newer_save() {
+        let mut pending_save_id = Some("first-save".to_string());
+
+        assert!(clear_matching_provider_api_key_save(
+            &mut pending_save_id,
+            "first-save"
+        ));
+        assert_eq!(pending_save_id, None);
+
+        pending_save_id = Some("second-save".to_string());
+        assert!(!clear_matching_provider_api_key_save(
+            &mut pending_save_id,
+            "first-save"
+        ));
+        assert_eq!(pending_save_id.as_deref(), Some("second-save"));
+        assert!(clear_matching_provider_api_key_save(
+            &mut pending_save_id,
+            "second-save"
+        ));
+        assert_eq!(pending_save_id, None);
     }
 
     #[test]

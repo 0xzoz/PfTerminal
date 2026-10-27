@@ -389,8 +389,11 @@ async fn handle_structured_edit(
         ));
     };
     let fs = turn_environment.environment.get_filesystem();
-    let sandbox =
-        turn.file_system_sandbox_context(/*additional_permissions*/ None, &turn_environment);
+    let sandbox = crate::security::protected_surface::protect_file_tool_context(
+        &session,
+        &turn,
+        turn.file_system_sandbox_context(/*additional_permissions*/ None, &turn_environment),
+    );
     let path_uri = turn_environment
         .cwd()
         .join(&args.path)
@@ -519,8 +522,11 @@ async fn handle_structured_write(
         ));
     };
     let fs = turn_environment.environment.get_filesystem();
-    let sandbox =
-        turn.file_system_sandbox_context(/*additional_permissions*/ None, &turn_environment);
+    let sandbox = crate::security::protected_surface::protect_file_tool_context(
+        &session,
+        &turn,
+        turn.file_system_sandbox_context(/*additional_permissions*/ None, &turn_environment),
+    );
     let path_uri = turn_environment
         .cwd()
         .join(&args.path)
@@ -667,7 +673,9 @@ fn validate_relative_path(path: &str) -> Result<(), FunctionCallError> {
         ));
     }
     let path = Path::new(path);
-    if path.is_absolute() {
+    // On Windows `/tmp/file` is root-relative rather than absolute, but it
+    // still escapes the workspace, so report it the same way.
+    if path.is_absolute() || path.has_root() {
         return Err(FunctionCallError::RespondToModel(
             "path must be relative, not absolute".to_string(),
         ));
@@ -837,20 +845,23 @@ mod tests {
     #[test]
     fn replace_exact_requires_unique_match_by_default() {
         assert_eq!(
-            replace_exact("a b a", "b", "B", false).expect("unique replacement"),
+            replace_exact("a b a", "b", "B", /*replace_all*/ false).expect("unique replacement"),
             "a B a"
         );
         assert_model_error(
-            replace_exact("a b a", "a", "A", false),
+            replace_exact("a b a", "a", "A", /*replace_all*/ false),
             "matched 2 locations",
         );
-        assert_model_error(replace_exact("a b a", "missing", "x", false), "not found");
+        assert_model_error(
+            replace_exact("a b a", "missing", "x", /*replace_all*/ false),
+            "not found",
+        );
     }
 
     #[test]
     fn replace_exact_allows_explicit_replace_all() {
         assert_eq!(
-            replace_exact("a b a", "a", "A", true).expect("replace all"),
+            replace_exact("a b a", "a", "A", /*replace_all*/ true).expect("replace all"),
             "A b A"
         );
     }
@@ -858,8 +869,13 @@ mod tests {
     #[test]
     fn replace_structured_normalizes_line_endings_to_current_file() {
         assert_eq!(
-            replace_structured("alpha\r\nbeta\r\ngamma\r\n", "beta\n", "BETA\n", false)
-                .expect("line-ending normalized replacement"),
+            replace_structured(
+                "alpha\r\nbeta\r\ngamma\r\n",
+                "beta\n",
+                "BETA\n",
+                /*replace_all*/ false
+            )
+            .expect("line-ending normalized replacement"),
             "alpha\r\nBETA\r\ngamma\r\n"
         );
     }
@@ -880,8 +896,9 @@ mod tests {
         let command =
             "python3 - <<'PY'\nfrom pathlib import Path\nPath('src/lib.rs').write_text('x')\nPY";
         let (_session, mut turn) = crate::session::tests::make_session_and_context().await;
-        let openai_provider =
-            codex_model_provider_info::ModelProviderInfo::create_openai_provider(None);
+        let openai_provider = codex_model_provider_info::ModelProviderInfo::create_openai_provider(
+            /*base_url*/ None,
+        );
         turn.provider =
             codex_model_provider::create_model_provider(openai_provider, turn.auth_manager.clone());
         turn.model_info.slug = "gpt-5.2".to_string();
@@ -900,8 +917,9 @@ mod tests {
     #[tokio::test]
     async fn repeated_strict_patch_failures_enable_structured_edit_fallback() {
         let (_session, mut turn) = crate::session::tests::make_session_and_context().await;
-        let openai_provider =
-            codex_model_provider_info::ModelProviderInfo::create_openai_provider(None);
+        let openai_provider = codex_model_provider_info::ModelProviderInfo::create_openai_provider(
+            /*base_url*/ None,
+        );
         turn.provider =
             codex_model_provider::create_model_provider(openai_provider, turn.auth_manager.clone());
         turn.model_info.slug = "gpt-5.2".to_string();
@@ -931,8 +949,9 @@ mod tests {
     #[tokio::test]
     async fn model_edit_profile_tag_classifies_glm_and_codex_patch_profiles() {
         let (_session, mut turn) = crate::session::tests::make_session_and_context().await;
-        let openai_provider =
-            codex_model_provider_info::ModelProviderInfo::create_openai_provider(None);
+        let openai_provider = codex_model_provider_info::ModelProviderInfo::create_openai_provider(
+            /*base_url*/ None,
+        );
         turn.provider =
             codex_model_provider::create_model_provider(openai_provider, turn.auth_manager.clone());
 

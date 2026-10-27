@@ -74,7 +74,39 @@ pub fn start_memories_startup_task(
         }
 
         // Run phase 1.
-        phase1::run(Arc::clone(&context), Arc::clone(&config)).await;
+        if !phase1::run(Arc::clone(&context), Arc::clone(&config)).await {
+            context.counter(
+                MEMORY_STARTUP,
+                /*inc*/ 1,
+                &[("status", "skipped_policy")],
+            );
+            return;
+        }
+        let Ok(current) = context.current_stage_one_config(&config).await else {
+            context.counter(
+                MEMORY_STARTUP,
+                /*inc*/ 1,
+                &[("status", "skipped_policy")],
+            );
+            return;
+        };
+        // PF-23-S01: above Permissive only stage one runs (on labelled input).
+        // Consolidation is a full agent session over those memories and is not
+        // yet qualified there.
+        if context
+            .stage_one_client(&current)
+            .await
+            .map_or(true, |client| client.requires_labelled_input())
+        {
+            context.counter(
+                MEMORY_STARTUP,
+                /*inc*/ 1,
+                &[("status", "skipped_policy_consolidation")],
+            );
+            return;
+        }
+        // Refresh above is a live policy gate only. Consolidation still uses
+        // the startup provider helper, so retain its matching configuration.
         // Run phase 2.
         phase2::run(context, config, parent_permission_profile).await;
     });

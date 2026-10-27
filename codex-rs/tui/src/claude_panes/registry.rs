@@ -1,6 +1,8 @@
 //! Registry of Claude panes with layout persistence.
 
+use std::collections::HashSet;
 use std::fs;
+#[cfg(unix)]
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -68,6 +70,12 @@ struct PersistedPaneLayoutEnvelope {
 pub(crate) struct ClaudePaneRegistry {
     active_user_pane_id: String,
     pub(crate) panes: Vec<ClaudePane>,
+    /// #554: panes whose running turn the kill switch stopped, until that
+    /// turn's end is handled.
+    kill_switch_stopped: HashSet<String>,
+    /// Tests: the prompt of each turn prepared, by pane.
+    #[cfg(test)]
+    pub(crate) prepared_prompts: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +89,9 @@ impl ClaudePaneRegistry {
         Self {
             active_user_pane_id: CODEX_MAIN_PANE_ID.to_string(),
             panes: Vec::new(),
+            kill_switch_stopped: HashSet::new(),
+            #[cfg(test)]
+            prepared_prompts: Vec::new(),
         }
     }
 
@@ -103,6 +114,9 @@ impl ClaudePaneRegistry {
         Self {
             active_user_pane_id,
             panes,
+            kill_switch_stopped: HashSet::new(),
+            #[cfg(test)]
+            prepared_prompts: Vec::new(),
         }
     }
 
@@ -281,7 +295,9 @@ impl ClaudePaneRegistry {
         cwd: PathBuf,
         codex_home: &Path,
     ) -> Result<String> {
-        self.create_pane_with_role(profile, cwd, codex_home, None, None)
+        self.create_pane_with_role(
+            profile, cwd, codex_home, /*spawn_role*/ None, /*spawn_nickname*/ None,
+        )
     }
 
     pub(crate) fn create_pane_with_role(
@@ -292,6 +308,9 @@ impl ClaudePaneRegistry {
         spawn_role: Option<SpawnRole>,
         spawn_nickname: Option<String>,
     ) -> Result<String> {
+        if let Some(reason) = crate::security::level::external_agent_block_reason() {
+            return Err(anyhow!(reason));
+        }
         self.push_pane(profile, cwd, codex_home, spawn_role, spawn_nickname)
     }
 
@@ -302,7 +321,9 @@ impl ClaudePaneRegistry {
         cwd: PathBuf,
         codex_home: &Path,
     ) -> Result<String> {
-        self.push_pane(profile, cwd, codex_home, None, None)
+        self.push_pane(
+            profile, cwd, codex_home, /*spawn_role*/ None, /*spawn_nickname*/ None,
+        )
     }
 
     fn push_pane(
@@ -366,6 +387,29 @@ impl ClaudePaneRegistry {
         prompt: String,
         codex_home: &Path,
     ) -> Result<PreparedClaudePaneTurn> {
+        self.prepare_turn_for_account(
+            pane_id, prompt, codex_home, /*claude_plan_account*/ None,
+        )
+    }
+
+    /// PF-84: like [`Self::prepare_turn`]; a Claude Plan pane uses the named
+    /// account `[provider_accounts]` selects, never the default one.
+    pub(crate) fn prepare_turn_for_account(
+        &mut self,
+        pane_id: &str,
+        prompt: String,
+        codex_home: &Path,
+        claude_plan_account: Option<&str>,
+    ) -> Result<PreparedClaudePaneTurn> {
+        if let Some(reason) = crate::security::level::external_agent_block_reason() {
+            return Err(anyhow!(reason));
+        }
+        // #507: with the kill switch on, Claude panes send nothing either.
+        if crate::legacy_core::security_revocation::kill_switch_on(codex_home) {
+            return Err(anyhow!(
+                crate::legacy_core::security_revocation::KILL_SWITCH_REFUSAL
+            ));
+        }
         let pane = self
             .panes
             .iter_mut()
@@ -380,7 +424,13 @@ impl ClaudePaneRegistry {
             .try_lock_owned()
             .map_err(|_| anyhow!("Claude pane `{}` is already running", pane.title))?;
 
-        let plan = build_claude_command_plan(pane, prompt, codex_home)?;
+        #[cfg(test)]
+        self.prepared_prompts
+            .push((pane_id.to_string(), prompt.clone()));
+        let mut plan = build_claude_command_plan(pane, prompt, codex_home)?;
+        if let Some(deferred) = plan.deferred_claude_plan_auth.as_mut() {
+            deferred.account = claude_plan_account.map(str::to_string);
+        }
         let cancel_token = CancellationToken::new();
         pane.status = ClaudePaneStatus::Running;
         pane.live_turn = Some(ClaudePaneLiveTurn::starting());
@@ -416,11 +466,26 @@ impl ClaudePaneRegistry {
         Ok(())
     }
 
+    /// #554: interrupts the pane's running turn for the security kill
+    /// switch; [`Self::take_kill_switch_stop`] then reports it once.
+    pub(crate) fn interrupt_turn_for_kill_switch(&mut self, pane_id: &str) -> Result<()> {
+        self.interrupt_turn(pane_id)?;
+        self.kill_switch_stopped.insert(pane_id.to_string());
+        Ok(())
+    }
+
+    /// #554: whether the kill switch stopped the pane's turn that just
+    /// ended (asked once, before [`Self::finish_turn`]).
+    pub(crate) fn take_kill_switch_stop(&mut self, pane_id: &str) -> bool {
+        self.kill_switch_stopped.remove(pane_id)
+    }
+
     pub(crate) fn finish_turn(
         &mut self,
         pane_id: &str,
         result: &Result<ClaudePaneTurnOutput, String>,
     ) {
+        self.kill_switch_stopped.remove(pane_id);
         let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == pane_id) else {
             return;
         };
@@ -446,7 +511,10 @@ impl ClaudePaneRegistry {
             pane.latest_turn_status = Some(output.status);
             pane.latest_audit_path = Some(output.audit_path.clone());
             if !output.text.trim().is_empty() {
-                pane.latest_result_message = Some(compact_claude_pane_metadata(&output.text, 240));
+                pane.latest_result_message = Some(compact_claude_pane_metadata(
+                    &output.text,
+                    /*max_chars*/ 240,
+                ));
             }
             pane.next_turn_index = pane.next_turn_index.saturating_add(1);
             if let Err(err) = persist_claude_pane_metadata(pane) {
@@ -457,7 +525,8 @@ impl ClaudePaneRegistry {
 
     pub(crate) fn set_latest_task_message(&mut self, pane_id: &str, task: Option<String>) {
         if let Some(pane) = self.panes.iter_mut().find(|pane| pane.id == pane_id) {
-            pane.latest_task_message = task.map(|task| compact_claude_pane_metadata(&task, 240));
+            pane.latest_task_message =
+                task.map(|task| compact_claude_pane_metadata(&task, /*max_chars*/ 240));
             if let Err(err) = persist_claude_pane_metadata(pane) {
                 tracing::warn!(pane_id = %pane.id, error = %err, "failed to persist Claude pane task metadata");
             }

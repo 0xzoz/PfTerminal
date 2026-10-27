@@ -307,3 +307,172 @@ async fn unicode_output_with_newlines(login: bool) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+/// Debug builds: the keyring-isolation flag reaches agent commands through the
+/// shell tool and unified exec even though its name matches the default
+/// `*KEY*` exclude, so a `corbanu` an agent starts in a test or demo profile
+/// stays off the real OS keyring.
+#[cfg(debug_assertions)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keyring_isolation_reaches_shell_and_unified_exec() -> Result<()> {
+    skip_if_host_windows!(Ok(()));
+    skip_if_no_network!(Ok(()));
+    const NAME: &str = codex_protocol::shell_environment::NO_NATIVE_KEYRING_ENV_VAR;
+    // `just test` (scripts/isolated_rust_tests.py) sets it; other runners that
+    // do not are not keyring-isolated, so there is nothing to check.
+    let Ok(expected) = std::env::var(NAME) else {
+        return Ok(());
+    };
+    for unified in [false, true] {
+        for inherit_none in [false, true] {
+            let harness = shell_command_harness_with(|builder| {
+                builder.with_model("gpt-5.4").with_config(move |config| {
+                    config.use_experimental_unified_exec_tool = unified;
+                    if unified {
+                        config
+                            .features
+                            .enable(codex_features::Feature::UnifiedExec)
+                            .unwrap();
+                    } else {
+                        config
+                            .features
+                            .disable(codex_features::Feature::UnifiedExec)
+                            .unwrap();
+                    }
+                    let policy = &mut config.permissions.shell_environment_policy;
+                    policy.ignore_default_excludes = false;
+                    if inherit_none {
+                        policy.inherit =
+                            codex_protocol::config_types::ShellEnvironmentPolicyInherit::None;
+                    }
+                })
+            })
+            .await?;
+            let command = format!("printf 'flag=%s\\n' \"${NAME}\"");
+            let (tool, args) = if unified {
+                (
+                    "exec_command",
+                    json!({"cmd": command, "login": false, "yield_time_ms": 1000}),
+                )
+            } else {
+                (
+                    "shell_command",
+                    json!({"command": command, "login": false, "timeout_ms": 5000}),
+                )
+            };
+            mount_sse_sequence(
+                harness.server(),
+                vec![
+                    sse(vec![
+                        ev_response_created("resp-flag"),
+                        ev_function_call("flag", tool, &args.to_string()),
+                        ev_completed("resp-flag"),
+                    ]),
+                    sse(vec![
+                        ev_assistant_message("done", "done"),
+                        ev_completed("resp-done"),
+                    ]),
+                ],
+            )
+            .await;
+            harness.submit("Print the isolation flag.").await?;
+            let output = harness.function_call_stdout("flag").await;
+            assert!(
+                output.contains(&format!("flag={expected}")),
+                "{tool} (inherit none: {inherit_none}): {output:?}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tasknode_profile_scope_survives_shell_and_unified_exec_overrides() -> Result<()> {
+    skip_if_host_windows!(Ok(()));
+    skip_if_no_network!(Ok(()));
+    for unified in [false, true] {
+        for profile in [Some("alice"), Some("bob"), None] {
+            let harness = shell_command_harness_with(|builder| {
+                builder.with_model("gpt-5.4").with_config(move |config| {
+                    config.use_experimental_unified_exec_tool = unified;
+                    if unified {
+                        config
+                            .features
+                            .enable(codex_features::Feature::UnifiedExec)
+                            .unwrap();
+                    } else {
+                        config
+                            .features
+                            .disable(codex_features::Feature::UnifiedExec)
+                            .unwrap();
+                    }
+                    config.config_layer_stack = codex_config::ConfigLayerStack::new(
+                        vec![codex_config::ConfigLayerEntry::new(
+                            codex_config::ConfigLayerSource::User {
+                                file: config.codex_home.join("config.toml"),
+                                profile: profile.map(|name| name.parse().unwrap()),
+                            },
+                            toml::Value::Table(Default::default()),
+                        )],
+                        Default::default(),
+                        Default::default(),
+                    )
+                    .unwrap();
+                    config.permissions.shell_environment_policy.r#set.insert(
+                        "CORBANU_TASKNODE_PROFILE".to_string(),
+                        "\"stale\"".to_string(),
+                    );
+                    config
+                        .permissions
+                        .shell_environment_policy
+                        .r#set
+                        .insert("CODEX_HOME".to_string(), "stale-home".to_string());
+                })
+            })
+            .await?;
+            let command = r#"printf '%s\n' "$CORBANU_TASKNODE_PROFILE" "$CODEX_HOME""#;
+            let (tool, args) = if unified {
+                (
+                    "exec_command",
+                    json!({"cmd": command, "login": false, "yield_time_ms": 1000}),
+                )
+            } else {
+                (
+                    "shell_command",
+                    json!({"command": command, "login": false, "timeout_ms": 5000}),
+                )
+            };
+            let mock = mount_sse_sequence(
+                harness.server(),
+                vec![
+                    sse(vec![
+                        ev_response_created("resp-scope"),
+                        ev_function_call("scope", tool, &args.to_string()),
+                        ev_completed("resp-scope"),
+                    ]),
+                    sse(vec![
+                        ev_assistant_message("done", "done"),
+                        ev_completed("resp-done"),
+                    ]),
+                ],
+            )
+            .await;
+            harness
+                .submit("Inspect the inherited Task Node scope.")
+                .await?;
+            let output = harness.function_call_stdout("scope").await;
+            let expected = format!(
+                "{}\n{}",
+                serde_json::to_string(&profile)?,
+                harness.test().config.codex_home.display()
+            );
+            assert!(
+                output.contains(&expected),
+                "{tool}: expected {expected:?}, got {output:?}"
+            );
+            assert!(!output.contains("stale-home"));
+            pretty_assertions::assert_eq!(mock.requests().len(), 2);
+        }
+    }
+    Ok(())
+}

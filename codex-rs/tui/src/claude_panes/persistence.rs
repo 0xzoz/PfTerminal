@@ -93,6 +93,7 @@ pub(crate) fn restore_claude_pane_from_dir(
         .map(|metadata| metadata.title.clone())
         .or_else(|| audit.map(|audit| audit.pane_title.clone()))
         .unwrap_or_else(|| profile.profile().title.to_string());
+    let title = current_profile_title(title, profile);
     let (fallback_role, fallback_nickname) = spawn_identity_from_title(&title, profile);
     let spawn_role = persisted
         .as_ref()
@@ -269,17 +270,13 @@ pub(crate) fn turn_index_from_artifact_name(name: &str) -> Option<u64> {
 }
 
 pub(crate) fn profile_from_audit(audit: &ClaudePaneTurnAudit) -> Option<ClaudeProviderProfileKind> {
-    ClaudeProviderProfileKind::creation_options()
-        .iter()
-        .copied()
+    ClaudeProviderProfileKind::restoration_options()
         .find(|kind| {
             let profile = kind.profile();
             profile.title == audit.provider && profile.provider_model == audit.model
         })
         .or_else(|| {
-            ClaudeProviderProfileKind::creation_options()
-                .iter()
-                .copied()
+            ClaudeProviderProfileKind::restoration_options()
                 .find(|kind| kind.profile().title == audit.provider)
         })
         .or_else(|| legacy_profile_from_audit(audit))
@@ -289,7 +286,9 @@ pub(crate) fn legacy_profile_from_audit(
     audit: &ClaudePaneTurnAudit,
 ) -> Option<ClaudeProviderProfileKind> {
     match audit.provider.as_str() {
-        "Claude Code - Claude Plan" => Some(ClaudeProviderProfileKind::ClaudePlan),
+        "Claude Code - Claude Plan" | "Claude Code - Opus 5 Claude Plan" => {
+            Some(ClaudeProviderProfileKind::ClaudePlan)
+        }
         _ => None,
     }
 }
@@ -305,9 +304,7 @@ pub(crate) fn profile_from_settings(artifact_dir: &Path) -> Option<ClaudeProvide
                 .pointer("/env/ANTHROPIC_MODEL")
                 .and_then(Value::as_str)
         })?;
-    ClaudeProviderProfileKind::creation_options()
-        .iter()
-        .copied()
+    ClaudeProviderProfileKind::restoration_options()
         .find(|kind| kind.profile().provider_model == model)
 }
 
@@ -347,10 +344,22 @@ pub(crate) fn title_prefix_without_profile_suffix(
     if let Some(prefix) = title.strip_suffix(&suffix) {
         return Some(prefix);
     }
-    if profile == ClaudeProviderProfileKind::ClaudePlan {
-        return title.strip_suffix(" - Claude Plan");
+    profile
+        .legacy_status_model_labels()
+        .iter()
+        .find_map(|label| title.strip_suffix(&format!(" - {label}")))
+}
+
+/// Replaces a retired label that named a model the pane no longer serves
+/// with the current one; other titles are returned unchanged.
+pub(crate) fn current_profile_title(title: String, profile: ClaudeProviderProfileKind) -> String {
+    match profile
+        .relabelled_status_model_label()
+        .and_then(|label| title.strip_suffix(&format!(" - {label}")))
+    {
+        Some(prefix) => format!("{prefix} - {}", profile.status_model_label()),
+        None => title,
     }
-    None
 }
 
 pub(crate) fn spawn_role_persisted_value(role: SpawnRole) -> String {
@@ -438,7 +447,7 @@ pub(crate) fn latest_result_message_from_artifact(path: &Path) -> Option<String>
             && let Some(result) = value.get("result").and_then(Value::as_str)
             && !result.trim().is_empty()
         {
-            latest = Some(compact_claude_pane_metadata(result, 240));
+            latest = Some(compact_claude_pane_metadata(result, /*max_chars*/ 240));
         }
     }
     latest

@@ -61,6 +61,10 @@ mod frame_requester;
 #[cfg(unix)]
 mod job_control;
 mod keyboard_modes;
+mod panic_diagnostics;
+#[cfg(all(test, unix))]
+#[path = "tui/terminal_ownership_tests.rs"]
+mod terminal_ownership_tests;
 mod terminal_stderr;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -77,6 +81,7 @@ pub(crate) struct InitializedTerminal {
     pub(crate) terminal: Terminal,
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) stderr_guard: terminal_stderr::TerminalStderrGuard,
+    pub(crate) restore_guard: TerminalRestoreGuard,
 }
 
 pub(crate) fn running_in_vscode_terminal() -> bool {
@@ -211,12 +216,20 @@ mod tests {
     }
 }
 
-pub fn set_modes() -> Result<()> {
+enum TerminalOwnership<'a> {
+    Existing,
+    Acquire(&'a mut TerminalRestoreGuard),
+}
+
+fn set_modes_with_ownership(ownership: TerminalOwnership<'_>) -> Result<()> {
     ensure_virtual_terminal_processing()?;
 
     execute!(stdout(), EnableBracketedPaste)?;
 
     enable_raw_mode()?;
+    if let TerminalOwnership::Acquire(guard) = ownership {
+        guard.activate();
+    }
     #[cfg(windows)]
     windows_console::set_input_record_mode()?;
     // Enable keyboard enhancement flags so modifiers for keys like Enter are disambiguated.
@@ -232,6 +245,10 @@ pub fn set_modes() -> Result<()> {
     #[cfg(windows)]
     let _ = execute!(stdout(), DisableFocusChange);
     Ok(())
+}
+
+pub fn set_modes() -> Result<()> {
+    set_modes_with_ownership(TerminalOwnership::Existing)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -351,6 +368,11 @@ pub(super) fn reapply_raw_mode_after_resume() -> Result<()> {
 pub fn restore_after_exit() -> Result<()> {
     let mut first_error =
         restore_common(RawModeRestore::Disable, KeyboardRestore::ResetAfterExit).err();
+    // Discard keystrokes the TUI never read, such as the rest of a typed or
+    // non-bracketed pasted secret, so they never reach the parent shell (#461).
+    if stdin().is_terminal() {
+        flush_terminal_input_buffer();
+    }
     if let Err(err) = terminal_stderr::finish() {
         first_error.get_or_insert(err);
     }
@@ -358,6 +380,54 @@ pub fn restore_after_exit() -> Result<()> {
     match first_error {
         Some(err) => Err(err),
         None => Ok(()),
+    }
+}
+
+pub(crate) fn configure_panic_diagnostics(log_dir: std::path::PathBuf) {
+    if let Err(error) = panic_diagnostics::configure(log_dir) {
+        tracing::warn!(%error, "failed to configure best-effort TUI panic diagnostics");
+    }
+}
+
+pub(crate) struct TerminalRestoreGuard {
+    active: bool,
+}
+
+impl TerminalRestoreGuard {
+    fn new() -> Self {
+        Self { active: false }
+    }
+
+    fn activate(&mut self) {
+        debug_assert!(!self.active, "terminal ownership activated twice");
+        self.active = true;
+        panic_diagnostics::terminal_acquired();
+    }
+
+    #[cfg_attr(debug_assertions, allow(dead_code))]
+    pub(crate) fn restore(&mut self) -> color_eyre::Result<()> {
+        if self.active {
+            panic_diagnostics::record_owner_drop();
+            restore_after_exit()?;
+            self.active = false;
+            panic_diagnostics::terminal_released();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn restore_silently(&mut self) {
+        if self.active {
+            panic_diagnostics::record_owner_drop();
+            crate::restore();
+            self.active = false;
+            panic_diagnostics::terminal_released();
+        }
+    }
+}
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        self.restore_silently();
     }
 }
 
@@ -413,7 +483,8 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
     if !stdout().is_terminal() {
         return Err(std::io::Error::other("stdout is not a terminal"));
     }
-    set_modes()?;
+    let mut restore_guard = TerminalRestoreGuard::new();
+    set_modes_with_ownership(TerminalOwnership::Acquire(&mut restore_guard))?;
 
     flush_terminal_input_buffer();
 
@@ -494,6 +565,7 @@ pub(crate) fn init() -> Result<InitializedTerminal> {
         terminal: tui,
         enhanced_keys_supported,
         stderr_guard,
+        restore_guard,
     })
 }
 
@@ -534,10 +606,24 @@ fn probe_windows_default_colors() {
     }
 }
 
-fn set_panic_hook() {
+pub(super) fn set_panic_hook() {
     let hook = panic::take_hook();
     panic::set_hook(Box::new(move |panic_info| {
-        let _ = restore_after_exit(); // ignore any errors as we are already failing
+        // Scoped callbacks recover inside Vault. Do not format their payload or
+        // tear down the terminal for a panic that will not exit the application.
+        if codex_vault::scoped_credential_callback_active() {
+            return;
+        }
+        let panic_is_on_owner_thread = panic_diagnostics::panic_is_on_terminal_owner_thread();
+        panic_diagnostics::record_panic(panic_info, panic_is_on_owner_thread);
+        // A panic on the thread that acquired terminal ownership is escaping the
+        // foreground TUI. Restore before the previous hook renders its report so
+        // macOS stderr is no longer suppressed and raw terminals handle newlines
+        // normally. Panics in Tokio tasks and background threads keep the terminal
+        // untouched because their unwind is contained by their task/thread boundary.
+        if panic_is_on_owner_thread {
+            let _ = restore_after_exit();
+        }
         hook(panic_info);
     }));
 }
@@ -653,7 +739,7 @@ impl Tui {
             /*enhanced_keys_supported*/ false,
             stderr_guard,
         );
-        tui.set_alt_screen_enabled(false);
+        tui.set_alt_screen_enabled(/*enabled*/ false);
         Ok(tui)
     }
 

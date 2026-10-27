@@ -5,6 +5,7 @@ use anyhow::Context;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::THREAD_UNMATERIALIZED_ERROR_CODE;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
@@ -308,11 +309,10 @@ impl BridgeRuntime {
 fn thread_read_unavailable_before_first_message(method: &str, error: &JSONRPCErrorError) -> bool {
     method == "thread/read"
         && error.code == -32600
-        && error.message.starts_with("thread/read failed:")
-        && error.message.contains("thread")
-        && error.message.contains("not materialized yet")
-        && error.message.contains("includeTurns")
-        && error.message.contains("before first user message")
+        && error.data.as_ref().and_then(|data| data.get("code"))
+            == Some(&serde_json::Value::String(
+                THREAD_UNMATERIALIZED_ERROR_CODE.to_string(),
+            ))
 }
 
 fn turn_items_contain_client_message<'a>(

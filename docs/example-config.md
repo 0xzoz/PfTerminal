@@ -6,10 +6,10 @@ Create or edit:
 $CODEX_HOME/config.toml
 ```
 
-Recommended home for PFTerminal:
+Recommended home for Corbanu Terminal:
 
 ```bash
-export CODEX_HOME="${PFTERMINAL_HOME:-$HOME/.pfterminal}"
+export CORBANU_HOME="$HOME/.corbanu"
 ```
 
 ## Ambient Default
@@ -25,7 +25,7 @@ Store the key through onboarding or `/vault`; temporary shell fallback:
 export AMBIENT_API_KEY="..."
 ```
 
-## Z.AI Coding Plan
+## Z.AI API (pay per use)
 
 ```toml
 model_provider = "zai"
@@ -97,7 +97,7 @@ export AI_GATEWAY_API_KEY="..."
 model_provider = "zai"
 model = "glm-5.2"
 sandbox_mode = "workspace-write"
-log_dir = "./.pfterminal-log"
+log_dir = "./.corbanu-log"
 ```
 
 Provider credentials do not belong in this file for normal use. Store them in

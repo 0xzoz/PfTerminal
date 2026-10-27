@@ -20,6 +20,10 @@ use codex_model_provider_info::ANTHROPIC_PROVIDER_ID;
 #[cfg(test)]
 use codex_model_provider_info::BASETEN_DEFAULT_MODEL;
 use codex_model_provider_info::BASETEN_PROVIDER_ID;
+use codex_model_provider_info::CLAUDE_FABLE_5_1_MODEL;
+#[cfg(test)]
+use codex_model_provider_info::CLAUDE_FABLE_5_1_PLAN_MODEL;
+use codex_model_provider_info::CLAUDE_FABLE_5_MODEL;
 #[cfg(test)]
 use codex_model_provider_info::CLAUDE_FABLE_5_PLAN_MODEL;
 #[cfg(test)]
@@ -27,8 +31,16 @@ use codex_model_provider_info::CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL;
 #[cfg(test)]
 use codex_model_provider_info::CLAUDE_PLAN_MODEL;
 use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
+use codex_model_provider_info::CORBANU_API_DEEPSEEK_V4_1_FLASH_MODEL;
+use codex_model_provider_info::CORBANU_API_DEEPSEEK_V4_PRO_MODEL;
+use codex_model_provider_info::CORBANU_API_GLM_5_3_FLASH_MODEL;
+use codex_model_provider_info::CORBANU_API_GLM_5_3_MODEL;
+use codex_model_provider_info::CORBANU_API_GPT_5_6_LUNA_MODEL;
+use codex_model_provider_info::CORBANU_API_GPT_5_6_SOL_MODEL;
+use codex_model_provider_info::CORBANU_API_KIMI_K3_MODEL;
 #[cfg(test)]
 use codex_model_provider_info::DEEPSEEK_DEFAULT_MODEL;
+use codex_model_provider_info::DEEPSEEK_PRO_MODEL;
 use codex_model_provider_info::DEEPSEEK_PROVIDER_ID;
 use codex_model_provider_info::KIMI_CODE_PROVIDER_ID;
 #[cfg(test)]
@@ -36,13 +48,21 @@ use codex_model_provider_info::META_DEFAULT_MODEL;
 use codex_model_provider_info::META_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::OPENROUTER_ANTHROPIC_PROVIDER_ID;
+#[cfg(test)]
+use codex_model_provider_info::OPENROUTER_DEEPSEEK_V4_PRO_0813_MODEL;
+#[cfg(test)]
+use codex_model_provider_info::OPENROUTER_GROK_4_6_MODEL;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
-use codex_model_provider_info::PFTERMINAL_PLAN_API_KEY_ENV_VAR;
+use codex_model_provider_info::PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID;
 use codex_model_provider_info::VERCEL_ANTHROPIC_FAST_PROVIDER_ID;
 use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
 use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
+use codex_model_provider_info::VERCEL_GLM_5_3_FLASH_MODEL;
+use codex_model_provider_info::VERCEL_GLM_5_3_MODEL;
+use codex_model_provider_info::VERCEL_KIMI_K3_MODEL;
 use codex_model_provider_info::VERCEL_PROVIDER_ID;
+use codex_model_provider_info::ZAI_ANTHROPIC_PROVIDER_ID;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_model_provider_info::ZAI_PROVIDER_ID;
 #[cfg(test)]
@@ -62,10 +82,97 @@ const OPENROUTER_DEEPSEEK_V4_FLASH_0731_MODEL: &str = "deepseek/deepseek-v4-flas
 const OPENROUTER_TENCENT_HY3_FREE_MODEL: &str = "tencent/hy3:free";
 #[cfg(test)]
 const OPENROUTER_KIMI_K3_MODEL: &str = "moonshotai/kimi-k3";
-const OPENAI_GPT_5_5_MODEL: &str = "gpt-5.5";
 const OPENAI_GPT_5_6_SOL_MODEL: &str = "gpt-5.6-sol";
-const OPENAI_GPT_5_6_TERRA_MODEL: &str = "gpt-5.6-terra";
 const OPENAI_GPT_5_6_LUNA_MODEL: &str = "gpt-5.6-luna";
+
+#[derive(Clone, Copy)]
+struct CorbanuApiModelTemplate {
+    source_model: &'static str,
+    public_model: &'static str,
+    display_name: Option<&'static str>,
+    description: Option<&'static str>,
+    provider_id: &'static str,
+    is_default: bool,
+}
+
+const CORBANU_API_MODEL_TEMPLATES: [CorbanuApiModelTemplate; 8] = [
+    CorbanuApiModelTemplate {
+        source_model: VERCEL_GLM_5_3_FLASH_MODEL,
+        public_model: CORBANU_API_GLM_5_3_FLASH_MODEL,
+        display_name: Some("GLM 5.3 Flash (Recommended)"),
+        description: Some(
+            "At cost: $0.15/M input · $0.03/M cache read · $0.15/M cache write · $0.50/M output. Third-party inference.",
+        ),
+        provider_id: PFTERMINAL_PLAN_PROVIDER_ID,
+        is_default: true,
+    },
+    CorbanuApiModelTemplate {
+        source_model: AMBIENT_DEFAULT_MODEL,
+        public_model: AMBIENT_DEFAULT_MODEL,
+        display_name: None,
+        description: None,
+        provider_id: PFTERMINAL_PLAN_PROVIDER_ID,
+        is_default: false,
+    },
+    CorbanuApiModelTemplate {
+        source_model: VERCEL_GLM_5_3_MODEL,
+        public_model: CORBANU_API_GLM_5_3_MODEL,
+        display_name: Some("GLM 5.3"),
+        description: Some(
+            "Uses balance faster. At cost: $1.40/M input · $0.14/M cache read · $1.40/M cache write · $4.40/M output. Third-party inference.",
+        ),
+        provider_id: PFTERMINAL_PLAN_PROVIDER_ID,
+        is_default: false,
+    },
+    CorbanuApiModelTemplate {
+        source_model: OPENAI_GPT_5_6_LUNA_MODEL,
+        public_model: CORBANU_API_GPT_5_6_LUNA_MODEL,
+        display_name: Some("GPT-5.6 Luna (xhigh)"),
+        description: Some(
+            "At cost: $0.20/M input · $0.02/M cache read · $0.25/M cache write · $1.20/M output. At 272K+ context: $0.40/M · $0.04/M · $0.50/M · $1.80/M. Third-party inference.",
+        ),
+        provider_id: PFTERMINAL_PLAN_PROVIDER_ID,
+        is_default: false,
+    },
+    CorbanuApiModelTemplate {
+        source_model: OPENAI_GPT_5_6_SOL_MODEL,
+        public_model: CORBANU_API_GPT_5_6_SOL_MODEL,
+        display_name: Some("GPT-5.6 Sol"),
+        description: Some(
+            "At cost: $2.00/M input · $0.20/M cache read · $2.50/M cache write · $10.00/M output. At 272K+ context: $4.00/M · $0.40/M · $5.00/M · $15.00/M. Third-party inference.",
+        ),
+        provider_id: PFTERMINAL_PLAN_PROVIDER_ID,
+        is_default: false,
+    },
+    CorbanuApiModelTemplate {
+        source_model: VERCEL_KIMI_K3_MODEL,
+        public_model: CORBANU_API_KIMI_K3_MODEL,
+        display_name: Some("Kimi K3"),
+        description: Some(
+            "At cost: $3.00/M input · $0.30/M cache read · $3.00/M cache write · $15.00/M output. Third-party inference.",
+        ),
+        provider_id: PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID,
+        is_default: false,
+    },
+    CorbanuApiModelTemplate {
+        source_model: DEEPSEEK_PRO_MODEL,
+        public_model: CORBANU_API_DEEPSEEK_V4_PRO_MODEL,
+        display_name: Some("DeepSeek V4 Pro"),
+        description: Some(
+            "At cost: $0.02175/M input · $0/M cache read · $0.00018125/M cache write · $0.0435/M output. Third-party inference.",
+        ),
+        provider_id: PFTERMINAL_PLAN_PROVIDER_ID,
+        is_default: false,
+    },
+    CorbanuApiModelTemplate {
+        source_model: CORBANU_API_DEEPSEEK_V4_1_FLASH_MODEL,
+        public_model: CORBANU_API_DEEPSEEK_V4_1_FLASH_MODEL,
+        display_name: None,
+        description: None,
+        provider_id: PFTERMINAL_PLAN_PROVIDER_ID,
+        is_default: false,
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ModelSelectionPurpose {
@@ -92,9 +199,12 @@ impl ModelSelectionPurpose {
     fn provider_subtitle(&self, provider_subtitle: &str) -> String {
         match self {
             Self::Session => provider_subtitle.to_string(),
-            Self::CodexPane { .. } => format!("New PFTerminal pane - {provider_subtitle}"),
+            Self::CodexPane { .. } => format!("New Corbanu Terminal pane - {provider_subtitle}"),
             Self::SpawnAgent { role, .. } => {
-                format!("PFTerminal {} pane - {provider_subtitle}", role.label())
+                format!(
+                    "Corbanu Terminal {} pane - {provider_subtitle}",
+                    role.label()
+                )
             }
         }
     }
@@ -107,7 +217,7 @@ struct ModelPickerProviderGroup {
     subtitle: &'static str,
 }
 
-const MODEL_PICKER_PROVIDER_GROUPS: [ModelPickerProviderGroup; 13] = [
+const MODEL_PICKER_PROVIDER_GROUPS: [ModelPickerProviderGroup; 14] = [
     ModelPickerProviderGroup {
         id: "openai",
         label: "OpenAI",
@@ -120,8 +230,8 @@ const MODEL_PICKER_PROVIDER_GROUPS: [ModelPickerProviderGroup; 13] = [
     },
     ModelPickerProviderGroup {
         id: "pfterminal-plan",
-        label: "PfTerminal Plan",
-        subtitle: "USDC-funded PfTerminal plan",
+        label: "Corbanu API",
+        subtitle: "At-cost, wallet-funded API balance",
     },
     ModelPickerProviderGroup {
         id: "kimi-code",
@@ -131,7 +241,7 @@ const MODEL_PICKER_PROVIDER_GROUPS: [ModelPickerProviderGroup; 13] = [
     ModelPickerProviderGroup {
         id: "zai",
         label: "Z.AI",
-        subtitle: "Z.AI coding plan",
+        subtitle: "Z.AI API key",
     },
     ModelPickerProviderGroup {
         id: "deepseek",
@@ -171,13 +281,41 @@ const MODEL_PICKER_PROVIDER_GROUPS: [ModelPickerProviderGroup; 13] = [
     ModelPickerProviderGroup {
         id: "gpu",
         label: "Rented GPU",
-        subtitle: "Authenticated PFTerminal rental",
+        subtitle: "Authenticated Corbanu Terminal rental",
+    },
+    ModelPickerProviderGroup {
+        id: "other",
+        label: "Other",
+        subtitle: "Configured custom providers",
     },
 ];
 
 const ULTRA_REASONING_CONCURRENCY_WARNING_THRESHOLD: usize = 8;
 
 impl ChatWidget {
+    pub(crate) fn corbanu_api_presets(presets: &[ModelPreset]) -> Vec<ModelPreset> {
+        CORBANU_API_MODEL_TEMPLATES
+            .into_iter()
+            .filter_map(|template| {
+                let mut preset = presets
+                    .iter()
+                    .find(|preset| preset.model == template.source_model)?
+                    .clone();
+                preset.id = template.public_model.to_string();
+                preset.model = template.public_model.to_string();
+                preset.provider_id = Some(template.provider_id.to_string());
+                if let Some(display_name) = template.display_name {
+                    preset.display_name = display_name.to_string();
+                }
+                if let Some(description) = template.description {
+                    preset.description = description.to_string();
+                }
+                preset.is_default = template.is_default;
+                Some(preset)
+            })
+            .collect()
+    }
+
     /// Open a popup to choose a quick auto model. Selecting "All models"
     /// opens the full picker with every available preset.
     pub(crate) fn open_model_popup(&mut self) {
@@ -215,7 +353,8 @@ impl ChatWidget {
     }
 
     fn model_menu_warning_line(&self) -> Option<Line<'static>> {
-        let base_url = self.custom_openai_base_url()?;
+        // The configured URL can carry a key in its query or userinfo.
+        let base_url = codex_http_client::redact_url(&self.custom_openai_base_url()?);
         let warning = format!(
             "Warning: OpenAI base URL is overridden to {base_url}. Selecting models may not be supported or work properly."
         );
@@ -244,7 +383,11 @@ impl ChatWidget {
     pub(crate) fn open_model_popup_with_presets(&mut self, presets: Vec<ModelPreset>) {
         let presets: Vec<ModelPreset> = presets
             .into_iter()
-            .filter(Self::show_in_pfterminal_model_picker)
+            .filter(|preset| {
+                Self::show_in_pfterminal_model_picker(preset)
+                    && (self.model_catalog.preset_is_selectable(preset)
+                        || self.another_route_is_selectable(preset))
+            })
             .collect();
 
         let current_model = self.current_model();
@@ -360,9 +503,12 @@ impl ChatWidget {
 
     fn resolved_model_provider(&self, model: &str) -> Option<String> {
         if model == self.current_model()
-            && self.config.model_provider_id == PFTERMINAL_PLAN_PROVIDER_ID
+            && matches!(
+                self.config.model_provider_id.as_str(),
+                PFTERMINAL_PLAN_PROVIDER_ID | PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID
+            )
         {
-            return Some(PFTERMINAL_PLAN_PROVIDER_ID.to_string());
+            return Some(self.config.model_provider_id.clone());
         }
         self.model_catalog
             .provider_for_model(model)
@@ -393,23 +539,44 @@ impl ChatWidget {
             .collect();
 
         if self.pfterminal_plan_key_is_linked() {
-            let paid_models = presets
+            let mut corbanu_presets = Self::corbanu_api_presets(&presets);
+            let fable_presets = presets
                 .iter()
                 .filter(|preset| {
                     matches!(
                         preset.model.as_str(),
-                        AMBIENT_DEFAULT_MODEL | AMBIENT_KIMI_K2_7_CODE_MODEL
+                        CLAUDE_FABLE_5_1_MODEL | CLAUDE_FABLE_5_MODEL
                     )
                 })
                 .cloned()
                 .map(|mut preset| {
-                    preset.provider_id = Some(PFTERMINAL_PLAN_PROVIDER_ID.to_string());
-                    preset.is_default = preset.model == AMBIENT_DEFAULT_MODEL;
+                    preset.provider_id = Some(PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID.to_string());
+                    preset.description = format!(
+                        "{} Non-private: served through a third-party provider.",
+                        preset.description
+                    )
+                    .trim_start()
+                    .to_string();
+                    preset.is_default = false;
                     preset
                 })
                 .collect::<Vec<_>>();
-            presets.extend(paid_models);
+            corbanu_presets.extend(fable_presets);
+            presets.extend(corbanu_presets);
         }
+        let mut presets = self.with_model_route_rows(presets);
+        presets.retain(|preset| self.model_catalog.preset_is_selectable(preset));
+
+        // Runtime and public API catalog entries may describe the same route.
+        // Keep distinct providers, but show each model/provider pair once.
+        let mut seen = HashSet::new();
+        presets.retain(|preset| {
+            let provider = preset
+                .provider_id
+                .clone()
+                .or_else(|| Self::model_provider_for_selection(&preset.model));
+            seen.insert((preset.model.clone(), provider))
+        });
 
         if presets.is_empty() {
             self.add_info_message(
@@ -419,10 +586,19 @@ impl ChatWidget {
             return;
         }
 
+        // #653: a default model's other connections stay next to it.
+        let default_route_models = presets
+            .iter()
+            .filter(|preset| {
+                preset.is_default
+                    && !codex_model_provider_info::model_routes(&preset.model).is_empty()
+            })
+            .map(|preset| preset.model.clone())
+            .collect::<HashSet<_>>();
         let mut provider_items = MODEL_PICKER_PROVIDER_GROUPS
             .into_iter()
             .map(|group| (group, Vec::new()))
-            .collect::<Vec<(ModelPickerProviderGroup, Vec<SelectionItem>)>>();
+            .collect::<Vec<(ModelPickerProviderGroup, Vec<(bool, SelectionItem)>)>>();
         for preset in presets.into_iter() {
             let provider = preset
                 .provider_id
@@ -437,16 +613,24 @@ impl ChatWidget {
             else {
                 continue;
             };
-            items.push(self.model_picker_item(preset, purpose.clone()));
+            let leads = preset.is_default || default_route_models.contains(&preset.model);
+            items.push((leads, self.model_picker_item(preset, purpose.clone())));
         }
-        for (_, items) in &mut provider_items {
-            items.sort_by_key(|item| !item.is_default);
-        }
+        let mut provider_items = provider_items
+            .into_iter()
+            .map(|(group, mut items)| {
+                items.sort_by_key(|(leads, _)| !leads);
+                (group, items.into_iter().map(|(_, item)| item).collect())
+            })
+            .collect::<Vec<(ModelPickerProviderGroup, Vec<SelectionItem>)>>();
         provider_items.retain(|(_, items)| !items.is_empty());
 
         let (items, tabs, initial_tab_id, footer_hint) = if provider_items.len() > 1 {
             let selected_model = purpose.selected_model(self.current_model());
-            let current_provider = self.resolved_model_provider(selected_model);
+            let current_provider = match purpose {
+                ModelSelectionPurpose::Session => Some(self.config.model_provider_id.clone()),
+                _ => self.resolved_model_provider(selected_model),
+            };
             let current_group = Self::model_picker_provider_group(current_provider.as_deref());
             let initial_tab_id = current_group
                 .filter(|group| {
@@ -484,7 +668,7 @@ impl ChatWidget {
         let header = if tabs.is_empty() {
             self.model_menu_header(
                 "Select Model and Effort",
-                "Access hidden models by running pfterminal -m <model_name> or in your config.toml",
+                "Access hidden models by running corbanu -m <model_name> or in your config.toml",
             )
         } else {
             Box::new(())
@@ -505,10 +689,27 @@ impl ChatWidget {
         purpose: ModelSelectionPurpose,
     ) -> SelectionItem {
         let description = Self::model_description_for_preset(&preset);
-        let is_current = preset.model.as_str() == purpose.selected_model(self.current_model());
+        let selected_model = purpose.selected_model(self.current_model());
+        let selected_provider = match &purpose {
+            ModelSelectionPurpose::Session => Some(self.config.model_provider_id.clone()),
+            _ => self.resolved_model_provider(selected_model),
+        };
+        let preset_provider = preset
+            .provider_id
+            .clone()
+            .or_else(|| Self::model_provider_for_selection(&preset.model));
+        let is_current = preset.model == selected_model && preset_provider == selected_provider;
         let direct_select = preset.supported_reasoning_efforts.len() <= 1;
         let preset_for_action = preset.clone();
-        let display_name = Self::model_display_label_for_preset(&preset);
+        let mut display_name = Self::model_display_label_for_preset(&preset);
+        // The Other tab can contain identical model IDs from distinct routes.
+        // Keep their provider identity visible before the user selects one.
+        if Self::model_picker_provider_group(preset_provider.as_deref())
+            .is_some_and(|group| group.id == "other")
+            && let Some(provider) = preset_provider.as_deref()
+        {
+            display_name = format!("{display_name} via {provider}");
+        }
         let model = preset.model.clone();
         let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
             let preset_for_event = preset_for_action.clone();
@@ -530,7 +731,7 @@ impl ChatWidget {
         }
     }
 
-    fn model_display_label_for_preset(preset: &ModelPreset) -> String {
+    pub(super) fn model_display_label_for_preset(preset: &ModelPreset) -> String {
         let display_name = preset.display_name.trim();
         if display_name.is_empty() {
             preset.model.clone()
@@ -557,53 +758,18 @@ impl ChatWidget {
     }
 
     pub(crate) fn show_in_pfterminal_model_picker(preset: &ModelPreset) -> bool {
-        if !preset.show_in_picker {
-            return false;
-        }
-
-        let provider = preset
-            .provider_id
-            .clone()
-            .or_else(|| Self::model_provider_for_selection(&preset.model));
-        match provider.as_deref() {
-            Some(OPENAI_PROVIDER_ID) => Self::is_openai_coding_plan_model(&preset.model),
-            Some(
-                AMBIENT_PROVIDER_ID
-                | PFTERMINAL_PLAN_PROVIDER_ID
-                | KIMI_CODE_PROVIDER_ID
-                | CLAUDE_PLAN_PROVIDER_ID
-                | ANTHROPIC_PROVIDER_ID
-                | ZAI_PROVIDER_ID
-                | DEEPSEEK_PROVIDER_ID
-                | BASETEN_PROVIDER_ID
-                | OPENROUTER_PROVIDER_ID
-                | OPENROUTER_ANTHROPIC_PROVIDER_ID
-                | META_PROVIDER_ID
-                | VERCEL_PROVIDER_ID
-                | VERCEL_ANTHROPIC_FAST_PROVIDER_ID,
-            ) => true,
-            Some(provider) if provider.starts_with("gpu-") => true,
-            _ => false,
-        }
-    }
-
-    fn is_openai_coding_plan_model(model: &str) -> bool {
-        matches!(
-            model.trim(),
-            OPENAI_GPT_5_5_MODEL
-                | OPENAI_GPT_5_6_SOL_MODEL
-                | OPENAI_GPT_5_6_TERRA_MODEL
-                | OPENAI_GPT_5_6_LUNA_MODEL
-        )
+        preset.show_in_picker
     }
 
     fn model_picker_provider_group(provider: Option<&str>) -> Option<ModelPickerProviderGroup> {
         let group_id = match provider {
             Some(OPENAI_PROVIDER_ID) => "openai",
             Some(AMBIENT_PROVIDER_ID) => "ambient",
-            Some(PFTERMINAL_PLAN_PROVIDER_ID) => "pfterminal-plan",
+            Some(PFTERMINAL_PLAN_PROVIDER_ID | PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID) => {
+                "pfterminal-plan"
+            }
             Some(KIMI_CODE_PROVIDER_ID) => "kimi-code",
-            Some(ZAI_PROVIDER_ID) => "zai",
+            Some(ZAI_PROVIDER_ID | ZAI_ANTHROPIC_PROVIDER_ID) => "zai",
             Some(DEEPSEEK_PROVIDER_ID) => "deepseek",
             Some(CLAUDE_PLAN_PROVIDER_ID) => "claude-plan",
             Some(ANTHROPIC_PROVIDER_ID) => "anthropic",
@@ -612,7 +778,8 @@ impl ChatWidget {
             Some(BASETEN_PROVIDER_ID) => "baseten",
             Some(OPENROUTER_PROVIDER_ID | OPENROUTER_ANTHROPIC_PROVIDER_ID) => "openrouter",
             Some(provider) if provider.starts_with("gpu-") => "gpu",
-            _ => return None,
+            Some(_) => "other",
+            None => return None,
         };
         MODEL_PICKER_PROVIDER_GROUPS
             .into_iter()
@@ -620,13 +787,10 @@ impl ChatWidget {
     }
 
     pub(crate) fn pfterminal_plan_key_is_linked(&self) -> bool {
-        codex_login::provider_api_key_from_auth_storage(
-            &self.config.codex_home,
-            PFTERMINAL_PLAN_API_KEY_ENV_VAR,
-            self.config.cli_auth_credentials_store_mode,
-            self.config.auth_keyring_backend_kind(),
-        )
-        .is_ok_and(|key| key.is_some_and(|value| !value.trim().is_empty()))
+        self.model_catalog.has_provider_policy()
+            && self
+                .model_catalog
+                .provider_is_selectable(PFTERMINAL_PLAN_PROVIDER_ID, AMBIENT_DEFAULT_MODEL)
     }
 
     fn model_selection_actions(
@@ -671,6 +835,40 @@ impl ChatWidget {
                 )));
             }
         })]
+    }
+
+    /// A model and effort chosen for a new pane or spawned agent go to that
+    /// pane; they never change or persist the session model.
+    fn send_pane_selection(
+        tx: &AppEventSender,
+        purpose: &ModelSelectionPurpose,
+        provider: Option<String>,
+        model: String,
+        effort: Option<ReasoningEffortConfig>,
+    ) {
+        match purpose {
+            // The session's own choice goes through `model_selection_actions`.
+            ModelSelectionPurpose::Session => {}
+            ModelSelectionPurpose::CodexPane { .. } => {
+                tx.send(AppEvent::OpenCodexPaneNamePrompt {
+                    provider,
+                    model,
+                    effort,
+                });
+            }
+            ModelSelectionPurpose::SpawnAgent {
+                role,
+                parent_node_id,
+                ..
+            } => tx.send(AppEvent::CreateSpawnAgent {
+                role: *role,
+                parent_node_id: parent_node_id.clone(),
+                agent_nickname: None,
+                provider,
+                model,
+                effort,
+            }),
+        }
     }
 
     fn should_persist_model_provider(provider: Option<&str>) -> bool {
@@ -890,7 +1088,7 @@ impl ChatWidget {
                                 effort: selected_effort,
                             });
                     } else {
-                        self.apply_model_and_effort(selected_model, selected_effort);
+                        self.apply_model_and_effort(selected_model, provider, selected_effort);
                     }
                 }
                 ModelSelectionPurpose::CodexPane { .. } => {
@@ -921,11 +1119,16 @@ impl ChatWidget {
             .then(|| default_effort.clone());
 
         let model_slug = preset.model.to_string();
-        let is_current_model = self.current_model() == preset.model.as_str();
+        let is_session_model = self.current_model() == preset.model.as_str();
+        // #653: another connection of the session's model keeps its effort
+        // highlighted but is not the current choice.
+        let is_current_model = is_session_model
+            && (codex_model_provider_info::model_routes(&preset.model).is_empty()
+                || provider.as_deref() == Some(self.config.model_provider_id.as_str()));
         let highlight_choice = match &purpose {
             ModelSelectionPurpose::SpawnAgent { .. } => spawn_default_effort,
             ModelSelectionPurpose::CodexPane { .. } => default_choice.clone(),
-            ModelSelectionPurpose::Session if is_current_model => {
+            ModelSelectionPurpose::Session if is_session_model => {
                 if in_plan_mode {
                     self.config
                         .plan_mode_reasoning_effort
@@ -942,7 +1145,20 @@ impl ChatWidget {
         let selection_choice = highlight_choice.clone().or_else(|| default_choice.clone());
         let initial_selected_idx = choices
             .iter()
-            .position(|choice| Some(choice) == selection_choice.as_ref());
+            .position(|choice| Some(choice) == selection_choice.as_ref())
+            .or_else(|| {
+                // #653: another connection of the session's model keeps an
+                // advanced effort (the session's, or the model default it runs
+                // on) preselected under "More reasoning…", which follows the
+                // standard choices.
+                (is_session_model
+                    && !is_current_model
+                    && !advanced_choices.is_empty()
+                    && Self::is_advanced_reasoning_effort(
+                        highlight_choice.as_ref().unwrap_or(&default_effort),
+                    ))
+                .then_some(choices.len())
+            });
         let mut items: Vec<SelectionItem> = Vec::new();
         for choice in choices.iter() {
             let effort = choice.clone();
@@ -1002,25 +1218,14 @@ impl ChatWidget {
                             }
                         }
                     }
-                    ModelSelectionPurpose::CodexPane { .. } => {
-                        tx.send(AppEvent::OpenCodexPaneNamePrompt {
-                            provider: provider_for_action.clone(),
-                            model: model_for_action.clone(),
-                            effort: choice_effort.clone(),
-                        });
-                    }
-                    ModelSelectionPurpose::SpawnAgent {
-                        role,
-                        parent_node_id,
-                        ..
-                    } => tx.send(AppEvent::CreateSpawnAgent {
-                        role: *role,
-                        parent_node_id: parent_node_id.clone(),
-                        agent_nickname: None,
-                        provider: provider_for_action.clone(),
-                        model: model_for_action.clone(),
-                        effort: choice_effort.clone(),
-                    }),
+                    purpose @ (ModelSelectionPurpose::CodexPane { .. }
+                    | ModelSelectionPurpose::SpawnAgent { .. }) => Self::send_pane_selection(
+                        tx,
+                        purpose,
+                        provider_for_action.clone(),
+                        model_for_action.clone(),
+                        choice_effort.clone(),
+                    ),
                 })];
 
             items.push(SelectionItem {
@@ -1046,9 +1251,11 @@ impl ChatWidget {
                 "consume"
             };
             let preset_for_action = preset;
+            let purpose_for_action = purpose.clone();
             let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
                 tx.send(AppEvent::OpenAdvancedReasoningPopup {
                     model: preset_for_action.clone(),
+                    purpose: purpose_for_action.clone(),
                 });
             })];
             items.push(SelectionItem {
@@ -1114,7 +1321,19 @@ impl ChatWidget {
     }
 
     /// Open the explicit Max/Ultra effort picker for the given model.
+    #[cfg(test)]
     pub(crate) fn open_advanced_reasoning_popup(&mut self, preset: ModelPreset) {
+        self.open_advanced_reasoning_popup_for_purpose(preset, ModelSelectionPurpose::Session);
+    }
+
+    /// The Max/Ultra step keeps the purpose of the popup it came from: a
+    /// pane or spawned agent gets the effort, the session model is untouched
+    /// (#468).
+    pub(crate) fn open_advanced_reasoning_popup_for_purpose(
+        &mut self,
+        preset: ModelPreset,
+        purpose: ModelSelectionPurpose,
+    ) {
         let provider = preset
             .provider_id
             .clone()
@@ -1136,10 +1355,14 @@ impl ChatWidget {
         }
 
         let model_slug = preset.model.to_string();
-        let is_current_model = self.current_model() == preset.model.as_str();
+        let is_current_model = matches!(purpose, ModelSelectionPurpose::Session)
+            && self.current_model() == preset.model.as_str();
         let highlight_choice = is_current_model
             .then(|| self.effective_reasoning_effort())
             .flatten();
+        // #653: another connection of the session's model is not the current choice.
+        let is_current_route = codex_model_provider_info::model_routes(&model_slug).is_empty()
+            || provider.as_deref() == Some(self.config.model_provider_id.as_str());
         let mut items = Vec::new();
         for effort in choices {
             let description = match &effort {
@@ -1151,19 +1374,52 @@ impl ChatWidget {
                 }
                 _ => unreachable!("advanced choices are limited to Max and Ultra"),
             };
-            let should_prompt_plan_mode_scope = self
-                .should_prompt_plan_mode_reasoning_scope(model_slug.as_str(), Some(effort.clone()));
-            let actions = self.model_selection_actions(
-                model_slug.clone(),
-                provider.clone(),
-                Some(effort.clone()),
-                should_prompt_plan_mode_scope,
-            );
+            let actions = match &purpose {
+                ModelSelectionPurpose::Session => {
+                    let should_prompt_plan_mode_scope = self
+                        .should_prompt_plan_mode_reasoning_scope(
+                            model_slug.as_str(),
+                            Some(effort.clone()),
+                        );
+                    self.model_selection_actions(
+                        model_slug.clone(),
+                        provider.clone(),
+                        Some(effort.clone()),
+                        should_prompt_plan_mode_scope,
+                    )
+                }
+                ModelSelectionPurpose::CodexPane { .. }
+                | ModelSelectionPurpose::SpawnAgent { .. } => {
+                    let purpose = purpose.clone();
+                    let provider = provider.clone();
+                    let model = model_slug.clone();
+                    // Ultra may use more agents in the new pane too.
+                    let warning = self.ultra_reasoning_concurrency_warning(&effort);
+                    let effort = Some(effort.clone());
+                    let action: SelectionAction = Box::new(move |tx| {
+                        Self::send_pane_selection(
+                            tx,
+                            &purpose,
+                            provider.clone(),
+                            model.clone(),
+                            effort.clone(),
+                        );
+                        if let Some(warning) = warning.clone() {
+                            tx.send(AppEvent::InsertHistoryCell(Box::new(
+                                history_cell::new_warning_event(warning),
+                            )));
+                        }
+                    });
+                    vec![action]
+                }
+            };
 
             items.push(SelectionItem {
                 name: Self::reasoning_effort_label(&effort),
                 description: Some(description.to_string()),
-                is_current: is_current_model && Some(&effort) == highlight_choice.as_ref(),
+                is_current: is_current_model
+                    && is_current_route
+                    && Some(&effort) == highlight_choice.as_ref(),
                 actions,
                 dismiss_on_select: true,
                 ..Default::default()
@@ -1234,27 +1490,26 @@ impl ChatWidget {
         ))
     }
 
-    pub(super) fn apply_model_and_effort_without_persist(
+    fn apply_model_and_effort(
         &self,
         model: String,
+        provider: Option<String>,
         effort: Option<ReasoningEffortConfig>,
     ) {
         let warning = effort
             .as_ref()
             .and_then(|effort| self.ultra_reasoning_concurrency_warning(effort));
-        self.app_event_tx.send(AppEvent::UpdateModel(model));
+        self.app_event_tx.send(AppEvent::UpdateModelSelection {
+            model: model.clone(),
+            provider: provider.clone(),
+        });
         self.app_event_tx
-            .send(AppEvent::UpdateReasoningEffort(effort));
+            .send(AppEvent::UpdateReasoningEffort(effort.clone()));
         if let Some(warning) = warning {
             self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
                 history_cell::new_warning_event(warning),
             )));
         }
-    }
-
-    fn apply_model_and_effort(&self, model: String, effort: Option<ReasoningEffortConfig>) {
-        self.apply_model_and_effort_without_persist(model.clone(), effort.clone());
-        let provider = self.resolved_model_provider(&model);
         if Self::should_persist_model_provider(provider.as_deref()) {
             self.app_event_tx.send(AppEvent::PersistModelSelection {
                 model,
@@ -1272,12 +1527,13 @@ mod tests {
     #[tokio::test]
     async fn runtime_gpu_model_selection_is_session_only() {
         let (chat, mut rx, _op_rx) =
-            crate::chatwidget::tests::helpers::make_chatwidget_manual(None).await;
+            crate::chatwidget::tests::helpers::make_chatwidget_manual(/*model_override*/ None)
+                .await;
         let actions = chat.model_selection_actions(
             "pinned-model".to_string(),
             Some("gpu-rental-123".to_string()),
-            None,
-            false,
+            /*effort_for_action*/ None,
+            /*should_prompt_plan_mode_scope*/ false,
         );
 
         actions[0](&chat.app_event_tx);
@@ -1300,6 +1556,17 @@ mod tests {
     fn model_provider_for_selection_maps_cross_provider_models() {
         assert_eq!(
             ChatWidget::model_provider_for_selection(DEEPSEEK_DEFAULT_MODEL).as_deref(),
+            Some(DEEPSEEK_PROVIDER_ID)
+        );
+        assert_eq!(
+            ChatWidget::model_provider_for_selection(DEEPSEEK_PRO_MODEL).as_deref(),
+            Some(DEEPSEEK_PROVIDER_ID)
+        );
+        assert_eq!(
+            ChatWidget::model_provider_for_selection(
+                codex_model_provider_info::DEEPSEEK_LEGACY_FLASH_MODEL
+            )
+            .as_deref(),
             Some(DEEPSEEK_PROVIDER_ID)
         );
         assert_eq!(
@@ -1326,13 +1593,15 @@ mod tests {
             ChatWidget::model_provider_for_selection(CLAUDE_PLAN_LEGACY_OPUS_4_8_MODEL).as_deref(),
             Some(CLAUDE_PLAN_PROVIDER_ID)
         );
-        assert_eq!(
-            ChatWidget::model_provider_for_selection(CLAUDE_FABLE_5_PLAN_MODEL).as_deref(),
-            Some(CLAUDE_PLAN_PROVIDER_ID)
-        );
+        for model in [CLAUDE_FABLE_5_PLAN_MODEL, CLAUDE_FABLE_5_1_PLAN_MODEL] {
+            assert_eq!(
+                ChatWidget::model_provider_for_selection(model).as_deref(),
+                Some(CLAUDE_PLAN_PROVIDER_ID)
+            );
+        }
         assert_eq!(
             ChatWidget::model_provider_for_selection(ANTHROPIC_DEFAULT_MODEL).as_deref(),
-            Some(ANTHROPIC_PROVIDER_ID)
+            Some(CLAUDE_PLAN_PROVIDER_ID)
         );
         assert_eq!(
             ChatWidget::model_provider_for_selection(BASETEN_DEFAULT_MODEL).as_deref(),
@@ -1343,7 +1612,9 @@ mod tests {
             Some(OPENROUTER_PROVIDER_ID)
         );
         for model in [
+            OPENROUTER_GROK_4_6_MODEL,
             OPENROUTER_GROK_4_5_MODEL,
+            OPENROUTER_DEEPSEEK_V4_PRO_0813_MODEL,
             OPENROUTER_DEEPSEEK_V4_PRO_MODEL,
             OPENROUTER_DEEPSEEK_V4_FLASH_0731_MODEL,
             OPENROUTER_TENCENT_HY3_FREE_MODEL,
@@ -1422,12 +1693,110 @@ mod tests {
             group_label(OPENROUTER_ANTHROPIC_PROVIDER_ID),
             Some("OpenRouter")
         );
-        assert_eq!(group_label(AMAZON_BEDROCK_PROVIDER_ID), None);
+        assert_eq!(group_label(AMAZON_BEDROCK_PROVIDER_ID), Some("Other"));
+    }
+
+    #[test]
+    fn corbanu_api_presets_preserve_ambient_and_publish_the_seven_wallet_funded_routes() {
+        let source_presets = [
+            VERCEL_GLM_5_3_FLASH_MODEL,
+            AMBIENT_DEFAULT_MODEL,
+            VERCEL_GLM_5_3_MODEL,
+            OPENAI_GPT_5_6_LUNA_MODEL,
+            OPENAI_GPT_5_6_SOL_MODEL,
+            VERCEL_KIMI_K3_MODEL,
+            DEEPSEEK_PRO_MODEL,
+            CORBANU_API_DEEPSEEK_V4_1_FLASH_MODEL,
+        ]
+        .into_iter()
+        .map(|model| preset(model, /*show_in_picker*/ true))
+        .collect::<Vec<_>>();
+
+        let presets = ChatWidget::corbanu_api_presets(&source_presets);
+        let actual = presets
+            .iter()
+            .map(|preset| {
+                (
+                    preset.model.as_str(),
+                    preset.provider_id.as_deref(),
+                    preset.display_name.as_str(),
+                    preset.is_default,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![
+                (
+                    CORBANU_API_GLM_5_3_FLASH_MODEL,
+                    Some(PFTERMINAL_PLAN_PROVIDER_ID),
+                    "GLM 5.3 Flash (Recommended)",
+                    true,
+                ),
+                (
+                    AMBIENT_DEFAULT_MODEL,
+                    Some(PFTERMINAL_PLAN_PROVIDER_ID),
+                    AMBIENT_DEFAULT_MODEL,
+                    false,
+                ),
+                (
+                    CORBANU_API_GLM_5_3_MODEL,
+                    Some(PFTERMINAL_PLAN_PROVIDER_ID),
+                    "GLM 5.3",
+                    false,
+                ),
+                (
+                    CORBANU_API_GPT_5_6_LUNA_MODEL,
+                    Some(PFTERMINAL_PLAN_PROVIDER_ID),
+                    "GPT-5.6 Luna (xhigh)",
+                    false,
+                ),
+                (
+                    CORBANU_API_GPT_5_6_SOL_MODEL,
+                    Some(PFTERMINAL_PLAN_PROVIDER_ID),
+                    "GPT-5.6 Sol",
+                    false,
+                ),
+                (
+                    CORBANU_API_KIMI_K3_MODEL,
+                    Some(PFTERMINAL_PLAN_ANTHROPIC_PROVIDER_ID),
+                    "Kimi K3",
+                    false,
+                ),
+                (
+                    CORBANU_API_DEEPSEEK_V4_PRO_MODEL,
+                    Some(PFTERMINAL_PLAN_PROVIDER_ID),
+                    "DeepSeek V4 Pro",
+                    false,
+                ),
+                (
+                    CORBANU_API_DEEPSEEK_V4_1_FLASH_MODEL,
+                    Some(PFTERMINAL_PLAN_PROVIDER_ID),
+                    CORBANU_API_DEEPSEEK_V4_1_FLASH_MODEL,
+                    false,
+                ),
+            ]
+        );
+        assert!(presets.iter().skip(1).all(|preset| {
+            !["Vercel", "xAPI", "Direct"].into_iter().any(|vendor| {
+                preset.display_name.contains(vendor) || preset.description.contains(vendor)
+            })
+        }));
+        assert!(presets[0].description.contains("$0.15/M input"));
+        assert!(presets.iter().all(|preset| {
+            preset.model != "corbanu/claude-fable-5" && !preset.display_name.contains("Fable")
+        }));
+        assert_eq!(
+            presets[1].description,
+            format!("{AMBIENT_DEFAULT_MODEL} description")
+        );
+        assert!(presets[2].description.contains("Uses balance faster"));
     }
 
     #[test]
     fn model_picker_display_label_uses_catalog_name_with_slug_in_description() {
-        let mut ambient = preset(AMBIENT_DEFAULT_MODEL, true);
+        let mut ambient = preset(AMBIENT_DEFAULT_MODEL, /*show_in_picker*/ true);
         ambient.display_name = "Ambient GLM 5.2".to_string();
         ambient.description = "Ambient-backed GLM.".to_string();
 
@@ -1442,7 +1811,7 @@ mod tests {
             ))
         );
 
-        let fallback = preset("custom-model", true);
+        let fallback = preset("custom-model", /*show_in_picker*/ true);
         assert_eq!(
             ChatWidget::model_display_label_for_preset(&fallback),
             "custom-model"
@@ -1457,41 +1826,42 @@ mod tests {
     fn pfterminal_picker_allows_curated_openai_plan_models() {
         assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
             AMBIENT_KIMI_K2_7_CODE_MODEL,
-            true
+            /*show_in_picker*/ true
         )));
         assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
             ANTHROPIC_DEFAULT_MODEL,
-            true
+            /*show_in_picker*/ true
         )));
         assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
             CLAUDE_PLAN_MODEL,
-            true
+            /*show_in_picker*/ true
         )));
-        assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
-            CLAUDE_FABLE_5_PLAN_MODEL,
-            true
-        )));
+        for model in [CLAUDE_FABLE_5_PLAN_MODEL, CLAUDE_FABLE_5_1_PLAN_MODEL] {
+            assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
+                model, /*show_in_picker*/ true
+            )));
+        }
         assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
             DEEPSEEK_DEFAULT_MODEL,
-            true
+            /*show_in_picker*/ true
         )));
         assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
-            "gpt-5.5", true
+            "gpt-5.5", /*show_in_picker*/ true
         )));
         for model in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"] {
             assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
-                model, true
+                model, /*show_in_picker*/ true
             )));
         }
-        assert!(!ChatWidget::show_in_pfterminal_model_picker(&preset(
-            "gpt-5.4", true
+        assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
+            "gpt-5.4", /*show_in_picker*/ true
         )));
-        assert!(!ChatWidget::show_in_pfterminal_model_picker(&preset(
+        assert!(ChatWidget::show_in_pfterminal_model_picker(&preset(
             "codex-auto-review",
-            true
+            /*show_in_picker*/ true
         )));
         assert!(!ChatWidget::show_in_pfterminal_model_picker(&preset(
-            "gpt-5.5", false
+            "gpt-5.5", /*show_in_picker*/ false
         )));
     }
 

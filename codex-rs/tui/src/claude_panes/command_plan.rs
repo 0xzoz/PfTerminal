@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::net::TcpListener as StdTcpListener;
 use std::path::Path;
+use std::path::PathBuf;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -13,8 +14,10 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::app_command::AppCommand;
+use crate::internal_cli_helper::internal_cli_helper_executable;
 use crate::spawn_orchestration::SpawnRole;
 
+use super::containment::ClaudeContainment;
 use super::pane::ClaudeCommandMode;
 use super::pane::ClaudePane;
 use super::provider::ClaudeProviderProfile;
@@ -23,9 +26,31 @@ use super::provider::ClaudeProviderTransport;
 use super::turn_types::ClaudeBridgeKind;
 use super::turn_types::ClaudeBridgePlan;
 use super::turn_types::ClaudeCommandPlan;
+use super::turn_types::DeferredClaudePlanAuth;
 use super::turn_types::DeferredVaultSecret;
+use super::turn_types::PaneDirectAccounting;
 
 const ANTHROPIC_AUTH_ENV_KEYS: [&str; 2] = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"];
+const CLAUDE_CREDENTIAL_ENV_KEYS: [&str; 4] = [
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+];
+const CLAUDE_PLAN_ROUTING_ENV_KEYS: [&str; 12] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    "CLAUDE_CODE_OAUTH_SCOPES",
+    "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CONFIG_DIR",
+];
 
 pub(crate) fn reveal_provider_secret(codex_home: &Path, label: &str) -> Result<String> {
     if !allowed_provider_vault_label(label) {
@@ -67,16 +92,31 @@ pub(crate) fn build_claude_command_plan(
     let audit_path = pane
         .artifact_dir
         .join(format!("turn-{turn_index:04}.audit.json"));
+    // #218: a contained pane reaches every provider through the bridge, so
+    // Claude Code never holds a provider key.
+    let containment = super::containment::enabled()
+        .map(|settings| -> Result<ClaudeContainment> {
+            Ok(ClaudeContainment {
+                state_dir: super::containment::state_dir(
+                    codex_home,
+                    &pane.id,
+                    settings.state_root.as_deref(),
+                )?,
+                panes_dir: codex_home.join("panes"),
+                linux_sandbox_exe: settings.linux_sandbox_exe,
+            })
+        })
+        .transpose()?;
     let mut bridge = None;
     let mut base_url_override = None;
-    if matches!(
-        profile.transport,
-        ClaudeProviderTransport::AmbientChatBridge
-            | ClaudeProviderTransport::AnthropicPassthroughBridge
-    ) {
-        let Some(label) = profile.vault_label else {
-            return Err(anyhow!("Claude bridge requires a provider vault label"));
-        };
+    if containment.is_some()
+        || matches!(profile.kind, ClaudeProviderProfileKind::ClaudePlan)
+        || matches!(
+            profile.transport,
+            ClaudeProviderTransport::AmbientChatBridge
+                | ClaudeProviderTransport::AnthropicPassthroughBridge
+        )
+    {
         let listener = StdTcpListener::bind("127.0.0.1:0")
             .context("failed to bind Claude bridge loopback listener")?;
         listener
@@ -85,70 +125,174 @@ pub(crate) fn build_claude_command_plan(
         let bind_addr = listener
             .local_addr()
             .context("failed to read Claude bridge listener address")?;
-        let (kind, upstream_base_url, upstream_model) = match profile.transport {
-            ClaudeProviderTransport::AmbientChatBridge => (
-                ClaudeBridgeKind::AmbientChat,
-                "https://api.ambient.xyz/v1/chat/completions".to_string(),
+        let (kind, upstream_base_url, upstream_model, deferred_vault_secret) = match profile.kind {
+            ClaudeProviderProfileKind::ClaudePlan => (
+                ClaudeBridgeKind::AnthropicOauthPassthrough,
+                "https://api.anthropic.com".to_string(),
                 profile.provider_model.to_string(),
+                None,
             ),
-            ClaudeProviderTransport::AnthropicPassthroughBridge => (
-                ClaudeBridgeKind::AnthropicPassthrough,
+            _ if matches!(
+                profile.transport,
+                ClaudeProviderTransport::AmbientChatBridge
+            ) =>
+            {
+                (
+                    ClaudeBridgeKind::AmbientChat,
+                    "https://api.ambient.xyz/v1/chat/completions".to_string(),
+                    profile.provider_model.to_string(),
+                    Some(DeferredVaultSecret {
+                        codex_home: codex_home.to_path_buf(),
+                        label: profile
+                            .vault_label
+                            .ok_or_else(|| {
+                                anyhow!("Claude bridge requires a provider vault label")
+                            })?
+                            .to_string(),
+                    }),
+                )
+            }
+            _ if matches!(
+                profile.transport,
+                ClaudeProviderTransport::AnthropicPassthroughBridge
+            ) =>
+            {
+                (
+                    ClaudeBridgeKind::AnthropicPassthrough,
+                    profile
+                        .base_url
+                        .ok_or_else(|| anyhow!("Anthropic passthrough bridge requires base URL"))?
+                        .trim_end_matches('/')
+                        .to_string(),
+                    profile.provider_model.to_string(),
+                    Some(DeferredVaultSecret {
+                        codex_home: codex_home.to_path_buf(),
+                        label: profile
+                            .vault_label
+                            .ok_or_else(|| {
+                                anyhow!("Claude bridge requires a provider vault label")
+                            })?
+                            .to_string(),
+                    }),
+                )
+            }
+            // Direct providers, bridged only when contained: the bridge sends
+            // the key in both headers, as Claude Code's `apiKeyHelper` did.
+            _ => (
+                ClaudeBridgeKind::AnthropicApiKeyPassthrough,
                 profile
                     .base_url
-                    .ok_or_else(|| anyhow!("Anthropic passthrough bridge requires base URL"))?
+                    .ok_or_else(|| anyhow!("Claude bridge requires a provider base URL"))?
                     .trim_end_matches('/')
                     .to_string(),
                 profile.provider_model.to_string(),
+                Some(DeferredVaultSecret {
+                    codex_home: codex_home.to_path_buf(),
+                    label: profile
+                        .vault_label
+                        .ok_or_else(|| anyhow!("Claude bridge requires a provider vault label"))?
+                        .to_string(),
+                }),
             ),
-            ClaudeProviderTransport::DirectAnthropic => {
-                unreachable!("direct providers do not use bridge")
-            }
         };
         base_url_override = Some(format!("http://{bind_addr}"));
         bridge = Some(ClaudeBridgePlan {
             kind,
             listener,
             bind_addr,
+            client_auth_token: Uuid::new_v4().to_string(),
             upstream_base_url,
             upstream_api_key: None,
-            deferred_vault_secret: Some(DeferredVaultSecret {
-                codex_home: codex_home.to_path_buf(),
-                label: label.to_string(),
-            }),
+            deferred_vault_secret,
             upstream_model,
+            accounting_provider_id: profile.accounting_provider_id.map(str::to_string),
         });
     }
-    let settings = settings_json_with_base_url(
+    let mut settings = settings_json_with_base_url(
         profile,
         if bridge.is_some() {
             None
         } else {
-            Some("pfterminal")
+            Some("corbanu")
         },
         base_url_override.as_deref(),
     );
+    if containment.is_some() {
+        add_contained_settings(&mut settings);
+    }
     std::fs::write(&settings_path, settings.to_string()).with_context(|| {
         format!(
             "failed to write Claude pane settings `{}`",
             settings_path.display()
         )
     })?;
+    // A contained pane cannot read `CODEX_HOME/panes`; it gets the same
+    // settings from its state folder, read-only there.
+    let settings_path = match containment.as_ref() {
+        Some(containment) => {
+            let path = containment.settings_path();
+            std::fs::create_dir_all(&containment.state_dir).with_context(|| {
+                format!(
+                    "failed to create the Claude pane state folder `{}`",
+                    containment.state_dir.display()
+                )
+            })?;
+            // The folder is writable to the pane; replace the file rather
+            // than write through whatever is there.
+            let mut file = tempfile::NamedTempFile::new_in(&containment.state_dir)
+                .context("failed to create Claude pane settings")?;
+            std::io::Write::write_all(&mut file, settings.to_string().as_bytes())
+                .context("failed to write Claude pane settings")?;
+            file.persist(&path)
+                .map_err(|err| err.error)
+                .with_context(|| {
+                    format!("failed to write Claude pane settings `{}`", path.display())
+                })?;
+            path
+        }
+        None => settings_path,
+    };
 
     let mut env = BTreeMap::new();
-    let mut env_remove = Vec::new();
+    // Claude Code gives its own OAuth variables precedence over provider-specific
+    // apiKeyHelper settings. Never let a subscription credential inherited from
+    // the parent shell escape into any pane, including third-party providers.
+    let mut env_remove = CLAUDE_CREDENTIAL_ENV_KEYS.map(ToString::to_string).to_vec();
+    let deferred_claude_plan_auth = if matches!(profile.kind, ClaudeProviderProfileKind::ClaudePlan)
+    {
+        env_remove.extend(CLAUDE_PLAN_ROUTING_ENV_KEYS.map(ToString::to_string));
+        Some(DeferredClaudePlanAuth {
+            codex_home: codex_home.to_path_buf(),
+            helper_executable: internal_cli_helper_executable()
+                .context("failed to locate Corbanu for Claude Plan authentication")?,
+            cwd: pane.cwd.clone(),
+            claude_config_dir_override: absolute_claude_config_dir_override()?,
+            account: None,
+        })
+    } else {
+        None
+    };
     if let Some(base_url) = base_url_override.as_deref().or(profile.base_url) {
         env.insert("ANTHROPIC_BASE_URL".to_string(), base_url.to_string());
     }
-    if bridge.is_some() {
+    if let Some(bridge) = bridge.as_ref() {
         env_remove.extend(ANTHROPIC_AUTH_ENV_KEYS.map(ToString::to_string));
         env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
         env.insert(
             "ANTHROPIC_AUTH_TOKEN".to_string(),
-            "pfterminal-local-bridge".to_string(),
+            bridge.client_auth_token.clone(),
         );
     } else if profile.vault_label.is_some() {
         env_remove.extend(ANTHROPIC_AUTH_ENV_KEYS.map(ToString::to_string));
         env.insert("ANTHROPIC_API_KEY".to_string(), String::new());
+    }
+    if let Some(containment) = containment.as_ref() {
+        // The sandbox lets Claude Code reach only the bridge, as its HTTP
+        // proxy (see `containment`); everything else it might call fails.
+        if let Some(base_url) = base_url_override.as_deref() {
+            env.insert("HTTP_PROXY".to_string(), base_url.to_string());
+        }
+        env.extend(containment.claude_env());
     }
     if profile.uses_bare_mode {
         env.insert(
@@ -206,16 +350,62 @@ pub(crate) fn build_claude_command_plan(
         "--verbose".to_string(),
         "--settings".to_string(),
         settings_path.to_string_lossy().into_owned(),
-        "--permission-mode".to_string(),
-        "bypassPermissions".to_string(),
         "--exclude-dynamic-system-prompt-sections".to_string(),
         "--model".to_string(),
         profile.claude_model.to_string(),
     ]);
+    if containment.is_some() {
+        // Claude Code asks before the tools in `CONTAINED_ASK_TOOLS` (the
+        // settings' `ask` rules) through stdin/stdout, and Corbanu asks a
+        // person (`super::approval`). The prompt then goes in on stdin too.
+        // Only the tools in `CONTAINED_TOOLS` exist, so a newer Claude Code's
+        // new tools are not available either; subagents, skills, slash
+        // commands and tools that start or schedule agents are also denied
+        // by name.
+        let tools = CONTAINED_TOOLS.join(",");
+        let disallowed = CONTAINED_DISALLOWED_TOOLS.join(",");
+        args.extend(
+            [
+                "--permission-mode",
+                "default",
+                "--permission-prompt-tool",
+                "stdio",
+                "--input-format",
+                "stream-json",
+                "--tools",
+                tools.as_str(),
+                "--disallowedTools",
+                disallowed.as_str(),
+            ]
+            .map(str::to_string),
+        );
+    } else {
+        args.extend([
+            "--permission-mode".to_string(),
+            "bypassPermissions".to_string(),
+        ]);
+    }
     if matches!(profile.kind, ClaudeProviderProfileKind::ClaudePlan) {
         args.extend(["--effort".to_string(), "high".to_string()]);
     }
-    args.extend(["--setting-sources".to_string(), "project".to_string()]);
+    if containment.is_some() {
+        // Settings, hooks and MCP servers a pane could write into its own
+        // folder must not run or allow anything without a person: only
+        // Corbanu's settings file applies.
+        // `--safe-mode` also leaves out CLAUDE.md, skills, plugins, custom
+        // commands and agents; Corbanu's `--settings` still apply.
+        args.extend(
+            [
+                "--setting-sources",
+                "",
+                "--strict-mcp-config",
+                "--safe-mode",
+            ]
+            .map(str::to_string),
+        );
+    } else {
+        args.extend(["--setting-sources".to_string(), "project".to_string()]);
+    }
     let (command_mode, command_session_id) = if let Some(session_id) = &pane.claude_session_id {
         args.push("--resume".to_string());
         args.push(session_id.clone());
@@ -226,8 +416,35 @@ pub(crate) fn build_claude_command_plan(
         args.push(session_id.clone());
         (ClaudeCommandMode::NewSession, session_id)
     };
-    args.push(prompt);
+    let stdin_prompt = if containment.is_some() {
+        // A prompt starting with `/` would run a Claude Code command (built-in
+        // skills such as `/batch` or `/loop` stay under `--safe-mode`); with a
+        // leading space it is plain text for the model.
+        Some(if prompt.starts_with('/') {
+            format!(" {prompt}")
+        } else {
+            prompt
+        })
+    } else {
+        args.push(prompt);
+        None
+    };
 
+    // With a bridge, every send passes through this process and is reported
+    // there. Without one, the pane talks to the provider itself and the only
+    // account of what it cost is the one the pane gives back.
+    let direct_accounting = match (
+        bridge.is_none(),
+        profile.accounting_provider_id,
+        profile.base_url,
+    ) {
+        (true, Some(provider_id), Some(base_url)) => Some(PaneDirectAccounting {
+            provider_id: provider_id.to_string(),
+            base_url: format!("{}/v1", base_url.trim_end_matches('/')),
+            model: profile.provider_model.to_string(),
+        }),
+        _ => None,
+    };
     Ok(ClaudeCommandPlan {
         executable: "claude".to_string(),
         args,
@@ -245,8 +462,98 @@ pub(crate) fn build_claude_command_plan(
         artifact_path,
         audit_path,
         timeout_ms: None,
+        deferred_claude_plan_auth,
         bridge,
+        direct_accounting,
+        containment,
+        stdin_prompt,
     })
+}
+
+fn absolute_claude_config_dir_override() -> Result<Option<PathBuf>> {
+    let configured = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    absolute_claude_config_dir_override_against(configured, &std::env::current_dir()?)
+}
+
+pub(crate) fn absolute_claude_config_dir_override_against(
+    configured: Option<PathBuf>,
+    current_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    configured
+        .map(|config_dir| {
+            let path = if config_dir.is_absolute() {
+                config_dir
+            } else {
+                current_dir.join(config_dir)
+            };
+            std::path::absolute(path)
+                .context("failed to resolve the exact Claude Code configuration profile")
+        })
+        .transpose()
+}
+
+/// Tools a contained pane always asks a person about, even when Claude Code
+/// would consider the call read-only (its read-only Bash classifier has had
+/// bypasses). Reading and searching files inside the sandbox stays automatic.
+/// Kept in step with `claude_code_regression.py` (qa/security-levels).
+pub(crate) const CONTAINED_ASK_TOOLS: [&str; 7] = [
+    "Bash",
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "WebFetch",
+    "WebSearch",
+];
+
+/// The only tools a contained pane has (`--tools`); names a Claude Code
+/// version does not have are ignored.
+pub(crate) const CONTAINED_TOOLS: [&str; 11] = [
+    "Bash",
+    "Read",
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit",
+    "Glob",
+    "Grep",
+    "WebFetch",
+    "WebSearch",
+    "TodoWrite",
+];
+
+/// Tools a contained pane does not get: subagents (whose definitions can ask
+/// for other permission modes, hooks and MCP servers), skills and slash
+/// commands (`allowed-tools`), and tools that start or schedule more agents.
+pub(crate) const CONTAINED_DISALLOWED_TOOLS: [&str; 9] = [
+    "Agent",
+    "Task",
+    "Skill",
+    "SlashCommand",
+    "Workflow",
+    "CronCreate",
+    "ScheduleWakeup",
+    "SendMessage",
+    "EnterWorktree",
+];
+
+/// Corbanu's settings for a contained pane: no hooks at all, the ask and deny
+/// rules above, and no way into `bypassPermissions`. Checked against the real
+/// Claude Code by `claude_code_regression.py`.
+fn add_contained_settings(settings: &mut Value) {
+    if let Some(settings) = settings.as_object_mut() {
+        settings.insert("disableAllHooks".to_string(), Value::Bool(true));
+        settings.insert(
+            "permissions".to_string(),
+            serde_json::json!({
+                "ask": CONTAINED_ASK_TOOLS,
+                "deny": CONTAINED_DISALLOWED_TOOLS,
+                "disableBypassPermissionsMode": "disable",
+            }),
+        );
+    }
 }
 
 pub(crate) fn settings_json_with_base_url(
@@ -255,6 +562,16 @@ pub(crate) fn settings_json_with_base_url(
     base_url_override: Option<&str>,
 ) -> Value {
     let mut env = serde_json::Map::new();
+    if matches!(profile.kind, ClaudeProviderProfileKind::ClaudePlan) {
+        env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            Value::String(
+                base_url_override
+                    .unwrap_or("https://api.anthropic.com")
+                    .to_string(),
+            ),
+        );
+    }
     if profile.uses_bare_mode {
         if let Some(base_url) = base_url_override.or(profile.base_url) {
             env.insert(

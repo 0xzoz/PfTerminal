@@ -1489,13 +1489,25 @@ async fn thread_read_include_turns_rejects_unmaterialized_loaded_thread() -> Res
     )
     .await??;
 
-    assert!(
+    // Pinned as a literal, not built from
+    // `THREAD_UNMATERIALIZED_INCLUDE_TURNS_MESSAGE`: clients recover from this
+    // state by matching this text, so rewording it is a wire-contract change
+    // and should fail here rather than silently block those clients.
+    assert_eq!(
+        read_err.error.message,
+        format!(
+            "thread {} is not materialized yet; includeTurns is unavailable before first user message",
+            thread.id
+        )
+    );
+    assert_eq!(
         read_err
             .error
-            .message
-            .contains("includeTurns is unavailable before first user message"),
-        "unexpected error: {}",
-        read_err.error.message
+            .data
+            .as_ref()
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str),
+        Some("thread_unmaterialized")
     );
 
     Ok(())

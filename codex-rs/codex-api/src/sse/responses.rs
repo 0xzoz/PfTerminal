@@ -2,6 +2,9 @@ use crate::common::ResponseEvent;
 use crate::common::ResponseStream;
 use crate::common::SafetyBuffering;
 use crate::common::SafetyBufferingTreatment;
+use crate::endpoint::responses::accounting::InvalidResponsesUsage;
+use crate::endpoint::responses::accounting::ResponsesUsageObserver;
+use crate::endpoint::responses::accounting::{self};
 use crate::error::ApiError;
 use crate::rate_limits::parse_all_rate_limits;
 use crate::safety_buffering::treatment_from_headers;
@@ -36,6 +39,22 @@ pub fn spawn_response_stream(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
     turn_state: Option<Arc<OnceLock<String>>>,
+) -> ResponseStream {
+    spawn_response_stream_with_observer(
+        stream_response,
+        idle_timeout,
+        telemetry,
+        turn_state,
+        /*observer*/ None,
+    )
+}
+
+pub(crate) fn spawn_response_stream_with_observer(
+    stream_response: StreamResponse,
+    idle_timeout: Duration,
+    telemetry: Option<Arc<dyn SseTelemetry>>,
+    turn_state: Option<Arc<OnceLock<String>>>,
+    observer: Option<Arc<dyn ResponsesUsageObserver>>,
 ) -> ResponseStream {
     let rate_limit_snapshots = parse_all_rate_limits(&stream_response.headers);
     let models_etag = stream_response
@@ -89,6 +108,7 @@ pub fn spawn_response_stream(
             idle_timeout,
             telemetry,
             safety_buffering_treatment,
+            observer,
         )
         .await;
     });
@@ -164,6 +184,7 @@ pub struct ResponsesStreamEvent {
     pub(crate) headers: Option<Value>,
     metadata: Option<Value>,
     response: Option<Value>,
+    error: Option<Error>,
     item: Option<Value>,
     item_id: Option<String>,
     call_id: Option<String>,
@@ -342,6 +363,18 @@ pub fn process_responses_event(
     event: ResponsesStreamEvent,
 ) -> std::result::Result<Option<ResponseEvent>, ResponsesEventError> {
     match event.kind.as_str() {
+        "error" => {
+            if let Some(error) = event.error
+                && let Some(message) = crate::api_bridge::misalignment_policy_message(
+                    error.code.as_deref(),
+                    error.message.as_deref(),
+                )
+            {
+                return Err(ResponsesEventError::Api(ApiError::InvalidRequest {
+                    message,
+                }));
+            }
+        }
         "response.output_item.done" => {
             if let Some(item_val) = event.item {
                 if let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) {
@@ -352,7 +385,10 @@ pub fn process_responses_event(
         }
         "response.output_text.delta" => {
             if let Some(delta) = event.delta {
-                return Ok(Some(ResponseEvent::OutputTextDelta(delta)));
+                return Ok(Some(ResponseEvent::OutputTextDelta {
+                    item_id: event.item_id,
+                    delta,
+                }));
             }
         }
         "response.custom_tool_call_input.delta" => {
@@ -404,7 +440,12 @@ pub fn process_responses_event(
                 if let Some(error) = resp_val.get("error")
                     && let Ok(error) = serde_json::from_value::<Error>(error.clone())
                 {
-                    if is_context_window_error(&error) {
+                    if let Some(message) = crate::api_bridge::misalignment_policy_message(
+                        error.code.as_deref(),
+                        error.message.as_deref(),
+                    ) {
+                        response_error = ApiError::InvalidRequest { message };
+                    } else if is_context_window_error(&error) {
                         response_error = ApiError::ContextWindowExceeded;
                     } else if is_quota_exceeded_error(&error) {
                         response_error = ApiError::QuotaExceeded;
@@ -500,6 +541,7 @@ pub async fn process_sse(
         idle_timeout,
         telemetry,
         SafetyBufferingTreatment::default(),
+        /*observer*/ None,
     )
     .await;
 }
@@ -510,7 +552,9 @@ async fn process_sse_with_treatment(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
     safety_buffering_treatment: SafetyBufferingTreatment,
+    mut observer: Option<Arc<dyn ResponsesUsageObserver>>,
 ) {
+    let mut position = 0_i64;
     let mut stream = stream.eventsource();
     let mut response_error: Option<ApiError> = None;
     let mut last_server_model: Option<String> = None;
@@ -544,6 +588,29 @@ async fn process_sse_with_treatment(
             }
         };
 
+        if let Some(active) = &observer {
+            let decoded = match position.checked_add(1) {
+                Some(next) => {
+                    position = next;
+                    accounting::decode(&sse.data)
+                }
+                None => Err(InvalidResponsesUsage),
+            };
+            let usage = match decoded {
+                Ok(None) => None,
+                Ok(Some(patch)) => Some(Ok(patch)),
+                Err(error) => Some(Err(error)),
+            };
+            if let Some(usage) = usage {
+                let invalid = usage.is_err();
+                let result = active.observe(position, usage).await;
+                // Accounting observes the stream; it never ends it. Rejected
+                // evidence stops observation for the rest of this response.
+                if invalid || result.is_err() {
+                    observer = None;
+                }
+            }
+        }
         trace!("SSE event: {}", &sse.data);
 
         let event: ResponsesStreamEvent = match serde_json::from_str(&sse.data) {
@@ -616,7 +683,15 @@ async fn process_sse_with_treatment(
             }
             Ok(None) => {}
             Err(error) => {
-                response_error = Some(error.into_api_error());
+                let error = error.into_api_error();
+                if matches!(
+                    error,
+                    ApiError::InvalidRequest { .. } | ApiError::CyberPolicy { .. }
+                ) {
+                    let _ = tx_event.send(Err(error)).await;
+                    return;
+                }
+                response_error = Some(error);
             }
         };
     }
@@ -627,25 +702,20 @@ fn try_parse_retry_after(err: &Error) -> Option<Duration> {
         return None;
     }
 
-    let re = rate_limit_regex();
-    if let Some(message) = &err.message
-        && let Some(captures) = re.captures(message)
-    {
-        let seconds = captures.get(1);
-        let unit = captures.get(2);
-
-        if let (Some(value), Some(unit)) = (seconds, unit) {
-            let value = value.as_str().parse::<f64>().ok()?;
-            let unit = unit.as_str().to_ascii_lowercase();
-
-            if unit == "s" || unit.starts_with("second") {
-                return Some(Duration::from_secs_f64(value));
-            } else if unit == "ms" {
-                return Some(Duration::from_millis(value as u64));
-            }
-        }
-    }
-    None
+    let message = err.message.as_ref()?.to_ascii_lowercase();
+    let (_, delay) = message.split_once("try again in")?;
+    let delay = delay.trim_start();
+    let number_end = delay.find(|ch: char| !ch.is_ascii_digit() && ch != '.')?;
+    let value = delay[..number_end].parse::<f64>().ok()?;
+    let unit = delay[number_end..].trim_start();
+    let seconds = if unit.starts_with("ms") {
+        value / 1000.0
+    } else if unit.starts_with('s') {
+        value
+    } else {
+        return None;
+    };
+    Duration::try_from_secs_f64(seconds).ok()
 }
 
 fn is_context_window_error(error: &Error) -> bool {
@@ -677,14 +747,6 @@ fn cyber_policy_message(message: Option<String>) -> String {
     message
         .filter(|message| !message.trim().is_empty())
         .unwrap_or_else(cyber_policy_fallback_message)
-}
-
-fn rate_limit_regex() -> &'static regex_lite::Regex {
-    static RE: std::sync::OnceLock<regex_lite::Regex> = std::sync::OnceLock::new();
-    #[expect(clippy::unwrap_used)]
-    RE.get_or_init(|| {
-        regex_lite::Regex::new(r"(?i)try again in\s*(\d+(?:\.\d+)?)\s*(s|ms|seconds?)").unwrap()
-    })
 }
 
 #[cfg(test)]
@@ -1169,6 +1231,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn misalignment_stop_discards_later_tool_output_and_completion() {
+        let stopped = json!({"type": "response.failed", "response": {"id": "stopped", "error": {"code": "misalignment_policy_violation", "message": "Review agent activity."}}});
+        let tool = json!({"type": "response.output_item.done", "item": {"type": "function_call", "name": "shell_command", "call_id": "forbidden-after-stop", "arguments": "{}"}});
+        let completed =
+            json!({"type": "response.completed", "response": {"id": "late-completion"}});
+        let frames = format!("data: {stopped}\n\ndata: {tool}\n\ndata: {completed}\n\n");
+        let events = collect_events(&[frames.as_bytes()]).await;
+        assert_eq!(events.len(), 1);
+        assert_matches!(events[0], Err(ApiError::InvalidRequest { .. }));
+    }
+
+    #[tokio::test]
+    async fn misalignment_stream_events_are_terminal_by_code() {
+        for message in [Some("Review account access."), Some("Other wording."), None] {
+            for kind in ["error", "response.failed"] {
+                let error = json!({"code": "misalignment_policy_violation", "message": message});
+                let event = if kind == "error" {
+                    json!({"type": kind, "error": error})
+                } else {
+                    json!({"type": kind, "response": {"id": "resp-policy", "error": error}})
+                };
+                let frame = format!("data: {event}\n\n");
+                let events = collect_events(&[frame.as_bytes()]).await;
+                assert_eq!(events.len(), 1);
+                match &events[0] {
+                    Err(ApiError::InvalidRequest { message }) => {
+                        assert!(message.contains("Automatic retries are disabled"))
+                    }
+                    other => panic!("policy stop must be terminal: {other:?}"),
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn content_policy_errors_without_type_are_invalid_requests() {
         for (code, expected_message) in [
             (
@@ -1513,6 +1610,7 @@ mod tests {
             }),
             json!({
                 "type": "response.output_text.delta",
+                "item_id": "msg-1",
                 "delta": "hello",
                 "safety_buffering": {
                     "use_cases": ["cyber"],
@@ -1522,6 +1620,7 @@ mod tests {
             }),
             json!({
                 "type": "response.output_text.delta",
+                "item_id": "msg-1",
                 "delta": " world",
                 "safety_buffering": {
                     "use_cases": ["cyber"],
@@ -1549,13 +1648,21 @@ mod tests {
                     && buffering.show_buffering_ui
                     && buffering.faster_model.as_deref() == Some("gpt-fast-wire")
         );
-        assert_matches!(&events[2], ResponseEvent::OutputTextDelta(delta) if delta == "hello");
+        assert_matches!(
+            &events[2],
+            ResponseEvent::OutputTextDelta { item_id: Some(item_id), delta }
+                if item_id == "msg-1" && delta == "hello"
+        );
         assert_matches!(
             &events[3],
             ResponseEvent::SafetyBuffering(buffering)
                 if buffering.use_cases == ["cyber"] && buffering.reasons == ["user_risk"]
         );
-        assert_matches!(&events[4], ResponseEvent::OutputTextDelta(delta) if delta == " world");
+        assert_matches!(
+            &events[4],
+            ResponseEvent::OutputTextDelta { item_id: Some(item_id), delta }
+                if item_id == "msg-1" && delta == " world"
+        );
         assert_matches!(
             &events[5],
             ResponseEvent::SafetyBuffering(buffering)

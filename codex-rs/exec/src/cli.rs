@@ -9,21 +9,21 @@ use std::path::PathBuf;
 #[derive(Parser, Debug)]
 #[command(
     version,
-    override_usage = "pfterminal exec [OPTIONS] [PROMPT]\n       pfterminal exec [OPTIONS] <COMMAND> [ARGS]"
+    override_usage = "corbanu exec [OPTIONS] [PROMPT]\n       corbanu exec [OPTIONS] <COMMAND> [ARGS]"
 )]
 pub struct Cli {
     /// Action to perform. If omitted, runs a new non-interactive session.
     #[command(subcommand)]
     pub command: Option<Command>,
 
-    /// Error out when config.toml contains fields that are not recognized by this version of PFTerminal.
+    /// Error out when config.toml contains fields that are not recognized by this Corbanu Terminal version.
     #[arg(long = "strict-config", global = true, default_value_t = false)]
     pub strict_config: bool,
 
     #[clap(flatten)]
     pub shared: ExecSharedCliOptions,
 
-    /// Allow running PFTerminal outside a Git repository.
+    /// Allow running Corbanu Terminal outside a Git repository.
     #[arg(long = "skip-git-repo-check", global = true, default_value_t = false)]
     pub skip_git_repo_check: bool,
 
@@ -31,7 +31,7 @@ pub struct Cli {
     #[arg(long = "ephemeral", global = true, default_value_t = false)]
     pub ephemeral: bool,
 
-    /// Do not load `$PFTERMINAL_HOME/config.toml`; auth still uses `PFTERMINAL_HOME`.
+    /// Do not load `$CORBANU_HOME/config.toml`; auth still uses `CORBANU_HOME`.
     #[arg(long = "ignore-user-config", global = true, default_value_t = false)]
     pub ignore_user_config: bool,
 
@@ -42,6 +42,25 @@ pub struct Cli {
     /// Path to a JSON Schema file describing the model's final response shape.
     #[arg(long = "output-schema", value_name = "FILE", global = true)]
     pub output_schema: Option<PathBuf>,
+
+    /// Named account for this session (`<name>` for the session's provider,
+    /// or `<provider>:<name>`). Another provider's account is used by spawned
+    /// agents on that provider, and is refused when none can run there. Needs
+    /// the `named_accounts` feature; a missing account is an error, never the
+    /// default account.
+    #[arg(long = "account", value_name = "[PROVIDER:]NAME", global = true)]
+    pub account: Option<String>,
+
+    /// How long to wait, retrying with backoff, while the Corbanu home cannot
+    /// be read (for example when a drive is briefly blocked) before failing.
+    /// `0` fails at once.
+    #[arg(
+        long = "home-wait-secs",
+        value_name = "SECONDS",
+        default_value_t = 3600,
+        global = true
+    )]
+    pub home_wait_secs: u64,
 
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
@@ -152,7 +171,7 @@ pub enum Command {
 #[derive(Args, Debug)]
 struct ResumeArgsRaw {
     // Note: This is the direct clap shape. We reinterpret the positional when --last is set
-    // so "pfterminal resume --last <prompt>" treats the positional as a prompt, not a session id.
+    // so "corbanu resume --last <prompt>" treats the positional as a prompt, not a session id.
     /// Conversation/session id (UUID) or thread name. UUIDs take precedence if it parses.
     /// If omitted, use --last to pick the most recent recorded session.
     #[arg(value_name = "SESSION_ID")]

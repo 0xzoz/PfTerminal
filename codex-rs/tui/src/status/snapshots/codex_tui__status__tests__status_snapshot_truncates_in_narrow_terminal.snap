@@ -1,17 +1,21 @@
 ---
 source: tui/src/status/tests.rs
-assertion_line: 1525
 expression: sanitized
 ---
 /status
 
 ╭────────────────────────────────────────────────────────────────────╮
-│  >_ PFTerminal (v0.1.27)                                           │
+│  >_ Corbanu Terminal (v<V>)                                        │
 │                                                                    │
-│  Model:            gpt-5.1-codex-max                               │
-│  Model provider:   Ambient                                         │
+│ Visit https://chatgpt.com/codex/settings/usage for up-to-date      │
+│ information on rate limits and credits                             │
+│                                                                    │
+│  Model:            gpt-5.1-codex-max (reasoning high, summaries de │
 │  Directory: [[workspace]]                                          │
-│  Permissions:      Custom (workspace with network access, Ask for  │
+│  Permissions:      Next turn: Custom (workspace with network       │
+│                    access, Ask for approval)                       │
+│  Security:         Requested Permissive; effective protection      │
+│                    unverified (/security)                          │
 │  Agents.md:        <none>                                          │
 │                                                                    │
 │  Token usage:      1.9K total  (1K input + 900 output)             │

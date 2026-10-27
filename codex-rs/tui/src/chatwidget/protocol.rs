@@ -16,6 +16,9 @@ impl ChatWidget {
         }
 
         let from_replay = replay_kind.is_some();
+        if !from_replay {
+            self.observe_provider_health(&notification);
+        }
         let is_resume_initial_replay =
             matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages));
         let is_retry_error = matches!(
@@ -50,9 +53,15 @@ impl ChatWidget {
             }
             ServerNotification::ThreadGoalUpdated(notification) => {
                 self.on_thread_goal_updated(notification.goal, notification.turn_id);
+                if !from_replay {
+                    self.tracker_capture("goal", "", serde_json::json!({"action":"goal_updated"}));
+                }
             }
             ServerNotification::ThreadGoalCleared(notification) => {
                 self.on_thread_goal_cleared(notification.thread_id.as_str());
+                if !from_replay {
+                    self.tracker_capture("goal", "", serde_json::json!({"action":"goal_cleared"}));
+                }
             }
             ServerNotification::ThreadSettingsUpdated(notification) => {
                 self.on_thread_settings_updated(notification);
@@ -157,12 +166,13 @@ impl ChatWidget {
             ServerNotification::DeprecationNotice(notification) => {
                 self.on_deprecation_notice(notification.summary, notification.details)
             }
-            ServerNotification::ConfigWarning(notification) => self.on_warning(
-                notification
+            ServerNotification::ConfigWarning(notification) => {
+                let message = notification
                     .details
                     .map(|details| format!("{}: {details}", notification.summary))
-                    .unwrap_or(notification.summary),
-            ),
+                    .unwrap_or_else(|| notification.summary.clone());
+                self.on_config_warning(notification.summary, message);
+            }
             ServerNotification::McpServerStatusUpdated(notification) => {
                 self.on_mcp_server_status_updated(notification)
             }
@@ -226,8 +236,14 @@ impl ChatWidget {
             | ServerNotification::ThreadRealtimeTranscriptDelta(_)
             | ServerNotification::ThreadRealtimeTranscriptDone(_)
             | ServerNotification::WindowsWorldWritableWarning(_)
-            | ServerNotification::WindowsSandboxSetupCompleted(_)
-            | ServerNotification::AccountLoginCompleted(_) => {}
+            | ServerNotification::WindowsSandboxSetupCompleted(_) => {}
+            ServerNotification::AccountLoginCompleted(notification) => {
+                self.app_event_tx
+                    .send(AppEvent::ProviderAccountLoginCompleted {
+                        login_id: notification.login_id,
+                        success: notification.success,
+                    });
+            }
             ServerNotification::ContextCompacted(_) => {}
         }
     }
@@ -237,6 +253,9 @@ impl ChatWidget {
         notification: TurnCompletedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        if replay_kind.is_none() {
+            self.tracker_capture("turn_end", "", serde_json::json!({"status": format!("{:?}", notification.turn.status), "durationMs": notification.turn.duration_ms, "nativeTurnId": notification.turn.id}));
+        }
         // User-message dedupe only suppresses the app-server echo of a prompt
         // this TUI already rendered locally. Once that turn ends, another
         // client can submit the same text and it still needs its own user cell.
@@ -339,6 +358,7 @@ impl ChatWidget {
                 prompt,
                 model,
                 reasoning_effort,
+                provider_account,
                 agents_states,
             } => self.on_collab_agent_tool_call(ThreadItem::CollabAgentToolCall {
                 id,
@@ -349,6 +369,7 @@ impl ChatWidget {
                 prompt,
                 model,
                 reasoning_effort,
+                provider_account,
                 agents_states,
             }),
             item @ ThreadItem::SubAgentActivity { .. } => self.on_sub_agent_activity(item),
@@ -364,6 +385,9 @@ impl ChatWidget {
         notification: ItemCompletedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        if replay_kind.is_none() {
+            self.tracker_item(&notification.item);
+        }
         self.handle_thread_item(
             notification.item,
             notification.turn_id,

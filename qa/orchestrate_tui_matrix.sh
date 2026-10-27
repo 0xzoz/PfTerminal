@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source "$ROOT/qa/orchestrate_tui_readiness.sh"
 BINARY=${PFTERMINAL_BINARY:-"$ROOT/codex-rs/target/debug/pfterminal"}
 SHA=$(git -C "$ROOT" rev-parse HEAD)
 ARTIFACT_ROOT=${PFTERMINAL_MATRIX_ARTIFACT_ROOT:-"$ROOT/qa/artifacts/$SHA"}
@@ -14,6 +15,8 @@ CURRENT_HOME=""
 CAPTURE_INDEX=0
 PANE_COUNT=0
 LAST_CAPTURE_PATH=""
+TERMINAL_LABEL=${PFTERMINAL_QA_PRODUCT_LABEL:-Corbanu Terminal}
+source "$ROOT/qa/orchestrate_tui_modal.sh"
 
 mkdir -p "$ARTIFACT_ROOT/server"
 : >"$CONTROL"
@@ -82,20 +85,44 @@ wait_screen() {
   return 1
 }
 
-wait_screen_absent() {
-  local pattern=$1
-  local attempts=${2:-80}
-  local output
+wait_modal_closed() {
+  local attempts=${1:-80}
+  local parent=${2:-none}
+  local attempt output
   for ((attempt = 0; attempt < attempts; attempt++)); do
     output=$(tmux capture-pane -p -t "$CURRENT_SESSION":0.0)
-    output=${output//$'\n'/ }
-    if ! grep -Fq -- "$pattern" <<<"$output"; then
+    if [[ "$parent" == orchestrate ]] && orchestrate_status_visible <<<"$output"; then
+      capture "details-returned-to-status" >/dev/null
+      orchestrate_send_escape "$CURRENT_SESSION":0.0
+      parent=none
+    elif [[ "$parent" == none ]] && orchestrate_modal_closed <<<"$output"; then
       return 0
     fi
     sleep 0.25
   done
-  capture "wait-absent-timeout" >/dev/null
+  capture "modal-close-timeout" >/dev/null
   return 1
+}
+
+wait_composer_ready() {
+  local attempts=$1
+  local attempt output
+  for ((attempt = 0; attempt < attempts; attempt++)); do
+    output=$(tmux capture-pane -p -t "$CURRENT_SESSION":0.0)
+    if orchestrate_composer_ready <<<"$output"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  capture "wait-timeout" >/dev/null
+  return 1
+}
+
+dismiss_modal() {
+  local parent=${1:-none}
+  orchestrate_send_escape "$CURRENT_SESSION":0.0
+  # Nested details and parent-list dismissal share the original wait budget.
+  wait_modal_closed 80 "$parent"
 }
 
 wait_layout() {
@@ -196,7 +223,7 @@ start_row() {
     "cd '$ROOT' && export PFTERMINAL_HOME='$CURRENT_HOME' CODEX_HOME='$CURRENT_HOME' PFTERMINAL_ORCHESTRATE_QA=1 PFTERMINAL_ORCHESTRATE_QA_CONTROL='$CONTROL' PFTERMINAL_ORCHESTRATE_TEST_CADENCE_SECONDS='$cadence_s' && exec '$BINARY' -c 'model=\"qa-model\"' -c 'model_provider=\"qa\"' -c 'model_providers.qa={ name = \"QA\", base_url = \"http://127.0.0.1:$PORT/v1\", wire_api = \"responses\", requires_openai_auth = false, request_max_retries = 0, stream_max_retries = 0 }' -c 'approval_policy=\"never\"' -c 'sandbox_mode=\"workspace-write\"'"
   wait_screen "Do you trust the contents" 40
   tmux send-keys -t "$CURRENT_SESSION":0.0 Enter
-  wait_screen "qa-model default" 80
+  wait_composer_ready 80
   sleep 2
   capture "started" >/dev/null
 }
@@ -207,7 +234,7 @@ restart_current() {
   tmux kill-session -t "$CURRENT_SESSION" 2>/dev/null || true
   tmux new-session -d -s "$CURRENT_SESSION" -x 140 -y 45 \
     "cd '$ROOT' && export PFTERMINAL_HOME='$CURRENT_HOME' CODEX_HOME='$CURRENT_HOME' PFTERMINAL_ORCHESTRATE_QA=1 PFTERMINAL_ORCHESTRATE_QA_CONTROL='$CONTROL' PFTERMINAL_ORCHESTRATE_TEST_CADENCE_SECONDS='$cadence_s' && exec '$BINARY' -c 'model=\"qa-model\"' -c 'model_provider=\"qa\"' -c 'model_providers.qa={ name = \"QA\", base_url = \"http://127.0.0.1:$PORT/v1\", wire_api = \"responses\", requires_openai_auth = false, request_max_retries = 0, stream_max_retries = 0 }' -c 'approval_policy=\"never\"' -c 'sandbox_mode=\"workspace-write\"' resume '$root_thread_id'"
-  wait_screen "qa-model default" 100
+  wait_composer_ready 100
   sleep 2
 }
 
@@ -217,13 +244,13 @@ create_pane() {
   capture "panes-before-create-$name" >/dev/null
   select_down $((PANE_COUNT + 1))
   capture "after-select-create-$name" >/dev/null
-  wait_screen "Name Codex pane"
+  wait_screen "Name $TERMINAL_LABEL pane"
   tmux send-keys -t "$CURRENT_SESSION":0.0 C-u
   literal_keys "$name"
   tmux send-keys -t "$CURRENT_SESSION":0.0 Enter
   sleep 0.2
   tmux send-keys -t "$CURRENT_SESSION":0.0 Enter
-  wait_screen "Created and switched to Codex pane $name" 100
+  wait_screen "Created and switched to $TERMINAL_LABEL pane $name" 100
   PANE_COUNT=$((PANE_COUNT + 1))
   capture "created-$name" >/dev/null
 }
@@ -238,13 +265,13 @@ switch_pane() {
     *) return 1 ;;
   esac
   select_down "$steps"
-  wait_screen_absent "Search panes and crew"
+  wait_modal_closed
 }
 
 switch_main() {
   submit_slash_wait "/panes" "Panes"
   select_down 0
-  wait_screen_absent "Search panes and crew"
+  wait_modal_closed
 }
 
 open_panes_capture() {
@@ -265,6 +292,10 @@ guided_prewritten_create_manager() {
   wait_screen "New Assignment - Manager"
   select_down 0
   wait_layout '.orchestrate_whips | to_entries[0].value.kind.phase == "executing"'
+  # The deterministic fixture runs the minimum two productive mandate fires, then returns a plain
+  # terminal response. Let that final Manager turn settle before rows send slash commands or user
+  # markers to its pane.
+  sleep 4
 }
 
 guided_draft_existing_manager() {
@@ -296,7 +327,7 @@ row_1() {
   local panes
   open_panes_capture "panes-after-two-cycles" >/dev/null
   panes=$LAST_CAPTURE_PATH
-  grep -Fq "Codex - Worker" "$panes" || fail 1 "Worker vanished from /panes"
+  grep -Fq "$TERMINAL_LABEL - Worker" "$panes" || fail 1 "Worker vanished from /panes"
   screen_contains "$panes" "managed-by Manager" || fail 1 "Worker assignment label missing"
   wait_layout '.orchestrate_whips | to_entries[0].value.fires >= 2' || fail 1 "two mandate cycles did not fire"
   snapshot_layout "final-layout"
@@ -310,7 +341,7 @@ row_2() {
   local panes
   open_panes_capture "draft-running-panes" >/dev/null
   panes=$LAST_CAPTURE_PATH
-  grep -Fq "Codex - Worker" "$panes" || fail 2 "Worker missing after first draft dispatch"
+  grep -Fq "$TERMINAL_LABEL - Worker" "$panes" || fail 2 "Worker missing after first draft dispatch"
   wait_layout '.orchestrate_whips | to_entries[0].value.last_dispatch_result == "delivered"' \
     || fail 2 "first draft dispatch was not delivered"
   snapshot_layout "final-layout"
@@ -373,6 +404,11 @@ row_6() {
   switch_pane "Manager"
   submit_user "QA_BAD_DISPATCH"
   wait_layout '.orchestrate_whips | to_entries[0].value.state == "paused"'
+  # The durable state transition and terminal rendering are delivered on
+  # separate event paths. A fast hosted runner can observe `paused` before the
+  # retry-failure notice reaches the viewport, so synchronize on both product
+  # signals before capturing evidence.
+  wait_screen "dispatch retry failed" 100 || fail 6 "retry failure was not visible"
   local evidence
   capture "dispatch-failure-paused" >/dev/null
   evidence=$LAST_CAPTURE_PATH
@@ -458,11 +494,10 @@ row_9() {
   local before after assignment_id
   open_panes_capture "pane-hygiene-before-detach" >/dev/null
   before=$LAST_CAPTURE_PATH
-  grep -Fq "Codex - Main" "$before" || fail 9 "Main pane missing"
-  grep -Fq "Codex - Worker" "$before" || fail 9 "Worker pane missing"
-  grep -Fq "Codex - Manager" "$before" || fail 9 "Manager pane missing"
-  tmux send-keys -t "$CURRENT_SESSION":0.0 Esc
-  wait_screen_absent "Search panes and crew"
+  grep -Fq "$TERMINAL_LABEL - Main" "$before" || fail 9 "Main pane missing"
+  grep -Fq "$TERMINAL_LABEL - Worker" "$before" || fail 9 "Worker pane missing"
+  grep -Fq "$TERMINAL_LABEL - Manager" "$before" || fail 9 "Manager pane missing"
+  dismiss_modal
   switch_pane "Worker"
   switch_pane "Manager"
   switch_main
@@ -471,8 +506,8 @@ row_9() {
   wait_layout '.orchestrate_whips | length == 0'
   open_panes_capture "pane-hygiene-after-detach" >/dev/null
   after=$LAST_CAPTURE_PATH
-  grep -Fq "Codex - Worker" "$after" || fail 9 "detach removed Worker pane"
-  grep -Fq "Codex - Manager" "$after" || fail 9 "detach removed Manager pane"
+  grep -Fq "$TERMINAL_LABEL - Worker" "$after" || fail 9 "detach removed Worker pane"
+  grep -Fq "$TERMINAL_LABEL - Manager" "$after" || fail 9 "detach removed Manager pane"
   if grep -Eq 'managed-by|managing' "$after"; then
     fail 9 "detach left assignment labels on panes"
   fi
@@ -491,7 +526,7 @@ row_10() {
   candidates=$LAST_CAPTURE_PATH
   grep -Fq "Create Manager pane" "$candidates" || fail 10 "create Manager option missing"
   if grep -Fq "Bind Main" "$candidates"; then
-    fail 10 "Codex Main was offered as Manager"
+    fail 10 "$TERMINAL_LABEL Main was offered as Manager"
   fi
 
   start_row 10-main 900
@@ -508,7 +543,7 @@ row_10() {
   submit_user "QA_APPROVE_DRAFT"
   wait_layout '.orchestrate_whips | to_entries[0].value.kind.phase == "executing" and to_entries[0].value.last_dispatch_result == "delivered"'
   snapshot_layout "codex-main-worker-layout"
-  printf 'PASS\t10\tCodex Main constraints\n' >>"$RESULTS"
+  printf 'PASS\t10\t%s Main constraints\n' "$TERMINAL_LABEL" >>"$RESULTS"
 }
 
 row_11() {
@@ -533,7 +568,9 @@ row_12() {
   start_row 12 900
   create_pane "Worker"
   local worker_thread_id worker_node
-  worker_thread_id=$(head -n 1 "$(rg -l '\"agent_nickname\":\"Worker\"' "$CURRENT_HOME/sessions" | head -n 1)" | jq -r '.payload.id')
+  worker_thread_id=$(jq -r '(.layout // .) | .codex_user_pane_ids[-1]' "$(layout_file)")
+  [[ "$worker_thread_id" != "null" && -n "$worker_thread_id" ]] \
+    || fail 12 "Worker durable thread ID was not persisted in the pane layout"
   worker_node="thread:$worker_thread_id"
   submit "/orchestrate attach $worker_node keep-going --mode auto --holder none --max 2 --cooldown 2s"
   wait_layout '.orchestrate_whips | to_entries[0].value.kind.type == "legacy_nudge"'
@@ -590,7 +627,8 @@ row_13() {
   wait_screen "Assignment assignment-"
   capture "jargon-details" >/dev/null
   screens+=("$LAST_CAPTURE_PATH")
-  tmux send-keys -t "$CURRENT_SESSION":0.0 Esc
+  dismiss_modal orchestrate
+  capture "details-and-status-dismissed" >/dev/null
 
   local worker_node
   worker_node=$(jq -r '(.layout // .) | .orchestrate_whips | to_entries[0].value.target' "$(layout_file)")
@@ -599,7 +637,9 @@ row_13() {
   capture "jargon-notice" >/dev/null
   screens+=("$LAST_CAPTURE_PATH")
   printf '%s\n' "${screens[@]}" >"$ARTIFACT_ROOT/$CURRENT_SESSION/jargon-screens.txt"
-  if rg -ni '\b(whip|holder|target|review)\b' "${screens[@]}" \
+  # The composer's rotating placeholder ("› Run /review on my current changes")
+  # is not product copy under test, so composer lines are excluded.
+  if rg -ni '\b(whip|holder|target|review)\b' "${screens[@]}" | rg -v ':[0-9]+:› ' \
     >"$ARTIFACT_ROOT/$CURRENT_SESSION/jargon-lint.txt"; then
     fail 13 "product jargon appeared in guided flow, status, details, or notices"
   fi
@@ -614,21 +654,21 @@ row_14() {
   local latency_file="$ARTIFACT_ROOT/$CURRENT_SESSION/popup-latency.tsv"
   : >"$latency_file"
   local started elapsed
-  started=$(date +%s%3N)
+  started=$(python3 "$ROOT/qa/orchestrate_tui_platform.py" now-ms) || return
   submit "/orchestrate attach"
   wait_screen "New Assignment - Worker"
-  elapsed=$(($(date +%s%3N) - started))
+  elapsed=$(python3 "$ROOT/qa/orchestrate_tui_platform.py" elapsed-ms "$started") || return
   printf 'worker\t%s\n' "$elapsed" >>"$latency_file"
   ((elapsed < 2000)) || fail 14 "Worker popup exceeded 2s"
-  started=$(date +%s%3N)
+  started=$(python3 "$ROOT/qa/orchestrate_tui_platform.py" now-ms) || return
   tmux send-keys -t "$CURRENT_SESSION":0.0 Down
   sleep 0.2
   tmux send-keys -t "$CURRENT_SESSION":0.0 Enter
   wait_screen "New Assignment - Duration"
-  elapsed=$(($(date +%s%3N) - started))
+  elapsed=$(python3 "$ROOT/qa/orchestrate_tui_platform.py" elapsed-ms "$started") || return
   printf 'duration\t%s\n' "$elapsed" >>"$latency_file"
   ((elapsed < 2500)) || fail 14 "Duration popup exceeded 2.5s"
-  started=$(date +%s%3N)
+  started=$(python3 "$ROOT/qa/orchestrate_tui_platform.py" now-ms) || return
   tmux send-keys -t "$CURRENT_SESSION":0.0 Down
   sleep 0.15
   tmux send-keys -t "$CURRENT_SESSION":0.0 Down
@@ -637,13 +677,13 @@ row_14() {
   sleep 0.2
   tmux send-keys -t "$CURRENT_SESSION":0.0 Enter
   wait_screen "New Assignment - Spec"
-  elapsed=$(($(date +%s%3N) - started))
+  elapsed=$(python3 "$ROOT/qa/orchestrate_tui_platform.py" elapsed-ms "$started") || return
   printf 'spec\t%s\n' "$elapsed" >>"$latency_file"
   ((elapsed < 2500)) || fail 14 "Spec popup exceeded 2.5s"
-  started=$(date +%s%3N)
+  started=$(python3 "$ROOT/qa/orchestrate_tui_platform.py" now-ms) || return
   tmux send-keys -t "$CURRENT_SESSION":0.0 Enter
   wait_screen "New Assignment - Manager"
-  elapsed=$(($(date +%s%3N) - started))
+  elapsed=$(python3 "$ROOT/qa/orchestrate_tui_platform.py" elapsed-ms "$started") || return
   printf 'manager\t%s\n' "$elapsed" >>"$latency_file"
   ((elapsed < 2500)) || fail 14 "Manager popup exceeded 2.5s"
   capture "responsive-manager-popup" >/dev/null
@@ -670,7 +710,8 @@ row_15() {
   {
     printf 'source=%s\n' "$source_layout"
     printf 'source_sha256=%s\n' "$source_hash"
-    stat -c 'source_mode=%a' "$evidence_dir/read-only-source/pane-layout.json"
+    python3 "$ROOT/qa/orchestrate_tui_platform.py" source-mode \
+      "$evidence_dir/read-only-source/pane-layout.json" || return
     printf 'normalized_root_thread_id=%s\n' "$root_thread_id"
   } >"$evidence_dir/source-record.txt"
 

@@ -45,7 +45,7 @@ impl ChatWidget {
                     (false, "No usage limit resets available.".to_string())
                 }
             };
-        SelectionViewParams {
+        let mut params = SelectionViewParams {
             view_id: Some(USAGE_MENU_VIEW_ID),
             title: Some("Usage".to_string()),
             subtitle: Some("View account usage or redeem an earned reset.".to_string()),
@@ -72,7 +72,25 @@ impl ChatWidget {
                 },
             ],
             ..Default::default()
+        };
+        // The recorded-request view is developer-only (PF-60-S03); a build
+        // that records no costs does not offer it.
+        if cfg!(feature = "developer-accounting") {
+            params.items.push(SelectionItem {
+                name: "Recorded requests".into(),
+                description: Some(
+                    "Explain this thread's recorded requests for today (UTC).".into(),
+                ),
+                actions: vec![Box::new(|tx| {
+                    tx.send(AppEvent::OpenAccountingInspector {
+                        day: chrono::Utc::now().timestamp_millis() / 86_400_000,
+                    })
+                })],
+                dismiss_on_select: true,
+                ..Default::default()
+            });
         }
+        params
     }
 
     pub(crate) fn finish_usage_menu_rate_limit_refresh(
@@ -585,9 +603,10 @@ fn reset_label(count: i64) -> &'static str {
     }
 }
 
-fn pfterminal_plan_usage_item() -> SelectionItem {
+#[cfg(test)]
+fn corbanu_plan_usage_item() -> SelectionItem {
     SelectionItem {
-        name: "PfTerminal Plan usage".to_string(),
+        name: "Corbanu Plan usage".to_string(),
         description: Some(
             "View prepaid spend, used and in-flight tokens, limits, and reset times.".to_string(),
         ),
@@ -598,12 +617,12 @@ fn pfterminal_plan_usage_item() -> SelectionItem {
 }
 
 #[cfg(test)]
-mod pfterminal_plan_tests {
+mod corbanu_plan_tests {
     use super::*;
 
     #[test]
     fn plan_usage_action_opens_dedicated_usage_view() {
-        let item = pfterminal_plan_usage_item();
+        let item = corbanu_plan_usage_item();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let sender = crate::app_event_sender::AppEventSender::new(tx);
         (item.actions[0])(&sender);

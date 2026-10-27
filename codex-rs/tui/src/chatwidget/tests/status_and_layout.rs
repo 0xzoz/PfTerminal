@@ -1772,7 +1772,7 @@ async fn workspace_owner_limit_states_render_state_specific_messages() {
         (
             RateLimitReachedType::WorkspaceOwnerCreditsDepleted,
             RateLimitErrorKind::Generic,
-            "You're out of credits. Your workspace is out of credits. Add credits to continue using PFTerminal.",
+            "You're out of credits. Your workspace is out of credits. Add credits to continue using Corbanu Terminal.",
         ),
         (
             RateLimitReachedType::WorkspaceOwnerUsageLimitReached,
@@ -2099,6 +2099,44 @@ async fn request_user_input_interrupt_pauses_active_goal_turn() {
         assert_matches!(rx.try_recv(), Ok(AppEvent::CodexOp(Op::Interrupt)));
         assert_goal_paused_event(&mut rx, thread_id);
     }
+}
+
+/// #787: an Esc that reaches an agent's question before it was drawn, or in
+/// the second after, neither interrupts the turn nor pauses the goal; once
+/// the question has been on screen that long, Esc does both.
+#[tokio::test]
+async fn issue_787_dropped_esc_neither_interrupts_nor_pauses_the_goal() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.bottom_pane
+        .set_request_input_guard(crate::bottom_pane::REQUEST_INPUT_GUARD);
+    let thread_id = start_active_goal_turn(&mut chat);
+    chat.handle_request_user_input_now(ToolRequestUserInputParams {
+        thread_id: thread_id.to_string(),
+        item_id: "call-1".to_string(),
+        turn_id: "turn-1".to_string(),
+        questions: Vec::new(),
+        auto_resolution_ms: None,
+    });
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+
+    chat.handle_key_event(esc);
+    chat.pre_draw_tick();
+    chat.handle_key_event(esc);
+    let events: Vec<AppEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AppEvent::CodexOp(Op::Interrupt) | AppEvent::SetThreadGoalStatus { .. }
+        )),
+        "a dropped Esc interrupted or paused: {events:?}"
+    );
+
+    std::thread::sleep(
+        crate::bottom_pane::REQUEST_INPUT_GUARD + std::time::Duration::from_millis(100),
+    );
+    chat.handle_key_event(esc);
+    assert_matches!(rx.try_recv(), Ok(AppEvent::CodexOp(Op::Interrupt)));
+    assert_goal_paused_event(&mut rx, thread_id);
 }
 
 fn start_active_goal_turn(chat: &mut ChatWidget) -> ThreadId {
@@ -2758,7 +2796,7 @@ async fn default_status_line_includes_product_brand() {
     chat.refresh_status_line();
 
     let status_line = status_line_text(&chat).expect("default status line should render");
-    assert!(status_line.contains("Post Fiat Terminal"));
+    assert!(status_line.contains("Corbanu Terminal"));
     assert!(status_line.ends_with("TPS: -- tok/s"));
 }
 
@@ -2769,12 +2807,12 @@ async fn status_line_tps_updates_during_active_streaming() {
     chat.refresh_status_line();
     chat.tps_estimator.start_turn(
         std::time::Instant::now() - std::time::Duration::from_secs(1),
-        None,
+        /*total_usage_at_start*/ None,
     );
     chat.on_agent_message_delta("12345678901234567890".to_string());
 
     let status_line = status_line_text(&chat).expect("status line should render");
-    assert!(status_line.contains("Post Fiat Terminal"));
+    assert!(status_line.contains("Corbanu Terminal"));
     assert!(
         status_line.contains("TPS: ~"),
         "stream-estimated active TPS should be marked approximate: {status_line}"
@@ -2809,7 +2847,7 @@ async fn status_line_tps_updates_from_completed_turn_average() {
     );
 
     let status_line = status_line_text(&chat).expect("status line should render after TPS sample");
-    assert!(status_line.contains("Post Fiat Terminal"));
+    assert!(status_line.contains("Corbanu Terminal"));
     assert!(status_line.ends_with("TPS: 20.0 tok/s"));
 }
 
@@ -2827,7 +2865,7 @@ async fn status_line_tps_uses_streamed_text_when_usage_is_missing() {
 
     let status_line =
         status_line_text(&chat).expect("status line should render after fallback TPS sample");
-    assert!(status_line.contains("Post Fiat Terminal"));
+    assert!(status_line.contains("Corbanu Terminal"));
     assert!(status_line.ends_with("TPS: ~5.0 tok/s"));
 }
 
@@ -2859,7 +2897,7 @@ async fn status_line_tps_updates_when_usage_arrives_after_completion() {
 
     let status_line =
         status_line_text(&chat).expect("status line should render after late usage update");
-    assert!(status_line.contains("Post Fiat Terminal"));
+    assert!(status_line.contains("Corbanu Terminal"));
     assert!(status_line.ends_with("TPS: 20.0 tok/s"));
 }
 
@@ -3258,6 +3296,30 @@ async fn status_line_fast_mode_footer_snapshot() {
 }
 
 #[tokio::test]
+async fn status_line_identifies_custom_provider_with_shared_model_slug() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("fixture-model")).await;
+    chat.config.tui_status_line = Some(vec!["model-with-reasoning".to_string()]);
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::High));
+    chat.config.model_provider_id = "custom-a".to_string();
+    chat.refresh_status_line();
+    assert_eq!(
+        status_line_text(&chat),
+        Some("fixture-model via custom-a high".into())
+    );
+    chat.config.model_provider_id = "custom-b".to_string();
+    chat.refresh_status_line();
+    assert_eq!(
+        status_line_text(&chat),
+        Some("fixture-model via custom-b high".into())
+    );
+    chat.set_active_external_model_display(Some("GLM 5.2 via external-child".into()));
+    assert_eq!(
+        status_line_text(&chat),
+        Some("GLM 5.2 via external-child".into())
+    );
+}
+
+#[tokio::test]
 async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
     set_fast_mode_test_catalog(&mut chat);
@@ -3274,7 +3336,7 @@ async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models(
     set_fast_mode_test_catalog(&mut chat);
     assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
     chat.refresh_status_line();
-    let test_cwd = test_path_display("/tmp/project");
+    let test_cwd = test_cwd_display();
 
     assert_eq!(
         status_line_text(&chat),
@@ -3309,7 +3371,7 @@ async fn status_line_model_uses_active_external_pane_model() {
 
     assert_eq!(status_line_text(&chat), Some("GLM 5.2 Z.AI".to_string()));
 
-    chat.set_active_external_model_display(None);
+    chat.set_active_external_model_display(/*model_display*/ None);
 
     assert_eq!(
         status_line_text(&chat),
@@ -3642,6 +3704,7 @@ async fn session_configured_clears_goal_status_footer() {
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
+        provider_account: None,
     });
 
     assert_eq!(chat.current_goal_status_indicator, None);

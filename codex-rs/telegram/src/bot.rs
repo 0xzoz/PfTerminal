@@ -498,7 +498,7 @@ async fn handle_callback_inner(
                 "Unsupported callback.".to_string()
             }
         }
-        Some(_) => "This chat is not authorized to use PFTerminal.".to_string(),
+        Some(_) => "This chat is not authorized to use Corbanu Terminal.".to_string(),
         None => "Approval callbacks must come from the original Telegram chat.".to_string(),
     };
     let answer_text = callback_answer_text(&response);
@@ -601,7 +601,7 @@ async fn begin_or_explain(
             send_notice(
                 bot,
                 conversation,
-                "PFTerminal's Telegram inbox is full. Wait for queued work to finish, then retry.",
+                "Corbanu Terminal's Telegram inbox is full. Wait for queued work to finish, then retry.",
             )
             .await?;
             Ok(false)
@@ -610,7 +610,7 @@ async fn begin_or_explain(
             send_notice(
                 bot,
                 conversation,
-                "PFTerminal could not safely persist this update, so it was not started. Retry after checking host storage.",
+                "Corbanu Terminal could not safely persist this update, so it was not started. Retry after checking host storage.",
             )
             .await?;
             Ok(false)
@@ -658,16 +658,17 @@ mod tests {
     #[test]
     fn plain_text_is_used_verbatim() {
         assert_eq!(
-            resolve_message_input(Some("hello there"), None),
+            resolve_message_input(Some("hello there"), /*caption*/ None),
             MessageInput::Text("hello there".to_string())
         );
     }
 
     #[test]
     fn caption_on_non_image_media_is_accepted_but_flags_the_dropped_attachment() {
-        let MessageInput::Text(text) =
-            resolve_message_input(None, Some("posted: https://discord.com/channels/1/2/3"))
-        else {
+        let MessageInput::Text(text) = resolve_message_input(
+            /*text*/ None,
+            Some("posted: https://discord.com/channels/1/2/3"),
+        ) else {
             panic!("a caption must produce text input");
         };
         // The caption reaches the agent...
@@ -680,10 +681,13 @@ mod tests {
 
     #[test]
     fn bare_media_without_caption_is_unsupported() {
-        assert_eq!(resolve_message_input(None, None), MessageInput::Unsupported);
+        assert_eq!(
+            resolve_message_input(/*text*/ None, /*caption*/ None),
+            MessageInput::Unsupported
+        );
         // A whitespace-only caption is not real input.
         assert_eq!(
-            resolve_message_input(None, Some("   ")),
+            resolve_message_input(/*text*/ None, Some("   ")),
             MessageInput::Unsupported
         );
     }

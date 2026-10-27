@@ -24,6 +24,7 @@ use codex_state::GpuRentalCreateParams;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -44,6 +45,61 @@ impl GpuCredentialResolver for FakeCredentials {
             GpuCredentialKind::HuggingFaceToken => Err(GpuCredentialError::Missing),
             GpuCredentialKind::ProviderApiKey { .. } => Err(GpuCredentialError::Missing),
         }
+    }
+}
+
+#[derive(Debug)]
+struct TrackingCredentials {
+    rental_ids: StdMutex<Vec<String>>,
+    deleted: StdMutex<Vec<String>>,
+}
+
+impl TrackingCredentials {
+    fn new(rental_ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            rental_ids: StdMutex::new(rental_ids.into_iter().map(Into::into).collect()),
+            deleted: StdMutex::new(Vec::new()),
+        }
+    }
+
+    fn deleted(&self) -> Vec<String> {
+        self.deleted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl GpuCredentialResolver for TrackingCredentials {
+    fn resolve(&self, kind: &GpuCredentialKind) -> Result<GpuCredential, GpuCredentialError> {
+        FakeCredentials.resolve(kind)
+    }
+
+    fn rental_endpoint_token_ids(&self) -> Result<Vec<String>, GpuCredentialError> {
+        Ok(self
+            .rental_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone())
+    }
+
+    fn delete_rental_endpoint_token(&self, rental_id: &str) -> Result<bool, GpuCredentialError> {
+        let removed = {
+            let mut rental_ids = self
+                .rental_ids
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let before = rental_ids.len();
+            rental_ids.retain(|stored| stored != rental_id);
+            rental_ids.len() != before
+        };
+        if removed {
+            self.deleted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(rental_id.to_string());
+        }
+        Ok(removed)
     }
 }
 
@@ -578,6 +634,77 @@ async fn create_authorized_rental(state: &StateRuntime, operation_id: &str) {
 }
 
 #[tokio::test]
+async fn reconciliation_prunes_orphaned_endpoint_tokens_and_preserves_tracked_rentals() {
+    let state = state_runtime().await;
+    let active = rental_params("active-token");
+    state
+        .create_gpu_rental(&active, NOW_MS)
+        .await
+        .expect("create tracked rental");
+    state
+        .request_gpu_rental_creation(active.rental_id.as_str(), NOW_MS)
+        .await
+        .expect("authorize tracked rental");
+    let credentials = Arc::new(TrackingCredentials::new([
+        "orphan-token",
+        active.rental_id.as_str(),
+    ]));
+    let controller = controller_with_dependencies(
+        state,
+        FakeProvider::new(CreateBehavior::Success),
+        credentials.clone(),
+        Arc::new(FakeReadiness),
+    );
+
+    controller
+        .reconcile_due(NOW_MS)
+        .await
+        .expect("prune orphaned endpoint tokens");
+
+    assert_eq!(credentials.deleted(), vec!["orphan-token"]);
+}
+
+#[tokio::test]
+async fn provider_confirmed_termination_deletes_the_endpoint_token() {
+    let state = state_runtime().await;
+    let provider = FakeProvider::new(CreateBehavior::Success);
+    create_authorized_rental(&state, "token-cleanup").await;
+    let credentials = Arc::new(TrackingCredentials::new(["rental-token-cleanup"]));
+    let controller = controller_with_dependencies(
+        state.clone(),
+        provider,
+        credentials.clone(),
+        Arc::new(FakeReadiness),
+    );
+    controller.reconcile_due(NOW_MS).await.expect("create");
+    state
+        .request_gpu_rental_termination("rental-token-cleanup", NOW_MS + 1)
+        .await
+        .expect("request termination");
+    controller
+        .reconcile_due(NOW_MS + 1)
+        .await
+        .expect("send termination");
+    assert_eq!(credentials.deleted(), vec!["rental-token-cleanup"]);
+
+    controller
+        .reconcile_due(NOW_MS + 2)
+        .await
+        .expect("confirm termination");
+
+    assert_eq!(credentials.deleted(), vec!["rental-token-cleanup"]);
+    assert_eq!(
+        state
+            .get_gpu_rental("rental-token-cleanup")
+            .await
+            .expect("load rental")
+            .expect("rental exists")
+            .observed_state,
+        GpuRentalState::TerminatedConfirmed
+    );
+}
+
+#[tokio::test]
 async fn ordinary_create_records_one_provider_resource() {
     let state = state_runtime().await;
     let provider = FakeProvider::new(CreateBehavior::Success);
@@ -606,7 +733,9 @@ async fn transient_endpoint_store_failure_retries_before_provider_create() {
     let controller = controller_with_dependencies(
         state.clone(),
         provider.clone(),
-        Arc::new(TransientEndpointCredentials::unavailable_on_call(1)),
+        Arc::new(TransientEndpointCredentials::unavailable_on_call(
+            /*fail_on_call*/ 1,
+        )),
         Arc::new(FakeReadiness),
     );
 
@@ -646,7 +775,9 @@ async fn transient_endpoint_store_failure_during_readiness_preserves_live_instan
     let controller = controller_with_dependencies(
         state.clone(),
         provider.clone(),
-        Arc::new(TransientEndpointCredentials::unavailable_on_call(2)),
+        Arc::new(TransientEndpointCredentials::unavailable_on_call(
+            /*fail_on_call*/ 2,
+        )),
         Arc::new(FakeReadiness),
     );
     create_authorized_rental(&state, "readiness-credential-retry").await;
@@ -910,7 +1041,7 @@ async fn retryable_secure_endpoint_discovery_does_not_destroy_a_live_rental() {
 async fn readiness_loss_disables_runtime_until_the_full_contract_recovers() {
     let state = state_runtime().await;
     let provider = FakeProvider::new(CreateBehavior::Success);
-    let readiness = Arc::new(SwitchableReadiness::new(true));
+    let readiness = Arc::new(SwitchableReadiness::new(/*ready*/ true));
     let controller = controller_with_readiness(state.clone(), provider.clone(), readiness.clone());
     create_authorized_rental(&state, "health").await;
     controller.reconcile_due(NOW_MS).await.expect("create");
@@ -943,7 +1074,7 @@ async fn readiness_loss_disables_runtime_until_the_full_contract_recovers() {
         .await
         .expect("seed stale runtime price");
 
-    readiness.set(false);
+    readiness.set(/*ready*/ false);
     let degraded = controller.reconcile_due(NOW_MS + 4).await.expect("degrade");
     assert_eq!(
         degraded,
@@ -961,7 +1092,7 @@ async fn readiness_loss_disables_runtime_until_the_full_contract_recovers() {
         2_500_000
     );
 
-    readiness.set(true);
+    readiness.set(/*ready*/ true);
     let recovered = controller
         .reconcile_due(NOW_MS + 60_004)
         .await
@@ -1418,8 +1549,8 @@ async fn retry_backoff_is_stable_jittered_and_honors_retry_after() {
         .expect("load rental")
         .expect("rental exists");
 
-    let first = controller.retry_delay_ms(&rental, None);
-    let replay = controller.retry_delay_ms(&rental, None);
+    let first = controller.retry_delay_ms(&rental, /*retry_after_ms*/ None);
+    let replay = controller.retry_delay_ms(&rental, /*retry_after_ms*/ None);
     assert_eq!(first, replay);
     assert!((750..=1_250).contains(&first));
     assert_eq!(controller.retry_delay_ms(&rental, Some(7_777)), 7_777);

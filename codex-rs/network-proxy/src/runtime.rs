@@ -3,6 +3,14 @@ use crate::config::NetworkMode;
 use crate::config::NetworkProxyConfig;
 use crate::config::ValidatedUnixSocketPath;
 use crate::credential_broker::CredentialBroker;
+use crate::credential_broker::CredentialRouting;
+use crate::credential_broker::IsolatedBrokerOptions;
+use crate::credential_broker::IsolatedCredentialDispatchError;
+use crate::credential_broker::IsolatedCredentialReceipt;
+use crate::credential_broker::IsolatedCredentialRoute;
+use crate::credential_broker::ScopedCredentialInjectionError;
+use crate::credential_broker::ScopedCredentialRoute;
+use crate::credential_broker::ScopedCredentialRouteError;
 use crate::mitm::MitmState;
 use crate::mitm_hook::HookEvaluation;
 use crate::mitm_hook::MitmHooksByHost;
@@ -189,7 +197,7 @@ pub trait ConfigReloader: Send + Sync {
 
 pub type ConfigReloaderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> + Send + 'a>>;
 
-struct StaticConfigReloader;
+pub(crate) struct StaticConfigReloader;
 
 impl ConfigReloader for StaticConfigReloader {
     fn source_label(&self) -> String {
@@ -344,7 +352,7 @@ impl NetworkProxyState {
         blocked_request_observer: Option<Arc<dyn BlockedRequestObserver>>,
     ) -> Self {
         Self {
-            credential_broker: CredentialBroker::new(state.config.credential_broker),
+            credential_broker: credential_broker_for_config(&state.config),
             state: Arc::new(RwLock::new(state)),
             reloader,
             blocked_request_observer: Arc::new(RwLock::new(blocked_request_observer)),
@@ -414,12 +422,91 @@ impl NetworkProxyState {
         &self.audit_metadata
     }
 
+    pub fn install_scoped_credential_route(
+        &self,
+        route: ScopedCredentialRoute,
+    ) -> Result<(), ScopedCredentialRouteError> {
+        self.credential_broker.install_scoped_openai_route(route)
+    }
+
+    pub fn scoped_credential_route_enabled(&self) -> bool {
+        self.credential_broker.scoped_openai_enabled()
+    }
+
+    /// Register an opaque broker route; this does not qualify its OS service.
+    pub fn install_isolated_credential_route(
+        &self,
+        route: IsolatedCredentialRoute,
+    ) -> Result<(), ScopedCredentialRouteError> {
+        self.credential_broker.install_isolated_openai_route(route)
+    }
+
+    /// Dispatch only through the installed exact-host isolated credential route.
+    pub fn dispatch_isolated_credential(
+        &self,
+        scheme: &str,
+        host: &str,
+        port: u16,
+        method: &str,
+        path: &str,
+    ) -> Result<IsolatedCredentialReceipt, IsolatedCredentialDispatchError> {
+        self.credential_broker
+            .dispatch_isolated_openai(scheme, host, port, method, path)
+    }
+
+    pub fn scoped_credential_route_matches_host(&self, host: &str) -> bool {
+        self.credential_broker.scoped_openai_matches_host(host)
+    }
+
     pub fn virtualize_child_credentials(&self, env: &mut HashMap<String, String>) {
         self.credential_broker.virtualize_child_env(env);
     }
 
-    pub fn inject_request_credentials(&self, host: &str, headers: &mut rama_http::HeaderMap) {
+    pub fn inject_legacy_request_credentials(
+        &self,
+        host: &str,
+        headers: &mut rama_http::HeaderMap,
+    ) {
         self.credential_broker.inject_request_headers(host, headers);
+    }
+
+    /// PF-28-S02: whether injected values are scrubbed from responses.
+    pub(crate) fn credential_response_gate(&self) -> bool {
+        self.credential_broker.response_gate_enabled()
+    }
+
+    /// Revokes every reference held by the isolated credential broker and
+    /// closes its in-flight channels. Returns false when isolation is inactive.
+    pub fn revoke_brokered_credentials(&self) -> bool {
+        self.credential_broker.revoke_isolated_credentials()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn route_request_credentials(
+        &self,
+        scheme: &str,
+        host: &str,
+        port: u16,
+        method: &str,
+        path: &str,
+        headers: &mut rama_http::HeaderMap,
+    ) -> Result<CredentialRouting, ScopedCredentialInjectionError> {
+        self.credential_broker
+            .route_request_credentials(scheme, host, port, method, path, headers)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn inject_request_credentials(
+        &self,
+        scheme: &str,
+        host: &str,
+        port: u16,
+        method: &str,
+        path: &str,
+        headers: &mut rama_http::HeaderMap,
+    ) -> Result<(), ScopedCredentialInjectionError> {
+        self.credential_broker
+            .inject_request_headers_for_request(scheme, host, port, method, path, headers)
     }
 
     pub async fn plaintext_credential_injection_enabled(&self) -> Result<bool> {
@@ -695,6 +782,13 @@ impl NetworkProxyState {
         Ok(guard.config.allow_local_binding)
     }
 
+    /// PF-33-S01: whether Core armed the URL destination guard.
+    pub(crate) async fn url_destination_policy(&self) -> Result<bool> {
+        self.reload_if_needed().await?;
+        let guard = self.state.read().await;
+        Ok(guard.config.url_destination_policy)
+    }
+
     pub async fn network_mode(&self) -> Result<NetworkMode> {
         self.reload_if_needed().await?;
         let guard = self.state.read().await;
@@ -854,7 +948,8 @@ impl NetworkProxyState {
 
     fn ensure_credential_broker_enablement_unchanged(&self, new_state: &ConfigState) -> Result<()> {
         anyhow::ensure!(
-            self.credential_broker.enabled() == new_state.config.credential_broker,
+            self.credential_broker.enabled() == new_state.config.credential_broker
+                && self.credential_broker.isolated() == new_state.config.isolated_credential_broker,
             "network.credential_broker cannot change while the proxy is running"
         );
         Ok(())
@@ -1017,6 +1112,30 @@ fn is_explicit_local_allowlisted(allowed_domains: &[String], host: &Host) -> boo
         normalized_pattern == normalized_host
             || unscoped_host.is_some_and(|ip| normalized_pattern == ip)
     })
+}
+
+fn credential_broker_for_config(config: &crate::config::NetworkProxyConfig) -> CredentialBroker {
+    let broker = if config.isolated_credential_broker {
+        CredentialBroker::new_isolated(
+            config.credential_broker,
+            IsolatedBrokerOptions {
+                // PF-33-S02: under the destination guard local binding is no
+                // private-network grant, and the broker dials only the
+                // answers the guard checked.
+                allow_local_binding: config.allow_local_binding && !config.url_destination_policy,
+                allow_upstream_proxy: config.allow_upstream_proxy,
+                runtime_dir: config.credential_broker_runtime_dir.clone(),
+                require_containment: config.secretless_agent_launch.is_some(),
+                scrub_responses: config.credential_response_gate,
+                pin_connections: config.url_destination_policy,
+            },
+        )
+    } else {
+        CredentialBroker::new(config.credential_broker)
+    };
+    broker
+        .with_process_env_source(config.secretless_agent_launch.as_deref())
+        .with_response_gate(config.credential_response_gate)
 }
 
 fn unix_timestamp() -> i64 {

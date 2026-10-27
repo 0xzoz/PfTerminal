@@ -6,6 +6,8 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelServiceTier;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
+use codex_protocol::openai_models::WeekdaySet;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::JsonSchemaPrimitiveType;
 use codex_tools::JsonSchemaType;
 use pretty_assertions::assert_eq;
@@ -43,24 +45,49 @@ fn model_preset(id: &str, show_in_picker: bool) -> ModelPreset {
 }
 
 #[test]
+fn scheduled_billing_renders_weekday_and_legacy_daily_contracts() {
+    let scheduled = |peak_weekdays| ModelBilling::PlanSchedule {
+        off_peak_relative_burn_millis: 1_000,
+        peak_relative_burn_millis: 3_000,
+        peak_start_utc_hour: 6,
+        peak_end_utc_hour: 10,
+        peak_weekdays,
+        promotional_off_peak_relative_burn_millis: None,
+        promotion_valid_through_utc: None,
+    };
+
+    assert_eq!(
+        format_model_billing(&scheduled(Some(WeekdaySet::weekdays_only()))),
+        "plan, normal off-peak 1x / peak 3x at 06:00-10:00 UTC on Monday/Tuesday/Wednesday/Thursday/Friday"
+    );
+    assert_eq!(
+        format_model_billing(&scheduled(None)),
+        "plan, normal off-peak 1x / peak 3x at 06:00-10:00 UTC"
+    );
+}
+
+#[test]
 fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
-    let mut incompatible = model_preset("incompatible", /*show_in_picker*/ true);
-    incompatible.multi_agent_version = Some(MultiAgentVersion::V1);
+    let mut legacy = model_preset("legacy", /*show_in_picker*/ true);
+    legacy.multi_agent_version = Some(MultiAgentVersion::V1);
+    let mut unspecified = model_preset("unspecified", /*show_in_picker*/ true);
+    unspecified.multi_agent_version = None;
     let mut visible = model_preset("visible", /*show_in_picker*/ true);
     visible.provider_id = Some("example-provider".to_string());
     let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
         available_models: vec![
             visible,
             model_preset("hidden", /*show_in_picker*/ false),
-            incompatible,
+            legacy,
+            unspecified,
         ],
         inherited_runtime: None,
         agent_type_description: "role help".to_string(),
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
-        multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
+        expose_account: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool {
@@ -90,10 +117,11 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         )
     );
     assert!(description.contains(
-        "- `example-provider` / `visible-model`; text-only; efforts: xhigh (default); tiers: priority"
+        "- `example-provider` / `visible-model`; explicit-choice only; allocation economics unavailable; text-only; efforts: xhigh (default); tiers: priority"
     ));
     assert!(!description.contains("hidden-model"));
-    assert!(!description.contains("incompatible-model"));
+    assert!(description.contains("legacy-model"));
+    assert!(description.contains("unspecified-model"));
     assert!(properties.contains_key("task_name"));
     assert!(properties.contains_key("message"));
     assert_eq!(
@@ -169,8 +197,7 @@ fn spawn_agent_catalog_exposes_parent_runtime_and_frontier_effort_policy() {
         service_tier: None,
     };
 
-    let description =
-        spawn_agent_models_description(&[sol], MultiAgentVersion::V2, Some(&inherited_runtime));
+    let description = spawn_agent_models_description(&[sol], Some(&inherited_runtime));
 
     assert!(
         description.contains(
@@ -193,6 +220,41 @@ fn spawn_agent_catalog_exposes_parent_runtime_and_frontier_effort_policy() {
 }
 
 #[test]
+fn spawn_agent_catalog_separates_explicit_choices_from_cost_based_allocation() {
+    let mut unpriced = model_preset("unpriced", /*show_in_picker*/ true);
+    unpriced.provider_id = Some("openai".to_string());
+    let mut disabled = unpriced.clone();
+    disabled.model = "manual-model".to_string();
+    disabled.orchestration = Some(ModelOrchestrationMetadata::Disabled {
+        provider_id: "openai".to_string(),
+        capability: ModelCapabilityTier::Frontier,
+        reason: "No verified allocation economics".to_string(),
+        billing: None,
+    });
+    let mut priced = unpriced.clone();
+    priced.model = "priced-model".to_string();
+    priced.orchestration = Some(ModelOrchestrationMetadata::Eligible {
+        provider_id: "openai".to_string(),
+        capability: ModelCapabilityTier::Balanced,
+        billing: ModelBilling::Plan {
+            relative_burn_millis: 1_000,
+        },
+    });
+    let description = spawn_agent_models_description(
+        &[unpriced, disabled, priced],
+        /*inherited_runtime*/ None,
+    );
+    for slug in ["unpriced-model", "manual-model"] {
+        assert!(description.contains(&format!(
+            "`openai` / `{slug}`; explicit-choice only; allocation economics unavailable;"
+        )));
+    }
+    assert!(description.contains("`openai` / `priced-model`; plan, burn 1x, balanced;"));
+    assert!(description.contains("must not be chosen for automatic cost-based allocation"));
+    assert!(description.contains("not an exhaustive allowlist"));
+}
+
+#[test]
 fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
     let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
         available_models: Vec::new(),
@@ -201,8 +263,8 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
-        multi_agent_version: MultiAgentVersion::V1,
         usage_hint_text: None,
+        expose_account: false,
     });
 
     let ToolSpec::Namespace(namespace) = tool else {
@@ -267,8 +329,8 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
-        multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
+        expose_account: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool { description, .. }) = tool else {
@@ -294,7 +356,7 @@ fn spawn_agent_tool_caps_reasoning_effort_value_length() {
         description: "Model-defined".to_string(),
     }];
 
-    let description = spawn_agent_models_description(&[model], MultiAgentVersion::V2, None);
+    let description = spawn_agent_models_description(&[model], /*inherited_runtime*/ None);
     let capped_effort = "é".repeat(MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION);
 
     assert!(description.contains("Current inherited runtime: unavailable."));
@@ -312,8 +374,8 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
         expose_agent_type: false,
         hide_agent_type_model_reasoning: true,
         expose_spawn_agent_model_overrides: true,
-        multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
+        expose_account: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool {
@@ -346,8 +408,8 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
         expose_agent_type: false,
         hide_agent_type_model_reasoning: true,
         expose_spawn_agent_model_overrides: false,
-        multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
+        expose_account: false,
     });
 
     let ToolSpec::Function(ResponsesApiTool {
@@ -580,8 +642,8 @@ fn openai_reserved_collaboration_profile_restores_pinned_argument_contracts() {
             expose_agent_type: true,
             hide_agent_type_model_reasoning: false,
             expose_spawn_agent_model_overrides: true,
-            multi_agent_version: MultiAgentVersion::V2,
             usage_hint_text: None,
+            expose_account: false,
         },
     ));
     let ToolSpec::Function(spawn) = spawn else {
@@ -668,4 +730,23 @@ fn openai_reserved_collaboration_profile_restores_pinned_result_contracts() {
         list.output_schema.expect("list output schema")["properties"]["agents"]["items"]["required"],
         json!(["agent_name", "agent_status"])
     );
+}
+
+#[test]
+fn spawn_agent_account_argument_is_offered_only_with_named_accounts() {
+    let has_account = |expose_account: bool| {
+        let ToolSpec::Function(ResponsesApiTool { parameters, .. }) =
+            create_spawn_agent_tool_v2(SpawnAgentToolOptions {
+                expose_account,
+                ..SpawnAgentToolOptions::default()
+            })
+        else {
+            panic!("spawn_agent should be a function tool");
+        };
+        parameters
+            .properties
+            .expect("spawn_agent should use object params")
+            .contains_key("account")
+    };
+    assert_eq!((has_account(false), has_account(true)), (false, true));
 }

@@ -181,6 +181,58 @@ async fn thread_start_warns_for_exec_policy_parse_failure_after_initialize() -> 
 }
 
 #[tokio::test]
+async fn thread_start_fails_for_rules_broken_after_initialize_when_strict() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    // Aggressive passes `-c strict_rules=true`, which a user config cannot undo.
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        "strict_rules = false\n",
+    )?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_args(&["-c", "strict_rules=true"])
+        .build_initialized()
+        .await?;
+    // A thread started while the rules parse keeps its rules.
+    mcp.start_thread(ThreadStartParams::default()).await?;
+
+    let rules_dir = codex_home.path().join("rules");
+    std::fs::create_dir_all(&rules_dir)?;
+    std::fs::write(rules_dir.join("broken.rules"), "prefix_rule(")?;
+
+    let request_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams::default())
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert!(
+        error.error.message.contains("failed to load rules")
+            && error.error.message.contains("broken.rules")
+            && error.error.message.contains("fix or remove it"),
+        "unexpected error: {}",
+        error.error.message
+    );
+    // No "custom rules not applied" warning: the thread did not run at all.
+    let warning = timeout(
+        std::time::Duration::from_millis(250),
+        mcp.read_stream_until_matching_notification(
+            "exec-policy configWarning",
+            is_exec_policy_config_warning,
+        ),
+    )
+    .await;
+    assert!(
+        warning.is_err(),
+        "strict thread/start sent a fallback warning"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_start_does_not_repeat_initialize_exec_policy_warning() -> Result<()> {
     let codex_home = TempDir::new()?;
     let rules_dir = codex_home.path().join("rules");
@@ -243,21 +295,51 @@ async fn thread_start_provider_model_fallback_uses_bedrock_static_catalog() -> R
         /*allow_provider_model_fallback*/ true,
     )
     .await?;
-    let unsupported_without_fallback = start_thread_with_model(
-        &mut mcp,
-        "gpt-5.4-mini",
-        /*allow_provider_model_fallback*/ false,
-    )
-    .await?;
-
     assert_eq!(
         vec![
             unsupported_with_fallback.model,
             supported_with_fallback.model,
-            unsupported_without_fallback.model,
         ],
-        vec!["openai.gpt-5.6-sol", "openai.gpt-5.4", "gpt-5.4-mini"]
+        vec!["openai.gpt-5.6-sol", "openai.gpt-5.4"]
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_start_provider_model_fallback_remains_opt_in() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"model_provider = "amazon-bedrock"
+"#,
+    )?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+
+    let request_id = mcp
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            model: Some("gpt-5.4-mini".to_string()),
+            allow_provider_model_fallback: false,
+            ..Default::default()
+        })
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+
+    assert_eq!(error.error.code, INVALID_REQUEST_ERROR_CODE);
+    assert!(
+        error
+            .error
+            .message
+            .contains("provider selection was preserved")
+    );
+    assert!(error.error.message.contains("gpt-5.4-mini"));
+    assert!(error.error.message.contains("amazon-bedrock"));
     Ok(())
 }
 
@@ -1364,8 +1446,9 @@ async fn thread_start_with_nested_git_cwd_trusts_repo_root() -> Result<()> {
 
     let repo_root = TempDir::new()?;
     std::fs::create_dir(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     let nested = repo_root.path().join("nested/project");
-    std::fs::create_dir_all(&nested)?;
+    std::fs::create_dir_all(nested.join(".git"))?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())

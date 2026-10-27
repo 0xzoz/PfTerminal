@@ -4,6 +4,10 @@ use strum_macros::EnumIter;
 use strum_macros::EnumString;
 use strum_macros::IntoStaticStr;
 
+/// The forms `/cost` accepts; the full rules are in its usage message.
+pub(crate) const COST_ARGUMENT_HINT: &str =
+    "[YYYY-MM-DD]  or  START END hour|day|week|month  (UTC)";
+
 /// Commands that can be invoked by starting a message with a leading slash.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, EnumString, EnumIter, AsRefStr, IntoStaticStr,
@@ -16,6 +20,7 @@ pub enum SlashCommand {
     Gpu,
     Ide,
     Permissions,
+    Security,
     Keymap,
     Vim,
     #[strum(serialize = "setup-default-sandbox")]
@@ -55,6 +60,7 @@ pub enum SlashCommand {
     Mention,
     Status,
     Usage,
+    Cost,
     DebugConfig,
     Title,
     Statusline,
@@ -94,7 +100,7 @@ impl SlashCommand {
         match self {
             SlashCommand::Feedback => "send logs to maintainers",
             SlashCommand::New => "start a new chat during a conversation",
-            SlashCommand::Init => "create an AGENTS.md file with instructions for PFTerminal",
+            SlashCommand::Init => "create an AGENTS.md file with instructions for Corbanu Terminal",
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Rename => "rename the current thread",
@@ -103,18 +109,24 @@ impl SlashCommand {
             SlashCommand::Delete => "permanently delete this session and exit",
             SlashCommand::Clear => "clear the terminal and start a new chat",
             SlashCommand::Fork => "fork the current chat",
-            SlashCommand::App => "continue this session in PFTerminal Desktop",
-            SlashCommand::Quit | SlashCommand::Exit => "exit PFTerminal",
+            SlashCommand::App => "continue this session in Corbanu Terminal Desktop",
+            SlashCommand::Quit | SlashCommand::Exit => "exit Corbanu Terminal",
             SlashCommand::Copy => "copy last response as markdown",
             SlashCommand::Raw => "toggle raw scrollback mode for copy-friendly terminal selection",
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Docs => "open MkDocs documentation in the terminal",
             SlashCommand::Mention => "mention a file",
-            SlashCommand::Skills => "use skills to improve how PFTerminal performs specific tasks",
+            SlashCommand::Skills => {
+                "use skills to improve how Corbanu Terminal performs specific tasks"
+            }
             SlashCommand::Import => "import setup, this project, and recent chats from Claude Code",
             SlashCommand::Hooks => "view and manage lifecycle hooks",
             SlashCommand::Status => "show current session configuration and token usage",
+            SlashCommand::Usage if cfg!(feature = "developer-accounting") => {
+                "view recorded request cost, account usage, or use a rate-limit reset"
+            }
             SlashCommand::Usage => "view account usage or use a rate-limit reset",
+            SlashCommand::Cost => "what your turns cost, on whichever provider served them",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
             SlashCommand::Title => "configure which items appear in the terminal title",
             SlashCommand::Statusline => "configure which items appear in the status line",
@@ -129,18 +141,19 @@ impl SlashCommand {
             SlashCommand::Ide => {
                 "include current selection, open files, and other context from your IDE"
             }
-            SlashCommand::Personality => "choose a communication style for PFTerminal",
+            SlashCommand::Personality => "choose a communication style for Corbanu Terminal",
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Goal => "set or view the goal for a long-running task",
             SlashCommand::Agent | SlashCommand::MultiAgents => "switch the active agent thread",
             SlashCommand::Spawn => "orchestrate Nazgul, Troll, and Orc agent roles",
             SlashCommand::Orchestrate => "attach and manage native pane whips",
             SlashCommand::Tasknode => "interact with Task Node tasks and rewards",
-            SlashCommand::Panes => "switch PFTerminal, Claude Code, or agent panes",
+            SlashCommand::Panes => "switch Corbanu Terminal, Claude Code, or agent panes",
             SlashCommand::Side | SlashCommand::Btw => {
                 "start a side conversation in an ephemeral fork"
             }
-            SlashCommand::Permissions => "choose what PFTerminal is allowed to do",
+            SlashCommand::Permissions => "choose what Corbanu Terminal is allowed to do",
+            SlashCommand::Security => security_description(crate::security::level::context()),
             SlashCommand::Keymap => "remap TUI shortcuts",
             SlashCommand::Vim => "toggle Vim mode for the composer",
             SlashCommand::ElevateSandbox => "set up elevated agent sandbox",
@@ -153,11 +166,11 @@ impl SlashCommand {
             SlashCommand::Mcp => "list configured MCP tools; use /mcp verbose for details",
             SlashCommand::Apps => "manage apps",
             SlashCommand::Plugins => "browse plugins",
-            SlashCommand::Providers => "add provider API keys to the encrypted vault",
-            SlashCommand::Telegram => "connect and manage PFTerminal from Telegram",
+            SlashCommand::Providers => "configure, activate, or deactivate providers",
+            SlashCommand::Telegram => "connect and manage Corbanu Terminal from Telegram",
             SlashCommand::Vault => "manage the encrypted credential vault (keys, tokens)",
-            SlashCommand::Wallet => "manage SOL, USDC, and PfTerminal inference plans",
-            SlashCommand::Logout => "log out of PFTerminal",
+            SlashCommand::Wallet => "manage SOL, USDC, and Corbanu API access",
+            SlashCommand::Logout => "log out of Corbanu Terminal",
             SlashCommand::Rollout => "print the rollout file path",
             SlashCommand::TestApproval => "test approval request",
         }
@@ -186,6 +199,7 @@ impl SlashCommand {
                 | SlashCommand::Raw
                 | SlashCommand::Docs
                 | SlashCommand::Usage
+                | SlashCommand::Cost
                 | SlashCommand::Pets
                 | SlashCommand::Side
                 | SlashCommand::Btw
@@ -201,6 +215,15 @@ impl SlashCommand {
         )
     }
 
+    /// A short, dimmed hint of the accepted arguments, shown in the composer
+    /// after the command and a space until the user types an argument.
+    pub fn argument_hint(self) -> Option<&'static str> {
+        match self {
+            SlashCommand::Cost => Some(COST_ARGUMENT_HINT),
+            _ => None,
+        }
+    }
+
     /// Whether this command remains available inside an active side conversation.
     pub fn available_in_side_conversation(self) -> bool {
         matches!(
@@ -212,6 +235,7 @@ impl SlashCommand {
                 | SlashCommand::Mention
                 | SlashCommand::Status
                 | SlashCommand::Usage
+                | SlashCommand::Cost
                 | SlashCommand::Ide
                 | SlashCommand::Providers
                 | SlashCommand::Telegram
@@ -243,7 +267,8 @@ impl SlashCommand {
             | SlashCommand::Logout
             | SlashCommand::MemoryDrop
             | SlashCommand::MemoryUpdate => false,
-            SlashCommand::Diff
+            SlashCommand::Cost
+            | SlashCommand::Diff
             | SlashCommand::Archive
             | SlashCommand::Delete
             | SlashCommand::Docs
@@ -252,6 +277,7 @@ impl SlashCommand {
             | SlashCommand::Gpu
             | SlashCommand::Personality
             | SlashCommand::Permissions
+            | SlashCommand::Security
             | SlashCommand::Copy
             | SlashCommand::Raw
             | SlashCommand::Rename
@@ -298,6 +324,12 @@ impl SlashCommand {
             SlashCommand::Copy => !cfg!(target_os = "android"),
             SlashCommand::App => cfg!(any(target_os = "macos", target_os = "windows")),
             SlashCommand::Rollout | SlashCommand::TestApproval => cfg!(debug_assertions),
+            // The recorded-request view is held: collection cannot exist in a
+            // shipped binary, and advertising the view there was never
+            // authorised. It is gated on the same build that can collect: in
+            // any other build typing it is an unrecognized command, and
+            // `/usage requests` says the history is not part of the build.
+            SlashCommand::Cost => cfg!(feature = "developer-accounting"),
             _ => true,
         }
     }
@@ -311,12 +343,25 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
         .collect()
 }
 
+/// `/security` opens the level picker when the `security_levels` flag is on
+/// (or a non-Permissive level is stored); otherwise it is the read-only view.
+fn security_description(context: Option<&crate::security::level::LevelContext>) -> &'static str {
+    if context.is_some_and(|context| context.picker_enabled) {
+        "choose a security level; takes effect when you restart"
+    } else {
+        "explore security profiles and protection readiness (read only)"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use pretty_assertions::assert_eq;
     use std::str::FromStr;
 
     use super::SlashCommand;
+    use super::security_description;
+    use crate::security::level::ChosenLevel;
+    use crate::security::level::LevelContext;
 
     #[test]
     fn stop_command_is_canonical_name() {
@@ -355,6 +400,32 @@ mod tests {
         assert_eq!(
             SlashCommand::from_str("approve"),
             Ok(SlashCommand::AutoReview)
+        );
+    }
+
+    /// The description follows what `/security` opens: the picker when the
+    /// launch context enables it, otherwise the read-only view.
+    #[test]
+    fn security_description_matches_what_the_command_opens() {
+        let context = |picker_enabled| LevelContext {
+            codex_home: std::path::PathBuf::from("/home"),
+            picker_enabled,
+            active: ChosenLevel::Permissive,
+            preflight_enabled: false,
+            boundary: None,
+        };
+        let read_only = "explore security profiles and protection readiness (read only)";
+        assert_eq!(
+            [
+                security_description(Some(&context(true))),
+                security_description(Some(&context(false))),
+                security_description(/*context*/ None),
+            ],
+            [
+                "choose a security level; takes effect when you restart",
+                read_only,
+                read_only,
+            ]
         );
     }
 }

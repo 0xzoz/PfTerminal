@@ -578,9 +578,11 @@ pub(crate) fn resolve_whip_instruction_path(
     } else {
         format!("{name}.md")
     };
-    let project_path = cwd.join(".pfterminal").join("whips").join(&file_name);
-    if project_path.exists() {
-        return Ok(Some(project_path));
+    for product_dir in [".corbanu", ".pfterminal"] {
+        let project_path = cwd.join(product_dir).join("whips").join(&file_name);
+        if project_path.exists() {
+            return Ok(Some(project_path));
+        }
     }
     let global_path = codex_home.join("whips").join(file_name);
     Ok(global_path.exists().then_some(global_path))
@@ -630,8 +632,14 @@ fn available_whip_instruction_entries(codex_home: &Path, cwd: &Path) -> Vec<Whip
     let mut seen = HashSet::new();
     let mut entries = Vec::new();
     scan_whip_instruction_dir(
-        &cwd.join(".pfterminal").join("whips"),
+        &cwd.join(".corbanu").join("whips"),
         "project",
+        &mut seen,
+        &mut entries,
+    );
+    scan_whip_instruction_dir(
+        &cwd.join(".pfterminal").join("whips"),
+        "legacy project",
         &mut seen,
         &mut entries,
     );
@@ -893,7 +901,7 @@ impl App {
         else {
             return Err("Expected an assignment attach command.".to_string());
         };
-        self.attach_whip(
+        let attached = self.attach_whip(
             target,
             whip_name,
             mode,
@@ -902,7 +910,13 @@ impl App {
             cooldown_s,
             holder,
             CommandOrigin::User,
-        )
+        );
+        // #613: as for `/orchestrate attach`, paused at once while the kill
+        // switch is on.
+        if attached.is_ok() {
+            self.pause_whips_for_kill_switch();
+        }
+        attached
     }
 
     pub(crate) fn open_orchestrate_status_view(&mut self) {
@@ -1073,7 +1087,7 @@ impl App {
         if items.is_empty() {
             items.push(SelectionItem {
                 name: "No Worker panes available".to_string(),
-                description: Some("Create a PFTerminal or Claude pane first.".to_string()),
+                description: Some("Create a Corbanu Terminal or Claude pane first.".to_string()),
                 is_disabled: true,
                 ..Default::default()
             });
@@ -1098,7 +1112,7 @@ impl App {
         let mut items = vec![SelectionItem {
             name: "Create Manager pane".to_string(),
             description: Some(format!(
-                "Create a PFTerminal pane using {} and start in Drafting.",
+                "Create a Corbanu Terminal pane using {} and start in Drafting.",
                 self.native_spawn_default_model()
             )),
             is_default: true,
@@ -1182,7 +1196,7 @@ impl App {
         if items.is_empty() {
             items.push(SelectionItem {
                 name: "No Worker panes available".to_string(),
-                description: Some("Create a PFTerminal or Claude pane first.".to_string()),
+                description: Some("Create a Corbanu Terminal or Claude pane first.".to_string()),
                 is_disabled: true,
                 ..Default::default()
             });
@@ -1354,7 +1368,7 @@ impl App {
         items.push(SelectionItem {
             name: "Create Manager pane".to_string(),
             description: Some(format!(
-                "Create a PFTerminal pane using {}.",
+                "Create a Corbanu Terminal pane using {}.",
                 self.native_spawn_default_model()
             )),
             is_default: true,
@@ -1531,7 +1545,7 @@ impl App {
             "Save Assignment Spec".to_string(),
             "Basename, for example keep-going".to_string(),
             suggested_name,
-            Some("Saved under ~/.pfterminal/whips".to_string()),
+            Some("Saved under $CODEX_HOME/whips".to_string()),
             Box::new(move |requested_name: String| {
                 tx.send(AppEvent::SaveOrchestrateWhipAndConfirm {
                     target: target.clone(),
@@ -1561,7 +1575,7 @@ impl App {
             Ok(whip_name) => {
                 self.chat_widget.add_info_message(
                     format!("Saved assignment spec `{whip_name}`."),
-                    Some("Saved globally under ~/.pfterminal/whips.".to_string()),
+                    Some("Saved globally under $CODEX_HOME/whips.".to_string()),
                 );
                 self.open_orchestrate_manager_picker(
                     target,
@@ -1755,17 +1769,17 @@ impl App {
             } else {
                 "idle"
             };
-            let mut description = format!("PFTerminal; {status}; {thread_id}");
+            let mut description = format!("Corbanu Terminal; {status}; {thread_id}");
             if let Some(task) = entry.last_task_message.as_deref() {
                 description.push_str(&format!(
                     "; task: {}",
-                    truncate_for_orchestrate_display(task, 90)
+                    truncate_for_orchestrate_display(task, /*max_chars*/ 90)
                 ));
             }
             if let Some(result) = entry.last_result_message.as_deref() {
                 description.push_str(&format!(
                     "; result: {}",
-                    truncate_for_orchestrate_display(result, 90)
+                    truncate_for_orchestrate_display(result, /*max_chars*/ 90)
                 ));
             }
             entries.push(OrchestrateTargetEntry {
@@ -1794,19 +1808,19 @@ impl App {
             if let Some(usage) = pane.latest_usage_summary.as_deref() {
                 description.push_str(&format!(
                     "; usage: {}",
-                    truncate_for_orchestrate_display(usage, 80)
+                    truncate_for_orchestrate_display(usage, /*max_chars*/ 80)
                 ));
             }
             if let Some(task) = pane.latest_task_message.as_deref() {
                 description.push_str(&format!(
                     "; task: {}",
-                    truncate_for_orchestrate_display(task, 90)
+                    truncate_for_orchestrate_display(task, /*max_chars*/ 90)
                 ));
             }
             if let Some(result) = pane.latest_result_message.as_deref() {
                 description.push_str(&format!(
                     "; result: {}",
-                    truncate_for_orchestrate_display(result, 90)
+                    truncate_for_orchestrate_display(result, /*max_chars*/ 90)
                 ));
             }
             entries.push(OrchestrateTargetEntry {
@@ -2080,6 +2094,24 @@ impl App {
         cause: &str,
         will_retry: bool,
     ) {
+        self.note_assignment_dispatch_failure_with_turns(
+            holder_node_id,
+            cause,
+            will_retry,
+            /*start_turns*/ true,
+        );
+    }
+
+    /// `start_turns` false (#660): the Manager is told without starting a
+    /// turn in it (a dispatch sent while the kill switch was on, or held or
+    /// refused because of it).
+    pub(crate) fn note_assignment_dispatch_failure_with_turns(
+        &mut self,
+        holder_node_id: &str,
+        cause: &str,
+        will_retry: bool,
+        start_turns: bool,
+    ) {
         let holder_node_id = normalize_orchestrate_node_id(holder_node_id);
         let Some((id, worker_node_id)) =
             self.assignment_dispatch_target_for_holder(&holder_node_id)
@@ -2120,9 +2152,11 @@ impl App {
         // The active UI can change between an automated dispatch and its failure. Persist the
         // operational notice to the Manager as a report as well, so switching panes cannot hide
         // the retry or pause reason from the operator or the Manager's next turn.
-        self.record_spawn_parent_report(
+        self.record_spawn_parent_report_with_notify(
             holder_node_id,
             format!("assignment_dispatch_notice; {message}"),
+            /*notify*/ true,
+            start_turns,
         );
         self.persist_pane_state();
     }
@@ -2220,7 +2254,7 @@ impl App {
         for (id, role) in notices {
             self.chat_widget.add_info_message(
                 format!("Assignment {id} paused: {role} {node_label} is unavailable."),
-                None,
+                /*hint*/ None,
             );
         }
         if changed {
@@ -2272,14 +2306,14 @@ impl App {
                     format!(
                         "Assignment {id} paused after restart: {role} is unavailable ({detail})."
                     ),
-                    None,
+                    /*hint*/ None,
                 );
             } else if executing {
                 self.chat_widget.add_info_message(
                     format!(
                         "Assignment {id} restored; the next Manager mandate waits one cadence."
                     ),
-                    None,
+                    /*hint*/ None,
                 );
             }
         }
@@ -2306,6 +2340,9 @@ impl App {
         let ids: Vec<String> = self.orchestrate_whips.keys().cloned().collect();
         for id in ids {
             self.expire_whip_if_needed(&id, now);
+        }
+        if self.pause_whips_for_kill_switch() {
+            return;
         }
         self.watch_assignment_reachability(now);
         let target_generations: Vec<(String, u64)> = self
@@ -2385,8 +2422,10 @@ impl App {
             if let Some(whip) = self.orchestrate_whips.get_mut(&id) {
                 whip.state = WhipState::Paused;
             }
-            self.chat_widget
-                .add_info_message(format!("Assignment {id} paused: {role} unreachable."), None);
+            self.chat_widget.add_info_message(
+                format!("Assignment {id} paused: {role} unreachable."),
+                /*hint*/ None,
+            );
             changed = true;
         }
         if changed {
@@ -2403,10 +2442,42 @@ impl App {
             self.chat_widget.add_error_message(err);
             return;
         }
+        // #613: while the kill switch is on nothing is resumed or started
+        // (it could fire right after switch-off), and a whip attached now is
+        // paused at once, like those armed when the switch went on. The saved
+        // state decides (not the state this process last learned): a switch-off
+        // elsewhere allows it at once, and a switch-on is already saved.
+        let refused = match &command {
+            OrchestrateCommand::Resume(id) => Some(("resumed", "resume", id)),
+            OrchestrateCommand::Start(id) => Some(("started", "start", id)),
+            _ => None,
+        };
+        if let Some((done, verb, id_or_target)) = refused
+            && crate::legacy_core::security_revocation::kill_switch_on(
+                self.config.codex_home.as_ref(),
+            )
+        {
+            self.chat_widget.add_error_message(format!(
+                "Not {done}: the security kill switch is on. Turn it off in /security, then run /orchestrate {verb} {id_or_target}."
+            ));
+            return;
+        }
+        let attaches = matches!(command, OrchestrateCommand::Attach { .. });
+        self.dispatch_orchestrate_command(command, origin);
+        if attaches {
+            self.pause_whips_for_kill_switch();
+        }
+    }
+
+    fn dispatch_orchestrate_command(
+        &mut self,
+        command: OrchestrateCommand,
+        origin: CommandOrigin<'_>,
+    ) {
         match command {
             OrchestrateCommand::Status => self.chat_widget.add_info_message(
                 format_whip_status(&self.orchestrate_whips, self.orchestrate_now()),
-                None,
+                /*hint*/ None,
             ),
             OrchestrateCommand::Attach {
                 target,
@@ -2420,7 +2491,7 @@ impl App {
                 match self.attach_whip(
                     target, whip_name, mode, expiry, max_fires, cooldown_s, holder, origin,
                 ) {
-                    Ok(message) => self.chat_widget.add_info_message(message, None),
+                    Ok(message) => self.chat_widget.add_info_message(message, /*hint*/ None),
                     Err(err) => self.chat_widget.add_error_message(err),
                 }
             }
@@ -2452,8 +2523,10 @@ impl App {
                     .map(|value| value.to_rfc3339())
                     .unwrap_or_else(|| "unlimited".to_string());
                 self.persist_pane_state();
-                self.chat_widget
-                    .add_info_message(format!("Extended {id}; expires_at={expires}."), None);
+                self.chat_widget.add_info_message(
+                    format!("Extended {id}; expires_at={expires}."),
+                    /*hint*/ None,
+                );
             }
             OrchestrateCommand::Fire(id) => match self.plan_whip_fire(&id, FireTrigger::Manual) {
                 Ok(plan) => self.execute_whip_fire(plan, FireTrigger::Manual),
@@ -2476,7 +2549,7 @@ impl App {
                         plan.destination_label,
                         plan.task
                     ),
-                    None,
+                    /*hint*/ None,
                 ),
                 Err(err) => self.chat_widget.add_error_message(err),
             },
@@ -2528,7 +2601,7 @@ impl App {
             })
         {
             return Err(
-                "PFTerminal Main cannot be an assignment Manager; create a Manager pane."
+                "Corbanu Terminal Main cannot be an assignment Manager; create a Manager pane."
                     .to_string(),
             );
         }
@@ -2543,8 +2616,11 @@ impl App {
         if let Some(manager) = holder_node_id.as_deref() {
             self.fire_destination_for_node(manager)?;
         }
+        // One clock read for the whole attach: the requested duration is measured
+        // from the same instant the assignment's duration is computed against.
+        let now = self.orchestrate_now();
         let resolved_expiry = expiry
-            .map(|value| resolve_expiry_arg(value, self.orchestrate_now()))
+            .map(|value| resolve_expiry_arg(value, now))
             .transpose()?;
         let options = ResolvedAttachOptions {
             mode: Some(resolved_mode),
@@ -2571,10 +2647,9 @@ impl App {
             target_node_id.clone(),
             whip_name.clone(),
             options,
-            self.orchestrate_now(),
+            now,
         );
         if create_assignment {
-            let now = self.orchestrate_now();
             let execution_duration_s = whip
                 .expires_at
                 .map(|expiry| (expiry - now).num_seconds().max(1));
@@ -2625,6 +2700,45 @@ impl App {
         ))
     }
 
+    /// #507: while the security kill switch is on, no assignment or whip
+    /// fires on its own. Each armed one is paused, so none starts work when
+    /// the switch is turned off either: a person resumes it. Returns whether
+    /// the switch is on.
+    pub(crate) fn pause_whips_for_kill_switch(&mut self) -> bool {
+        if !self
+            .orchestrate_whips
+            .values()
+            .any(|whip| whip.state == WhipState::Armed)
+        {
+            return false;
+        }
+        if !crate::legacy_core::security_revocation::kill_switch_on(self.config.codex_home.as_ref())
+        {
+            return false;
+        }
+        let mut paused: Vec<(String, bool)> = self
+            .orchestrate_whips
+            .values_mut()
+            .filter(|whip| whip.state == WhipState::Armed)
+            .map(|whip| {
+                whip.state = WhipState::Paused;
+                (whip.id.clone(), whip.is_assignment())
+            })
+            .collect();
+        paused.sort();
+        self.persist_pane_state();
+        for (id, is_assignment) in paused {
+            let subject = if is_assignment { "Assignment" } else { "Whip" };
+            self.chat_widget.add_info_message(
+                format!(
+                    "{subject} {id} paused: the security kill switch is on. Turning it off does not resume it; resume it with /orchestrate resume {id} when you want it to run again."
+                ),
+                /*hint*/ None,
+            );
+        }
+        true
+    }
+
     fn set_whip_state_by_ref(&mut self, id_or_target: &str, state: WhipState, action: &str) {
         let Some(id) = self.find_whip_id(id_or_target) else {
             self.chat_widget
@@ -2662,7 +2776,7 @@ impl App {
             action
         };
         self.chat_widget
-            .add_info_message(format!("{subject} {id} {action}."), None);
+            .add_info_message(format!("{subject} {id} {action}."), /*hint*/ None);
     }
 
     fn start_assignment_by_ref(&mut self, id_or_target: &str) {
@@ -2693,8 +2807,10 @@ impl App {
         }
         whip.state = WhipState::Armed;
         self.persist_pane_state();
-        self.chat_widget
-            .add_info_message(format!("Assignment {id} execution started."), None);
+        self.chat_widget.add_info_message(
+            format!("Assignment {id} execution started."),
+            /*hint*/ None,
+        );
     }
 
     fn evaluate_whips_for_target(
@@ -2703,6 +2819,11 @@ impl App {
         idle_generation: u64,
         trigger: FireTrigger,
     ) {
+        if !matches!(trigger, FireTrigger::Manual | FireTrigger::Test)
+            && self.pause_whips_for_kill_switch()
+        {
+            return;
+        }
         let ids: Vec<String> = self
             .orchestrate_whips
             .values()
@@ -2748,22 +2869,36 @@ impl App {
             &worker_label,
             instruction.as_ref().ok().map(|(_, text)| text.as_str()),
             instruction.as_ref().ok().map(|(path, _)| path.as_path()),
+            self.assignment_dispatch_protocol_for_target(&whip.target),
         );
         match destination {
-            FireDestination::Native(thread_id) => {
-                self.app_event_tx
-                    .send(AppEvent::SubmitSpawnAgentTask { thread_id, task });
-            }
+            FireDestination::Native(thread_id) => self.send_native_task_event(thread_id, task),
             FireDestination::ClaudePane(pane_id) => {
-                self.app_event_tx
-                    .send(AppEvent::SubmitSpawnClaudePaneTask { pane_id, task });
+                let sent_while_kill_switch_on = self.kill_switch_on_now();
+                self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
+                    pane_id,
+                    task,
+                    sent_while_kill_switch_on,
+                });
             }
         }
         self.chat_widget.add_info_message(
             format!("Assignment {id} started in Drafting: Manager {manager_label} -> Worker {worker_label}."),
-            None,
+            /*hint*/ None,
         );
         Ok(())
+    }
+
+    pub(crate) fn assignment_dispatch_protocol_for_target(
+        &self,
+        target: &str,
+    ) -> AssignmentDispatchProtocol {
+        match node_id_thread(target) {
+            Some(thread_id) if self.is_native_spawn_thread(thread_id) => {
+                AssignmentDispatchProtocol::NativeFollowup
+            }
+            _ => AssignmentDispatchProtocol::HostAdapter,
+        }
     }
 
     fn plan_whip_fire(
@@ -2913,6 +3048,7 @@ impl App {
                 instruction.as_ref().ok().map(|(_, text)| text.as_str()),
                 instruction.as_ref().ok().map(|(path, _)| path.as_path()),
                 now,
+                self.assignment_dispatch_protocol_for_target(&whip.target),
             )
         } else {
             let (instruction_path, instruction_text) = instruction?;
@@ -2973,15 +3109,14 @@ impl App {
         };
         match plan.destination {
             FireDestination::Native(thread_id) => {
-                self.app_event_tx.send(AppEvent::SubmitSpawnAgentTask {
-                    thread_id,
-                    task: plan.task,
-                });
+                self.send_native_task_event(thread_id, plan.task);
             }
             FireDestination::ClaudePane(pane_id) => {
+                let sent_while_kill_switch_on = self.kill_switch_on_now();
                 self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
                     pane_id,
                     task: plan.task,
+                    sent_while_kill_switch_on,
                 });
             }
         }
@@ -3001,11 +3136,11 @@ impl App {
                 plan.whip_id, plan.destination_label, fires, max_fires
             )
         };
-        self.chat_widget.add_info_message(message, None);
+        self.chat_widget.add_info_message(message, /*hint*/ None);
         if exhausted && !matches!(trigger, FireTrigger::Test) {
             self.chat_widget.add_info_message(
                 format!("Whip {} exhausted: max fires reached.", plan.whip_id),
-                None,
+                /*hint*/ None,
             );
         }
     }
@@ -3060,8 +3195,10 @@ impl App {
                     *phase = AssignmentPhase::Done;
                     changed = true;
                 }
-                self.chat_widget
-                    .add_info_message(format!("Assignment {id} completed by its Manager."), None);
+                self.chat_widget.add_info_message(
+                    format!("Assignment {id} completed by its Manager."),
+                    /*hint*/ None,
+                );
             } else if let Some(reason) = assignment_blocked_reason(output) {
                 if let Some(whip) = self.orchestrate_whips.get_mut(&id)
                     && let WhipKind::Assignment { phase, .. } = &mut whip.kind
@@ -3071,8 +3208,10 @@ impl App {
                     };
                     changed = true;
                 }
-                self.chat_widget
-                    .add_info_message(format!("Assignment {id} blocked: {reason}"), None);
+                self.chat_widget.add_info_message(
+                    format!("Assignment {id} blocked: {reason}"),
+                    /*hint*/ None,
+                );
             }
             if changed {
                 self.persist_pane_state();
@@ -3158,12 +3297,17 @@ impl App {
                 "Assignment {id} recovery: your previous turn completed successfully but emitted no visible assistant response. Process the latest user message already present in this conversation. Continue drafting the assignment from the available context and dispatch the Worker when the specification is sufficiently concrete. Do not ask the user to repeat information they already supplied."
             );
             match self.fire_destination_for_node(manager) {
-                Ok(FireDestination::Native(thread_id)) => self
-                    .app_event_tx
-                    .send(AppEvent::SubmitSpawnAgentTask { thread_id, task }),
-                Ok(FireDestination::ClaudePane(pane_id)) => self
-                    .app_event_tx
-                    .send(AppEvent::SubmitSpawnClaudePaneTask { pane_id, task }),
+                Ok(FireDestination::Native(thread_id)) => {
+                    self.send_native_task_event(thread_id, task)
+                }
+                Ok(FireDestination::ClaudePane(pane_id)) => {
+                    let sent_while_kill_switch_on = self.kill_switch_on_now();
+                    self.app_event_tx.send(AppEvent::SubmitSpawnClaudePaneTask {
+                        pane_id,
+                        task,
+                        sent_while_kill_switch_on,
+                    });
+                }
                 Err(err) => {
                     pause_ids.push(id.clone());
                     self.chat_widget.add_error_message(format!(
@@ -3176,7 +3320,7 @@ impl App {
                 format!(
                     "Assignment {id} Manager returned no visible response; retrying once with the existing conversation context."
                 ),
-                None,
+                /*hint*/ None,
             );
         }
         pause_ids.sort();
@@ -3248,7 +3392,7 @@ impl App {
         for id in failing_assignments {
             self.chat_widget.add_info_message(
                 format!("Assignment {id}: Manager failing, retrying with backoff."),
-                None,
+                /*hint*/ None,
             );
         }
         if assignment_changed {
@@ -3435,8 +3579,10 @@ impl App {
         whip.expiry_notified = true;
         self.persist_pane_state();
         let subject = if is_assignment { "Assignment" } else { "Whip" };
-        self.chat_widget
-            .add_info_message(format!("{subject} {id} {}: {reason}.", state.label()), None);
+        self.chat_widget.add_info_message(
+            format!("{subject} {id} {}: {reason}.", state.label()),
+            /*hint*/ None,
+        );
     }
 
     fn resolve_orchestrate_target_node(&self, target: &str) -> Result<String, String> {
@@ -3477,7 +3623,7 @@ impl App {
                 return self
                     .primary_thread_id
                     .map(FireDestination::Native)
-                    .ok_or_else(|| "PFTerminal Main is not loaded.".to_string());
+                    .ok_or_else(|| "Corbanu Terminal Main is not loaded.".to_string());
             }
             if self
                 .claude_panes
@@ -3485,6 +3631,10 @@ impl App {
                 .iter()
                 .any(|pane| pane.id == pane_id)
             {
+                // Refused before the fire is counted or reported as started.
+                if let Some(reason) = crate::security::level::external_agent_block_reason() {
+                    return Err(reason);
+                }
                 return Ok(FireDestination::ClaudePane(pane_id.to_string()));
             }
         }
@@ -3499,7 +3649,9 @@ impl App {
         self.active_thread_id
             .or(self.primary_thread_id)
             .map(thread_node_id)
-            .ok_or_else(|| "No current PFTerminal pane is available as whip holder.".to_string())
+            .ok_or_else(|| {
+                "No current Corbanu Terminal pane is available as whip holder.".to_string()
+            })
     }
 
     fn target_node_is_idle(&self, node_id: &str) -> bool {
@@ -3598,6 +3750,7 @@ pub(crate) fn assignment_mandate_task(
     instructions: Option<&str>,
     path: Option<&Path>,
     now: DateTime<Utc>,
+    dispatch_protocol: AssignmentDispatchProtocol,
 ) -> String {
     let source = path
         .map(|path| path.display().to_string())
@@ -3614,7 +3767,8 @@ pub(crate) fn assignment_mandate_task(
         .filter(|text| !text.is_empty())
         .map(|text| format!("\n\nWorker's latest completed output:\n{text}"))
         .unwrap_or_else(|| "\n\nWorker's latest completed output: unavailable.".to_string());
-    let dispatch_protocol = assignment_dispatch_protocol(whip, "<next concrete task>");
+    let dispatch_protocol =
+        assignment_dispatch_instructions(whip, "<next concrete task>", dispatch_protocol);
     format!(
         "Assignment {} mandate. Worker {worker_label} stopped at {}. Audit its latest result and act.\n\n{dispatch_protocol}\n\nReport ASSIGNMENT_BLOCKED: <reason> only for a genuinely user-owned decision, or emit WHIP_DONE only when complete. When you emit either marker, place it alone on its own line. Spec source: {source}.{spec}{worker_result}",
         whip.id,
@@ -3628,6 +3782,7 @@ fn assignment_birth_brief(
     worker_label: &str,
     instructions: Option<&str>,
     path: Option<&Path>,
+    dispatch_protocol: AssignmentDispatchProtocol,
 ) -> String {
     let duration = match whip.kind {
         WhipKind::Assignment {
@@ -3657,37 +3812,53 @@ fn assignment_birth_brief(
             "Draft mode: ask the user for the assignment requirements. When they are concrete, send the first task to Worker {worker_label}."
         )
     };
-    let dispatch_protocol = assignment_dispatch_protocol(whip, "<concrete task>");
+    let dispatch_protocol =
+        assignment_dispatch_instructions(whip, "<concrete task>", dispatch_protocol);
     format!(
         "You are Manager {manager_label} for Worker {worker_label}. This assignment lasts until {duration} after execution starts.\n\n{dispatch_protocol}\n\n{kickoff} After each Worker result, audit it and send the next task until the assignment is complete. Keep progress concise. User messages take priority. Use WHIP_DONE alone only when complete, or ASSIGNMENT_BLOCKED: <reason> alone only for a decision only the user can make. If the Worker is idle, you will be prompted again after {} minutes.{inline}",
         whip.cooldown_s / 60,
     )
 }
 
-fn assignment_dispatch_protocol(whip: &Whip, task_placeholder: &str) -> String {
-    let native_worker = whip
-        .holder
-        .as_deref()
-        .and_then(node_id_thread)
-        .and_then(|_| node_id_thread(&whip.target));
-    if let Some(worker_thread_id) = native_worker {
-        return format!(
-            "Dispatch only with the native `followup_task` collaboration tool. Set its target to the durable Worker thread ID `{worker_thread_id}` and its message to `{task_placeholder}`. This is not a shell command or tool-discovery request. Do not emit a `pfterminal-send-task` block, spawn another agent, or replace the Worker."
-        );
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AssignmentDispatchProtocol {
+    NativeFollowup,
+    HostAdapter,
+}
+
+fn assignment_dispatch_instructions(
+    whip: &Whip,
+    task_placeholder: &str,
+    dispatch_protocol: AssignmentDispatchProtocol,
+) -> String {
+    match dispatch_protocol {
+        AssignmentDispatchProtocol::NativeFollowup => {
+            let worker_thread_id = node_id_thread(&whip.target)
+                .map(|thread_id| thread_id.to_string())
+                .unwrap_or_else(|| whip.target.clone());
+            format!(
+                "Dispatch only with the native `followup_task` collaboration tool. Set its target to the durable Worker thread ID `{worker_thread_id}` and its message to `{task_placeholder}`. This is not a shell command or tool-discovery request. Do not emit a `pfterminal-send-task` block, spawn another agent, or replace the Worker."
+            )
+        }
+        AssignmentDispatchProtocol::HostAdapter => format!(
+            "To send work across this host-routed pane boundary, write this fenced assistant-text block; it is not a shell command or tool:\n```pfterminal-send-task\n{{\"target\":\"{}\",\"task\":\"{task_placeholder}\"}}\n```",
+            whip.target,
+        ),
     }
-    format!(
-        "To send work across this external-pane boundary, write this fenced assistant-text block; it is not a shell command or tool:\n```pfterminal-send-task\n{{\"target\":\"{}\",\"task\":\"{task_placeholder}\"}}\n```",
-        whip.target,
-    )
 }
 
 fn format_duration_seconds(seconds: i64) -> String {
-    if seconds % 3600 == 0 {
-        format!("{} hours", seconds / 3600)
+    let (count, unit) = if seconds % 3600 == 0 {
+        (seconds / 3600, "hour")
     } else if seconds % 60 == 0 {
-        format!("{} minutes", seconds / 60)
+        (seconds / 60, "minute")
     } else {
-        format!("{seconds} seconds")
+        (seconds, "second")
+    };
+    if count == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{count} {unit}s")
     }
 }
 
@@ -3980,6 +4151,16 @@ mod tests {
     }
 
     #[test]
+    fn assignment_duration_label_uses_singular_units() {
+        assert_eq!(format_duration_seconds(/*seconds*/ 60 * 60), "1 hour");
+        assert_eq!(format_duration_seconds(/*seconds*/ 60), "1 minute");
+        assert_eq!(format_duration_seconds(/*seconds*/ 1), "1 second");
+        assert_eq!(format_duration_seconds(/*seconds*/ 2 * 60 * 60), "2 hours");
+        assert_eq!(format_duration_seconds(/*seconds*/ 90 * 60), "90 minutes");
+        assert_eq!(format_duration_seconds(/*seconds*/ 3599), "3599 seconds");
+    }
+
+    #[test]
     fn drafting_brief_defines_native_dispatch_protocol_and_exact_target() {
         let now = Utc::now();
         let manager_thread_id =
@@ -4002,7 +4183,14 @@ mod tests {
             execution_duration_s: Some(28_800),
         };
 
-        let brief = assignment_birth_brief(&whip, "Manager", "Worker", None, None);
+        let brief = assignment_birth_brief(
+            &whip,
+            "Manager",
+            "Worker",
+            /*instructions*/ None,
+            /*path*/ None,
+            AssignmentDispatchProtocol::NativeFollowup,
+        );
 
         assert!(brief.contains("native `followup_task` collaboration tool"));
         assert!(brief.contains(&worker_thread_id.to_string()));
@@ -4016,12 +4204,16 @@ mod tests {
     }
 
     #[test]
-    fn external_assignment_brief_retains_host_dispatch_adapter() {
+    fn operator_pane_assignment_brief_retains_host_dispatch_adapter() {
         let now = Utc::now();
         let mut whip = Whip::new(
             "whip-1".to_string(),
-            Some("pane:manager".to_string()),
-            "thread:worker".to_string(),
+            Some(thread_node_id(
+                ThreadId::from_string("00000000-0000-0000-0000-000000000603").expect("manager id"),
+            )),
+            thread_node_id(
+                ThreadId::from_string("00000000-0000-0000-0000-000000000604").expect("worker id"),
+            ),
             DRAFT_WITH_MANAGER_SPEC.to_string(),
             ResolvedAttachOptions::default(),
             now,
@@ -4034,10 +4226,17 @@ mod tests {
             execution_duration_s: Some(28_800),
         };
 
-        let brief = assignment_birth_brief(&whip, "Manager", "Worker", None, None);
+        let brief = assignment_birth_brief(
+            &whip,
+            "Manager",
+            "Worker",
+            /*instructions*/ None,
+            /*path*/ None,
+            AssignmentDispatchProtocol::HostAdapter,
+        );
 
         assert!(brief.contains("```pfterminal-send-task"));
-        assert!(brief.contains("\"target\":\"thread:worker\""));
+        assert!(brief.contains("\"target\":\"thread:00000000-0000-0000-0000-000000000604\""));
         assert!(!brief.contains("native `followup_task` collaboration tool"));
     }
 
@@ -4157,14 +4356,21 @@ mod tests {
     }
 
     #[test]
-    fn project_keep_going_file_overrides_global_file() {
+    fn corbanu_project_file_overrides_global_and_legacy_project_files() {
         let codex_home = tempfile::tempdir().expect("codex home");
         let cwd = tempfile::tempdir().expect("cwd");
         let global_whips = codex_home.path().join("whips");
         fs::create_dir_all(&global_whips).expect("global whips dir");
         fs::write(global_whips.join("keep-going.md"), "global override")
             .expect("write global whip");
-        let project_whips = cwd.path().join(".pfterminal").join("whips");
+        let legacy_project_whips = cwd.path().join(".pfterminal").join("whips");
+        fs::create_dir_all(&legacy_project_whips).expect("legacy project whips dir");
+        fs::write(
+            legacy_project_whips.join("keep-going.md"),
+            "legacy project override",
+        )
+        .expect("write legacy project whip");
+        let project_whips = cwd.path().join(".corbanu").join("whips");
         fs::create_dir_all(&project_whips).expect("project whips dir");
         let project_path = project_whips.join("keep-going.md");
         fs::write(&project_path, "project override").expect("write project whip");
@@ -4175,6 +4381,22 @@ mod tests {
 
         assert_eq!(path, project_path);
         assert_eq!(contents, "project override");
+    }
+
+    #[test]
+    fn legacy_project_file_remains_readable() {
+        let codex_home = tempfile::tempdir().expect("codex home");
+        let cwd = tempfile::tempdir().expect("cwd");
+        let legacy_whips = cwd.path().join(".pfterminal").join("whips");
+        fs::create_dir_all(&legacy_whips).expect("legacy project whips dir");
+        let legacy_path = legacy_whips.join("legacy.md");
+        fs::write(&legacy_path, "legacy instructions").expect("write legacy whip");
+
+        let (path, contents) = read_whip_instruction(codex_home.path(), cwd.path(), "legacy")
+            .expect("legacy project whip");
+
+        assert_eq!(path, legacy_path);
+        assert_eq!(contents, "legacy instructions");
     }
 
     #[test]

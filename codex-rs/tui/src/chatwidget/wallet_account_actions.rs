@@ -8,10 +8,10 @@ use codex_wallet_daemon::WalletDaemonClient;
 impl ChatWidget {
     pub(crate) fn confirm_wallet_plan_disconnect(&mut self) {
         let mut header = ColumnRenderable::new();
-        header.push(Line::from("Disconnect PfTerminal Plan".bold()));
+        header.push(Line::from("Disconnect Corbanu API".bold()));
         push_wallet_text(
             &mut header,
-            "This removes the plan credential from this device. Your paid period and wallet remain unchanged.",
+            "This removes the stored API credential from this device. Your wallet and dollar balance remain unchanged.",
             WalletTextStyle::Dimmed,
         );
         self.show_selection_view(SelectionViewParams {
@@ -22,8 +22,8 @@ impl ChatWidget {
                     AppEvent::OpenWallet
                 }),
                 confirmation_item(
-                    "Disconnect plan",
-                    "Remove only the metered-inference credential",
+                    "Disconnect API",
+                    "Remove only the stored API credential",
                     || AppEvent::WalletPlanDisconnectRequested,
                 ),
             ],
@@ -50,16 +50,16 @@ impl ChatWidget {
             .dismiss_view_by_id(super::wallet_menu::WALLET_DISCONNECT_PLAN_VIEW_ID);
         match result {
             Ok(true) => self.add_info_message(
-                "PfTerminal Plan disconnected from this device. The paid period and wallet were not changed."
+                "Corbanu API disconnected from this device. The wallet and dollar balance were not changed."
                     .to_string(),
-                None,
+                /*hint*/ None,
             ),
             Ok(false) => self.add_info_message(
-                "PfTerminal Plan was already disconnected on this device.".to_string(),
-                None,
+                "Corbanu API was already disconnected on this device.".to_string(),
+                /*hint*/ None,
             ),
             Err(error) => {
-                self.add_error_message(format!("Unable to disconnect PfTerminal Plan: {error}"));
+                self.add_error_message(format!("Unable to disconnect Corbanu API: {error}"));
                 self.open_wallet_menu();
                 return;
             }
@@ -74,12 +74,12 @@ impl ChatWidget {
         header.push(Line::from(format!("Wallet: {short}")));
         push_wallet_text(
             &mut header,
-            "Funds stay on Solana. PfTerminal cannot recover them without your recovery material.",
+            "Funds stay on Solana. Corbanu Terminal cannot recover them without your recovery material.",
             WalletTextStyle::Danger,
         );
         push_wallet_text(
             &mut header,
-            "This also disconnects the local PfTerminal Plan credential. It does not cancel or refund the paid period.",
+            "This also removes the stored Corbanu API credential. Your on-chain funds and dollar balance remain unchanged.",
             WalletTextStyle::Dimmed,
         );
         self.show_selection_view(SelectionViewParams {
@@ -89,16 +89,13 @@ impl ChatWidget {
                 confirmation_item("Cancel", "Keep the wallet on this device", || {
                     AppEvent::OpenWallet
                 }),
-                {
-                    let address = address;
-                    confirmation_item(
-                        "Remove wallet",
-                        "I have saved the recovery material",
-                        move || AppEvent::WalletRemoveRequested {
-                            address: address.clone(),
-                        },
-                    )
-                },
+                confirmation_item(
+                    "Remove wallet",
+                    "I have saved the recovery material",
+                    move || AppEvent::WalletRemoveRequested {
+                        address: address.clone(),
+                    },
+                ),
             ],
             initial_selected_idx: Some(0),
             allow_number_shortcuts: false,
@@ -126,7 +123,7 @@ impl ChatWidget {
                         .map(|_| ())
                         .map_err(|error| {
                             format!(
-                                "wallet was removed, but its plan credential could not be disabled: {error}"
+                                "wallet was removed, but its Corbanu API credential could not be disabled: {error}"
                             )
                         })
                     })
@@ -147,11 +144,11 @@ impl ChatWidget {
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => tracing::warn!(
                         %error,
-                        "wallet was removed and its plan credential suppressed, but vault cleanup failed"
+                        "wallet was removed and its Corbanu API credential suppressed, but vault cleanup failed"
                     ),
                     Err(error) => tracing::warn!(
                         %error,
-                        "wallet was removed and its plan credential suppressed, but vault cleanup task failed"
+                        "wallet was removed and its Corbanu API credential suppressed, but vault cleanup task failed"
                     ),
                 }
             }
@@ -162,12 +159,13 @@ impl ChatWidget {
         self.bottom_pane
             .dismiss_view_by_id(super::wallet_menu::WALLET_REMOVE_VIEW_ID);
         self.wallet_capability = None;
+        self.wallet_capability_policy = None;
         self.wallet_balances = None;
         match result {
             Ok(()) => self.add_info_message(
-                "Wallet and PfTerminal Plan credential removed from this device. On-chain funds and the paid period were not changed."
+                "Wallet and stored Corbanu API credential removed from this device. On-chain funds and the dollar balance were not changed."
                     .to_string(),
-                None,
+                /*hint*/ None,
             ),
             Err(error) => {
                 self.add_error_message(format!("Unable to remove wallet cleanly: {error}"));
@@ -183,7 +181,7 @@ impl ChatWidget {
         if self.config.model_provider_id == PFTERMINAL_PLAN_PROVIDER_ID {
             self.add_info_message(
                 "Choose another provider before starting the next turn.".to_string(),
-                None,
+                /*hint*/ None,
             );
             self.open_model_popup();
         }

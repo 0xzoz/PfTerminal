@@ -1,11 +1,9 @@
 use super::multi_agents_common::MAX_SPAWN_AGENT_MODEL_OVERRIDES;
-use super::multi_agents_common::model_supports_multi_agent_backend;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::openai_models::ModelBilling;
 use codex_protocol::openai_models::ModelCapabilityTier;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort;
-use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::JsonSchema;
 use codex_tools::ResponsesApiNamespace;
 use codex_tools::ResponsesApiNamespaceTool;
@@ -21,6 +19,7 @@ const MULTI_AGENT_V1_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and manag
 const SPAWN_AGENT_INHERITED_MODEL_GUIDANCE_V1: &str = "Spawned agents inherit your current model by default. Omit `model` to use that preferred default; set `model` only when an explicit override is needed.";
 const SPAWN_AGENT_INHERITED_MODEL_GUIDANCE_V2: &str = "Spawned agents inherit your current provider and model by default. Omit both `model_provider` and `model` to inherit that runtime. To use another runtime, set both fields explicitly.";
 const SPAWN_AGENT_TYPE_OVERRIDE_DESCRIPTION_V1: &str = "Agent type override for the new agent. Omit to inherit the parent agent type with a full-history fork; otherwise, `default` is used.";
+const SPAWN_AGENT_ACCOUNT_DESCRIPTION: &str = "Named account of the spawned agent's provider. Omit to use the parent's account; `default` uses the provider's default credentials. Only accounts the user has configured are accepted, and under the Aggressive security level the user must approve the switch. Never retry a refused account on another one without the user's consent.";
 const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
     "Model override for the new agent. Omit unless an explicit override is needed.";
 const SPAWN_AGENT_PROVIDER_OVERRIDE_DESCRIPTION: &str = "Provider override for the new agent. Set this together with `model`; omit both to inherit the parent runtime.";
@@ -37,8 +36,9 @@ pub struct SpawnAgentToolOptions {
     pub expose_agent_type: bool,
     pub hide_agent_type_model_reasoning: bool,
     pub expose_spawn_agent_model_overrides: bool,
-    pub multi_agent_version: MultiAgentVersion,
     pub usage_hint_text: Option<String>,
+    /// PF-84: offer the `account` argument (named accounts are on).
+    pub expose_account: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,8 +58,8 @@ impl Default for SpawnAgentToolOptions {
             expose_agent_type: true,
             hide_agent_type_model_reasoning: false,
             expose_spawn_agent_model_overrides: false,
-            multi_agent_version: MultiAgentVersion::Disabled,
             usage_hint_text: None,
+            expose_account: false,
         }
     }
 }
@@ -85,7 +85,6 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
     let available_models_description = (!options.hide_agent_type_model_reasoning).then(|| {
         spawn_agent_models_description(
             &options.available_models,
-            options.multi_agent_version,
             options.inherited_runtime.as_ref(),
         )
     });
@@ -99,6 +98,9 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
     }
     if options.hide_agent_type_model_reasoning {
         hide_spawn_agent_metadata_options(&mut properties);
+    }
+    if options.expose_account {
+        insert_account_property(&mut properties);
     }
 
     ToolSpec::Namespace(ResponsesApiNamespace {
@@ -124,7 +126,6 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
     let available_models_description = options.expose_spawn_agent_model_overrides.then(|| {
         spawn_agent_models_description(
             &options.available_models,
-            options.multi_agent_version,
             options.inherited_runtime.as_ref(),
         )
     });
@@ -141,6 +142,9 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
     if !options.expose_spawn_agent_model_overrides {
         properties.remove("model");
         properties.remove("reasoning_effort");
+    }
+    if options.expose_account {
+        insert_account_property(&mut properties);
     }
     properties.insert(
         "task_name".to_string(),
@@ -438,6 +442,7 @@ fn apply_openai_reserved_collaboration_function_schema(
                 // protocol boundary.
                 for property in [
                     "agent_type",
+                    "account",
                     "model_provider",
                     "model",
                     "reasoning_effort",
@@ -556,6 +561,10 @@ fn spawn_agent_output_schema_v1() -> Value {
             "nickname": {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
+            },
+            "account": {
+                "type": "string",
+                "description": "Named account of the spawned agent's provider, when named accounts are on."
             }
         },
         "required": ["agent_id", "nickname"],
@@ -592,6 +601,10 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
             "model_provider": {
                 "type": "string",
                 "description": "Resolved provider used by the spawned agent."
+            },
+            "account": {
+                "type": "string",
+                "description": "Named account of the spawned agent's provider, when named accounts are on."
             },
             "model": {
                 "type": "string",
@@ -989,6 +1002,13 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
     ])
 }
 
+fn insert_account_property(properties: &mut BTreeMap<String, JsonSchema>) {
+    properties.insert(
+        "account".to_string(),
+        JsonSchema::string(Some(SPAWN_AGENT_ACCOUNT_DESCRIPTION.to_string())),
+    );
+}
+
 fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchema>) {
     properties.remove("agent_type");
     properties.remove("model");
@@ -1098,7 +1118,6 @@ Note that passing `fork_turns="none"` will not pass any surrounding context to t
 
 fn spawn_agent_models_description(
     models: &[ModelPreset],
-    multi_agent_version: MultiAgentVersion,
     inherited_runtime: Option<&SpawnAgentRuntime>,
 ) -> String {
     let inherited_runtime = inherited_runtime.map_or_else(
@@ -1118,10 +1137,11 @@ fn spawn_agent_models_description(
             )
         },
     );
+    // Provider authorization was resolved by the caller. Picker visibility controls
+    // discovery; allocation economics and engine preference are not spawn allowlists.
     let visible_models: Vec<&ModelPreset> = models
         .iter()
         .filter(|model| model.show_in_picker)
-        .filter(|model| model_supports_multi_agent_backend(model, multi_agent_version))
         .take(MAX_MODEL_OVERRIDES_IN_SPAWN_AGENT_DESCRIPTION)
         .collect();
     if visible_models.is_empty() {
@@ -1179,60 +1199,8 @@ fn spawn_agent_models_description(
                 .orchestration
                 .as_ref()
                 .and_then(|metadata| metadata.billing().map(|billing| (metadata, billing)))
-                .map_or_else(String::new, |(metadata, billing)| {
-                    let billing = match billing {
-                        ModelBilling::Plan {
-                            relative_burn_millis,
-                        } => {
-                            format!("plan, burn {}x", format_millis(*relative_burn_millis))
-                        }
-                        ModelBilling::PlanSchedule {
-                            off_peak_relative_burn_millis,
-                            peak_relative_burn_millis,
-                            peak_start_utc_hour,
-                            peak_end_utc_hour,
-                            promotional_off_peak_relative_burn_millis,
-                            promotion_valid_through_utc,
-                        } => {
-                            let promotion = promotional_off_peak_relative_burn_millis
-                                .zip(promotion_valid_through_utc.as_deref())
-                                .map_or_else(String::new, |(burn, valid_through)| {
-                                    format!(
-                                        ", promotional off-peak {}x through {valid_through}",
-                                        format_millis(burn)
-                                    )
-                                });
-                            format!(
-                                "plan, normal off-peak {}x / peak {}x at {:02}:00-{:02}:00 UTC{}",
-                                format_millis(*off_peak_relative_burn_millis),
-                                format_millis(*peak_relative_burn_millis),
-                                peak_start_utc_hour,
-                                peak_end_utc_hour,
-                                promotion
-                            )
-                        }
-                        ModelBilling::Metered {
-                            input_milli_usd_per_million_tokens,
-                            output_milli_usd_per_million_tokens,
-                            ..
-                        } => format!(
-                            "metered ${}/${} per M tok",
-                            format_millis(*input_milli_usd_per_million_tokens),
-                            format_millis(*output_milli_usd_per_million_tokens)
-                        ),
-                        ModelBilling::AuthDependent {
-                            plan_relative_burn_millis,
-                            api_key_input_milli_usd_per_million_tokens,
-                            api_key_output_milli_usd_per_million_tokens,
-                            ..
-                        } => format!(
-                            "auth-dependent: subscription burn {}x or API ${}/${} per M tok",
-                            format_millis(*plan_relative_burn_millis),
-                            format_millis(*api_key_input_milli_usd_per_million_tokens),
-                            format_millis(*api_key_output_milli_usd_per_million_tokens)
-                        ),
-                        ModelBilling::Local => "local".to_string(),
-                    };
+                .map_or_else(|| " explicit-choice only; allocation economics unavailable;".to_string(), |(metadata, billing)| {
+                    let billing = format_model_billing(billing);
                     format!(" {billing}, {};", metadata.capability())
                 });
             let frontier_effort_suffix = model
@@ -1282,8 +1250,110 @@ fn spawn_agent_models_description(
     format!(
         "{inherited_runtime}\n\
 Available authorized exact runtime overrides (optional; omit both fields to inherit the current runtime). Pass the provider as `model_provider` and the model as `model`.\n\
-Default allocation policy: compare the task with this catalogue before every spawn. Prefer an authorized `plan` runtime over a `metered` runtime when both can do the work, then choose the lowest-burn capable plan runtime. Use `fast` for mechanical or tightly specified work, `balanced` for ordinary engineering, and `frontier` only for genuinely hard reasoning, planning, or review. For frontier models with `max` or `ultra`, reserve those efforts for frontier work; `ultra` is the orchestration setting when automatic delegation is actually needed. Vision work requires a `vision` runtime; never send images to `text-only`. Plan capacity is finite, not free. If the user names a provider or model, treat it as an exact constraint: if it is unavailable or unauthorized, report that failure and do not substitute another runtime without the user's explicit consent.\n{model_descriptions}"
+Default allocation policy: compare the task with this catalogue before every spawn. Models marked `explicit-choice only` support user-requested selection or parent inheritance, but must not be chosen for automatic cost-based allocation. Prefer an authorized `plan` runtime over a `metered` runtime when both can do the work, then choose the lowest-burn capable plan runtime. Use `fast` for mechanical or tightly specified work, `balanced` for ordinary engineering, and `frontier` only for genuinely hard reasoning, planning, or review. For frontier models with `max` or `ultra`, reserve those efforts for frontier work; `ultra` is the orchestration setting when automatic delegation is actually needed. Vision work requires a `vision` runtime; never send images to `text-only`. Plan capacity is finite, not free. If the user names a provider or model, treat it as an exact constraint: if it is unavailable or unauthorized, report that failure and do not substitute another runtime without the user's explicit consent. This list is capped at {MAX_MODEL_OVERRIDES_IN_SPAWN_AGENT_DESCRIPTION} entries, not an exhaustive allowlist; an unlisted exact configured runtime can still be requested.\n{model_descriptions}"
     )
+}
+
+fn format_model_billing(billing: &ModelBilling) -> String {
+    match billing {
+        ModelBilling::Plan {
+            relative_burn_millis,
+        } => format!("plan, burn {}x", format_millis(*relative_burn_millis)),
+        ModelBilling::PlanSchedule {
+            off_peak_relative_burn_millis,
+            peak_relative_burn_millis,
+            peak_start_utc_hour,
+            peak_end_utc_hour,
+            peak_weekdays,
+            promotional_off_peak_relative_burn_millis,
+            promotion_valid_through_utc,
+        } => {
+            let promotion = promotional_off_peak_relative_burn_millis
+                .zip(promotion_valid_through_utc.as_deref())
+                .map_or_else(String::new, |(burn, valid_through)| {
+                    format!(
+                        ", promotional off-peak {}x through {valid_through}",
+                        format_millis(burn)
+                    )
+                });
+            let peak_days = peak_weekdays
+                .filter(|weekdays| !weekdays.is_every_day())
+                .map_or_else(String::new, |weekdays| {
+                    format!(" on {}", weekdays.names().join("/"))
+                });
+            format!(
+                "plan, normal off-peak {}x / peak {}x at {:02}:00-{:02}:00 UTC{}{}",
+                format_millis(*off_peak_relative_burn_millis),
+                format_millis(*peak_relative_burn_millis),
+                peak_start_utc_hour,
+                peak_end_utc_hour,
+                peak_days,
+                promotion
+            )
+        }
+        ModelBilling::Metered {
+            input_milli_usd_per_million_tokens,
+            output_milli_usd_per_million_tokens,
+            valid_through_utc,
+            ..
+        } => format!(
+            "metered ${}/${} per M tok{}",
+            format_millis(*input_milli_usd_per_million_tokens),
+            format_millis(*output_milli_usd_per_million_tokens),
+            through(valid_through_utc)
+        ),
+        ModelBilling::MeteredSchedule {
+            off_peak,
+            peak,
+            peak_windows,
+            peak_weekdays,
+            ..
+        } => {
+            let windows = peak_windows
+                .iter()
+                .map(|window| {
+                    format!(
+                        "{:02}:00-{:02}:00",
+                        window.start_utc_hour, window.end_utc_hour
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let peak_days = peak_weekdays
+                .filter(|weekdays| !weekdays.is_every_day())
+                .map_or_else(String::new, |weekdays| {
+                    format!(" on {}", weekdays.names().join("/"))
+                });
+            format!(
+                "metered ${}/${} per M tok off-peak, ${}/${} at {windows} UTC{peak_days}",
+                format_millis(off_peak.input_milli_usd_per_million_tokens),
+                format_millis(off_peak.output_milli_usd_per_million_tokens),
+                format_millis(peak.input_milli_usd_per_million_tokens),
+                format_millis(peak.output_milli_usd_per_million_tokens),
+            )
+        }
+        ModelBilling::AuthDependent {
+            plan_relative_burn_millis,
+            api_key_input_milli_usd_per_million_tokens,
+            api_key_output_milli_usd_per_million_tokens,
+            api_key_valid_through_utc,
+            ..
+        } => format!(
+            "auth-dependent: subscription burn {}x or API ${}/${} per M tok{}",
+            format_millis(*plan_relative_burn_millis),
+            format_millis(*api_key_input_milli_usd_per_million_tokens),
+            format_millis(*api_key_output_milli_usd_per_million_tokens),
+            through(api_key_valid_through_utc)
+        ),
+        ModelBilling::Local => "local".to_string(),
+    }
+}
+
+/// When API rates are stated only until an instant, such as a promotion's end.
+fn through(valid_through_utc: &Option<String>) -> String {
+    valid_through_utc
+        .as_deref()
+        .map_or_else(String::new, |end| format!(" through {end}"))
 }
 
 fn format_millis(value: u32) -> String {

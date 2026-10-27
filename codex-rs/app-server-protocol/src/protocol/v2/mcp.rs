@@ -26,7 +26,8 @@ v2_enum_from_core!(
 
 v2_enum_from_core!(
     pub enum McpServerStartupFailureReason from codex_protocol::protocol::McpStartupFailureReason {
-        ReauthenticationRequired
+        ReauthenticationRequired,
+        OpenAiAccountReauthenticationRequired
     }
 );
 
@@ -239,6 +240,7 @@ pub enum McpServerStartupState {
     Ready,
     Failed,
     Cancelled,
+    Stopped,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

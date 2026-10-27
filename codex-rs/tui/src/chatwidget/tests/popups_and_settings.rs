@@ -14,21 +14,34 @@ use codex_app_server_protocol::PluginSource;
 use codex_connectors::AppInfo;
 use codex_features::Stage;
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
-use codex_model_provider_info::AMBIENT_KIMI_K2_7_CODE_MODEL;
 use codex_model_provider_info::AMBIENT_PROVIDER_ID;
 use codex_model_provider_info::ANTHROPIC_DEFAULT_MODEL;
 use codex_model_provider_info::BASETEN_DEFAULT_MODEL;
+use codex_model_provider_info::CLAUDE_FABLE_5_1_MODEL;
+use codex_model_provider_info::CLAUDE_FABLE_5_1_PLAN_MODEL;
 use codex_model_provider_info::CLAUDE_FABLE_5_MODEL;
 use codex_model_provider_info::CLAUDE_FABLE_5_PLAN_MODEL;
 use codex_model_provider_info::CLAUDE_PLAN_MODEL;
+use codex_model_provider_info::CORBANU_API_DEEPSEEK_V4_1_FLASH_MODEL;
+use codex_model_provider_info::CORBANU_API_DEEPSEEK_V4_PRO_MODEL;
+use codex_model_provider_info::CORBANU_API_GLM_5_3_FLASH_MODEL;
+use codex_model_provider_info::CORBANU_API_GLM_5_3_MODEL;
+use codex_model_provider_info::CORBANU_API_GPT_5_6_LUNA_MODEL;
+use codex_model_provider_info::CORBANU_API_GPT_5_6_SOL_MODEL;
+use codex_model_provider_info::CORBANU_API_KIMI_K3_MODEL;
 use codex_model_provider_info::DEEPSEEK_DEFAULT_MODEL;
 use codex_model_provider_info::DEEPSEEK_PROVIDER_ID;
 use codex_model_provider_info::KIMI_CODE_K3_MODEL;
 use codex_model_provider_info::KIMI_CODE_PROVIDER_ID;
 use codex_model_provider_info::OPENROUTER_PROVIDER_ID;
 use codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID;
+use codex_model_provider_info::VERCEL_DEEPSEEK_V4_PRO_MODEL;
 use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
 use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
+use codex_model_provider_info::VERCEL_GLM_5_3_FLASH_MODEL;
+use codex_model_provider_info::VERCEL_GLM_5_3_MODEL;
+use codex_model_provider_info::VERCEL_KIMI_K3_MODEL;
+use codex_model_provider_info::VERCEL_PROVIDER_ID;
 use codex_model_provider_info::ZAI_DEFAULT_MODEL;
 use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
@@ -152,7 +165,7 @@ async fn telegram_setup_polls_until_a_chat_is_discovered_and_ignores_stale_resul
     assert!(popup.contains("Alice"));
     assert!(!popup.contains("Stale chat"));
 
-    let cancelled_generation = chat.begin_telegram_discovery(None);
+    let cancelled_generation = chat.begin_telegram_discovery(/*identity*/ None);
     chat.bottom_pane
         .dismiss_active_view_if_id(crate::chatwidget::telegram_setup::TELEGRAM_DISCOVERY_VIEW_ID);
     assert!(!chat.apply_telegram_discovery(
@@ -171,7 +184,7 @@ async fn telegram_setup_polls_until_a_chat_is_discovered_and_ignores_stale_resul
 #[tokio::test]
 async fn telegram_setup_surfaces_polling_failure_with_a_retry_action() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.6-sol")).await;
-    let generation = chat.begin_telegram_discovery(None);
+    let generation = chat.begin_telegram_discovery(/*identity*/ None);
 
     chat.telegram_discovery_failed(
         generation,
@@ -237,7 +250,7 @@ async fn wallet_removal_wraps_copy_and_dismisses_confirmation_before_replacement
             .collect::<Vec<_>>()
             .join(" ");
         assert!(
-            normalized.contains("does not cancel or refund the paid period."),
+            normalized.contains("on-chain funds and dollar balance remain unchanged."),
             "expected complete removal warning at width {width}, got:\n{confirmation}"
         );
     }
@@ -3373,7 +3386,40 @@ async fn model_selection_popup_openai_provider_snapshot() {
 
 #[tokio::test]
 async fn model_selection_popup_openrouter_provider_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("moonshotai/kimi-k3")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("x-ai/grok-4.7")).await;
+    chat.config.model_provider_id = "openrouter".to_string();
+    chat.set_model("x-ai/grok-4.7");
+    chat.thread_id = Some(ThreadId::new());
+    let presets = chat
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog should load");
+    chat.open_all_models_popup(presets);
+
+    let popup = render_bottom_popup_with_height(&chat, /*width*/ 130, /*height*/ 44);
+    for model in [
+        "x-ai/grok-4.7",
+        "deepseek/deepseek-v4.1-flash",
+        "z-ai/glm-5.3-flash",
+        "nvidia/nemotron-3-ultra-550b-a55b:free",
+    ] {
+        assert!(popup.contains(model), "missing {model}: {popup}");
+    }
+    for retired in [
+        "grok-4.5",
+        "grok-4.6",
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "owl-alpha",
+    ] {
+        assert!(!popup.contains(retired), "retired {retired}: {popup}");
+    }
+    assert_chatwidget_snapshot!("model_selection_popup_openrouter_provider", popup);
+}
+
+#[tokio::test]
+async fn model_selection_popup_zai_flash_provider_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("glm-5.3-flash")).await;
     chat.thread_id = Some(ThreadId::new());
     let presets = chat
         .model_catalog
@@ -3382,7 +3428,7 @@ async fn model_selection_popup_openrouter_provider_snapshot() {
     chat.open_all_models_popup(presets);
 
     let popup = render_bottom_popup_with_height(&chat, /*width*/ 100, /*height*/ 32);
-    assert_chatwidget_snapshot!("model_selection_popup_openrouter_provider", popup);
+    assert_chatwidget_snapshot!("model_selection_popup_zai_flash_provider", popup);
 }
 
 #[tokio::test]
@@ -3395,14 +3441,18 @@ async fn spawn_model_selection_popup_deepseek_provider_snapshot() {
         .expect("model catalog should load");
     chat.open_all_models_popup_for_purpose(
         presets,
-        spawn_model_purpose(SpawnRole::Orc, None, DEEPSEEK_DEFAULT_MODEL),
+        spawn_model_purpose(
+            SpawnRole::Orc,
+            /*parent_node_id*/ None,
+            DEEPSEEK_DEFAULT_MODEL,
+        ),
     );
 
     let popup = render_bottom_popup_with_height(&chat, /*width*/ 110, /*height*/ 24);
     assert_chatwidget_snapshot!("spawn_model_selection_popup_deepseek_provider", popup);
-    assert!(popup.contains("PFTerminal Orc pane - DeepSeek API key"));
+    assert!(popup.contains("Corbanu Terminal Orc pane - DeepSeek API key"));
     assert!(popup.contains("[DeepSeek]"));
-    assert!(popup.contains("DeepSeek V4 Flash 0731 (Direct) (current)"));
+    assert!(popup.contains("DeepSeek V4.1 Flash (Direct) (current)"));
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     let (preset, purpose) = loop {
@@ -3429,6 +3479,7 @@ async fn spawn_model_selection_popup_deepseek_provider_snapshot() {
 async fn model_selection_popup_kimi_code_provider_snapshot() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some(KIMI_CODE_K3_MODEL)).await;
     chat.thread_id = Some(ThreadId::new());
+    chat.config.model_provider_id = KIMI_CODE_PROVIDER_ID.to_string();
     let presets = chat
         .model_catalog
         .try_list_models()
@@ -3477,17 +3528,21 @@ async fn spawn_model_selection_popup_snapshot() {
     let presets = chat.model_catalog.try_list_models().expect("model catalog");
     chat.open_all_models_popup_for_purpose(
         presets,
-        spawn_model_purpose(SpawnRole::Nazgul, None, "gpt-5.6-sol"),
+        spawn_model_purpose(
+            SpawnRole::Nazgul,
+            /*parent_node_id*/ None,
+            "gpt-5.6-sol",
+        ),
     );
 
     let popup = render_bottom_popup_with_height(&chat, /*width*/ 100, /*height*/ 30);
     assert_chatwidget_snapshot!("spawn_model_selection_popup", popup);
-    assert!(popup.contains("PFTerminal Nazgul pane - OpenAI Codex plan"));
+    assert!(popup.contains("Corbanu Terminal Nazgul pane - OpenAI Codex plan"));
     assert!(popup.contains("GPT-5.6-Sol (current)"));
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Right));
     let switched = render_bottom_popup_with_height(&chat, /*width*/ 100, /*height*/ 30);
-    assert!(switched.contains("PFTerminal Nazgul pane - Ambient coding plan"));
+    assert!(switched.contains("Corbanu Terminal Nazgul pane - Ambient coding plan"));
     assert!(switched.lines().any(|line| line.contains('›')));
 }
 
@@ -3504,7 +3559,7 @@ async fn codex_pane_model_picker_uses_provider_tabs_and_opens_name_prompt() {
     );
 
     let popup = render_bottom_popup_with_height(&chat, /*width*/ 100, /*height*/ 30);
-    assert!(popup.contains("New PFTerminal pane - OpenAI Codex plan"));
+    assert!(popup.contains("New Corbanu Terminal pane - OpenAI Codex plan"));
     assert!(popup.contains("GPT-5.6-Sol (current)"));
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
@@ -3645,7 +3700,11 @@ async fn spawn_effort_escape_returns_to_tabs_without_creating_agent() {
     let presets = chat.model_catalog.try_list_models().expect("model catalog");
     chat.open_all_models_popup_for_purpose(
         presets,
-        spawn_model_purpose(SpawnRole::Nazgul, None, "gpt-5.6-sol"),
+        spawn_model_purpose(
+            SpawnRole::Nazgul,
+            /*parent_node_id*/ None,
+            "gpt-5.6-sol",
+        ),
     );
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     let (model, purpose) = loop {
@@ -3658,7 +3717,7 @@ async fn spawn_effort_escape_returns_to_tabs_without_creating_agent() {
     chat.open_reasoning_popup_for_purpose(model, purpose);
 
     chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
-    assert!(render_bottom_popup(&chat, 100).contains("Select Model and Effort"));
+    assert!(render_bottom_popup(&chat, /*width*/ 100).contains("Select Model and Effort"));
     chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
     assert!(chat.no_modal_or_popup_active());
     while let Ok(event) = rx.try_recv() {
@@ -3691,6 +3750,27 @@ async fn spawn_picker_only_shows_models_with_constructible_native_providers() {
     assert!(shown_provider_groups.contains("claude-plan"));
     assert!(shown_provider_groups.contains("openrouter"));
     assert!(shown_provider_groups.len() >= 5);
+}
+
+#[tokio::test]
+async fn astra_model_and_reasoning_picker_snapshots() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.6-sol")).await;
+    chat.thread_id = Some(ThreadId::new());
+    let presets = chat
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog should load");
+    let astra = presets
+        .iter()
+        .find(|preset| preset.model == "gpt-6-astra")
+        .expect("bundled Astra preset")
+        .clone();
+    chat.open_all_models_popup(presets);
+    let popup = render_bottom_popup_with_height(&chat, /*width*/ 100, /*height*/ 30);
+    assert_chatwidget_snapshot!("astra_openai_model_picker", popup);
+    chat.open_reasoning_popup(astra);
+    let popup = render_bottom_popup_with_height(&chat, /*width*/ 100, /*height*/ 20);
+    assert_chatwidget_snapshot!("astra_reasoning_picker", popup);
 }
 
 #[tokio::test]
@@ -3780,13 +3860,14 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
 }
 
 fn move_model_picker_selection_to(chat: &mut ChatWidget, model: &str) {
+    let exact_model_field = format!("Model: {model}.");
     for _ in 0..16 {
         for _ in 0..20 {
             let popup =
                 render_bottom_popup_with_height(chat, /*width*/ 140, /*height*/ 40);
             if popup
                 .lines()
-                .any(|line| line.contains('›') && line.contains(model))
+                .any(|line| line.contains('›') && line.contains(&exact_model_field))
             {
                 return;
             }
@@ -3797,6 +3878,123 @@ fn move_model_picker_selection_to(chat: &mut ChatWidget, model: &str) {
 
     let popup = render_bottom_popup_with_height(chat, /*width*/ 140, /*height*/ 40);
     panic!("could not select model {model:?} in picker:\n{popup}");
+}
+
+#[tokio::test]
+async fn model_picker_same_slug_marks_only_exact_provider_current() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some(CLAUDE_FABLE_5_1_PLAN_MODEL)).await;
+    let base = chat
+        .model_catalog
+        .try_list_models()
+        .unwrap()
+        .into_iter()
+        .find(|preset| preset.model == CLAUDE_FABLE_5_1_PLAN_MODEL)
+        .unwrap();
+    let mut first = base.clone();
+    first.provider_id = Some("custom-a".to_string());
+    let mut second = base;
+    second.provider_id = Some("custom-b".to_string());
+    chat.config.model_provider_id = "custom-b".to_string();
+    chat.open_all_models_popup(vec![first, second]);
+    let popup = render_bottom_popup_with_height(&chat, /*width*/ 120, /*height*/ 20);
+    assert_eq!(popup.matches("(current)").count(), 1, "{popup}");
+    insta::assert_snapshot!("model_picker_exact_provider_current", popup);
+}
+
+#[tokio::test]
+async fn model_picker_claude_recovery_refresh_restores_full_subscription_catalog() {
+    use crate::provider_status_host::ProviderAccountMetadata;
+    use crate::provider_status_host::ProviderStatusHost;
+    use codex_provider_auth::ClaudeCredentialMetadata;
+    use codex_provider_auth::ClaudeCredentialSource;
+    use codex_provider_auth::ProviderRuntimeAuthorizations;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some(CLAUDE_FABLE_5_1_PLAN_MODEL)).await;
+    let home = tempfile::tempdir().unwrap();
+    let mut config = crate::legacy_core::config::ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await
+        .unwrap();
+    config.cli_auth_credentials_store_mode = codex_login::AuthCredentialsStoreMode::File;
+    config.model_provider_id = "claude-plan".to_string();
+    chat.config.model_provider_id = "claude-plan".to_string();
+    let host = ProviderStatusHost::from_config(&config, ProviderAccountMetadata::default());
+    chat.model_catalog.set_provider_policy(
+        super::super::provider_model_policy::ProviderModelPolicy::new(
+            host.clone(),
+            ProviderRuntimeAuthorizations::default(),
+        ),
+    );
+    assert!(
+        !chat
+            .model_catalog
+            .provider_is_selectable("claude-plan", CLAUDE_PLAN_MODEL)
+    );
+    host.update_account_metadata(ProviderAccountMetadata {
+        claude: ClaudeCredentialMetadata::Configured {
+            source: ClaudeCredentialSource::Managed,
+        },
+        ..Default::default()
+    });
+    chat.model_catalog
+        .update_provider_statuses(host.resolve().entries());
+    chat.model_catalog.sync_runtime_models(
+        config.model_providers.keys().map(String::as_str),
+        Some(CLAUDE_FABLE_5_1_PLAN_MODEL),
+        "claude-plan",
+    );
+    let presets = chat.model_catalog.try_list_models().unwrap();
+    chat.open_all_models_popup(presets);
+    let popup = render_bottom_popup_with_height(&chat, /*width*/ 140, /*height*/ 30);
+    for model in [
+        CLAUDE_PLAN_MODEL,
+        CLAUDE_FABLE_5_PLAN_MODEL,
+        CLAUDE_FABLE_5_1_PLAN_MODEL,
+    ] {
+        assert!(popup.contains(model), "{popup}");
+    }
+    assert_eq!(popup.matches("(current)").count(), 1, "{popup}");
+    assert!(!popup.contains("[Other]"), "{popup}");
+    assert!(
+        !chat
+            .model_catalog
+            .provider_is_selectable("anthropic", ANTHROPIC_DEFAULT_MODEL)
+    );
+    insta::assert_snapshot!("model_picker_recovered_claude_subscription", popup);
+
+    // A separately configured API key enables Anthropic without moving the
+    // current subscription session or borrowing the subscription credential.
+    codex_login::login_with_provider_api_key(
+        home.path(),
+        "ANTHROPIC_API_KEY",
+        "synthetic-picker-anthropic-key",
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+    )
+    .unwrap();
+    chat.model_catalog
+        .update_provider_statuses(host.resolve().entries());
+    assert!(
+        chat.model_catalog
+            .provider_is_selectable("anthropic", ANTHROPIC_DEFAULT_MODEL)
+    );
+    chat.handle_key_event(KeyEvent::from(KeyCode::Esc));
+    chat.open_all_models_popup(chat.model_catalog.try_list_models().unwrap());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Right));
+    let api_popup = render_bottom_popup_with_height(&chat, /*width*/ 140, /*height*/ 30);
+    assert!(api_popup.contains("[Anthropic]"), "{api_popup}");
+    for model in [
+        ANTHROPIC_DEFAULT_MODEL,
+        CLAUDE_FABLE_5_MODEL,
+        CLAUDE_FABLE_5_1_MODEL,
+    ] {
+        assert!(
+            api_popup.contains(&format!("Model: {model}.")),
+            "{api_popup}"
+        );
+    }
+    assert_eq!(api_popup.matches("(current)").count(), 0);
+    assert_eq!(chat.config.model_provider_id, "claude-plan");
 }
 
 #[tokio::test]
@@ -3834,14 +4032,7 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
         popup.contains("Ambient: GLM 5.2 - $0.76/M input, $0.14/M cached input, $2.42/M output."),
         "expected Ambient model description in /model picker:\n{popup}"
     );
-    assert!(
-        popup.contains(AMBIENT_KIMI_K2_7_CODE_MODEL),
-        "expected Ambient Kimi K2.7 Code in /model picker:\n{popup}"
-    );
-    assert!(
-        popup.contains("Ambient: Kimi K2.7 Code - $0.73/M input"),
-        "expected Ambient Kimi description in /model picker:\n{popup}"
-    );
+    assert_chatwidget_snapshot!("ambient_glm_only_model_picker", popup);
     assert!(
         !popup.contains(&format!("Model: {ZAI_DEFAULT_MODEL}."))
             && !popup.contains(&format!("Model: {CLAUDE_PLAN_MODEL}.")),
@@ -3851,19 +4042,22 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
     let (mut claude_plan_chat, _claude_plan_rx, _claude_plan_op_rx) =
         make_chatwidget_manual(Some(CLAUDE_PLAN_MODEL)).await;
     claude_plan_chat.thread_id = Some(ThreadId::new());
+    claude_plan_chat.config.model_provider_id = "claude-plan".to_string();
     let presets = claude_plan_chat
         .model_catalog
         .try_list_models()
         .expect("model catalog should load");
     claude_plan_chat.open_all_models_popup(presets);
     let claude_plan_popup =
-        render_bottom_popup_with_height(&claude_plan_chat, /*width*/ 140, /*height*/ 28);
+        render_bottom_popup_with_height(&claude_plan_chat, /*width*/ 140, /*height*/ 36);
     assert!(
         claude_plan_popup.contains("[Claude Plan]")
             && claude_plan_popup.contains(CLAUDE_PLAN_MODEL)
+            && claude_plan_popup.contains(CLAUDE_FABLE_5_1_PLAN_MODEL)
             && claude_plan_popup.contains(CLAUDE_FABLE_5_PLAN_MODEL),
         "expected Claude Code models in the Claude Plan tab:\n{claude_plan_popup}"
     );
+    insta::assert_snapshot!("claude_plan_model_picker_fable_versions", claude_plan_popup);
     assert!(
         !claude_plan_popup.contains("claude-opus-4-8-plan"),
         "deprecated Claude Opus 4.8 Plan must not appear in the picker:\n{claude_plan_popup}"
@@ -3875,13 +4069,14 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
     let (mut anthropic_chat, _anthropic_rx, _anthropic_op_rx) =
         make_chatwidget_manual(Some(ANTHROPIC_DEFAULT_MODEL)).await;
     anthropic_chat.thread_id = Some(ThreadId::new());
+    anthropic_chat.config.model_provider_id = "anthropic".to_string();
     let presets = anthropic_chat
         .model_catalog
         .try_list_models()
         .expect("model catalog should load");
     anthropic_chat.open_all_models_popup(presets);
     let anthropic_popup =
-        render_bottom_popup_with_height(&anthropic_chat, /*width*/ 140, /*height*/ 28);
+        render_bottom_popup_with_height(&anthropic_chat, /*width*/ 140, /*height*/ 36);
 
     assert!(
         anthropic_popup.contains("[Anthropic]"),
@@ -3892,7 +4087,8 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
         "expected Anthropic API-key model in /model picker:\n{anthropic_popup}"
     );
     assert!(
-        anthropic_popup.contains(CLAUDE_FABLE_5_MODEL),
+        anthropic_popup.contains(CLAUDE_FABLE_5_1_MODEL)
+            && anthropic_popup.contains(CLAUDE_FABLE_5_MODEL),
         "expected Claude Fable API-key model in /model picker:\n{anthropic_popup}"
     );
     assert!(
@@ -3906,6 +4102,7 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
     let (mut baseten_chat, _baseten_rx, _baseten_op_rx) =
         make_chatwidget_manual(Some(BASETEN_DEFAULT_MODEL)).await;
     baseten_chat.thread_id = Some(ThreadId::new());
+    baseten_chat.config.model_provider_id = "baseten".to_string();
     let presets = baseten_chat
         .model_catalog
         .try_list_models()
@@ -3926,6 +4123,7 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
     let (mut kimi_chat, _kimi_rx, _kimi_op_rx) =
         make_chatwidget_manual(Some(KIMI_CODE_K3_MODEL)).await;
     kimi_chat.thread_id = Some(ThreadId::new());
+    kimi_chat.config.model_provider_id = KIMI_CODE_PROVIDER_ID.to_string();
     let presets = kimi_chat
         .model_catalog
         .try_list_models()
@@ -3946,6 +4144,7 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
     let (mut vercel_chat, _vercel_rx, _vercel_op_rx) =
         make_chatwidget_manual(Some(VERCEL_DEFAULT_MODEL)).await;
     vercel_chat.thread_id = Some(ThreadId::new());
+    vercel_chat.config.model_provider_id = VERCEL_PROVIDER_ID.to_string();
     let presets = vercel_chat
         .model_catalog
         .try_list_models()
@@ -3963,10 +4162,27 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
             .contains("Vercel: GLM 5.2 - $1.40/M input, $0.26/M cached input, $4.40/M output."),
         "expected Vercel GLM price description in /model picker:\n{vercel_popup}"
     );
+    for (model, display_name) in [
+        (VERCEL_GLM_5_3_FLASH_MODEL, "Vercel GLM 5.3 Flash"),
+        (VERCEL_GLM_5_3_MODEL, "Vercel GLM 5.3"),
+        (VERCEL_KIMI_K3_MODEL, "Vercel Kimi K3"),
+        (VERCEL_DEEPSEEK_V4_PRO_MODEL, "Vercel DeepSeek V4 Pro"),
+    ] {
+        assert!(
+            vercel_popup.contains(model) && vercel_popup.contains(display_name),
+            "expected {display_name} ({model}) in the Vercel tab:\n{vercel_popup}"
+        );
+        assert_eq!(
+            ChatWidget::model_provider_for_selection(model).as_deref(),
+            Some(VERCEL_PROVIDER_ID),
+            "expected {model} to select the Vercel provider"
+        );
+    }
 
     let (mut vercel_fast_chat, _vercel_fast_rx, _vercel_fast_op_rx) =
         make_chatwidget_manual(Some(VERCEL_GLM_5_2_FAST_MODEL)).await;
     vercel_fast_chat.thread_id = Some(ThreadId::new());
+    vercel_fast_chat.config.model_provider_id = "vercel-anthropic-fast".to_string();
     let presets = vercel_fast_chat
         .model_catalog
         .try_list_models()
@@ -3988,6 +4204,7 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
     let (mut minimax_chat, _minimax_rx, _minimax_op_rx) =
         make_chatwidget_manual(Some("minimax/minimax-m3")).await;
     minimax_chat.thread_id = Some(ThreadId::new());
+    minimax_chat.config.model_provider_id = OPENROUTER_PROVIDER_ID.to_string();
     let presets = minimax_chat
         .model_catalog
         .try_list_models()
@@ -4005,20 +4222,28 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
         "expected MiniMax M3 price description in /model picker:\n{minimax_popup}"
     );
     assert!(
-        minimax_popup.contains("openrouter/owl-alpha")
-            && minimax_popup.contains("OpenRouter: Owl Alpha - $0/M input, $0/M output."),
+        minimax_popup.contains("x-ai/grok-4.7"),
         "expected OpenRouter models to share the OpenRouter tab:\n{minimax_popup}"
     );
+    // Owl Alpha is retired from the picker; it stays selectable by exact name.
     assert!(
-        minimax_popup.contains("moonshotai/kimi-k3")
-            && minimax_popup.contains("OpenRouter: Kimi K3")
-            && minimax_popup.contains("$3.00/M input, $0.30/M cached input, $15.00/M"),
-        "expected Kimi K3 in the OpenRouter tab:\n{minimax_popup}"
+        !minimax_popup.contains("openrouter/owl-alpha"),
+        "a hidden OpenRouter row is not offered:\n{minimax_popup}"
+    );
+    move_model_picker_selection_to(&mut minimax_chat, "moonshotai/kimi-k3");
+    let kimi_openrouter_popup =
+        render_bottom_popup_with_height(&minimax_chat, /*width*/ 140, /*height*/ 28);
+    assert!(
+        kimi_openrouter_popup.contains("moonshotai/kimi-k3")
+            && kimi_openrouter_popup.contains("OpenRouter: Kimi K3")
+            && kimi_openrouter_popup.contains("$3.00/M input, $0.30/M cached input, $15.00/M"),
+        "expected Kimi K3 in the OpenRouter tab:\n{kimi_openrouter_popup}"
     );
 
     let (mut openai_chat, _openai_rx, _openai_op_rx) =
         make_chatwidget_manual(Some("gpt-5.6-sol")).await;
     openai_chat.thread_id = Some(ThreadId::new());
+    openai_chat.config.model_provider_id = "openai".to_string();
     let presets = openai_chat
         .model_catalog
         .try_list_models()
@@ -4027,8 +4252,12 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
     let openai_popup =
         render_bottom_popup_with_height(&openai_chat, /*width*/ 140, /*height*/ 28);
     assert!(
-        openai_popup.contains("[OpenAI]") && openai_popup.contains("gpt-5.5"),
-        "expected GPT-5.5 in the OpenAI tab:\n{openai_popup}"
+        openai_popup.contains("[OpenAI]") && openai_popup.contains("gpt-6-sol"),
+        "expected GPT-6 Sol in the OpenAI tab:\n{openai_popup}"
+    );
+    assert!(
+        !openai_popup.contains("Model: gpt-5.5."),
+        "expected retired GPT-5.5 to be hidden from /model picker:\n{openai_popup}"
     );
     assert!(
         !openai_popup.contains("gpt-5.4"),
@@ -4061,6 +4290,52 @@ async fn model_picker_hides_fake_openai_models_and_shows_curated_provider_models
         assert!(
             !reasoning_popup.contains(label),
             "expected old Ambient reasoning option {label:?} to be hidden:\n{reasoning_popup}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn corbanu_api_model_picker_preserves_ambient_and_shows_the_seven_public_routes() {
+    let (mut chat, _rx, _op_rx) =
+        make_chatwidget_manual(Some(CORBANU_API_GLM_5_3_FLASH_MODEL)).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.config.model_provider_id = PFTERMINAL_PLAN_PROVIDER_ID.to_string();
+
+    let mut presets = chat
+        .model_catalog
+        .try_list_models()
+        .expect("model catalog should load");
+    presets.extend(ChatWidget::corbanu_api_presets(&presets));
+    chat.open_all_models_popup(presets);
+    let popup = render_bottom_popup_with_height(&chat, /*width*/ 140, /*height*/ 40);
+
+    assert_chatwidget_snapshot!("corbanu_api_model_picker", popup);
+    assert!(popup.contains("[Corbanu API]"), "{popup}");
+    assert_eq!(popup.matches("DeepSeek V4.1 Flash").count(), 1);
+    for model in [
+        CORBANU_API_GLM_5_3_FLASH_MODEL,
+        AMBIENT_DEFAULT_MODEL,
+        CORBANU_API_GLM_5_3_MODEL,
+        CORBANU_API_GPT_5_6_LUNA_MODEL,
+        CORBANU_API_GPT_5_6_SOL_MODEL,
+        CORBANU_API_KIMI_K3_MODEL,
+        CORBANU_API_DEEPSEEK_V4_PRO_MODEL,
+        CORBANU_API_DEEPSEEK_V4_1_FLASH_MODEL,
+    ] {
+        assert!(
+            popup.contains(model),
+            "expected {model} in Corbanu API tab:\n{popup}"
+        );
+    }
+    assert!(popup.contains("Recommended"), "{popup}");
+    assert!(popup.contains("Uses balance faster"), "{popup}");
+    assert!(popup.contains("Ambient GLM 5.2"), "{popup}");
+    assert!(!popup.contains("Claude Fable"), "{popup}");
+    assert!(!popup.contains("corbanu/claude-fable-5"), "{popup}");
+    for legacy_row in ["Ambient Kimi K2.7 Code", "DeepSeek V4 Pro (Direct)"] {
+        assert!(
+            !popup.contains(legacy_row),
+            "legacy row {legacy_row:?} leaked into Corbanu API tab:\n{popup}"
         );
     }
 }
@@ -4142,7 +4417,7 @@ async fn model_picker_selects_kimi_k3_with_required_max_reasoning() {
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
     let advanced_preset = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|event| match event {
-        AppEvent::OpenAdvancedReasoningPopup { model } => Some(model),
+        AppEvent::OpenAdvancedReasoningPopup { model, .. } => Some(model),
         _ => None,
     });
     chat.open_advanced_reasoning_popup(advanced_preset.expect("Kimi advanced reasoning popup"));
@@ -4207,7 +4482,7 @@ async fn model_picker_opens_openrouter_reasoning_options_for_gemini() {
     }
     assert!(
         !reasoning_popup.contains("(default)"),
-        "expected Gemini reasoning picker not to invent a PFTerminal default:\n{reasoning_popup}"
+        "expected Gemini reasoning picker not to invent a Corbanu Terminal default:\n{reasoning_popup}"
     );
 }
 
@@ -4382,7 +4657,7 @@ async fn select_ultra_with_multi_agent_thread_limit(max_threads: usize) -> (bool
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
     let advanced_preset = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|event| match event {
-        AppEvent::OpenAdvancedReasoningPopup { model } => Some(model),
+        AppEvent::OpenAdvancedReasoningPopup { model, .. } => Some(model),
         _ => None,
     });
     chat.open_advanced_reasoning_popup(advanced_preset.expect("advanced reasoning popup"));
@@ -4426,6 +4701,109 @@ async fn ultra_reasoning_selection_skips_warning_below_threshold() {
     let below_threshold = select_ultra_with_multi_agent_thread_limit(/*max_threads*/ 7).await;
 
     assert_eq!(below_threshold, (true, Vec::new()));
+}
+
+/// #468: Max or Ultra chosen under "More reasoning…" for a spawned agent
+/// spawns it with that effort and never changes or saves the session model.
+#[tokio::test]
+async fn spawn_advanced_reasoning_spawns_instead_of_saving_session_model() {
+    for advanced in [ReasoningEffortConfig::Max, ReasoningEffortConfig::Ultra] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+        chat.config
+            .multi_agent_v2
+            .max_concurrent_threads_per_session = 8;
+        let mut preset = get_available_model(&chat, "gpt-5.4");
+        preset.default_reasoning_effort = ReasoningEffortConfig::Low;
+        preset.supported_reasoning_efforts = vec![
+            ReasoningEffortPreset {
+                effort: ReasoningEffortConfig::Low,
+                description: "Low reasoning".to_string(),
+            },
+            ReasoningEffortPreset {
+                effort: advanced.clone(),
+                description: "Advanced reasoning".to_string(),
+            },
+        ];
+        let purpose = spawn_model_purpose(SpawnRole::Troll, Some("node-1"), "gpt-5.4");
+        chat.open_reasoning_popup_for_purpose(preset, purpose.clone());
+        while rx.try_recv().is_ok() {}
+
+        chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        let (model, forwarded) = std::iter::from_fn(|| rx.try_recv().ok())
+            .find_map(|event| match event {
+                AppEvent::OpenAdvancedReasoningPopup { model, purpose } => Some((model, purpose)),
+                _ => None,
+            })
+            .expect("More reasoning… opens the advanced popup");
+        assert_eq!(forwarded, purpose);
+
+        chat.open_advanced_reasoning_popup_for_purpose(model, forwarded);
+        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AppEvent::CreateSpawnAgent {
+                    role: SpawnRole::Troll,
+                    parent_node_id: Some(parent),
+                    model,
+                    effort: Some(effort),
+                    ..
+                } if parent == "node-1" && model == "gpt-5.4" && *effort == advanced
+            )),
+            "{advanced:?} must spawn the Troll: {events:?}"
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                AppEvent::PersistModelSelection { .. }
+                    | AppEvent::UpdateModelSelection { .. }
+                    | AppEvent::UpdateReasoningEffort(_)
+                    | AppEvent::ApplyAdvancedReasoning { .. }
+            )),
+            "{advanced:?} for a spawn must not touch the session model: {events:?}"
+        );
+        // Ultra still warns about multi-agent concurrency for the new pane.
+        assert_eq!(
+            events
+                .iter()
+                .any(|event| matches!(event, AppEvent::InsertHistoryCell(_))),
+            advanced == ReasoningEffortConfig::Ultra,
+            "{events:?}"
+        );
+
+        // A new Corbanu Terminal pane gets the effort the same way.
+        let pane = ModelSelectionPurpose::CodexPane {
+            default_model: "gpt-5.4".to_string(),
+        };
+        let mut preset = get_available_model(&chat, "gpt-5.4");
+        preset.supported_reasoning_efforts = vec![ReasoningEffortPreset {
+            effort: advanced.clone(),
+            description: "Advanced reasoning".to_string(),
+        }];
+        chat.open_advanced_reasoning_popup_for_purpose(preset, pane);
+        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AppEvent::OpenCodexPaneNamePrompt { model, effort: Some(effort), .. }
+                    if model == "gpt-5.4" && *effort == advanced
+            )),
+            "{advanced:?} must open the pane prompt: {events:?}"
+        );
+        assert!(
+            events.iter().all(|event| !matches!(
+                event,
+                AppEvent::PersistModelSelection { .. }
+                    | AppEvent::UpdateModelSelection { .. }
+                    | AppEvent::UpdateReasoningEffort(_)
+                    | AppEvent::ApplyAdvancedReasoning { .. }
+            )),
+            "{advanced:?} for a pane must not touch the session model: {events:?}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -4859,4 +5237,35 @@ async fn reasoning_popup_escape_returns_to_model_popup() {
     let after_escape = render_bottom_popup(&chat, /*width*/ 80);
     assert!(after_escape.contains("Select Model"));
     assert!(!after_escape.contains("Select Reasoning Level"));
+}
+
+#[tokio::test]
+async fn model_picker_runtime_refresh_keeps_claude_out_of_openai_tab() {
+    use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
+    let (mut chat, _, _) = make_chatwidget_manual(Some(CLAUDE_FABLE_5_PLAN_MODEL)).await;
+    chat.config.model_provider_id = CLAUDE_PLAN_PROVIDER_ID.to_string();
+    chat.thread_id = Some(ThreadId::new());
+    chat.model_catalog.sync_runtime_models(
+        ["openai", CLAUDE_PLAN_PROVIDER_ID],
+        Some(CLAUDE_FABLE_5_PLAN_MODEL),
+        CLAUDE_PLAN_PROVIDER_ID,
+    );
+    let presets = chat.model_catalog.try_list_models().unwrap();
+    chat.open_all_models_popup(presets);
+    let claude = render_bottom_popup_with_height(&chat, /*width*/ 140, /*height*/ 36);
+    assert!(claude.contains("[Claude Plan]"), "{claude}");
+    assert!(claude.contains(&format!("Model: {CLAUDE_FABLE_5_PLAN_MODEL}.")));
+    for _ in 0..16 {
+        let popup = render_bottom_popup_with_height(&chat, /*width*/ 140, /*height*/ 36);
+        if popup.contains("[OpenAI]") {
+            assert!(
+                !popup.contains(&format!("Model: {CLAUDE_FABLE_5_PLAN_MODEL}.")),
+                "{popup}"
+            );
+            insta::assert_snapshot!("openai_tab_after_claude_runtime_refresh", popup);
+            return;
+        }
+        chat.handle_key_event(KeyEvent::from(KeyCode::Right));
+    }
+    panic!("OpenAI tab unavailable");
 }

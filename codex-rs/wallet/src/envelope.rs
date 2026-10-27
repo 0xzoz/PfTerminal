@@ -121,6 +121,14 @@ impl UnlockedWallet {
         crate::payment::issue_gateway_key(self, gateway_origin).await
     }
 
+    pub async fn execute_corbanu_api_operation(
+        &self,
+        gateway_origin: String,
+        operation: crate::CorbanuApiOperation,
+    ) -> Result<crate::CorbanuApiOperationResult, crate::X402PaymentError> {
+        crate::corbanu_api::execute(self, gateway_origin, operation).await
+    }
+
     pub(crate) fn seed_for_payment(&self) -> &[u8; 32] {
         &self.seed
     }
@@ -374,8 +382,8 @@ impl Wallet {
             created_at,
         };
         prepare_private_dir(&self.root)?;
-        atomic_json(&self.envelope_path(), &envelope, 0o600)?;
-        atomic_json(&self.manifest_path(), &manifest, 0o600)?;
+        atomic_json(&self.envelope_path(), &envelope, /*mode*/ 0o600)?;
+        atomic_json(&self.manifest_path(), &manifest, /*mode*/ 0o600)?;
         Ok(CreatedWallet {
             manifest,
             recovery_material: Zeroizing::new(bs58::encode(seed.as_ref()).into_string()),
@@ -563,12 +571,17 @@ fn atomic_json<T: Serialize>(path: &Path, value: &T, mode: u32) -> Result<(), Wa
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(mode);
+    #[cfg(not(unix))]
+    let _ = mode;
     let mut file = options.open(&temporary).map_err(storage)?;
     let bytes = serde_json::to_vec_pretty(value).map_err(storage)?;
     file.write_all(&bytes).map_err(storage)?;
     file.write_all(b"\n").map_err(storage)?;
     file.sync_all().map_err(storage)?;
     fs::rename(&temporary, path).map_err(storage)?;
+    // Windows cannot open a directory with `File::open` (os error 5), and
+    // `MoveFileExW` needs no separate directory flush.
+    #[cfg(unix)]
     File::open(parent)
         .and_then(|directory| directory.sync_all())
         .map_err(storage)?;

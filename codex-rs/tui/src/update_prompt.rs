@@ -12,6 +12,8 @@ use crate::tui::Tui;
 use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
 use crate::updates;
+use crate::updates_cache;
+use codex_product_brand::GITHUB_LATEST_RELEASE_URL;
 use color_eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -26,7 +28,7 @@ use ratatui::widgets::Clear;
 use ratatui::widgets::WidgetRef;
 use tokio_stream::StreamExt;
 
-const RELEASE_NOTES_URL: &str = "https://github.com/agtico/PfTerminal/releases/latest";
+const RELEASE_NOTES_URL: &str = GITHUB_LATEST_RELEASE_URL;
 
 pub(crate) enum UpdatePromptOutcome {
     Continue,
@@ -37,7 +39,7 @@ pub(crate) async fn run_update_prompt_if_needed(
     tui: &mut Tui,
     config: &Config,
 ) -> Result<UpdatePromptOutcome> {
-    let Some(latest_version) = updates::get_upgrade_version_for_popup(config) else {
+    let Some(latest_version) = updates::get_upgrade_version_for_popup(config).await else {
         return Ok(UpdatePromptOutcome::Continue);
     };
     let Some(update_action) = crate::update_action::get_update_action() else {
@@ -76,7 +78,8 @@ pub(crate) async fn run_update_prompt_if_needed(
         }
         Some(UpdateSelection::NotNow) | None => Ok(UpdatePromptOutcome::Continue),
         Some(UpdateSelection::DontRemind) => {
-            if let Err(err) = updates::dismiss_version(config, screen.latest_version()).await {
+            if let Err(err) = updates_cache::dismiss_version(config, screen.latest_version()).await
+            {
                 tracing::error!("Failed to persist update dismissal: {err}");
             }
             Ok(UpdatePromptOutcome::Continue)
@@ -254,7 +257,7 @@ mod tests {
         UpdatePromptScreen::new(
             FrameRequester::test_dummy(),
             "9.9.9".into(),
-            UpdateAction::NpmGlobalLatest,
+            UpdateAction::StandaloneUnix,
         )
     }
 

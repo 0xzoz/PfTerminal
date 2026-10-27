@@ -1,0 +1,5 @@
+---
+source: tui/src/chatwidget/tests/mcp_startup.rs
+expression: warning_text
+---
+⚠ MCP startup interrupted. The following servers were not initialized: alpha

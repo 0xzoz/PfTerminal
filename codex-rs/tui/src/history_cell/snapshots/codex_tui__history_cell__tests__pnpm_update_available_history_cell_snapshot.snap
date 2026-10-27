@@ -1,12 +1,11 @@
 ---
 source: tui/src/history_cell/tests.rs
-assertion_line: 1216
 expression: rendered
 ---
-╭──────────────────────────────────────────────────────╮
-│ ✨ Update available! 0.1.27 -> 9.9.9                 │
-│ Run pnpm add -g @agticorp/pfterminal to update.      │
-│                                                      │
-│ See full release notes:                              │
-│ https://github.com/agtico/PfTerminal/releases/latest │
-╰──────────────────────────────────────────────────────╯
+╭────────────────────────────────────────────────────────────────╮
+│ ✨ Update available! <V> -> 9.9.9                              │
+│ Run pnpm add -g @agticorp/pfterminal to update.                │
+│                                                                │
+│ See full release notes:                                        │
+│ https://github.com/CorbanuCore/CorbanuTerminal/releases/latest │
+╰────────────────────────────────────────────────────────────────╯

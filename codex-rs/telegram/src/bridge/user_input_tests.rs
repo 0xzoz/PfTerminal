@@ -3,7 +3,9 @@ use super::queue_capacity_error;
 use super::thread_read_unavailable_before_first_message;
 use super::turn_input;
 use super::turn_items_contain_client_message;
+use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::JSONRPCErrorError;
+use codex_app_server_protocol::THREAD_UNMATERIALIZED_ERROR_CODE;
 use codex_app_server_protocol::ThreadItem;
 
 #[test]
@@ -30,16 +32,27 @@ fn text_only_unchanged() {
 
 #[test]
 fn queue_limits_are_hard_for_items_and_bytes() {
-    assert!(queue_capacity_error(15, 0, 1).is_none());
     assert!(
-        queue_capacity_error(16, 0, 1)
-            .unwrap()
-            .contains("16 messages")
+        queue_capacity_error(
+            /*item_count*/ 15, /*queued_bytes*/ 0, /*incoming_bytes*/ 1
+        )
+        .is_none()
     );
     assert!(
-        queue_capacity_error(0, PER_CONVERSATION_QUEUE_BYTES, 1)
-            .unwrap()
-            .contains("256 KiB")
+        queue_capacity_error(
+            /*item_count*/ 16, /*queued_bytes*/ 0, /*incoming_bytes*/ 1
+        )
+        .unwrap()
+        .contains("16 messages")
+    );
+    assert!(
+        queue_capacity_error(
+            /*item_count*/ 0,
+            PER_CONVERSATION_QUEUE_BYTES,
+            /*incoming_bytes*/ 1
+        )
+        .unwrap()
+        .contains("256 KiB")
     );
 }
 
@@ -62,27 +75,49 @@ fn replay_reconciliation_finds_only_the_matching_client_message() {
     assert!(!turn_items_contain_client_message(turns, "telegram:1:42"));
 }
 
+/// The raw message the app server sends for an unmaterialized thread. It
+/// carries no `thread/read failed:` prefix; that is added by
+/// `TypedRequestError`'s `Display`, which the helper never sees.
+fn unmaterialized_thread_read_error() -> JSONRPCErrorError {
+    JSONRPCErrorError {
+        code: -32600,
+        message: "human-readable wording may change".to_string(),
+        data: Some(serde_json::json!({
+            "code": THREAD_UNMATERIALIZED_ERROR_CODE,
+            "threadId": "abc",
+        })),
+    }
+}
+
 #[test]
 fn unmaterialized_thread_read_is_treated_as_an_empty_reconciliation_source() {
-    let error = JSONRPCErrorError {
-        code: -32600,
-        message: "thread/read failed: thread abc is not materialized yet; includeTurns is unavailable before first user message".into(),
-        data: None,
-    };
+    assert!(thread_read_unavailable_before_first_message(
+        "thread/read",
+        &unmaterialized_thread_read_error()
+    ));
+}
+
+/// Regression test for the shipped bug: formatting must have no effect on the
+/// structured recovery signal.
+#[test]
+fn the_formatted_prefix_is_absent_from_the_message_the_helper_receives() {
+    let raw = unmaterialized_thread_read_error();
+    let formatted = TypedRequestError::Server {
+        method: "thread/read".into(),
+        source: raw.clone(),
+    }
+    .to_string();
+    assert!(formatted.starts_with("thread/read failed:"));
 
     assert!(thread_read_unavailable_before_first_message(
         "thread/read",
-        &error
+        &raw
     ));
 }
 
 #[test]
 fn unrelated_invalid_requests_are_not_suppressed_during_reconciliation() {
-    for message in [
-        "thread/read failed: thread abc does not exist",
-        "thread/read failed: includeTurns is unavailable for archived threads",
-        "turn/start failed: thread abc is not materialized yet; includeTurns is unavailable before first user message",
-    ] {
+    for message in ["thread abc does not exist", "is not materialized yet"] {
         let error = JSONRPCErrorError {
             code: -32600,
             message: message.into(),
@@ -96,21 +131,15 @@ fn unrelated_invalid_requests_are_not_suppressed_during_reconciliation() {
 
     let wrong_code = JSONRPCErrorError {
         code: -32603,
-        message: "thread/read failed: thread abc is not materialized yet; includeTurns is unavailable before first user message".into(),
-        data: None,
+        ..unmaterialized_thread_read_error()
     };
     assert!(!thread_read_unavailable_before_first_message(
         "thread/read",
         &wrong_code
     ));
 
-    let right_error_wrong_method = JSONRPCErrorError {
-        code: -32600,
-        message: "thread abc is not materialized yet; includeTurns is unavailable before first user message".into(),
-        data: None,
-    };
     assert!(!thread_read_unavailable_before_first_message(
         "turn/start",
-        &right_error_wrong_method
+        &unmaterialized_thread_read_error()
     ));
 }

@@ -80,7 +80,6 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tracing::info_span;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 use tungstenite::Message;
 use tungstenite::WebSocket;
 use tungstenite::connect;
@@ -1829,16 +1828,6 @@ impl CodexClient {
         self.send_request(request, request_id, "account/login/start")
     }
 
-    fn login_account_openai_provider_device_code(&mut self) -> Result<LoginAccountResponse> {
-        let request_id = self.request_id();
-        let request = ClientRequest::LoginAccount {
-            request_id: request_id.clone(),
-            params: codex_app_server_protocol::LoginAccountParams::OpenaiProviderDeviceCode,
-        };
-
-        self.send_request(request, request_id, "account/login/start")
-    }
-
     fn get_account_rate_limits(&mut self) -> Result<GetAccountRateLimitsResponse> {
         let request_id = self.request_id();
         let request = ClientRequest::GetAccountRateLimits {
@@ -2385,9 +2374,10 @@ impl TestClientTracing {
         if let Some(provider) = otel_provider.as_ref()
             && traces_enabled
         {
-            let _ = tracing_subscriber::registry()
-                .with(provider.tracing_layer())
-                .try_init();
+            let _ = codex_log_guard::guard(
+                tracing_subscriber::registry().with(provider.tracing_layer()),
+            )
+            .try_init();
         }
         Ok(Self {
             traces_enabled,

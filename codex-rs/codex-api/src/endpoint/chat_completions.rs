@@ -51,6 +51,12 @@ use tracing::instrument;
 use tracing::trace;
 use tracing::warn;
 
+#[path = "chat_accounting.rs"]
+pub(crate) mod accounting;
+#[cfg(test)]
+#[path = "chat_accounting_tests.rs"]
+mod accounting_tests;
+
 const REQUEST_ID_HEADER: &str = "x-request-id";
 const GENERATION_ID_HEADERS: [&str; 3] = [
     "x-openrouter-generation-id",
@@ -60,12 +66,13 @@ const GENERATION_ID_HEADERS: [&str; 3] = [
 const SSE_IDLE_TIMEOUT_MESSAGE: &str = "idle timeout waiting for SSE";
 const DEFAULT_ACTIONABLE_SILENCE_TIMEOUT: Duration = Duration::from_secs(180);
 const SERIALIZED_TOOL_TEXT_PROBE_CHARS: usize = 96;
-const CALL_METRICS_TAG: &str = "pfterminal_call_metrics";
+const CALL_METRICS_TAG: &str = "corbanu_call_metrics";
 static CHAT_CALL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub struct ChatCompletionsClient<T: HttpTransport> {
     session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
+    usage_observer: Option<Arc<dyn accounting::ChatUsageObserver>>,
 }
 
 #[derive(Default)]
@@ -83,7 +90,16 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
         Self {
             session: EndpointSession::new(transport, provider, auth),
             sse_telemetry: None,
+            usage_observer: None,
         }
+    }
+
+    pub fn with_usage_observer(
+        mut self,
+        observer: Option<Arc<dyn accounting::ChatUsageObserver>>,
+    ) -> Self {
+        self.usage_observer = observer;
+        self
     }
 
     pub fn with_telemetry(
@@ -94,6 +110,7 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
         Self {
             session: self.session.with_request_telemetry(request),
             sse_telemetry: sse,
+            usage_observer: self.usage_observer,
         }
     }
 
@@ -164,6 +181,7 @@ impl<T: HttpTransport> ChatCompletionsClient<T> {
             actionable_silence_timeout.unwrap_or(DEFAULT_ACTIONABLE_SILENCE_TIMEOUT),
             self.sse_telemetry.clone(),
             metrics,
+            self.usage_observer.clone(),
         ))
     }
 
@@ -178,6 +196,7 @@ fn spawn_chat_completions_stream(
     actionable_silence_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
     metrics: ChatCallMetrics,
+    observer: Option<Arc<dyn accounting::ChatUsageObserver>>,
 ) -> ResponseStream {
     let upstream_request_id = stream_response
         .headers
@@ -188,7 +207,7 @@ fn spawn_chat_completions_stream(
     let response_id_hint = upstream_request_id.clone();
     tokio::spawn(async move {
         let _ = tx_event.send(Ok(ResponseEvent::Created)).await;
-        process_chat_sse(
+        process_chat_sse_observed(
             stream_response.bytes,
             tx_event,
             idle_timeout,
@@ -196,6 +215,7 @@ fn spawn_chat_completions_stream(
             telemetry,
             response_id_hint,
             Some(metrics),
+            observer,
         )
         .await;
     });
@@ -600,7 +620,7 @@ impl ChatCallMetrics {
         // terminal (interactive TUI), printing them corrupts the rendered UI with one JSON line
         // per API call, so route them to the tracing log instead.
         if std::io::stderr().is_terminal() {
-            tracing::info!(target: "pfterminal_call_metrics", "{serialized}");
+            tracing::info!(target: "corbanu_call_metrics", "{serialized}");
         } else {
             eprintln!("{serialized}");
         }
@@ -997,7 +1017,10 @@ impl ChatStreamState {
         let delta = self.message_text[self.emitted_text_len..].to_string();
         self.emitted_text_len = self.message_text.len();
         tx_event
-            .send(Ok(ResponseEvent::OutputTextDelta(delta)))
+            .send(Ok(ResponseEvent::OutputTextDelta {
+                item_id: Some(self.message_id()),
+                delta,
+            }))
             .await
             .is_ok()
     }
@@ -1112,6 +1135,7 @@ fn diagnostic_excerpt(text: &str) -> String {
     excerpt.replace('\n', "\\n")
 }
 
+#[cfg(test)]
 async fn process_chat_sse(
     stream: ByteStream,
     tx_event: mpsc::Sender<Result<ResponseEvent, ApiError>>,
@@ -1121,6 +1145,31 @@ async fn process_chat_sse(
     response_id_hint: Option<String>,
     metrics: Option<ChatCallMetrics>,
 ) {
+    process_chat_sse_observed(
+        stream,
+        tx_event,
+        idle_timeout,
+        actionable_silence_timeout,
+        telemetry,
+        response_id_hint,
+        metrics,
+        /*observer*/ None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_chat_sse_observed(
+    stream: ByteStream,
+    tx_event: mpsc::Sender<Result<ResponseEvent, ApiError>>,
+    idle_timeout: Duration,
+    actionable_silence_timeout: Duration,
+    telemetry: Option<Arc<dyn SseTelemetry>>,
+    response_id_hint: Option<String>,
+    metrics: Option<ChatCallMetrics>,
+    mut observer: Option<Arc<dyn accounting::ChatUsageObserver>>,
+) {
+    let mut position = 0_i64;
     let (activity, mut activity_rx) = ChatStreamActivity::new();
     let mut stream =
         byte_idle_timeout_stream(stream, idle_timeout, metrics.clone(), activity.clone())
@@ -1131,13 +1180,12 @@ async fn process_chat_sse(
 
     loop {
         let start = Instant::now();
-        let response = match poll_chat_sse_event(
-            &mut stream,
-            &mut activity_rx,
-            actionable_deadline_at,
-        )
-        .await
-        {
+        let polled = tokio::select! {
+            biased;
+            _ = tx_event.closed(), if observer.is_some() => return,
+            value = poll_chat_sse_event(&mut stream, &mut activity_rx, actionable_deadline_at) => value,
+        };
+        let response = match polled {
             ChatSsePoll::Activity => {
                 let now = Instant::now();
                 if first_activity_at.is_none() {
@@ -1205,6 +1253,35 @@ async fn process_chat_sse(
             let now = Instant::now();
             first_activity_at = Some(now);
             actionable_deadline_at = Some(now + actionable_silence_timeout);
+        }
+
+        if let Some(active) = &observer {
+            let next = position.checked_add(1);
+            let patch = match next {
+                Some(next) => {
+                    position = next;
+                    if sse.data.trim() == "[DONE]" {
+                        Ok(None)
+                    } else {
+                        accounting::decode(&sse.data)
+                    }
+                }
+                None => Err(accounting::InvalidChatUsage),
+            };
+            if !matches!(patch, Ok(None)) {
+                let usage = patch.and_then(|value| value.ok_or(accounting::InvalidChatUsage));
+                let invalid = usage.is_err();
+                let result = tokio::select! {
+                    biased;
+                    _ = tx_event.closed() => return,
+                    result = active.observe(position, usage) => result,
+                };
+                // Accounting observes the stream; it never ends it. Rejected
+                // evidence stops observation for the rest of this response.
+                if invalid || result.is_err() {
+                    observer = None;
+                }
+            }
         }
 
         if sse.data.trim() == "[DONE]" {
@@ -1473,8 +1550,16 @@ mod tests {
             &events[1],
             Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { .. }))
         );
-        assert_matches!(&events[2], Ok(ResponseEvent::OutputTextDelta(delta)) if delta == "he");
-        assert_matches!(&events[3], Ok(ResponseEvent::OutputTextDelta(delta)) if delta == "llo");
+        assert_matches!(
+            &events[2],
+            Ok(ResponseEvent::OutputTextDelta { item_id: Some(item_id), delta })
+                if item_id == "msg_chatcmpl-1" && delta == "he"
+        );
+        assert_matches!(
+            &events[3],
+            Ok(ResponseEvent::OutputTextDelta { item_id: Some(item_id), delta })
+                if item_id == "msg_chatcmpl-1" && delta == "llo"
+        );
         assert_matches!(
             &events[4],
             Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { content, .. }))
@@ -1522,7 +1607,7 @@ mod tests {
         );
         assert_matches!(
             &events[2],
-            Ok(ResponseEvent::OutputTextDelta(delta)) if delta == "RENTED_GPU_OK"
+            Ok(ResponseEvent::OutputTextDelta { delta, .. }) if delta == "RENTED_GPU_OK"
         );
         assert_matches!(
             &events[3],
@@ -1680,7 +1765,7 @@ mod tests {
         );
         assert_matches!(
             &events[5],
-            Ok(ResponseEvent::OutputTextDelta(delta)) if delta == "visible answer"
+            Ok(ResponseEvent::OutputTextDelta { delta, .. }) if delta == "visible answer"
         );
         assert_matches!(
             &events[6],
@@ -1741,7 +1826,7 @@ mod tests {
             &events[0],
             Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { .. }))
         );
-        assert_matches!(&events[1], Ok(ResponseEvent::OutputTextDelta(delta)) if delta == &content);
+        assert_matches!(&events[1], Ok(ResponseEvent::OutputTextDelta { delta, .. }) if delta == &content);
         assert_matches!(
             &events[2],
             Ok(ResponseEvent::OutputItemDone(ResponseItem::Message { content: final_content, .. }))
@@ -1818,7 +1903,7 @@ mod tests {
             Duration::from_millis(30),
             DEFAULT_ACTIONABLE_SILENCE_TIMEOUT,
             /*telemetry*/ None,
-            None,
+            /*response_id_hint*/ None,
             /*metrics*/ None,
         )
         .await;
@@ -1841,33 +1926,37 @@ mod tests {
 
     #[tokio::test]
     async fn comment_only_stream_survives_actionable_silence_timeout() {
-        let body = delayed_body(vec![
-            (Duration::ZERO, b": OPENROUTER PROCESSING\n\n".to_vec()),
+        // Keepalives every 200ms span 1.2s, half again the 800ms
+        // actionable-silence budget, so only the keepalives keep the stream
+        // alive. Each gap leaves 600ms of slack: with 200ms against 300ms, a
+        // loaded Windows Bazel run stretched one gap past the budget (#636).
+        let keepalive = || {
             (
-                Duration::from_millis(20),
+                Duration::from_millis(200),
                 b": OPENROUTER PROCESSING\n\n".to_vec(),
-            ),
+            )
+        };
+        let mut chunks = vec![(Duration::ZERO, b": OPENROUTER PROCESSING\n\n".to_vec())];
+        chunks.extend(std::iter::repeat_with(keepalive).take(5));
+        chunks.extend([
             (
-                Duration::from_millis(20),
-                b": OPENROUTER PROCESSING\n\n".to_vec(),
-            ),
-            (
-                Duration::from_millis(20),
+                Duration::from_millis(200),
                 br#"data: {"id":"chatcmpl-late","choices":[{"delta":{"content":"late"}}]}"#
                     .to_vec(),
             ),
             (Duration::ZERO, b"\n\n".to_vec()),
             (Duration::ZERO, b"data: [DONE]\n\n".to_vec()),
         ]);
+        let body = delayed_body(chunks);
         let (tx_event, mut rx_event) = mpsc::channel(1600);
 
         process_chat_sse(
             body,
             tx_event,
-            Duration::from_millis(100),
-            Duration::from_millis(30),
+            Duration::from_millis(2_000),
+            Duration::from_millis(800),
             /*telemetry*/ None,
-            None,
+            /*response_id_hint*/ None,
             /*metrics*/ None,
         )
         .await;
@@ -1910,20 +1999,22 @@ mod tests {
     async fn normalized_reasoning_deltas_keep_actionable_silence_alive() {
         // Fast-pool OpenRouter hosts (StreamLake/AkashML/Together, probed
         // 2026-07-02) stream thinking as `delta.reasoning`, not
-        // `reasoning_content`. Six reasoning frames spanning 120ms with a
-        // 60ms actionable timeout must survive because each delta refreshes
-        // the deadline; pre-fix this stream was killed at 60ms.
+        // `reasoning_content`. Ten reasoning frames 50ms apart span 500ms
+        // with a 250ms actionable timeout; the stream must survive because
+        // each delta refreshes the deadline (pre-fix it was killed after the
+        // first timeout). The 200ms of slack per gap covers loaded Windows
+        // Bazel runs, which stretched 20ms gaps past a 60ms timeout (#636).
         let reasoning_frame = |i: u64| {
             format!(
                 "data: {{\"id\":\"chatcmpl-r\",\"provider\":\"StreamLake\",\"choices\":[{{\"delta\":{{\"reasoning\":\"t{i}\"}}}}]}}\n\n"
             )
             .into_bytes()
         };
-        let mut frames: Vec<(Duration, Vec<u8>)> = (0..6)
-            .map(|i| (Duration::from_millis(20), reasoning_frame(i)))
+        let mut frames: Vec<(Duration, Vec<u8>)> = (0..10)
+            .map(|i| (Duration::from_millis(50), reasoning_frame(i)))
             .collect();
         frames.push((
-            Duration::from_millis(20),
+            Duration::from_millis(50),
             br#"data: {"id":"chatcmpl-r","choices":[{"delta":{"content":"done"}}]}"#.to_vec(),
         ));
         frames.push((Duration::ZERO, b"\n\n".to_vec()));
@@ -1933,10 +2024,10 @@ mod tests {
         process_chat_sse(
             delayed_body(frames),
             tx_event,
-            Duration::from_millis(500),
-            Duration::from_millis(60),
+            Duration::from_millis(1_000),
+            Duration::from_millis(250),
             /*telemetry*/ None,
-            None,
+            /*response_id_hint*/ None,
             /*metrics*/ None,
         )
         .await;
@@ -1967,7 +2058,7 @@ mod tests {
             Duration::from_millis(10),
             Duration::from_millis(50),
             /*telemetry*/ None,
-            None,
+            /*response_id_hint*/ None,
             /*metrics*/ None,
         )
         .await;
@@ -1995,7 +2086,7 @@ mod tests {
             Duration::from_secs(5),
             DEFAULT_ACTIONABLE_SILENCE_TIMEOUT,
             /*telemetry*/ None,
-            None,
+            /*response_id_hint*/ None,
             /*metrics*/ None,
         )
         .await;

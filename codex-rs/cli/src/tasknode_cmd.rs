@@ -4,7 +4,7 @@ use clap::Parser;
 use clap::Subcommand;
 use codex_core::config::ConfigBuilder;
 use codex_utils_cli::CliConfigOverrides;
-use serde::Deserialize;
+use codex_utils_cli::ProfileV2Name;
 use serde_json::Map;
 use serde_json::Value;
 use serde_json::json;
@@ -13,13 +13,16 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-const TASKNODE_SESSION_LABEL: &str = "tasknode/session";
 const DEFAULT_TASKNODE_ORIGIN: &str = "https://tasknode.postfiat.org";
 
 #[derive(Debug, Parser)]
 pub(crate) struct TaskNodeCli {
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
+
+    /// Use Task Node credentials owned by this Corbanu profile.
+    #[arg(long = "profile", short = 'p', global = true)]
+    pub config_profile: Option<ProfileV2Name>,
 
     /// Emit JSON. This helper always emits JSON; the flag is accepted for scripts.
     #[arg(long, global = true, default_value_t = false)]
@@ -35,6 +38,10 @@ pub(crate) struct TaskNodeCli {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum TaskNodeCommand {
+    /// Link Task Node via GitHub, or manage a link attempt. Starting a link
+    /// never disturbs an existing working session.
+    Link(LinkCli),
+
     /// Show linked account, wallet, server flags, and task counts.
     Status,
 
@@ -50,6 +57,9 @@ pub(crate) enum TaskNodeCommand {
     /// Read or save the Task Node context document.
     Context(ContextCli),
 
+    /// Read shared collaborator context from Task Node.
+    Team(TeamCli),
+
     /// Create a new task request.
     Request(RequestCli),
 
@@ -64,6 +74,35 @@ pub(crate) enum TaskNodeCommand {
 
     /// Respond to verification requests.
     Verification(VerificationCli),
+}
+
+#[derive(Debug, Args)]
+pub(crate) struct LinkCli {
+    #[command(subcommand)]
+    action: Option<LinkCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum LinkCommand {
+    /// Start a GitHub link attempt (default). Prints the verification URL.
+    Start,
+
+    /// Poll the pending attempt; on success the token is validated against the
+    /// server before it replaces any stored session.
+    Poll(LinkPollArgs),
+
+    /// Show non-secret local auth state (works without a valid session).
+    Status,
+
+    /// Abandon the pending link attempt. The active session is untouched.
+    Cancel,
+}
+
+#[derive(Debug, Args)]
+struct LinkPollArgs {
+    /// Keep polling for up to this many seconds; 0 polls exactly once.
+    #[arg(long, default_value_t = 0)]
+    wait: u64,
 }
 
 #[derive(Debug, Args)]
@@ -151,6 +190,18 @@ struct ChatSendArgs {
 }
 
 #[derive(Debug, Args)]
+pub(crate) struct TeamCli {
+    #[command(subcommand)]
+    action: TeamCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum TeamCommand {
+    /// Read the permission-filtered Team Context report.
+    Context,
+}
+
+#[derive(Debug, Args)]
 pub(crate) struct ContextCli {
     #[command(subcommand)]
     action: ContextCommand,
@@ -207,7 +258,7 @@ struct RequestCreateArgs {
     kind: String,
 
     /// Source title recorded in Task Node.
-    #[arg(long, default_value = "PFTerminal JSON helper")]
+    #[arg(long, default_value = "Corbanu Terminal JSON helper")]
     source_title: String,
 }
 
@@ -220,10 +271,31 @@ pub(crate) struct RequestsCli {
 #[derive(Debug, Subcommand)]
 enum RequestsCommand {
     /// List active task-generation requests.
-    List(LimitArgs),
+    List(RequestsListArgs),
 
     /// Show one task request.
     Show(RequestShowArgs),
+
+    /// List locally saved submissions, including uncertain network outcomes.
+    Pending,
+
+    /// Retry a failed request, fenced to the attempt shown by requests show.
+    Retry {
+        request_id: String,
+        #[arg(long)]
+        attempt: u64,
+    },
+
+    /// Recover an original submission with its saved key.
+    Recover { key: String },
+}
+
+#[derive(Debug, Args)]
+struct RequestsListArgs {
+    #[arg(long, default_value_t = 20)]
+    limit: u8,
+    #[arg(long)]
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -291,11 +363,11 @@ impl TaskEvidenceMode {
     fn command(self, task_id: &str) -> String {
         match self {
             Self::InitialSubmission => {
-                format!("pfterminal tasknode task evidence {task_id} --body-file <path> --json")
+                format!("corbanu tasknode task evidence {task_id} --body-file <path> --json")
             }
-            Self::VerificationResponse => format!(
-                "pfterminal tasknode verification respond {task_id} --body-file <path> --json"
-            ),
+            Self::VerificationResponse => {
+                format!("corbanu tasknode verification respond {task_id} --body-file <path> --json")
+            }
         }
     }
 }
@@ -375,9 +447,21 @@ pub(crate) async fn run(command: TaskNodeCli) -> anyhow::Result<()> {
 
 async fn run_inner(command: TaskNodeCli) -> anyhow::Result<i32> {
     let _json_flag = command.json;
-    let client = TaskNodeClient::from_cli(command.config_overrides, command.origin).await?;
+    let inherited_profile = std::env::var("CORBANU_TASKNODE_PROFILE");
+    let profile = resolve_tasknode_profile(
+        command.config_profile.as_ref(),
+        inherited_profile.as_deref(),
+        std::env::var_os("CODEX_THREAD_ID").is_some(),
+    )?;
+    let scope = tasknode_session_scope(profile.as_ref());
+    // `link` must work without an existing session; everything else requires one.
+    if let TaskNodeCommand::Link(link) = command.command {
+        return run_link_command(command.config_overrides, command.origin, scope, link).await;
+    }
+    let client = TaskNodeClient::from_cli(command.config_overrides, command.origin, &scope).await?;
 
     match command.command {
+        TaskNodeCommand::Link(_) => unreachable!("handled above"),
         TaskNodeCommand::Status => {
             emit_response(client.get("/api/terminal/tasknode/status").await?)
         }
@@ -394,13 +478,16 @@ async fn run_inner(command: TaskNodeCli) -> anyhow::Result<i32> {
                 client
                     .get(&format!(
                         "/api/terminal/tasknode/rewards?limit={}",
-                        limit(args.limit, 1, 50)
+                        limit(args.limit, /*min*/ 1, /*max*/ 50)
                     ))
                     .await?,
             ),
         },
         TaskNodeCommand::Chat(cli) => run_chat_command(&client, cli).await,
         TaskNodeCommand::Context(cli) => run_context_command(&client, cli).await,
+        TaskNodeCommand::Team(TeamCli {
+            action: TeamCommand::Context,
+        }) => emit_response(client.get("/api/terminal/tasknode/team/context").await?),
         TaskNodeCommand::Request(cli) => run_request_command(&client, cli).await,
         TaskNodeCommand::Requests(cli) => run_requests_command(&client, cli).await,
         TaskNodeCommand::Tasks(cli) => run_tasks_command(&client, cli).await,
@@ -415,7 +502,7 @@ async fn run_chat_command(client: &TaskNodeClient, cli: ChatCli) -> anyhow::Resu
             client
                 .get(&format!(
                     "/api/terminal/tasknode/chat/conversations?limit={}",
-                    limit(args.limit, 1, 50)
+                    limit(args.limit, /*min*/ 1, /*max*/ 50)
                 ))
                 .await?,
         ),
@@ -424,7 +511,7 @@ async fn run_chat_command(client: &TaskNodeClient, cli: ChatCli) -> anyhow::Resu
                 .get(&format!(
                     "/api/terminal/tasknode/chat/history?conversationId={}&limit={}",
                     urlencoding::encode(&args.conversation_id),
-                    limit_u16(args.limit, 1, 200)
+                    limit_u16(args.limit, /*min*/ 1, /*max*/ 200)
                 ))
                 .await?,
         ),
@@ -433,7 +520,7 @@ async fn run_chat_command(client: &TaskNodeClient, cli: ChatCli) -> anyhow::Resu
                 .get(&format!(
                     "/api/terminal/tasknode/chat/search?q={}&limit={}",
                     urlencoding::encode(&args.query),
-                    limit(args.limit, 1, 50)
+                    limit(args.limit, /*min*/ 1, /*max*/ 50)
                 ))
                 .await?,
         ),
@@ -492,29 +579,94 @@ async fn run_request_command(client: &TaskNodeClient, cli: RequestCli) -> anyhow
     match cli.action {
         RequestCommand::Create(args) => {
             let detail = read_text_input(args.text, args.body_file, "task request")?;
-            let body = json!({
-                "userDetailText": detail,
-                "requestedTaskKind": args.kind,
-                "source": "pfterminal-cli",
-                "sourceConversationTitle": args.source_title,
-                "idempotencyKey": idempotency_key("request"),
-            });
-            emit_response(
-                client
-                    .post("/api/terminal/tasknode/requests", &body)
-                    .await?,
-            )
+            let store = client
+                .commands
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let command = store
+                .begin(&detail, &args.kind)
+                .map_err(anyhow::Error::msg)?;
+            let mut body = command.body();
+            body["sourceConversationTitle"] = Value::String(args.source_title);
+            let response = client
+                .post("/api/terminal/tasknode/requests", &body)
+                .await?;
+            if (200..300).contains(&response.status)
+                && response.body.get("ok") != Some(&Value::Bool(false))
+            {
+                store
+                    .acknowledge(&command.key, &response.body)
+                    .map_err(anyhow::Error::msg)?;
+            }
+            emit_response(response)
         }
     }
 }
 
 async fn run_requests_command(client: &TaskNodeClient, cli: RequestsCli) -> anyhow::Result<i32> {
     match cli.action {
+        RequestsCommand::Retry {
+            request_id,
+            attempt,
+        } => emit_response(
+            client
+                .post(
+                    "/api/terminal/tasknode/requests",
+                    &client.transport.retry_body(&request_id, attempt),
+                )
+                .await?,
+        ),
+        RequestsCommand::Pending => {
+            let store = client
+                .commands
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            print_json(
+                &json!({"ok": true, "commands": store.list().map_err(anyhow::Error::msg)?}),
+            )?;
+            Ok(0)
+        }
+        RequestsCommand::Recover { key } => {
+            let store = client
+                .commands
+                .as_ref()
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let command = store
+                .list()
+                .map_err(anyhow::Error::msg)?
+                .into_iter()
+                .find(|command| command.key == key)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("No saved request with that key in this profile and account.")
+                })?;
+            if let Some(request_id) = &command.request_id {
+                return emit_response(
+                    client
+                        .get(&format!(
+                            "/api/terminal/tasknode/requests/{}",
+                            urlencoding::encode(request_id)
+                        ))
+                        .await?,
+                );
+            }
+            let response = client
+                .post("/api/terminal/tasknode/requests", &command.body())
+                .await?;
+            if (200..300).contains(&response.status)
+                && response.body.get("ok") != Some(&Value::Bool(false))
+            {
+                store
+                    .acknowledge(&command.key, &response.body)
+                    .map_err(anyhow::Error::msg)?;
+            }
+            emit_response(response)
+        }
         RequestsCommand::List(args) => emit_response(
             client
                 .get(&format!(
-                    "/api/terminal/tasknode/requests?limit={}",
-                    limit(args.limit, 1, 50)
+                    "/api/terminal/tasknode/requests?limit={}&cursor={}",
+                    limit(args.limit, /*min*/ 1, /*max*/ 50),
+                    urlencoding::encode(args.cursor.as_deref().unwrap_or_default())
                 ))
                 .await?,
         ),
@@ -546,14 +698,14 @@ async fn run_task_command(client: &TaskNodeClient, cli: TaskCli) -> anyhow::Resu
     match cli.action {
         TaskCommand::Show(args) => emit_response(task_detail(client, &args.task_id).await?),
         TaskCommand::Accept(args) => {
-            emit_response(task_action(client, &args.task_id, "accept", None).await?)
+            emit_response(task_action(client, &args.task_id, "accept", /*reason*/ None).await?)
         }
         TaskCommand::Refuse(args) => {
             let reason = read_optional_text_input(args.reason, args.reason_file, "refusal reason")?;
             emit_response(task_action(client, &args.task_id, "refuse", reason).await?)
         }
         TaskCommand::Cancel(args) => {
-            emit_response(task_action(client, &args.task_id, "cancel", None).await?)
+            emit_response(task_action(client, &args.task_id, "cancel", /*reason*/ None).await?)
         }
         TaskCommand::Evidence(args) => {
             emit_response(task_evidence(client, args, TaskEvidenceMode::InitialSubmission).await?)
@@ -688,7 +840,7 @@ fn evidence_mode_preflight(
                 "task_evidence_not_available",
                 "This task does not currently accept evidence. Refresh it and follow the server-reported lifecycle action."
                     .to_string(),
-                format!("pfterminal tasknode task show {task_id} --json"),
+                format!("corbanu tasknode task show {task_id} --json"),
             )
         },
         |mode| {
@@ -749,7 +901,7 @@ fn annotate_evidence_lifecycle(
     let (phase, next_command, notice) = if reward_issued {
         (
             "reward_issued",
-            "pfterminal tasknode rewards list --json".to_string(),
+            "corbanu tasknode rewards list --json".to_string(),
             "Task Node reports a terminal rewarded state.",
         )
     } else if verification_required {
@@ -761,13 +913,13 @@ fn annotate_evidence_lifecycle(
     } else if submitted_mode == TaskEvidenceMode::VerificationResponse {
         (
             "awaiting_reward",
-            format!("pfterminal tasknode task show {task_id} --json"),
+            format!("corbanu tasknode task show {task_id} --json"),
             "The verification response is submitted, but completion is not confirmed until Task Node reports the reward outcome.",
         )
     } else {
         (
             "awaiting_verification",
-            format!("pfterminal tasknode task show {task_id} --json"),
+            format!("corbanu tasknode task show {task_id} --json"),
             "Initial evidence is submitted, but completion is not confirmed. Recheck for the normal verification request and answer it.",
         )
     };
@@ -786,16 +938,242 @@ fn annotate_evidence_lifecycle(
     );
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct TaskNodeClient {
-    origin: String,
-    token: String,
+    transport: codex_tasknode_session::Client,
+    commands: Result<codex_tasknode_session::CommandStore, String>,
+}
+
+async fn resolve_codex_home(
+    config_overrides: CliConfigOverrides,
+) -> anyhow::Result<std::path::PathBuf> {
+    let cli_kv_overrides = config_overrides
+        .parse_overrides()
+        .map_err(anyhow::Error::msg)?;
+    let config = ConfigBuilder::default()
+        .cli_overrides(cli_kv_overrides)
+        .build()
+        .await?;
+    Ok(config.codex_home.as_path().to_path_buf())
+}
+
+async fn run_link_command(
+    config_overrides: CliConfigOverrides,
+    origin_override: Option<String>,
+    scope: codex_tasknode_session::SessionScope,
+    link: LinkCli,
+) -> anyhow::Result<i32> {
+    let codex_home = resolve_codex_home(config_overrides).await?;
+    let state = load_tasknode_state(&codex_home, &scope)?;
+    let saved_origin = state
+        .active
+        .as_ref()
+        .map(|active| active.origin.clone())
+        .or_else(|| state.pending.as_ref().map(|pending| pending.origin.clone()));
+    let origin = resolve_origin(origin_override, saved_origin.as_deref());
+
+    match link.action.unwrap_or(LinkCommand::Start) {
+        LinkCommand::Start => run_link_start(&codex_home, &scope, &origin, &state).await,
+        LinkCommand::Poll(args) => run_link_poll(&codex_home, &scope, &origin, args.wait).await,
+        LinkCommand::Status => {
+            let mut summary = codex_tasknode_session::state_summary(&state);
+            if let Some(map) = summary.as_object_mut() {
+                map.insert("ok".to_string(), Value::Bool(true));
+                map.insert("origin".to_string(), Value::String(origin));
+                map.insert(
+                    "profile".to_string(),
+                    scope
+                        .profile()
+                        .map_or(Value::Null, |profile| Value::String(profile.to_string())),
+                );
+            }
+            print_json(&summary)?;
+            Ok(0)
+        }
+        LinkCommand::Cancel => {
+            let removed =
+                codex_tasknode_session::clear_pending_scoped(&tasknode_vault(&codex_home), &scope)
+                    .map_err(|err| anyhow::anyhow!("failed to clear pending link: {err}"))?;
+            print_json(&json!({
+                "ok": true,
+                "action": "link_cancelled",
+                "removedPendingAttempt": removed,
+                "activeSessionPreserved": state.active.is_some(),
+            }))?;
+            Ok(0)
+        }
+    }
+}
+
+async fn run_link_start(
+    codex_home: &std::path::Path,
+    scope: &codex_tasknode_session::SessionScope,
+    origin: &str,
+    state: &codex_tasknode_session::LocalState,
+) -> anyhow::Result<i32> {
+    let url = format!("{origin}/api/auth/terminal/start/github");
+    let response = normal_http_client()?
+        .post(url)
+        .json(&json!({}))
+        .send()
+        .await
+        .map_err(reqwest_error)?;
+    let response = parse_response(response).await?;
+    if !response_is_ok(&response) {
+        return emit_response(response);
+    }
+    let started: codex_tasknode_session::TerminalAuthStart =
+        serde_json::from_value(response.body).context("invalid terminal auth start response")?;
+    let pending = codex_tasknode_session::PendingLink {
+        origin: origin.to_string(),
+        request_id: started.request_id.clone(),
+        poll_token: started.poll_token.clone(),
+        verification_url: started.verification_url.clone(),
+        started_at: Some(now_unix_string()),
+    };
+    codex_tasknode_session::save_pending_scoped(&tasknode_vault(codex_home), scope, &pending)
+        .map_err(|err| anyhow::anyhow!("failed to store link attempt: {err}"))?;
+    let status_command = scope.profile().map_or_else(
+        || "corbanu tasknode status".to_string(),
+        |profile| format!("corbanu --profile {profile} tasknode status"),
+    );
+    print_json(&json!({
+        "ok": true,
+        "state": "pending",
+        "requestId": started.request_id,
+        "verificationUrl": started.verification_url,
+        "expiresAt": started.expires_at,
+        "activeSessionPreserved": state.active.is_some(),
+        "nextStep": format!(
+            "Open {} in a browser, choose your GitHub account, then run `{status_command}`.",
+            started.verification_url
+        ),
+    }))?;
+    Ok(0)
+}
+
+async fn run_link_poll(
+    codex_home: &std::path::Path,
+    scope: &codex_tasknode_session::SessionScope,
+    origin: &str,
+    wait_seconds: u64,
+) -> anyhow::Result<i32> {
+    let state = load_tasknode_state(codex_home, scope)?;
+    let Some(pending) = state.pending else {
+        if state.active.as_ref().is_some_and(|a| !a.is_expired()) {
+            print_json(&json!({
+                "ok": true,
+                "state": "linked",
+                "message": "No link attempt is pending; an active session already exists.",
+            }))?;
+            return Ok(0);
+        }
+        print_json(&json!({
+            "ok": false,
+            "error": "tasknode_link_not_started",
+            "message": "No link attempt is pending. Run `corbanu tasknode link` first.",
+        }))?;
+        return Ok(1);
+    };
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait_seconds);
+    loop {
+        let url = format!(
+            "{origin}/api/auth/terminal/session?requestId={}&pollToken={}",
+            urlencoding::encode(&pending.request_id),
+            urlencoding::encode(&pending.poll_token),
+        );
+        let response = normal_http_client()?
+            .get(url)
+            .send()
+            .await
+            .map_err(reqwest_error)?;
+        let response = parse_response(response).await?;
+        match response.status {
+            200 => {
+                let issued: codex_tasknode_session::TerminalSessionIssued =
+                    serde_json::from_value(response.body.clone())
+                        .context("invalid terminal session response")?;
+                let candidate =
+                    codex_tasknode_session::ActiveSession::from_issued(origin.to_string(), issued);
+                // Validate before promoting: the issued token must prove itself
+                // against the server before it replaces any stored session.
+                let status_url = format!("{origin}/api/terminal/tasknode/status");
+                let status_response = normal_http_client()?
+                    .get(status_url)
+                    .bearer_auth(&candidate.terminal_token)
+                    .send()
+                    .await
+                    .map_err(reqwest_error)?;
+                let status_response = parse_response(status_response).await?;
+                if !response_is_ok(&status_response) {
+                    print_json(&json!({
+                        "ok": false,
+                        "error": "tasknode_issued_token_invalid",
+                        "message": "Issued token failed validation; local state unchanged.",
+                        "serverResponse": status_response.body,
+                    }))?;
+                    return Ok(1);
+                }
+                codex_tasknode_session::promote_active_scoped(
+                    &tasknode_vault(codex_home),
+                    scope,
+                    &candidate,
+                )
+                .map_err(|err| anyhow::anyhow!("failed to store session: {err}"))?;
+                print_json(&json!({
+                    "ok": true,
+                    "state": "linked",
+                    "accountId": candidate.account_id,
+                    "githubUsername": candidate.github_username,
+                    "expiresAt": candidate.expires_at,
+                }))?;
+                return Ok(0);
+            }
+            202 => {
+                if std::time::Instant::now() >= deadline {
+                    print_json(&json!({
+                        "ok": false,
+                        "state": "pending",
+                        "verificationUrl": pending.verification_url,
+                        "message": "GitHub auth has not completed yet. Finish it in the browser, then poll again.",
+                    }))?;
+                    return Ok(1);
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            404 | 409 => {
+                // The attempt is unknown or consumed server-side; keeping the
+                // local record can only produce the same failure forever.
+                let _ = codex_tasknode_session::clear_pending_scoped(
+                    &tasknode_vault(codex_home),
+                    scope,
+                );
+                print_json(&json!({
+                    "ok": false,
+                    "error": "tasknode_link_expired",
+                    "message": "The link attempt expired or was already used. Run `corbanu tasknode link` to start again.",
+                    "serverResponse": response.body,
+                }))?;
+                return Ok(1);
+            }
+            _ => return emit_response(response),
+        }
+    }
+}
+
+fn now_unix_string() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs().to_string())
+        .unwrap_or_default()
 }
 
 impl TaskNodeClient {
     async fn from_cli(
         config_overrides: CliConfigOverrides,
         origin_override: Option<String>,
+        scope: &codex_tasknode_session::SessionScope,
     ) -> anyhow::Result<Self> {
         let cli_kv_overrides = config_overrides
             .parse_overrides()
@@ -804,48 +1182,56 @@ impl TaskNodeClient {
             .cli_overrides(cli_kv_overrides)
             .build()
             .await?;
-        let session = load_tasknode_session(config.codex_home.as_path())?;
-        let token = session.terminal_token.clone().ok_or_else(|| {
-            anyhow::anyhow!("Task Node session is missing a terminal token. Run /tasknode link.")
-        })?;
+        let codex_home = config.codex_home.as_path().to_path_buf();
+        let session_scope = scope.clone();
+        let requested_origin = origin_override
+            .clone()
+            .or_else(|| std::env::var("PFT_TASKNODE_ORIGIN").ok())
+            .or_else(|| std::env::var("TASKNODE_ORIGIN").ok());
+        let session = tokio::task::spawn_blocking(move || {
+            codex_tasknode_session::resolve_scoped(
+                &codex_home,
+                &session_scope,
+                requested_origin.as_deref(),
+            )
+        })
+        .await?
+        .map_err(anyhow::Error::msg)?;
+        let origin = resolve_origin(origin_override, Some(session.origin.as_str()));
         Ok(Self {
-            origin: resolve_origin(origin_override, session.origin.as_deref()),
-            token,
+            transport: codex_tasknode_session::Client::for_session(&session, &origin)?,
+            commands: codex_tasknode_session::CommandStore::new(
+                config.codex_home.as_path(),
+                scope,
+                &session,
+            ),
         })
     }
 
     async fn get(&self, path: &str) -> anyhow::Result<TaskNodeResponse> {
-        let url = self.url(path);
-        let response = normal_http_client()?
-            .get(url)
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .map_err(reqwest_error)?;
-        parse_response(response).await
+        let response = self
+            .transport
+            .request(reqwest::Method::GET, path, /*body*/ None)
+            .await?;
+        Ok(TaskNodeResponse {
+            status: response.status,
+            body: response.body,
+        })
     }
 
     async fn post(&self, path: &str, body: &Value) -> anyhow::Result<TaskNodeResponse> {
-        let url = self.url(path);
-        let response = normal_http_client()?
-            .post(url)
-            .bearer_auth(&self.token)
-            .json(body)
-            .send()
-            .await
-            .map_err(reqwest_error)?;
-        parse_response(response).await
+        let response = self
+            .transport
+            .request(reqwest::Method::POST, path, Some(body))
+            .await?;
+        Ok(TaskNodeResponse {
+            status: response.status,
+            body: response.body,
+        })
     }
 
     async fn post_sse_jsonl(&self, path: &str, body: &Value) -> anyhow::Result<i32> {
-        let url = self.url(path);
-        let mut response = streaming_http_client()?
-            .post(url)
-            .bearer_auth(&self.token)
-            .json(body)
-            .send()
-            .await
-            .map_err(reqwest_error)?;
+        let mut response = self.transport.stream(path, body).await?;
         let status = response.status().as_u16();
         let content_type = response
             .headers()
@@ -858,7 +1244,7 @@ impl TaskNodeClient {
         }
 
         let mut stdout = std::io::stdout();
-        let mut buffer = String::new();
+        let mut decoder = codex_tasknode_session::StreamDecoder::default();
         let mut saw_done = false;
         let mut exit_code = 0;
         while let Some(chunk) = response
@@ -866,9 +1252,8 @@ impl TaskNodeClient {
             .await
             .context("failed reading Task Node chat stream")?
         {
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            for block in tasknode_sse_drain_blocks(&mut buffer) {
-                if let Some((event, data)) = tasknode_parse_sse_block(&block)? {
+            for (event, data) in decoder.push(&chunk).map_err(anyhow::Error::msg)? {
+                {
                     if event == "done" {
                         saw_done = true;
                     } else if event == "error" {
@@ -883,20 +1268,7 @@ impl TaskNodeClient {
                 }
             }
         }
-        for block in tasknode_sse_drain_remainder(&mut buffer) {
-            if let Some((event, data)) = tasknode_parse_sse_block(&block)? {
-                if event == "done" {
-                    saw_done = true;
-                } else if event == "error" {
-                    exit_code = 1;
-                }
-                writeln!(
-                    stdout,
-                    "{}",
-                    serde_json::to_string(&json!({ "event": event, "data": data }))?
-                )?;
-            }
-        }
+        decoder.finish().map_err(anyhow::Error::msg)?;
         stdout.flush()?;
         if !saw_done && exit_code == 0 {
             print_json(&json!({
@@ -908,10 +1280,6 @@ impl TaskNodeClient {
         }
         Ok(exit_code)
     }
-
-    fn url(&self, path: &str) -> String {
-        format!("{}{}", self.origin.trim_end_matches('/'), path)
-    }
 }
 
 #[derive(Debug)]
@@ -920,31 +1288,59 @@ struct TaskNodeResponse {
     body: Value,
 }
 
-#[derive(Debug, Deserialize)]
-struct TaskNodeLocalSession {
-    origin: Option<String>,
-    terminal_token: Option<String>,
-    pending_verification_url: Option<String>,
+fn tasknode_vault(codex_home: &std::path::Path) -> codex_vault::Vault {
+    codex_vault::Vault::new(codex_home.to_path_buf())
 }
 
-fn load_tasknode_session(codex_home: &std::path::Path) -> anyhow::Result<TaskNodeLocalSession> {
-    let vault = codex_vault::Vault::new(codex_home.to_path_buf());
-    let secret = vault
-        .reveal(TASKNODE_SESSION_LABEL)
-        .map_err(|err| anyhow::anyhow!("Task Node is not linked. Run /tasknode link. ({err})"))?;
-    let session: TaskNodeLocalSession =
-        serde_json::from_str(&secret).context("invalid local Task Node session")?;
-    if session.terminal_token.is_none() {
-        if let Some(url) = session
-            .pending_verification_url
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            anyhow::bail!("Task Node link is pending. Finish GitHub auth: {url}");
+fn load_tasknode_state(
+    codex_home: &std::path::Path,
+    scope: &codex_tasknode_session::SessionScope,
+) -> anyhow::Result<codex_tasknode_session::LocalState> {
+    codex_tasknode_session::load_scoped(&tasknode_vault(codex_home), scope)
+        .map_err(|err| anyhow::anyhow!("failed to read local Task Node state: {err}"))
+}
+
+fn resolve_tasknode_profile(
+    explicit: Option<&ProfileV2Name>,
+    inherited: Result<&str, &std::env::VarError>,
+    agent_session: bool,
+) -> anyhow::Result<Option<ProfileV2Name>> {
+    match inherited {
+        Ok(value) => {
+            let profile: Option<String> = serde_json::from_str(value).context(
+                "Invalid inherited Task Node profile; refusing default-account fallback",
+            )?;
+            let profile = profile
+                .map(|name| name.parse::<ProfileV2Name>())
+                .transpose()
+                .context(
+                    "Invalid inherited Task Node profile; refusing default-account fallback",
+                )?;
+            if explicit.is_some() && explicit != profile.as_ref() {
+                anyhow::bail!(
+                    "Task Node profile conflicts with the active terminal profile; switch profiles in Corbanu first"
+                );
+            }
+            Ok(profile)
         }
-        anyhow::bail!("Task Node session is missing a terminal token. Run /tasknode link.");
+        Err(std::env::VarError::NotPresent) => {
+            if agent_session {
+                anyhow::bail!(
+                    "Active Task Node profile was not supplied by this terminal. Restart the updated terminal to inherit its profile; refusing default-account fallback"
+                );
+            }
+            Ok(explicit.cloned())
+        }
+        Err(_) => {
+            anyhow::bail!("Invalid inherited Task Node profile; refusing default-account fallback")
+        }
     }
-    Ok(session)
+}
+
+fn tasknode_session_scope(profile: Option<&ProfileV2Name>) -> codex_tasknode_session::SessionScope {
+    profile
+        .map(|profile| codex_tasknode_session::SessionScope::for_profile(profile.as_str()))
+        .unwrap_or_default()
 }
 
 fn resolve_origin(origin_override: Option<String>, saved_origin: Option<&str>) -> String {
@@ -959,16 +1355,9 @@ fn resolve_origin(origin_override: Option<String>, saved_origin: Option<&str>) -
 
 fn normal_http_client() -> anyhow::Result<reqwest::Client> {
     reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(45))
-        .build()
-        .map_err(reqwest_error)
-}
-
-fn streaming_http_client() -> anyhow::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(reqwest_error)
 }
@@ -987,7 +1376,17 @@ async fn parse_response(response: reqwest::Response) -> anyhow::Result<TaskNodeR
     Ok(TaskNodeResponse { status, body })
 }
 
-fn emit_response(response: TaskNodeResponse) -> anyhow::Result<i32> {
+fn emit_response(mut response: TaskNodeResponse) -> anyhow::Result<i32> {
+    if response.status == 401 {
+        let message = codex_tasknode_session::Response {
+            status: response.status,
+            body: response.body.clone(),
+        }
+        .message();
+        if let Some(body) = response.body.as_object_mut() {
+            body.insert("message".into(), Value::String(message));
+        }
+    }
     print_json(&response.body)?;
     Ok(if response_is_ok(&response) { 0 } else { 1 })
 }
@@ -1136,6 +1535,7 @@ fn infer_artifact_type(value: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn tasknode_sse_separator(buffer: &str) -> Option<(usize, usize)> {
     match (buffer.find("\n\n"), buffer.find("\r\n\r\n")) {
         (Some(lf), Some(crlf)) if crlf < lf => Some((crlf, 4)),
@@ -1145,6 +1545,7 @@ fn tasknode_sse_separator(buffer: &str) -> Option<(usize, usize)> {
     }
 }
 
+#[cfg(test)]
 fn tasknode_sse_drain_blocks(buffer: &mut String) -> Vec<String> {
     let mut blocks = Vec::new();
     while let Some((index, separator_len)) = tasknode_sse_separator(buffer) {
@@ -1154,15 +1555,7 @@ fn tasknode_sse_drain_blocks(buffer: &mut String) -> Vec<String> {
     blocks
 }
 
-fn tasknode_sse_drain_remainder(buffer: &mut String) -> Vec<String> {
-    let remainder = std::mem::take(buffer);
-    if remainder.trim().is_empty() {
-        Vec::new()
-    } else {
-        vec![remainder]
-    }
-}
-
+#[cfg(test)]
 fn tasknode_parse_sse_block(block: &str) -> anyhow::Result<Option<(String, Value)>> {
     let normalized = block.replace("\r\n", "\n");
     let mut event = "message".to_string();
@@ -1209,6 +1602,151 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
+    fn team_context_is_read_only_and_accepts_profile_scope() {
+        let cli = TaskNodeCli::try_parse_from([
+            "tasknode",
+            "--profile",
+            "alice",
+            "team",
+            "context",
+            "--json",
+        ])
+        .unwrap();
+        assert_eq!(cli.config_profile.as_deref(), Some("alice"));
+        assert!(matches!(
+            cli.command,
+            TaskNodeCommand::Team(TeamCli {
+                action: TeamCommand::Context
+            })
+        ));
+        assert!(
+            TaskNodeCli::try_parse_from(["tasknode", "team", "context", "--account", "bob"])
+                .is_err()
+        );
+        assert!(TaskNodeCli::try_parse_from(["tasknode", "team", "save"]).is_err());
+    }
+
+    #[test]
+    fn tasknode_cli_accepts_profile_scoped_credentials() {
+        let cli = TaskNodeCli::try_parse_from([
+            "tasknode",
+            "--profile",
+            "goodalexander",
+            "link",
+            "status",
+        ])
+        .expect("parse profile-scoped Task Node command");
+
+        assert_eq!(
+            cli.config_profile.as_deref(),
+            Some("goodalexander"),
+            "the helper must select the same credential scope as the profile tab"
+        );
+        assert_eq!(
+            tasknode_session_scope(cli.config_profile.as_ref()).profile(),
+            Some("goodalexander")
+        );
+    }
+
+    #[test]
+    fn tasknode_agent_profile_resolution_fails_closed() {
+        let alice: ProfileV2Name = "alice".parse().unwrap();
+        let bob: ProfileV2Name = "bob".parse().unwrap();
+        let missing = std::env::VarError::NotPresent;
+        for (explicit, inherited) in [
+            (None, Err(&missing)),
+            (Some(&alice), Err(&missing)),
+            (None, Ok("alice")),
+            (None, Ok("42")),
+            (None, Ok("\"../alice\"")),
+            (Some(&bob), Ok("\"alice\"")),
+            (Some(&alice), Ok("null")),
+        ] {
+            assert!(resolve_tasknode_profile(explicit, inherited, /*agent_session*/ true).is_err());
+        }
+        for (explicit, inherited, expected) in [
+            (None, "\"alice\"", Some(alice.clone())),
+            (Some(&alice), "\"alice\"", Some(alice.clone())),
+            (None, "\"bob\"", Some(bob.clone())),
+            (None, "null", None),
+        ] {
+            assert_eq!(
+                resolve_tasknode_profile(explicit, Ok(inherited), /*agent_session*/ true).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            resolve_tasknode_profile(
+                /*explicit*/ None,
+                Err(&missing),
+                /*agent_session*/ false
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_tasknode_profile(Some(&bob), Err(&missing), /*agent_session*/ false).unwrap(),
+            Some(bob)
+        );
+    }
+
+    #[test]
+    fn tasknode_inherited_profiles_load_distinct_linked_accounts() {
+        let home = tempfile::tempdir().unwrap();
+        let vault = tasknode_vault(home.path());
+        for (profile, account) in [
+            (None, "default-account"),
+            (Some("alice"), "alice-account"),
+            (Some("bob"), "bob-account"),
+        ] {
+            let profile = profile.map(|name| name.parse::<ProfileV2Name>().unwrap());
+            codex_tasknode_session::promote_active_scoped(
+                &vault,
+                &tasknode_session_scope(profile.as_ref()),
+                &codex_tasknode_session::ActiveSession {
+                    origin: "http://127.0.0.1:1".to_string(),
+                    account_id: Some(account.to_string()),
+                    github_username: Some(account.to_string()),
+                    terminal_token: format!("fixture-{account}"),
+                    expires_at: None,
+                },
+            )
+            .unwrap();
+        }
+        for (inherited, account) in [
+            ("null", "default-account"),
+            ("\"alice\"", "alice-account"),
+            ("\"bob\"", "bob-account"),
+        ] {
+            let profile = resolve_tasknode_profile(
+                /*explicit*/ None,
+                Ok(inherited),
+                /*agent_session*/ true,
+            )
+            .unwrap();
+            let active = codex_tasknode_session::load_scoped(
+                &vault,
+                &tasknode_session_scope(profile.as_ref()),
+            )
+            .unwrap()
+            .active
+            .unwrap();
+            assert_eq!(
+                (
+                    active.account_id,
+                    active.github_username,
+                    active.terminal_token
+                ),
+                (
+                    Some(account.to_string()),
+                    Some(account.to_string()),
+                    format!("fixture-{account}")
+                )
+            );
+        }
+    }
+
+    #[test]
     fn evidence_mode_preflight_routes_verification_to_the_distinct_command() {
         let detail = json!({
             "actions": {
@@ -1229,7 +1767,7 @@ mod tests {
                 "message": "This task requires verification_response evidence, not initial_submission evidence.",
                 "taskId": "task_test",
                 "requestedMode": "initial_submission",
-                "nextCommand": "pfterminal tasknode verification respond task_test --body-file <path> --json"
+                "nextCommand": "corbanu tasknode verification respond task_test --body-file <path> --json"
             })
         );
     }
@@ -1265,7 +1803,7 @@ mod tests {
                     "submittedMode": "initial_submission",
                     "phase": "verification_required",
                     "completionConfirmed": false,
-                    "nextCommand": "pfterminal tasknode verification respond task_test --body-file <path> --json",
+                    "nextCommand": "corbanu tasknode verification respond task_test --body-file <path> --json",
                     "notice": "Initial evidence is not completion. Answer the current verification request before expecting a reward.",
                     "currentVerificationRequest": {
                         "body": "Provide the exact test result."
@@ -1301,7 +1839,7 @@ mod tests {
                 "submittedMode": "verification_response",
                 "phase": "reward_issued",
                 "completionConfirmed": true,
-                "nextCommand": "pfterminal tasknode rewards list --json",
+                "nextCommand": "corbanu tasknode rewards list --json",
                 "notice": "Task Node reports a terminal rewarded state.",
                 "currentVerificationRequest": null
             })

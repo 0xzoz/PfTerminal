@@ -12,7 +12,7 @@ pub struct Cli {
     #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
 
-    /// Error out when config.toml contains fields that are not recognized by this version of PFTerminal.
+    /// Error out when config.toml contains fields that are not recognized by this version of Corbanu Terminal.
     #[arg(long = "strict-config", default_value_t = false)]
     pub strict_config: bool,
 
@@ -70,6 +70,14 @@ pub struct Cli {
     /// Runs the TUI in inline mode, preserving terminal scrollback history.
     #[arg(long = "no-alt-screen", default_value_t = false)]
     pub no_alt_screen: bool,
+
+    /// Named account for this session (`<name>` for the session's provider,
+    /// or `<provider>:<name>`). Another provider's account is used by spawned
+    /// agents and workers on that provider and when you switch to it. Needs
+    /// the `named_accounts` feature; a missing account is an error, never the
+    /// default account.
+    #[arg(long = "account", value_name = "[PROVIDER:]NAME")]
+    pub account: Option<String>,
 
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,

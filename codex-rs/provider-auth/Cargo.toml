@@ -1,0 +1,25 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-provider-auth"
+version.workspace = true
+
+[lib]
+doctest = false
+name = "codex_provider_auth"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+codex-login = { workspace = true }
+codex-model-provider-info = { workspace = true }
+codex-vault = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

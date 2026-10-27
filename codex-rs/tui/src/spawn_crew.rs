@@ -112,9 +112,9 @@ impl App {
             }
         }
 
-        let primary_thread_id = self
-            .primary_thread_id
-            .ok_or_else(|| eyre!("PFTerminal Main is unavailable; no crew data was removed."))?;
+        let primary_thread_id = self.primary_thread_id.ok_or_else(|| {
+            eyre!("Corbanu Terminal Main is unavailable; no crew data was removed.")
+        })?;
         self.save_active_claude_pane_transcript();
         self.claude_panes
             .set_active_user_pane(CODEX_MAIN_PANE_ID)
@@ -143,6 +143,7 @@ impl App {
                     )
                 })?;
             self.claude_pane_transcript_cells.remove(pane_id);
+            self.drop_held_claude_task_of_removed_pane(pane_id);
         }
 
         let native_thread_set = native_thread_ids.iter().copied().collect::<HashSet<_>>();
@@ -353,6 +354,14 @@ impl App {
             .await
     }
 
+    pub(crate) async fn create_spawn_corbanu_api_crew(
+        &mut self,
+        app_server: &mut AppServerSession,
+    ) -> Result<(ThreadId, ThreadId)> {
+        self.create_spawn_crew(app_server, crew_presets::corbanu_api_crew_spec())
+            .await
+    }
+
     async fn create_spawn_crew(
         &mut self,
         app_server: &mut AppServerSession,
@@ -361,7 +370,9 @@ impl App {
         let root_thread_id = self
             .primary_thread_id
             .or(self.active_thread_id)
-            .ok_or_else(|| eyre!("Cannot create a crew before PFTerminal Main has started."))?;
+            .ok_or_else(|| {
+                eyre!("Cannot create a crew before Corbanu Terminal Main has started.")
+            })?;
         let spawn_config = self.native_spawn_agent_config()?;
         self.ensure_crew_providers_ready(&crew).await?;
         match self.spawn_crew.as_mut() {
@@ -479,7 +490,7 @@ impl App {
                 nickname,
                 &member.role_profile,
                 started,
-                false,
+                /*persist_layout*/ false,
             )
             .await;
             let node_id = thread_node_id(thread_id);

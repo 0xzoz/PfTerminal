@@ -6,6 +6,7 @@ use pretty_assertions::assert_eq;
 fn crew_instance_round_trip_preserves_logical_to_native_identity() {
     for spec in [
         crew_presets::standard_crew_spec(),
+        crew_presets::corbanu_api_crew_spec(),
         crew_presets::multimodel_qualification_crew_spec(),
     ] {
         let mut state = CrewInstanceState::begin(spec).expect("valid crew");
@@ -91,7 +92,7 @@ fn ready_custom_crew_can_add_heterogeneous_members_without_changing_existing_ide
                 runtime_request: codex_protocol::crew::RuntimeRequest::exact(
                     "kimi-code",
                     "k3",
-                    None,
+                    /*reasoning_effort*/ None,
                 ),
             },
             "thread:kimi",
@@ -137,7 +138,7 @@ fn adding_a_member_cannot_broaden_the_crew_provider_allowlist() {
     for (member_id, provider, model, node) in [
         ("orc-1", "kimi-code", "k3", "thread:kimi"),
         ("orc-2", "anthropic", "claude-opus-5", "thread:opus"),
-        ("orc-3", "openrouter", "x-ai/grok-4.5", "thread:grok"),
+        ("orc-3", "openrouter", "x-ai/grok-4.7", "thread:grok"),
     ] {
         let error = state
             .add_ready_member(
@@ -147,7 +148,7 @@ fn adding_a_member_cannot_broaden_the_crew_provider_allowlist() {
                     role_profile: "orc".to_string(),
                     parent_member_id: Some("nazgul".to_string()),
                     runtime_request: codex_protocol::crew::RuntimeRequest::exact(
-                        provider, model, None,
+                        provider, model, /*reasoning_effort*/ None,
                     ),
                 },
                 node,

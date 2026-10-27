@@ -135,6 +135,9 @@ where
     }
 
     pub async fn reconcile_due(&self, now_ms: i64) -> anyhow::Result<Vec<ControllerEvent>> {
+        if let Some(credentials) = &self.credentials {
+            prune_stale_rental_endpoint_tokens(&self.state, credentials.as_ref()).await?;
+        }
         self.state.prune_terminal_gpu_runtime_providers().await?;
         let provider = self.provider.capabilities().provider;
         let leases = self
@@ -169,7 +172,7 @@ where
                 .record_terminal_failure(
                     lease,
                     "provider-recovery-unsupported",
-                    "Provider cannot safely reconcile PFTerminal-owned resources.",
+                    "Provider cannot safely reconcile Corbanu Terminal-owned resources.",
                     now_ms,
                 )
                 .await;
@@ -378,7 +381,7 @@ where
                 .finish_gpu_provision_step(
                     lease.rental.rental_id.as_str(),
                     "01-provider-bootstrap",
-                    true,
+                    /*succeeded*/ true,
                     Some(
                         serde_json::json!({
                             "resource_id": resource_id,
@@ -393,7 +396,7 @@ where
                         .to_string()
                         .as_str(),
                     ),
-                    None,
+                    /*sanitized_error*/ None,
                     now_ms,
                 )
                 .await?;
@@ -562,7 +565,7 @@ where
             .finish_gpu_provision_step(
                 lease.rental.rental_id.as_str(),
                 "02-readiness",
-                true,
+                /*succeeded*/ true,
                 Some(&serde_json::to_string(&serde_json::json!({
                     "authenticated": report.rejects_missing_token && report.rejects_wrong_token,
                     "model_identity": report.model_identity_ok,
@@ -571,7 +574,7 @@ where
                     "cancellation": report.cancellation_ok,
                     "tool_call": report.tool_call_ok,
                 }))?),
-                None,
+                /*sanitized_error*/ None,
                 now_ms,
             )
             .await?;
@@ -631,22 +634,7 @@ where
         };
         let instance = match self.provider.get_instance(resource_id.clone()).await {
             Ok(None) => {
-                self.apply_update(
-                    &lease,
-                    GpuRentalUpdate {
-                        desired_state: Some(GpuRentalState::TerminatedConfirmed),
-                        observed_state: Some(GpuRentalState::TerminatedConfirmed),
-                        next_retry_at_ms: Some(i64::MAX),
-                        clear_last_error: true,
-                        ..GpuRentalUpdate::default()
-                    },
-                    now_ms,
-                )
-                .await?;
-                return Ok(vec![ControllerEvent::StateChanged {
-                    rental_id: lease.rental.rental_id,
-                    state: GpuRentalState::TerminatedConfirmed,
-                }]);
+                return self.confirm_terminated(lease, now_ms).await;
             }
             Ok(Some(instance))
                 if matches!(
@@ -661,7 +649,7 @@ where
                         observed_state: Some(GpuRentalState::TerminateRequested),
                         last_error_code: Some("provider-side-stop".to_string()),
                         last_error_message: Some(
-                            "The provider resource stopped outside PFTerminal; cleanup was requested."
+                            "The provider resource stopped outside Corbanu Terminal; cleanup was requested."
                                 .to_string(),
                         ),
                         next_retry_at_ms: Some(now_ms),
@@ -673,7 +661,7 @@ where
                 return Ok(vec![ControllerEvent::Warning {
                     rental_id: lease.rental.rental_id,
                     code: "provider-side-stop".to_string(),
-                    message: "Provider-side stop detected; PFTerminal is confirming cleanup."
+                    message: "Provider-side stop detected; Corbanu Terminal is confirming cleanup."
                         .to_string(),
                 }]);
             }
@@ -811,7 +799,7 @@ where
             [instance] => Ok(Some(instance.clone())),
             _ => Err(ProviderError::new(
                 ProviderErrorKind::Permanent,
-                "Multiple provider resources have the same PFTerminal ownership tag.",
+                "Multiple provider resources have the same Corbanu Terminal ownership tag.",
             )),
         }
     }
@@ -957,6 +945,39 @@ where
         }
         Ok(())
     }
+}
+
+/// Deletes managed endpoint tokens that cannot belong to a provisioning or serving rental.
+pub async fn prune_stale_rental_endpoint_tokens(
+    state: &StateRuntime,
+    credentials: &dyn crate::GpuCredentialResolver,
+) -> anyhow::Result<usize> {
+    let mut stale_rental_ids = Vec::new();
+    for rental_id in credentials.rental_endpoint_token_ids()? {
+        let rental = state.get_gpu_rental(rental_id.as_str()).await?;
+        if rental.is_none_or(|rental| !rental_requires_endpoint_token(&rental)) {
+            stale_rental_ids.push(rental_id);
+        }
+    }
+    Ok(credentials.delete_rental_endpoint_tokens(&stale_rental_ids)?)
+}
+
+fn rental_requires_endpoint_token(rental: &GpuRental) -> bool {
+    if rental.desired_state == GpuRentalState::TerminateRequested {
+        return false;
+    }
+    matches!(
+        (rental.desired_state, rental.observed_state),
+        (GpuRentalState::CreatePending, GpuRentalState::Quoted)
+            | (_, GpuRentalState::Allocating)
+            | (_, GpuRentalState::Reconciling)
+            | (_, GpuRentalState::Bootstrapping)
+            | (_, GpuRentalState::Downloading)
+            | (_, GpuRentalState::Starting)
+            | (_, GpuRentalState::Probing)
+            | (_, GpuRentalState::Ready)
+            | (_, GpuRentalState::Degraded)
+    )
 }
 
 fn manifest_step_digest(value: &str) -> String {

@@ -1,8 +1,347 @@
 //! App-level orchestration tests for the TUI.
 
+async fn accounting_fixture(
+    app: &mut App,
+    path: &std::path::Path,
+) -> anyhow::Result<(ThreadId, i64)> {
+    use codex_state::accounting::*;
+    let now = chrono::Utc::now().timestamp_millis();
+    let owner = ThreadId::new();
+    let db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::from_sqlite_home(path.abs()),
+        "synthetic".into(),
+    )
+    .await?;
+    let metadata = codex_state::ThreadMetadataBuilder::new(
+        owner,
+        path.join("synthetic.jsonl"),
+        chrono::Utc::now(),
+        codex_protocol::protocol::SessionSource::Cli,
+    );
+    db.upsert_thread(&metadata.build("synthetic")).await?;
+    let a: Attempt = serde_json::from_value(serde_json::json!({
+        "attempt_id":uuid::Uuid::from_u128(1),"request_id":uuid::Uuid::from_u128(2),
+        "thread_id":owner,"turn":"synthetic","retry_of":null,"provider":"fixture-only",
+        "model":"fixture-model","scope":uuid::Uuid::nil(),"dialect":"Inclusive","dispatched_at_ms":now
+    }))?;
+    let s: Snapshot = serde_json::from_value(serde_json::json!({
+        "id":uuid::Uuid::from_u128(3),"provider":"fixture-only","model":"fixture-model",
+        "scope":uuid::Uuid::nil(),"currency":"USD","unit":"PerMillionTokens",
+        "rates":{"noncached":"1","read":"1","write":"2","output":"4"},
+        "source_reference":uuid::Uuid::from_u128(4),"source_kind":"ProviderPublished",
+        "observed_at_ms":0,"approved_at_ms":0,"effective_from_ms":0,"effective_end_ms":null
+    }))?;
+    let o: Observation = serde_json::from_value(serde_json::json!({
+        "revision":1,"source":uuid::Uuid::from_u128(5),"sequence":1,
+        "patch":{"input":100,"read":20,"output":40}
+    }))?;
+    let store = AccountingStore::open(&db, now).await?;
+    store.admit(owner, &a, &[s], now).await?;
+    store.observe(owner, &a, &[o], now).await?;
+    app.chat_widget
+        .handle_thread_session_quiet(test_thread_session(owner, path.to_path_buf()));
+    app.active_thread_id = Some(owner);
+    app.state_db = Some(db);
+    Ok((owner, now / 86_400_000))
+}
+
+async fn accounting_load(
+    app: &mut App,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    day: i64,
+) -> AppEvent {
+    while rx.try_recv().is_ok() {}
+    app.handle_accounting_inspector_event(AppEvent::OpenAccountingInspector { day });
+    let load = rx.recv().await.unwrap();
+    assert!(matches!(load, AppEvent::LoadAccountingInspector { .. }));
+    app.handle_accounting_inspector_event(load);
+    tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+fn accounting_scroll(app: &mut App) -> String {
+    app.chat_widget.on_terminal_resize(/*width*/ 40);
+    let mut output = String::new();
+    for _ in 0..120 {
+        output.push_str(&render_bottom_popup(&app.chat_widget, /*width*/ 40));
+        app.chat_widget
+            .handle_key_event(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Down,
+                crossterm::event::KeyModifiers::NONE,
+            ));
+    }
+    output
+}
+
+#[tokio::test]
+async fn accounting_inspect_app_real_store_to_view() -> anyhow::Result<()> {
+    use codex_state::accounting::InspectionDay;
+    let path = tempdir()?;
+    let (mut app, mut rx, mut ops) = make_test_app_with_channels().await;
+    let (_, day) = accounting_fixture(&mut app, path.path()).await?;
+    while ops.try_recv().is_ok() {}
+    let event = accounting_load(&mut app, &mut rx, day).await;
+    let generation = match &event {
+        AppEvent::AccountingInspectorLoaded {
+            result: Ok(InspectionDay::Ready(v)),
+            generation,
+            ..
+        } => {
+            assert_eq!(
+                serde_json::to_value(v.totals.known_usd)?,
+                serde_json::json!("0.00018")
+            );
+            assert_eq!(v.totals.unknown_estimates, 1);
+            assert_eq!(v.requests.len(), 1);
+            *generation
+        }
+        other => panic!("{other:?}"),
+    };
+    app.handle_accounting_inspector_event(event);
+    let summary = accounting_scroll(&mut app);
+    assert!(
+        summary.contains("$0.000180") && summary.contains("+ unknown") && summary.contains("costs")
+    );
+    for page in [1, 2] {
+        app.handle_accounting_inspector_event(AppEvent::NavigateAccountingInspector {
+            generation,
+            page,
+        });
+    }
+    let detail = accounting_scroll(&mut app);
+    for required in [
+        "Cache write: unknown",
+        "fixture-only",
+        "fixture-model",
+        "0.00018",
+        "Price ID:",
+    ] {
+        assert!(detail.contains(required), "{required}");
+    }
+    assert!(ops.try_recv().is_err());
+    assert!(rx.try_recv().is_err());
+    app.state_db.as_ref().unwrap().close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn accounting_inspect_range_app_dispatch_preserves_query() -> anyhow::Result<()> {
+    use codex_state::accounting::InspectionDay;
+    use codex_state::accounting::InspectionGrouping;
+    use codex_state::accounting::InspectionRange;
+    let path = tempdir()?;
+    let (mut app, mut rx, _ops) = make_test_app_with_channels().await;
+    let started = chrono::Utc::now().timestamp_millis();
+    let (_, day) = accounting_fixture(&mut app, path.path()).await?;
+    while rx.try_recv().is_ok() {}
+    app.handle_accounting_inspector_event(AppEvent::OpenAccountingInspector { day });
+    let mut load = rx.recv().await.unwrap();
+    let requested = InspectionRange {
+        start_ms: day * 86_400_000,
+        end_ms: (day + 1) * 86_400_000,
+        grouping: InspectionGrouping::Hour,
+    };
+    let AppEvent::LoadAccountingInspector { range, .. } = &mut load else {
+        panic!()
+    };
+    *range = Some(requested);
+    app.handle_accounting_inspector_event(load);
+    let event = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+        .await?
+        .unwrap();
+    assert!(matches!(&event, AppEvent::AccountingInspectorLoaded {
+        result: Ok(InspectionDay::Range { requested: actual, buckets, .. }), ..
+    } if *actual == requested && buckets.len() == 24));
+    app.handle_accounting_inspector_event(event);
+    let text = accounting_scroll(&mut app);
+    assert!(text.contains("timezone: UTC"));
+    // Today's hours: the current one is in progress and later ones have not
+    // started, so the total so far is shown (#289 R2). Unless the hour turned
+    // while the test ran, which leaves the request's hour partial.
+    let hour = |ms: i64| ms / 3_600_000;
+    if hour(started) == hour(chrono::Utc::now().timestamp_millis()) {
+        assert!(text.contains("In progress — totals so far"), "{text}");
+        assert!(!text.contains("Range total unavailable"), "{text}");
+    }
+    app.state_db.as_ref().unwrap().close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn accounting_inspect_app_remote_does_not_read_local() -> anyhow::Result<()> {
+    let path = tempdir()?;
+    let (mut app, mut rx, _ops) = make_test_app_with_channels().await;
+    let (_, day) = accounting_fixture(&mut app, path.path()).await?;
+    app.app_server_target = crate::AppServerTarget::Remote {
+        endpoint: crate::RemoteAppServerEndpoint::UnixSocket {
+            socket_path: path.path().join("missing.sock").abs(),
+        },
+    };
+    let event = accounting_load(&mut app, &mut rx, day).await;
+    assert!(
+        matches!(&event, AppEvent::AccountingInspectorLoaded { result: Err(message), .. } if message.contains("remote") && message.contains("Next step: "))
+    );
+    app.handle_accounting_inspector_event(event);
+    let screen = accounting_scroll(&mut app);
+    assert!(!screen.contains("0.000180"));
+    assert!(!screen.contains("fixture-only"));
+    app.state_db.as_ref().unwrap().close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn accounting_inspect_app_thread_switch_stale_reply() -> anyhow::Result<()> {
+    let path = tempdir()?;
+    let (mut app, mut rx, _ops) = make_test_app_with_channels().await;
+    let (_, day) = accounting_fixture(&mut app, path.path()).await?;
+    let held_result = accounting_load(&mut app, &mut rx, day).await;
+    let other = ThreadId::new();
+    app.chat_widget
+        .handle_thread_session_quiet(test_thread_session(other, path.path().to_path_buf()));
+    app.active_thread_id = Some(other);
+    app.handle_accounting_inspector_event(held_result);
+    assert!(
+        !render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Cost — this conversation")
+    );
+    let next = accounting_load(&mut app, &mut rx, day).await;
+    assert!(matches!(next, AppEvent::AccountingInspectorLoaded {
+        thread: Some(id), result: Ok(codex_state::accounting::InspectionDay::MissingThread), ..
+    } if id == other));
+    app.state_db.as_ref().unwrap().close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn accounting_inspect_app_error_retry_and_timeout() -> anyhow::Result<()> {
+    let path = tempdir()?;
+    let (mut app, mut rx, _ops) = make_test_app_with_channels().await;
+    let (_, day) = accounting_fixture(&mut app, path.path()).await?;
+    let db = app.state_db.take().unwrap();
+    let missing = accounting_load(&mut app, &mut rx, day).await;
+    assert!(
+        matches!(&missing, AppEvent::AccountingInspectorLoaded { result: Err(s), .. } if s.contains("database is not open"))
+    );
+    app.handle_accounting_inspector_event(missing);
+    app.state_db = Some(db.clone());
+    let event = accounting_load(&mut app, &mut rx, day).await;
+    let AppEvent::AccountingInspectorLoaded { generation, .. } = &event else {
+        panic!()
+    };
+    let generation = *generation;
+    app.handle_accounting_inspector_event(event);
+    tokio::time::pause();
+    let timeout =
+        super::event_dispatch::accounting_inspector_read_result(std::future::pending()).await;
+    tokio::time::resume();
+    assert!(timeout.unwrap_err().contains("timed out"));
+    app.handle_accounting_inspector_event(AppEvent::RefreshAccountingInspector { generation });
+    let AppEvent::LoadAccountingInspector {
+        generation: next, ..
+    } = rx.recv().await.unwrap()
+    else {
+        panic!()
+    };
+    assert_ne!(generation, next);
+    db.close().await;
+    let failed = accounting_load(&mut app, &mut rx, day).await;
+    assert!(
+        matches!(&failed, AppEvent::AccountingInspectorLoaded { result: Err(s), .. } if s.contains("could not be read") && !s.contains("SELECT"))
+    );
+    app.handle_accounting_inspector_event(failed);
+    app.chat_widget
+        .handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Esc,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    app.handle_accounting_inspector_event(rx.recv().await.unwrap());
+    assert!(
+        !render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Cost — this conversation")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn accounting_inspect_app_restart_and_profile_isolation() -> anyhow::Result<()> {
+    let path = tempdir()?;
+    let fresh = tempdir()?;
+    let (mut app, mut rx, _ops) = make_test_app_with_channels().await;
+    let (owner, day) = accounting_fixture(&mut app, path.path()).await?;
+    let before = accounting_load(&mut app, &mut rx, day).await;
+    app.handle_accounting_inspector_event(before);
+    app.state_db.take().unwrap().close().await;
+    app.chat_widget.clear_pending_token_activity_refreshes();
+    app.state_db = Some(
+        codex_state::StateRuntime::init(
+            codex_state::SqliteConfig::from_sqlite_home(path.path().abs()),
+            "synthetic".into(),
+        )
+        .await?,
+    );
+    let reopened = accounting_load(&mut app, &mut rx, day).await;
+    assert!(
+        matches!(reopened, AppEvent::AccountingInspectorLoaded { result: Ok(codex_state::accounting::InspectionDay::Ready(v)), .. } if v.owner == owner && v.totals.attempts == 1)
+    );
+    app.state_db.take().unwrap().close().await;
+    app.chat_widget.update_account_state(
+        /*status_account_display*/ None, /*plan_type*/ None,
+        /*has_chatgpt_account*/ false, /*has_codex_backend_auth*/ false,
+    );
+    app.state_db = Some(
+        codex_state::StateRuntime::init(
+            codex_state::SqliteConfig::from_sqlite_home(fresh.path().abs()),
+            "synthetic".into(),
+        )
+        .await?,
+    );
+    let empty = accounting_load(&mut app, &mut rx, day).await;
+    assert!(matches!(
+        &empty,
+        AppEvent::AccountingInspectorLoaded {
+            result: Ok(codex_state::accounting::InspectionDay::Absent),
+            ..
+        }
+    ));
+    app.handle_accounting_inspector_event(empty);
+    assert!(!accounting_scroll(&mut app).contains("0.000180"));
+    app.state_db.take().unwrap().close().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn accounting_inspect_app_off_and_old_usage_routes() -> anyhow::Result<()> {
+    let (mut app, mut rx, mut ops) = make_test_app_with_channels().await;
+    let event = accounting_load(&mut app, &mut rx, /*day*/ 0).await;
+    assert!(
+        matches!(&event, AppEvent::AccountingInspectorLoaded { result: Err(s), .. } if s.contains("no current native thread"))
+    );
+    app.handle_accounting_inspector_event(event);
+    assert!(ops.try_recv().is_err());
+    assert!(rx.try_recv().is_err());
+    app.chat_widget.clear_pending_token_activity_refreshes();
+    set_chatgpt_auth(&mut app.chat_widget);
+    app.chat_widget.handle_paste("/usage".into());
+    app.chat_widget
+        .handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    app.chat_widget
+        .handle_key_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ));
+    assert!(matches!(rx.recv().await, Some(AppEvent::OpenTokenActivity)));
+    Ok(())
+}
+
 #[path = "tests/advanced_reasoning_tests.rs"]
 mod advanced_reasoning_tests;
 mod dispatch_integration;
+mod issue_613;
+mod issue_646;
+mod issue_660;
 mod model_catalog;
 mod plugin_catalog;
 mod rate_limits;
@@ -153,9 +492,50 @@ use tokio::time;
 macro_rules! assert_app_snapshot {
     ($name:expr, $value:expr $(,)?) => {
         insta::with_settings!({snapshot_path => "../snapshots"}, {
-            assert_snapshot!($name, $value);
+            let normalized = crate::status::snapshot_helpers::normalize_snapshot_version(&$value);
+            assert_snapshot!($name, normalized);
         });
     };
+}
+
+#[tokio::test]
+async fn modal_tui_input_handoff_accounts_for_keys_and_returns_queue_to_chat() {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
+    let keys = [
+        KeyCode::Char('f'),
+        KeyCode::Down,
+        KeyCode::Esc,
+        KeyCode::Char('x'),
+    ];
+    let source =
+        tokio_stream::iter(keys.map(|code| TuiEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))));
+    let mut drained = spawn_tui_event_drainer(Box::pin(source));
+    {
+        let mut modal = modal_tui_events(&mut drained.rx, &drained.watchdog);
+        for expected in &keys[..3] {
+            let event = time::timeout(Duration::from_secs(2), modal.next())
+                .await
+                .expect("modal receives input")
+                .expect("key");
+            assert!(matches!(event, TuiEvent::Key(key) if key.code == *expected));
+        }
+    }
+    let event = drained
+        .rx
+        .recv()
+        .await
+        .expect("chat retains ownership after cancel");
+    drained.watchdog.note_handled();
+    assert!(matches!(event, TuiEvent::Key(key) if key.code == KeyCode::Char('x')));
+    assert_eq!(drained.watchdog.pending_events.load(Ordering::Relaxed), 0);
+    // Reopening after EOF does not create another terminal reader or hang.
+    assert!(
+        modal_tui_events(&mut drained.rx, &drained.watchdog)
+            .next()
+            .await
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -338,10 +718,23 @@ fn bypass_hook_trust_startup_warning_snapshot() {
 
     assert_app_snapshot!("bypass_hook_trust_startup_warning", rendered);
 }
+
+#[test]
+fn legacy_windows_sandbox_startup_warning_snapshot() {
+    let rendered = lines_to_single_string(
+        &history_cell::new_warning_event(
+            codex_sandboxing::LEGACY_WINDOWS_SANDBOX_WARNING.to_string(),
+        )
+        .display_lines(/*width*/ 80),
+    );
+
+    assert_app_snapshot!("legacy_windows_sandbox_startup_warning", rendered);
+}
 #[tokio::test]
 async fn enqueue_primary_thread_session_replays_buffered_approval_after_attach() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let thread_id = ThreadId::new();
+    app.pending_permission_confirmation = Some(test_support::pending_confirmation(thread_id));
     let approval_request =
         exec_approval_request(thread_id, "turn-1", "call-1", /*approval_id*/ None);
 
@@ -377,8 +770,9 @@ async fn enqueue_primary_thread_session_replays_buffered_approval_after_attach()
     ));
 
     app.handle_thread_event_now(event);
+    // Enter confirms the highlighted "Yes, proceed".
     app.chat_widget
-        .handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     while let Ok(app_event) = app_event_rx.try_recv() {
         if let AppEvent::SubmitThreadOp {
@@ -387,6 +781,7 @@ async fn enqueue_primary_thread_session_replays_buffered_approval_after_attach()
         } = app_event
         {
             assert_eq!(op_thread_id, thread_id);
+            assert!(app.pending_permission_confirmation.is_some());
             return Ok(());
         }
     }
@@ -443,8 +838,9 @@ async fn resolved_buffered_approval_does_not_become_actionable_after_drain() -> 
     ));
 
     app.handle_thread_event_now(event);
+    // Enter confirms the highlighted "Yes, proceed".
     app.chat_widget
-        .handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
     while let Ok(app_event) = app_event_rx.try_recv() {
         assert!(
@@ -1490,6 +1886,7 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                provider_account: None,
                 agents_states: HashMap::new(),
             },
         }),
@@ -1530,6 +1927,7 @@ async fn collab_receiver_notification_does_not_cache_not_found_thread() {
                 prompt: Some("hello".to_string()),
                 model: None,
                 reasoning_effort: None,
+                provider_account: None,
                 agents_states: HashMap::from([(
                     receiver_thread_id.to_string(),
                     codex_app_server_protocol::CollabAgentState {
@@ -1570,6 +1968,7 @@ async fn collab_receiver_notification_caches_result_preview() {
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                provider_account: None,
                 agents_states: HashMap::from([(
                     receiver_thread_id.to_string(),
                     codex_app_server_protocol::CollabAgentState {
@@ -1614,7 +2013,7 @@ async fn native_followup_dispatch_transitions_only_the_matching_assignment() {
         app.upsert_agent_picker_thread(
             thread_id,
             Some(name.to_string()),
-            None,
+            /*agent_role*/ None,
             /*is_closed*/ false,
         );
     }
@@ -1732,7 +2131,7 @@ async fn native_direct_parent_assignment_uses_core_result_delivery_without_dupli
         app.upsert_agent_picker_thread(
             thread_id,
             Some(name.to_string()),
-            None,
+            /*agent_role*/ None,
             /*is_closed*/ false,
         );
     }
@@ -1749,8 +2148,8 @@ async fn native_direct_parent_assignment_uses_core_result_delivery_without_dupli
     app.note_whip_target_idle_with_fire_control(
         &worker_node,
         Some("NATIVE_PARENT_RESULT"),
-        true,
-        true,
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
     );
 
     assert!(
@@ -1764,7 +2163,12 @@ async fn native_direct_parent_assignment_uses_core_result_delivery_without_dupli
         Some("NATIVE_PARENT_RESULT")
     );
 
-    app.note_whip_target_idle_with_fire_control(&manager_node, Some("WHIP_DONE"), false, true);
+    app.note_whip_target_idle_with_fire_control(
+        &manager_node,
+        Some("WHIP_DONE"),
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
+    );
     assert!(matches!(
         app.orchestrate_whips
             .get("assignment-1")
@@ -1910,6 +2314,101 @@ async fn pane_spawn_tree_hides_task_actions() {
     {
         AppEvent::OpenSpawnAgentTaskPrompt { thread_id } => assert_eq!(thread_id, orc_thread_id),
         event => panic!("expected Snaga task prompt event, got {event:?}"),
+    }
+}
+
+/// D95 (#1146): only the person's Spawn status prompt sends a task as the
+/// person's own input; the route agents' tasks take (assignment fires,
+/// model dispatch) still sends them as inter-agent messages.
+#[tokio::test]
+async fn spawn_status_prompt_alone_sends_person_tasks() {
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000001146").expect("valid thread id");
+    let orc_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000001147").expect("valid thread id");
+    app.primary_thread_id = Some(main_thread_id);
+    app.active_thread_id = Some(main_thread_id);
+    app.upsert_agent_picker_thread(
+        orc_thread_id,
+        Some("Snaga".to_string()),
+        Some("orc".to_string()),
+        /*is_closed*/ false,
+    );
+    app.spawn_parent_by_thread
+        .insert(orc_thread_id, main_thread_id);
+
+    (crate::spawn_orchestration::spawn_agent_task_prompt_submit(
+        app.app_event_tx.clone(),
+        orc_thread_id,
+    ))("typed by the person".to_string());
+    match rx.try_recv().expect("the prompt sends an event") {
+        AppEvent::SubmitSpawnAgentTaskFromPerson { thread_id, task } => {
+            assert_eq!(thread_id, orc_thread_id);
+            assert_eq!(task, "typed by the person");
+        }
+        event => panic!("expected the person's task, got {event:?}"),
+    }
+
+    app.send_native_task_event(orc_thread_id, "sent by an agent".to_string());
+    match rx.try_recv().expect("an agent's task sends an event") {
+        AppEvent::SubmitSpawnAgentTask {
+            thread_id, task, ..
+        } => {
+            assert_eq!(thread_id, orc_thread_id);
+            assert_eq!(task, "sent by an agent");
+        }
+        event => panic!("expected an agent's task, got {event:?}"),
+    }
+}
+
+/// D106 (#1176): an agent's task for a pane the person opened takes the
+/// mailbox route, as for an agent-opened pane; it is never sent as the
+/// person's input. The person's own Spawn status task still is (D95).
+#[tokio::test]
+async fn agent_task_for_a_person_opened_pane_takes_the_mailbox_route() {
+    let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000001176").expect("valid thread id");
+    let pane_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000001177").expect("valid thread id");
+    app.primary_thread_id = Some(main_thread_id);
+    app.active_thread_id = Some(main_thread_id);
+    app.upsert_agent_picker_thread(
+        pane_thread_id,
+        Some("Worker".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    let entry = app
+        .agent_navigation
+        .get(&pane_thread_id)
+        .expect("pane entry")
+        .clone();
+    assert!(app.is_operator_owned_codex_user_pane(pane_thread_id, &entry));
+
+    app.send_native_task_event(pane_thread_id, "sent by an agent".to_string());
+    match rx.try_recv().expect("an agent's task sends an event") {
+        AppEvent::SubmitSpawnAgentTask {
+            thread_id, task, ..
+        } => {
+            assert_eq!(thread_id, pane_thread_id);
+            assert_eq!(task, "sent by an agent");
+        }
+        event => panic!("expected an agent's task for the mailbox, got {event:?}"),
+    }
+    assert!(rx.try_recv().is_err(), "one event only");
+
+    (crate::spawn_orchestration::spawn_agent_task_prompt_submit(
+        app.app_event_tx.clone(),
+        pane_thread_id,
+    ))("typed by the person".to_string());
+    match rx.try_recv().expect("the prompt sends an event") {
+        AppEvent::SubmitSpawnAgentTaskFromPerson { thread_id, task } => {
+            assert_eq!(thread_id, pane_thread_id);
+            assert_eq!(task, "typed by the person");
+        }
+        event => panic!("expected the person's task, got {event:?}"),
     }
 }
 
@@ -2073,8 +2572,8 @@ async fn terminal_lifecycle_scope_blocks_external_managed_and_parent_owned_panes
     app.upsert_agent_picker_thread(
         operator_thread_id,
         Some("Operator".to_string()),
-        None,
-        false,
+        /*agent_role*/ None,
+        /*is_closed*/ false,
     );
 
     assert!(
@@ -2296,7 +2795,7 @@ fn whole_crew_removal_deletes_mixed_members_and_preserves_bound_main() -> Result
             Some("Burzum".to_string()),
             "troll",
             troll,
-            true,
+            /*persist_layout*/ true,
         )
         .await;
         crew.record_member("troll", &troll_node_id)
@@ -2569,7 +3068,8 @@ async fn restore_materializes_saved_native_orcs_without_rollouts() -> Result<()>
         ),
     )?;
     app.chat_widget.update_account_state(
-        None, None, /*has_chatgpt_account*/ true, /*has_codex_backend_auth*/ true,
+        /*status_account_display*/ None, /*plan_type*/ None,
+        /*has_chatgpt_account*/ true, /*has_codex_backend_auth*/ true,
     );
     let mut app_server = start_config_write_test_app_server(&app).await?;
     let main = app_server.start_thread(&app.config).await?;
@@ -2578,11 +3078,8 @@ async fn restore_materializes_saved_native_orcs_without_rollouts() -> Result<()>
         .session
         .rollout_path
         .as_ref()
-        .expect("PFTerminal Main should have a local rollout path");
-    assert!(
-        main_rollout_path.is_file(),
-        "a no-task PFTerminal Main must be durable before panes reference its layout"
-    );
+        .expect("Main rollout path");
+    assert!(main_rollout_path.is_file(), "Main rollout must be durable");
     app.primary_thread_id = Some(main_thread_id);
     app.active_thread_id = Some(main_thread_id);
     app.primary_session_configured = Some(main.session.clone());
@@ -2614,7 +3111,7 @@ async fn restore_materializes_saved_native_orcs_without_rollouts() -> Result<()>
         Some("Angmar".to_string()),
         "nazgul",
         nazgul,
-        true,
+        /*persist_layout*/ true,
     )
     .await;
     app.set_spawn_nazgul_pane_binding(crate::spawn_orchestration::thread_node_id(nazgul_thread_id));
@@ -2645,7 +3142,7 @@ async fn restore_materializes_saved_native_orcs_without_rollouts() -> Result<()>
         Some("Burzum".to_string()),
         "troll",
         troll,
-        true,
+        /*persist_layout*/ true,
     )
     .await;
     app.thread_event_channels
@@ -3020,13 +3517,13 @@ async fn pane_picker_separates_user_panes_from_managed_spawn_crew() {
         manager_thread,
         Some("Codex manager".to_string()),
         Some("default".to_string()),
-        false,
+        /*is_closed*/ false,
     );
     app.upsert_agent_picker_thread(
         worker_thread,
         Some("Codex worker".to_string()),
         Some("default".to_string()),
-        false,
+        /*is_closed*/ false,
     );
     app.spawn_parent_by_thread
         .insert(worker_thread, manager_thread);
@@ -3044,7 +3541,7 @@ async fn pane_picker_separates_user_panes_from_managed_spawn_crew() {
         parent_controlled_thread,
         Some("Task-only subagent".to_string()),
         Some("default".to_string()),
-        false,
+        /*is_closed*/ false,
     );
     app.agent_navigation
         .mark_parent_owned(parent_controlled_thread);
@@ -3053,11 +3550,11 @@ async fn pane_picker_separates_user_panes_from_managed_spawn_crew() {
         .iter()
         .map(|item| item.name.as_str())
         .collect::<Vec<_>>();
-    assert!(names.contains(&"PFTerminal - Codex manager"));
-    assert!(names.contains(&"PFTerminal - Codex worker"));
+    assert!(names.contains(&"Corbanu Terminal - Codex manager"));
+    assert!(names.contains(&"Corbanu Terminal - Codex worker"));
     assert!(
-        !names.contains(&"PFTerminal - Task-only subagent"),
-        "parent-controlled Core workers are not operator-owned user panes"
+        !names.contains(&"Corbanu Terminal - Task-only subagent"),
+        "managed workers stay out of user panes"
     );
 
     let user_index = names
@@ -3095,13 +3592,13 @@ async fn pane_picker_marks_exactly_the_active_native_thread_current() {
         main_thread,
         Some("Main".to_string()),
         Some("default".to_string()),
-        false,
+        /*is_closed*/ false,
     );
     app.upsert_agent_picker_thread(
         user_thread,
         Some("Matrix Twin".to_string()),
         Some("default".to_string()),
-        false,
+        /*is_closed*/ false,
     );
     app.primary_session_configured = Some(ThreadSessionState {
         model: "deepseek-v4-flash".to_string(),
@@ -3114,25 +3611,19 @@ async fn pane_picker_marks_exactly_the_active_native_thread_current() {
     let items = app.pane_picker_items();
     let main = items
         .iter()
-        .find(|item| item.name == "PFTerminal - Main")
-        .expect("Main pane row");
+        .find(|item| item.name == "Corbanu Terminal - Main")
+        .expect("Main pane");
     let user = items
         .iter()
-        .find(|item| item.name == "PFTerminal - Matrix Twin")
-        .expect("operator pane row");
+        .find(|item| item.name == "Corbanu Terminal - Matrix Twin")
+        .expect("operator pane");
 
-    assert!(
-        !main.is_current,
-        "inactive Main must not be labelled current"
-    );
-    assert!(
-        user.is_current,
-        "active native pane must be labelled current"
-    );
+    assert!(!main.is_current, "inactive Main marked current");
+    assert!(user.is_current, "active pane not current");
     assert_eq!(
         items.iter().filter(|item| item.is_current).count(),
         1,
-        "the pane picker must project one current pane"
+        "expected one current pane"
     );
     assert_snapshot!(
         format!(
@@ -3147,19 +3638,20 @@ async fn pane_picker_marks_exactly_the_active_native_thread_current() {
     );
 }
 
-/// Drains app events looking for a `SubmitSpawnAgentTask` for `thread_id`. Returns its task text.
+/// Drains native task events for `thread_id`, whether the target is a managed agent or an
+/// operator-owned user pane (both take agents' tasks from the mailbox, D106). Returns the task
+/// texts.
 fn drain_spawn_agent_tasks_for(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     thread_id: ThreadId,
 ) -> Vec<String> {
     let mut matched = Vec::new();
     while let Ok(event) = rx.try_recv() {
-        if let AppEvent::SubmitSpawnAgentTask {
-            thread_id: t, task, ..
-        } = event
-            && t == thread_id
-        {
-            matched.push(task);
+        match event {
+            AppEvent::SubmitSpawnAgentTask {
+                thread_id: t, task, ..
+            } if t == thread_id => matched.push(task),
+            _ => {}
         }
     }
     matched
@@ -3195,6 +3687,97 @@ fn register_native_dispatch_pair(app: &mut App) -> (ThreadId, ThreadId) {
     (troll_thread_id, orc_thread_id)
 }
 
+fn issue_1208_layout(edges: &[(&str, &str)]) -> crate::claude_panes::PaneLayoutState {
+    crate::claude_panes::PaneLayoutState {
+        spawn_parent_by_node: edges
+            .iter()
+            .map(|(child, parent)| (child.to_string(), parent.to_string()))
+            .collect(),
+        ..Default::default()
+    }
+}
+
+const ISSUE_1208_MAIN: &str = "thread:00000000-0000-0000-0000-000000001208";
+const ISSUE_1208_CHILD: &str = "thread:00000000-0000-0000-0000-000000001209";
+const ISSUE_1208_GRANDCHILD: &str = "thread:00000000-0000-0000-0000-000000001210";
+
+#[test]
+fn model_spawned_sub_agents_alone_are_not_a_legacy_spawn_hierarchy() {
+    // #1208: the spawn-agent tool records only thread -> thread edges.
+    let native_only = issue_1208_layout(&[
+        (ISSUE_1208_CHILD, ISSUE_1208_MAIN),
+        (ISSUE_1208_GRANDCHILD, ISSUE_1208_CHILD),
+    ]);
+    assert_eq!(
+        crate::spawn_orchestration::pane_layout_has_legacy_spawn_hierarchy(&native_only),
+        false
+    );
+
+    // A /spawn Troll without a Nazgul binding hangs off the Main pane node.
+    let legacy_pane_root = issue_1208_layout(&[
+        (ISSUE_1208_CHILD, "pane:codex-main"),
+        (ISSUE_1208_GRANDCHILD, ISSUE_1208_CHILD),
+    ]);
+    assert_eq!(
+        crate::spawn_orchestration::pane_layout_has_legacy_spawn_hierarchy(&legacy_pane_root),
+        true
+    );
+
+    // A /spawn hierarchy bound to a native Nazgul has only thread edges plus the binding.
+    let legacy_bound_nazgul = crate::claude_panes::PaneLayoutState {
+        spawn_nazgul_pane_id: Some(ISSUE_1208_MAIN.to_string()),
+        ..issue_1208_layout(&[(ISSUE_1208_CHILD, ISSUE_1208_MAIN)])
+    };
+    assert_eq!(
+        crate::spawn_orchestration::pane_layout_has_legacy_spawn_hierarchy(&legacy_bound_nazgul),
+        true
+    );
+
+    // A /spawn Claude member is a pane node.
+    let legacy_claude_member = issue_1208_layout(&[("pane:claude-1", ISSUE_1208_MAIN)]);
+    assert_eq!(
+        crate::spawn_orchestration::pane_layout_has_legacy_spawn_hierarchy(&legacy_claude_member),
+        true
+    );
+}
+
+#[tokio::test]
+async fn resume_with_only_model_spawned_sub_agents_shows_no_legacy_spawn_notice() -> Result<()> {
+    let native_only = issue_1208_layout(&[(ISSUE_1208_CHILD, ISSUE_1208_MAIN)]);
+    let legacy = issue_1208_layout(&[(ISSUE_1208_CHILD, "pane:codex-main")]);
+    for (layout, expect_notice) in [(native_only, false), (legacy, true)] {
+        let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
+        // Set by hand as App construction does it in app.rs
+        // (`restored_spawn_legacy_read_only`, the value given to
+        // `spawn_legacy_read_only` when the App is built from the restored
+        // layout). If that site stops calling
+        // `pane_layout_has_legacy_spawn_hierarchy`, change this line too.
+        app.spawn_legacy_read_only =
+            crate::spawn_orchestration::pane_layout_has_legacy_spawn_hierarchy(&layout);
+        let mut app_server = start_config_write_test_app_server(&app).await?;
+
+        app.restore_native_spawn_panes_from_saved_state(&mut app_server)
+            .await;
+
+        let mut rendered = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                rendered.push_str(&lines_to_single_string(&cell.display_lines(/*width*/ 200)));
+            }
+        }
+        assert_eq!(
+            (
+                app.spawn_legacy_read_only,
+                rendered.contains("Restored a legacy /spawn hierarchy in read-only mode")
+            ),
+            (expect_notice, expect_notice),
+            "layout edges {:?}; rendered: {rendered}",
+            layout.spawn_parent_by_node
+        );
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn restored_legacy_spawn_hierarchy_is_inspectable_but_rejects_mutation() {
     let (mut app, mut rx, _op_rx) = make_test_app_with_channels().await;
@@ -3228,7 +3811,7 @@ async fn restored_crew_validation_rejects_runtime_drift() {
         thread_id,
         Some("Manager".to_string()),
         Some("manager".to_string()),
-        false,
+        /*is_closed*/ false,
     );
     app.spawn_parent_by_node.insert(
         node_id.clone(),
@@ -3256,7 +3839,7 @@ async fn restored_crew_validation_rejects_runtime_drift() {
             runtime_request: codex_protocol::crew::RuntimeRequest::exact(
                 "openai",
                 "gpt-5.6-sol",
-                None,
+                /*reasoning_effort*/ None,
             ),
         }],
         policy: codex_protocol::crew::CrewPolicy {
@@ -3564,6 +4147,55 @@ async fn custom_spawn_core_classes_match_persisted_crew_identity() {
     assert_eq!(crew.spec.crew_id, crew_id);
 }
 
+/// #435 (AGG-20, G12/G12b): `/spawn` → Troll before any Nazgul ended with
+/// "Custom crew root was not created." and no reason. The Troll now starts the
+/// crew rooted at its parent (the main pane), and a spawn that fails drops it.
+#[tokio::test]
+async fn sec_435_first_troll_starts_the_crew_at_its_parent() {
+    use crate::spawn_orchestration::SpawnRole;
+    let mut app = make_test_app().await;
+    // The milestone failure.
+    let err = app
+        .custom_spawn_member_agent_class(SpawnRole::Troll)
+        .expect_err("no crew yet");
+    assert!(err.to_string().contains("spawn a Nazgul first"), "{err}");
+
+    // The parent `/spawn` gives a Troll: the root node, `pane:codex-main`.
+    let root = app.spawn_root_node_id();
+    assert_eq!(root, format!("pane:{CODEX_MAIN_PANE_ID}"));
+    let (class, started) = app
+        .custom_spawn_member_agent_class_under(SpawnRole::Troll, &root)
+        .expect("a first Troll starts the crew");
+    assert!(started);
+    let codex_protocol::crew::AgentClass::CrewMember {
+        logical_member_id, ..
+    } = class
+    else {
+        panic!("a Troll is a crew member");
+    };
+    assert_eq!(logical_member_id, "troll-1");
+    let crew = app.spawn_crew.as_ref().expect("crew started");
+    assert_eq!(
+        crew.member_node_by_id.get("nazgul").map(String::as_str),
+        Some(root.as_str())
+    );
+
+    // The spawn failed: the crew it started is dropped, so a Nazgul can
+    // still be created afterwards.
+    app.abort_started_custom_spawn_root();
+    assert!(app.spawn_crew.is_none());
+    app.preflight_new_custom_spawn_root()
+        .expect("a Nazgul can still be created");
+
+    // With a crew already present nothing new is started.
+    app.ensure_custom_spawn_root(CODEX_MAIN_PANE_ID)
+        .expect("bind custom root");
+    let (_, started) = app
+        .custom_spawn_member_agent_class_under(SpawnRole::Troll, CODEX_MAIN_PANE_ID)
+        .expect("second Troll");
+    assert!(!started);
+}
+
 #[tokio::test]
 async fn native_task_agent_role_does_not_make_it_a_persistent_spawn_crew_member() {
     let mut app = make_test_app().await;
@@ -3575,13 +4207,13 @@ async fn native_task_agent_role_does_not_make_it_a_persistent_spawn_crew_member(
         crew_orc,
         Some("Snaga".to_string()),
         Some("orc".to_string()),
-        false,
+        /*is_closed*/ false,
     );
     app.upsert_agent_picker_thread(
         task_agent,
         Some("Ephemeral reviewer".to_string()),
         Some("orc".to_string()),
-        false,
+        /*is_closed*/ false,
     );
     app.record_custom_spawn_member(
         &crate::spawn_orchestration::thread_node_id(crew_orc),
@@ -3803,7 +4435,7 @@ async fn spawn_roster_keeps_context_pressure_out_of_model_context() {
     app.update_spawn_status_for_thread_notification(&token_usage_notification_with_total(
         orc_thread_id,
         "turn-context",
-        90_000,
+        /*total_tokens*/ 90_000,
         Some(100_000),
     ));
 
@@ -3823,7 +4455,7 @@ async fn low_context_telemetry_does_not_manufacture_a_lifecycle_warning() {
     app.update_spawn_status_for_thread_notification(&token_usage_notification_with_total(
         orc_thread_id,
         "turn-low-1",
-        90_000,
+        /*total_tokens*/ 90_000,
         Some(100_000),
     ));
     let reports = app.spawn_parent_reports_by_node.get(&parent_node_id);
@@ -3917,7 +4549,7 @@ async fn replacement_transaction_migrates_runtime_waiting_and_relationships() {
         new_thread,
         Some("Snaga".to_string()),
         Some("orc".to_string()),
-        false,
+        /*is_closed*/ false,
     );
     let old_node = thread_node_id(old_thread);
     app.spawn_parent_by_node
@@ -4382,6 +5014,7 @@ async fn stale_receiver_running_status_does_not_hide_completed_orc_report() {
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                provider_account: None,
                 agents_states: HashMap::from([(
                     orc_thread_id.to_string(),
                     codex_app_server_protocol::CollabAgentState {
@@ -4614,6 +5247,7 @@ async fn direct_six_orc_turn_reports_are_visible_to_claude_troll_context() {
                     status: crate::claude_panes::ClaudePaneTurnStatus::Success,
                     session_id: Some("claude-session".to_string()),
                     usage_summary: None,
+                    turn_usage_summary: None,
                     usage_status: crate::claude_panes::ClaudePaneUsageStatus::Missing,
                     artifact_path: app
                         .config
@@ -4632,6 +5266,7 @@ async fn direct_six_orc_turn_reports_are_visible_to_claude_troll_context() {
                     tool_events: Vec::new(),
                     reasoning_events: Vec::new(),
                     command_mode: crate::claude_panes::ClaudeCommandMode::NewSession,
+                    direct_accounting: None,
                 }),
             );
         }
@@ -4649,7 +5284,7 @@ async fn direct_six_orc_turn_reports_are_visible_to_claude_troll_context() {
         .spawn_context_for_user_pane(&troll_pane_id)
         .expect("Troll pane should receive spawn context");
     assert!(context.contains("Snaga [orc]; status=completed; has_new_report=true"));
-    assert!(context.contains("Claude Code Ghash [orc] - Opus 5 Claude Plan; status=success"));
+    assert!(context.contains("Claude Code Ghash [orc] - Opus 5.5 Claude Plan; status=success"));
 }
 
 #[tokio::test]
@@ -4776,8 +5411,8 @@ async fn bound_claude_nazgul_context_explains_empty_spawn_hierarchy() {
         .spawn_context_for_user_pane("claude-test-pane")
         .expect("bound Claude pane should receive spawn context");
 
-    assert!(context.contains("You are the PFTerminal Nazgul/root pane"));
-    assert!(context.contains("Troll and Orc are PFTerminal orchestration roles"));
+    assert!(context.contains("You are the Corbanu Terminal Nazgul/root pane"));
+    assert!(context.contains("Troll and Orc are Corbanu Terminal orchestration roles"));
     assert!(context.contains("Trolls: none spawned yet."));
     assert!(context.contains("Orcs: none spawned yet."));
     assert!(context.contains("suggest using /spawn"));
@@ -4870,7 +5505,7 @@ async fn bound_claude_nazgul_context_auto_nests_orphans_under_single_claude_trol
         .spawn_context_for_user_pane("claude-nazgul")
         .expect("bound Claude pane should receive spawn context");
 
-    assert!(context.contains("Claude Code Burzum [troll] - Opus 5 Claude Plan; role=Troll"));
+    assert!(context.contains("Claude Code Burzum [troll] - Opus 5.5 Claude Plan; role=Troll"));
     assert!(context.contains("  - Snaga [orc]; status=idle"));
     assert!(!context.contains("Unassigned Orcs"));
 }
@@ -4912,6 +5547,7 @@ async fn claude_orc_completion_is_reported_to_parent_troll_context() {
             status: crate::claude_panes::ClaudePaneTurnStatus::Success,
             session_id: Some("claude-session".to_string()),
             usage_summary: None,
+            turn_usage_summary: None,
             usage_status: crate::claude_panes::ClaudePaneUsageStatus::Missing,
             artifact_path,
             audit_path,
@@ -4922,6 +5558,7 @@ async fn claude_orc_completion_is_reported_to_parent_troll_context() {
             tool_events: Vec::new(),
             reasoning_events: Vec::new(),
             command_mode: crate::claude_panes::ClaudeCommandMode::NewSession,
+            direct_accounting: None,
         }),
     );
 
@@ -4929,7 +5566,7 @@ async fn claude_orc_completion_is_reported_to_parent_troll_context() {
         .spawn_context_for_user_pane(&troll_pane_id)
         .expect("Troll pane should receive spawn context");
     assert!(context.contains("Recent child reports delivered to this pane:"));
-    assert!(context.contains("Claude Code Snaga [orc] - Opus 5 Claude Plan"));
+    assert!(context.contains("Claude Code Snaga [orc] - Opus 5.5 Claude Plan"));
     assert!(context.contains("status=idle"));
     assert!(context.contains("result=Implemented the mock website and npm run build passed."));
 }
@@ -5022,7 +5659,12 @@ async fn native_legacy_whip_target_receives_orchestration_lifecycle() {
     write_test_whip(&app, "keep-going", "# whip: keep-going\nContinue the work.");
     let worker_thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000467").expect("worker id");
-    app.upsert_agent_picker_thread(worker_thread_id, Some("Worker".to_string()), None, false);
+    app.upsert_agent_picker_thread(
+        worker_thread_id,
+        Some("Worker".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
     let worker_node = crate::spawn_orchestration::thread_node_id(worker_thread_id);
 
     app.handle_orchestrate_command(format!(
@@ -5069,8 +5711,8 @@ async fn orchestrate_stop_marker_pauses_before_fire() {
     app.note_whip_target_idle_with_fire_control(
         &target_node_id,
         Some("done\nWHIP_DONE"),
-        true,
-        true,
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
     );
 
     assert!(drain_claude_pane_task_events(&mut app_event_rx).is_empty());
@@ -5103,8 +5745,18 @@ async fn orchestrate_empty_output_loop_pauses_whip() {
     app.handle_orchestrate_command(format!(
         "attach {pane_id} loop-aware --mode auto --holder none --max 3 --cooldown 1s"
     ));
-    app.note_whip_target_idle_with_fire_control(&target_node_id, Some(""), true, true);
-    app.note_whip_target_idle_with_fire_control(&target_node_id, Some("   "), true, true);
+    app.note_whip_target_idle_with_fire_control(
+        &target_node_id,
+        Some(""),
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
+    );
+    app.note_whip_target_idle_with_fire_control(
+        &target_node_id,
+        Some("   "),
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
+    );
 
     let submitted_tasks = drain_claude_pane_task_events(&mut app_event_rx);
     assert_eq!(submitted_tasks.len(), 1);
@@ -5140,15 +5792,20 @@ async fn orchestrate_failed_turn_loop_pauses_and_success_resets_streak() {
     app.note_whip_target_idle_with_fire_control(
         &target_node_id,
         Some("provider error"),
-        true,
-        false,
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ false,
     );
-    app.note_whip_target_idle_with_fire_control(&target_node_id, Some("recovered"), true, true);
+    app.note_whip_target_idle_with_fire_control(
+        &target_node_id,
+        Some("recovered"),
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
+    );
     app.note_whip_target_idle_with_fire_control(
         &target_node_id,
         Some("provider error"),
-        true,
-        false,
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ false,
     );
     assert_eq!(
         app.orchestrate_whips
@@ -5160,8 +5817,8 @@ async fn orchestrate_failed_turn_loop_pauses_and_success_resets_streak() {
     app.note_whip_target_idle_with_fire_control(
         &target_node_id,
         Some("provider error"),
-        true,
-        false,
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ false,
     );
     let whip = app.orchestrate_whips.get("whip-1").expect("whip");
     assert_eq!(whip.state, crate::orchestrate::WhipState::Paused);
@@ -5231,8 +5888,8 @@ async fn assignment_overnight_loop_survives_cycles_backoff_and_manager_markers()
     app.note_whip_target_idle_with_fire_control(
         &manager_node,
         Some("I will emit WHIP_DONE when complete and ASSIGNMENT_BLOCKED: <reason> if needed."),
-        false,
-        true,
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
     );
     assert!(matches!(
         app.orchestrate_whips
@@ -5265,8 +5922,8 @@ async fn assignment_overnight_loop_survives_cycles_backoff_and_manager_markers()
     app.note_whip_target_idle_with_fire_control(
         &worker_node,
         Some("WORKER_AUDIT_RESULT: baseline checkout is invalid"),
-        false,
-        true,
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
     );
     assert!(
         drain_claude_pane_task_events(&mut app_event_rx).is_empty(),
@@ -5302,8 +5959,9 @@ async fn assignment_overnight_loop_survives_cycles_backoff_and_manager_markers()
         assignment,
         "Worker",
         Some("Run the audit."),
-        None,
+        /*path*/ None,
         started,
+        crate::orchestrate::AssignmentDispatchProtocol::HostAdapter,
     );
     assert!(mandate.contains("Worker's latest completed output:"));
     assert!(mandate.contains("WORKER_AUDIT_RESULT: baseline checkout is invalid"));
@@ -5323,14 +5981,14 @@ async fn assignment_overnight_loop_survives_cycles_backoff_and_manager_markers()
     app.note_whip_target_idle_with_fire_control(
         &manager_node,
         Some("temporary provider failure"),
-        false,
-        false,
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ false,
     );
     app.note_whip_target_idle_with_fire_control(
         &manager_node,
         Some("temporary provider failure"),
-        false,
-        false,
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ false,
     );
     assert_eq!(
         app.orchestrate_whips
@@ -5351,7 +6009,12 @@ async fn assignment_overnight_loop_survives_cycles_backoff_and_manager_markers()
     }
     app.sweep_orchestrate_whips();
     assert_eq!(drain_claude_pane_task_events(&mut app_event_rx).len(), 1);
-    app.note_whip_target_idle_with_fire_control(&manager_node, Some("recovered"), false, true);
+    app.note_whip_target_idle_with_fire_control(
+        &manager_node,
+        Some("recovered"),
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
+    );
     assert_eq!(
         app.orchestrate_whips
             .get("assignment-1")
@@ -5362,8 +6025,8 @@ async fn assignment_overnight_loop_survives_cycles_backoff_and_manager_markers()
     app.note_whip_target_idle_with_fire_control(
         &worker_node,
         Some("ASSIGNMENT_BLOCKED: worker said it\nWHIP_DONE"),
-        false,
-        true,
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
     );
     assert!(matches!(
         app.orchestrate_whips
@@ -5377,8 +6040,8 @@ async fn assignment_overnight_loop_survives_cycles_backoff_and_manager_markers()
     app.note_whip_target_idle_with_fire_control(
         &manager_node,
         Some("I may emit WHIP_DONE later and mention ASSIGNMENT_BLOCKED: in prose."),
-        false,
-        true,
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
     );
     assert!(matches!(
         app.orchestrate_whips
@@ -5392,8 +6055,8 @@ async fn assignment_overnight_loop_survives_cycles_backoff_and_manager_markers()
     app.note_whip_target_idle_with_fire_control(
         &manager_node,
         Some("ASSIGNMENT_BLOCKED:\nprogress continues"),
-        false,
-        true,
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
     );
     assert!(matches!(
         app.orchestrate_whips
@@ -5407,8 +6070,8 @@ async fn assignment_overnight_loop_survives_cycles_backoff_and_manager_markers()
     app.note_whip_target_idle_with_fire_control(
         &manager_node,
         Some("progress\nASSIGNMENT_BLOCKED: waiting for production credentials"),
-        false,
-        true,
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
     );
     assert!(matches!(
         app.orchestrate_whips
@@ -5429,7 +6092,12 @@ async fn assignment_overnight_loop_survives_cycles_backoff_and_manager_markers()
             ..
         })
     ));
-    app.note_whip_target_idle_with_fire_control(&manager_node, Some("WHIP_DONE"), false, true);
+    app.note_whip_target_idle_with_fire_control(
+        &manager_node,
+        Some("WHIP_DONE"),
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
+    );
     assert!(matches!(
         app.orchestrate_whips
             .get("assignment-1")
@@ -5449,8 +6117,18 @@ async fn assignment_manager_empty_completion_retries_current_turn_once_then_paus
         ThreadId::from_string("00000000-0000-0000-0000-000000000463").expect("manager id");
     let worker_thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000464").expect("worker id");
-    app.upsert_agent_picker_thread(manager_thread_id, Some("Manager".to_string()), None, false);
-    app.upsert_agent_picker_thread(worker_thread_id, Some("Worker".to_string()), None, false);
+    app.upsert_agent_picker_thread(
+        manager_thread_id,
+        Some("Manager".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        worker_thread_id,
+        Some("Worker".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
     let manager_node = crate::spawn_orchestration::thread_node_id(manager_thread_id);
     let worker_node = crate::spawn_orchestration::thread_node_id(worker_thread_id);
     app.handle_orchestrate_command(format!(
@@ -5527,110 +6205,6 @@ async fn assignment_manager_empty_completion_retries_current_turn_once_then_paus
 }
 
 #[tokio::test]
-async fn inactive_native_manager_text_never_dispatches_to_worker() {
-    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
-    write_test_whip(
-        &app,
-        "native-manager-dispatch",
-        "Manager must dispatch the implementation to Worker.",
-    );
-    let manager_thread_id =
-        ThreadId::from_string("00000000-0000-0000-0000-000000000465").expect("manager id");
-    let worker_thread_id =
-        ThreadId::from_string("00000000-0000-0000-0000-000000000466").expect("worker id");
-    app.upsert_agent_picker_thread(manager_thread_id, Some("Manager".to_string()), None, false);
-    app.upsert_agent_picker_thread(worker_thread_id, Some("Worker".to_string()), None, false);
-    let manager_node = crate::spawn_orchestration::thread_node_id(manager_thread_id);
-    let worker_node = crate::spawn_orchestration::thread_node_id(worker_thread_id);
-    app.handle_orchestrate_command(format!(
-        "attach {worker_node} native-manager-dispatch --mode review --holder {manager_node} --for 1h"
-    ));
-    while app_event_rx.try_recv().is_ok() {}
-
-    let dispatch = format!(
-        "```pfterminal-send-task\n{{\"target\":\"{worker_node}\",\"task\":\"Review the branch and report concrete defects.\"}}\n```"
-    );
-    let ServerNotification::ItemCompleted(mut injected_instruction) = item_completed_notification(
-        manager_thread_id,
-        "manager-dispatch-1",
-        "injected-manager-brief",
-        &dispatch,
-    ) else {
-        unreachable!("helper returns ItemCompleted");
-    };
-    let ThreadItem::AgentMessage { phase, .. } = &mut injected_instruction.item else {
-        unreachable!("helper returns AgentMessage");
-    };
-    *phase = Some(codex_protocol::models::MessagePhase::Commentary);
-    app.enqueue_thread_notification(
-        manager_thread_id,
-        ServerNotification::ItemCompleted(injected_instruction),
-    )
-    .await
-    .expect("enqueue injected Manager instruction");
-    assert!(
-        drain_spawn_agent_task_for(&mut app_event_rx, worker_thread_id).is_none(),
-        "an injected inter-agent instruction must never execute its example host block"
-    );
-    assert!(matches!(
-        app.orchestrate_whips
-            .get("assignment-1")
-            .map(|whip| &whip.kind),
-        Some(crate::orchestrate::WhipKind::Assignment {
-            phase: crate::orchestrate::AssignmentPhase::Drafting,
-            ..
-        })
-    ));
-
-    app.enqueue_thread_notification(
-        manager_thread_id,
-        item_completed_notification(
-            manager_thread_id,
-            "manager-dispatch-1",
-            "agent-message-1",
-            &dispatch,
-        ),
-    )
-    .await
-    .expect("enqueue inactive Manager message completion");
-    assert!(
-        drain_spawn_agent_task_for(&mut app_event_rx, worker_thread_id).is_none(),
-        "native Manager output is display text, never an inter-agent transport"
-    );
-
-    let completed = turn_completed_with_agent_message(
-        manager_thread_id,
-        "manager-dispatch-1",
-        TurnStatus::Completed,
-        &dispatch,
-    );
-    app.enqueue_thread_notification(manager_thread_id, completed.clone())
-        .await
-        .expect("enqueue inactive Manager completion");
-    assert!(
-        drain_spawn_agent_task_for(&mut app_event_rx, worker_thread_id).is_none(),
-        "TurnCompleted must not parse native assistant text as a task"
-    );
-    assert!(matches!(
-        app.orchestrate_whips
-            .get("assignment-1")
-            .map(|whip| &whip.kind),
-        Some(crate::orchestrate::WhipKind::Assignment {
-            phase: crate::orchestrate::AssignmentPhase::Drafting,
-            ..
-        })
-    ));
-
-    app.enqueue_thread_notification(manager_thread_id, completed)
-        .await
-        .expect("replay inactive Manager completion");
-    assert!(
-        drain_spawn_agent_task_for(&mut app_event_rx, worker_thread_id).is_none(),
-        "terminal notification replay must remain transport-free"
-    );
-}
-
-#[tokio::test]
 async fn assignment_manager_visible_paraphrase_resets_empty_completion_guard() {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     write_test_whip(&app, "empty-reset", "Draft and run the recovery audit.");
@@ -5638,8 +6212,18 @@ async fn assignment_manager_visible_paraphrase_resets_empty_completion_guard() {
         ThreadId::from_string("00000000-0000-0000-0000-000000000465").expect("manager id");
     let worker_thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000466").expect("worker id");
-    app.upsert_agent_picker_thread(manager_thread_id, Some("Manager".to_string()), None, false);
-    app.upsert_agent_picker_thread(worker_thread_id, Some("Worker".to_string()), None, false);
+    app.upsert_agent_picker_thread(
+        manager_thread_id,
+        Some("Manager".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        worker_thread_id,
+        Some("Worker".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
     let manager_node = crate::spawn_orchestration::thread_node_id(manager_thread_id);
     let worker_node = crate::spawn_orchestration::thread_node_id(worker_thread_id);
     app.handle_orchestrate_command(format!(
@@ -5647,14 +6231,19 @@ async fn assignment_manager_visible_paraphrase_resets_empty_completion_guard() {
     ));
     while app_event_rx.try_recv().is_ok() {}
 
-    app.note_whip_target_idle_with_fire_control(&manager_node, None, false, true);
+    app.note_whip_target_idle_with_fire_control(
+        &manager_node,
+        /*last_output*/ None,
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
+    );
     let _ = drain_spawn_agent_task_for(&mut app_event_rx, manager_thread_id)
         .expect("first empty completion should retry");
     app.note_whip_target_idle_with_fire_control(
         &manager_node,
         Some("I have enough context; drafting the acceptance criteria now."),
-        false,
-        true,
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
     );
     assert_eq!(
         app.orchestrate_whips
@@ -5662,7 +6251,12 @@ async fn assignment_manager_visible_paraphrase_resets_empty_completion_guard() {
             .map(|whip| whip.empty_output_fires),
         Some(0)
     );
-    app.note_whip_target_idle_with_fire_control(&manager_node, Some("   "), false, true);
+    app.note_whip_target_idle_with_fire_control(
+        &manager_node,
+        Some("   "),
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
+    );
     assert!(drain_spawn_agent_task_for(&mut app_event_rx, manager_thread_id).is_some());
     assert_eq!(
         app.orchestrate_whips
@@ -5677,7 +6271,12 @@ async fn codex_pane_description_uses_cached_model_instead_of_unknown() {
     let mut app = make_test_app().await;
     let thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000467").expect("thread id");
-    app.upsert_agent_picker_thread(thread_id, Some("Manager".to_string()), None, false);
+    app.upsert_agent_picker_thread(
+        thread_id,
+        Some("Manager".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
     app.agent_navigation
         .set_model(thread_id, Some("claude-fable-5-plan".to_string()));
     let entry = app.agent_navigation.get(&thread_id).expect("picker entry");
@@ -5699,8 +6298,18 @@ async fn assignment_bad_target_retries_durable_worker_once_then_pauses() {
         ThreadId::from_string("00000000-0000-0000-0000-000000000471").expect("manager id");
     let worker_thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000472").expect("worker id");
-    app.upsert_agent_picker_thread(manager_thread_id, Some("Manager".to_string()), None, false);
-    app.upsert_agent_picker_thread(worker_thread_id, Some("Worker".to_string()), None, false);
+    app.upsert_agent_picker_thread(
+        manager_thread_id,
+        Some("Manager".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        worker_thread_id,
+        Some("Worker".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
     let manager_node = crate::spawn_orchestration::thread_node_id(manager_thread_id);
     let worker_node = crate::spawn_orchestration::thread_node_id(worker_thread_id);
     app.handle_orchestrate_command(format!(
@@ -5763,8 +6372,18 @@ async fn assignment_creation_fails_visibly_when_layout_cannot_be_persisted() {
         ThreadId::from_string("00000000-0000-0000-0000-000000000481").expect("manager id");
     let worker_thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000482").expect("worker id");
-    app.upsert_agent_picker_thread(manager_thread_id, Some("Manager".to_string()), None, false);
-    app.upsert_agent_picker_thread(worker_thread_id, Some("Worker".to_string()), None, false);
+    app.upsert_agent_picker_thread(
+        manager_thread_id,
+        Some("Manager".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        worker_thread_id,
+        Some("Worker".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
     app.primary_thread_id = Some(ThreadId::new());
 
     let panes_path = app.config.codex_home.join("panes");
@@ -5803,8 +6422,18 @@ async fn orchestrate_fast_path_is_worker_then_manager_with_eight_hour_draft_defa
     let worker_thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000493").expect("worker id");
     app.primary_thread_id = Some(main_thread_id);
-    app.upsert_agent_picker_thread(manager_thread_id, Some("Manager".to_string()), None, false);
-    app.upsert_agent_picker_thread(worker_thread_id, Some("Worker".to_string()), None, false);
+    app.upsert_agent_picker_thread(
+        manager_thread_id,
+        Some("Manager".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        worker_thread_id,
+        Some("Worker".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
 
     app.open_orchestrate_fast_target_picker();
     assert_app_snapshot!(
@@ -5831,7 +6460,7 @@ async fn assignment_unreachable_watchdog_pauses_after_four_cadences() {
             crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
             app.config.cwd.to_path_buf(),
             app.config.codex_home.as_ref(),
-            None,
+            /*spawn_role*/ None,
             Some("Manager".to_string()),
         )
         .expect("create manager");
@@ -5841,7 +6470,7 @@ async fn assignment_unreachable_watchdog_pauses_after_four_cadences() {
             crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
             app.config.cwd.to_path_buf(),
             app.config.codex_home.as_ref(),
-            None,
+            /*spawn_role*/ None,
             Some("Worker".to_string()),
         )
         .expect("create worker");
@@ -5880,6 +6509,49 @@ async fn assignment_unreachable_watchdog_pauses_after_four_cadences() {
 }
 
 #[tokio::test]
+async fn assignment_for_one_hour_keeps_the_whole_hour() {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    write_test_whip(&app, "watchdog", "Keep managing.");
+    let manager_pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            /*spawn_role*/ None,
+            Some("Manager".to_string()),
+        )
+        .expect("create manager");
+    let worker_pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            /*spawn_role*/ None,
+            Some("Worker".to_string()),
+        )
+        .expect("create worker");
+    // No clock override: the real clock moves between reads, as in the product.
+    assert_eq!(app.orchestrate_now_override, None);
+    app.handle_orchestrate_command(format!(
+        "attach {worker_pane_id} watchdog --mode review --holder {manager_pane_id} --for 1h"
+    ));
+
+    let execution_duration_s =
+        app.orchestrate_whips
+            .get("assignment-1")
+            .and_then(|whip| match &whip.kind {
+                crate::orchestrate::WhipKind::Assignment {
+                    execution_duration_s,
+                    ..
+                } => *execution_duration_s,
+                crate::orchestrate::WhipKind::LegacyNudge => None,
+            });
+    assert_eq!(execution_duration_s, Some(3600));
+}
+
+#[tokio::test]
 async fn assignment_restart_lifecycle_waits_one_cadence_then_continues() {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     write_test_whip(&app, "restart-loop", "Continue the recovery work.");
@@ -5887,8 +6559,18 @@ async fn assignment_restart_lifecycle_waits_one_cadence_then_continues() {
         ThreadId::from_string("00000000-0000-0000-0000-000000000501").expect("manager id");
     let worker_thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000502").expect("worker id");
-    app.upsert_agent_picker_thread(manager_thread_id, Some("Manager".to_string()), None, false);
-    app.upsert_agent_picker_thread(worker_thread_id, Some("Worker".to_string()), None, false);
+    app.upsert_agent_picker_thread(
+        manager_thread_id,
+        Some("Manager".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        worker_thread_id,
+        Some("Worker".to_string()),
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
     let manager_node = crate::spawn_orchestration::thread_node_id(manager_thread_id);
     let worker_node = crate::spawn_orchestration::thread_node_id(worker_thread_id);
     let started = chrono::DateTime::parse_from_rfc3339("2026-07-10T20:00:00Z")
@@ -5948,7 +6630,7 @@ async fn assignment_rejects_codex_main_as_manager() {
             crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
             app.config.cwd.to_path_buf(),
             app.config.codex_home.as_ref(),
-            None,
+            /*spawn_role*/ None,
             Some("Worker".to_string()),
         )
         .expect("create worker");
@@ -5995,13 +6677,18 @@ async fn orchestrate_review_holder_ignored_twice_pauses_whip() {
         .kind = crate::orchestrate::WhipKind::LegacyNudge;
     let _ = drain_claude_pane_task_events(&mut app_event_rx);
     app.handle_orchestrate_command("fire assignment-1".to_string());
-    app.note_whip_target_idle_with_fire_control(&holder_node_id, Some("no dispatch"), true, true);
+    app.note_whip_target_idle_with_fire_control(
+        &holder_node_id,
+        Some("no dispatch"),
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
+    );
     app.handle_orchestrate_command("fire assignment-1".to_string());
     app.note_whip_target_idle_with_fire_control(
         &holder_node_id,
         Some("still no dispatch"),
-        true,
-        true,
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
     );
 
     let submitted_tasks = drain_claude_pane_task_events(&mut app_event_rx);
@@ -6090,8 +6777,8 @@ async fn assignment_worker_completion_wakes_manager_without_waiting_for_watchdog
     app.note_whip_target_idle_with_fire_control(
         &worker_node,
         Some("first completed result"),
-        true,
-        true,
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
     );
 
     let immediate = drain_claude_pane_task_events(&mut app_event_rx);
@@ -6113,8 +6800,8 @@ async fn assignment_worker_completion_wakes_manager_without_waiting_for_watchdog
     app.note_whip_target_idle_with_fire_control(
         &worker_node,
         Some("second completed result"),
-        true,
-        true,
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
     );
     assert!(drain_claude_pane_task_events(&mut app_event_rx).is_empty());
 
@@ -6128,8 +6815,8 @@ async fn assignment_worker_completion_wakes_manager_without_waiting_for_watchdog
     app.note_whip_target_idle_with_fire_control(
         &manager_node,
         Some("manager finished its prior audit"),
-        false,
-        true,
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
     );
 
     let pending = drain_claude_pane_task_events(&mut app_event_rx);
@@ -6143,7 +6830,12 @@ async fn assignment_worker_completion_wakes_manager_without_waiting_for_watchdog
     );
 
     app.orchestrate_now_override = Some(started + chrono::Duration::seconds(9));
-    app.note_whip_target_idle_with_fire_control(&worker_node, None, true, false);
+    app.note_whip_target_idle_with_fire_control(
+        &worker_node,
+        /*last_output*/ None,
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ false,
+    );
 
     let interrupted = drain_claude_pane_task_events(&mut app_event_rx);
     assert_eq!(interrupted.len(), 1);
@@ -6190,7 +6882,12 @@ async fn orchestrate_restored_whip_waits_for_fresh_idle_edge() {
     app.sweep_orchestrate_whips();
     assert!(drain_claude_pane_task_events(&mut app_event_rx).is_empty());
 
-    app.note_whip_target_idle_with_fire_control(&target_node_id, Some("completed"), true, true);
+    app.note_whip_target_idle_with_fire_control(
+        &target_node_id,
+        Some("completed"),
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
+    );
     assert_eq!(drain_claude_pane_task_events(&mut app_event_rx).len(), 1);
 }
 
@@ -6241,7 +6938,12 @@ async fn orchestrate_fire_suppression_still_counts_ignored_review() {
         .kind = crate::orchestrate::WhipKind::LegacyNudge;
     let _ = drain_claude_pane_task_events(&mut app_event_rx);
     app.handle_orchestrate_command("fire assignment-1".to_string());
-    app.note_whip_target_idle_with_fire_control(&holder_node_id, Some("no dispatch"), false, true);
+    app.note_whip_target_idle_with_fire_control(
+        &holder_node_id,
+        Some("no dispatch"),
+        /*allow_fire*/ false,
+        /*turn_succeeded*/ true,
+    );
 
     let submitted_tasks = drain_claude_pane_task_events(&mut app_event_rx);
     assert_eq!(
@@ -6469,6 +7171,694 @@ async fn claude_adapter_emits_direct_records_without_prose_batching() {
     assert!(!tasks[1].1.contains("Multiple spawn dispatches"));
 }
 
+/// #507: turning the kill switch on interrupts every running Claude pane
+/// turn (its cancel token ends the Claude process), and the pane says why.
+#[tokio::test]
+async fn issue_507_kill_switch_interrupts_running_claude_panes() {
+    let (mut app, _app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let running = app
+        .claude_panes
+        .prepare_turn(&troll_pane_id, "long task".to_string(), &codex_home)
+        .expect("prepare running Troll pane");
+    assert!(app.claude_panes.claude_pane_is_running(&troll_pane_id));
+    assert!(!app.claude_panes.claude_pane_is_running(&orc_pane_id));
+
+    app.stop_claude_panes_for_kill_switch();
+
+    assert!(running.cancel_token.is_cancelled());
+    let said = |pane_id: &str| {
+        app.claude_pane_transcript_cells
+            .get(pane_id)
+            .into_iter()
+            .flatten()
+            .any(|cell| {
+                lines_to_single_string(&cell.display_lines(/*width*/ 400))
+                    .contains("security kill switch was turned on")
+            })
+    };
+    assert!(said(&troll_pane_id));
+    assert!(!said(&orc_pane_id), "an idle pane has nothing to stop");
+}
+
+/// #507 (Travis, 2026-10-12): a kill switch another Corbanu Terminal process
+/// on this home turns on stops this app's running Claude panes too and says
+/// where it came from; the same change reported again (by `/security` here
+/// or the watch) is handled once; turning it off there is announced and
+/// starts nothing here.
+#[tokio::test]
+async fn issue_507_kill_switch_from_another_process_stops_claude_panes_once() {
+    let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let rendered = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>| {
+        let mut text = String::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                text.push_str(&lines_to_single_string(&cell.display_lines(/*width*/ 400)));
+            }
+        }
+        text
+    };
+    let _ = rendered(&mut app_event_rx);
+    let running = app
+        .claude_panes
+        .prepare_turn(&troll_pane_id, "long task".to_string(), &codex_home)
+        .expect("prepare running Troll pane");
+    assert!(!app.kill_switch_known_on);
+
+    app.on_kill_switch_changed(/*on*/ true, /*elsewhere*/ true);
+    assert!(running.cancel_token.is_cancelled());
+    assert!(app.kill_switch_known_on);
+    let text = rendered(&mut app_event_rx);
+    assert!(
+        text.contains("turned on in another Corbanu Terminal on this home"),
+        "{text}"
+    );
+
+    // Reported again: nothing more is stopped or said.
+    let later = app
+        .claude_panes
+        .prepare_turn(&orc_pane_id, "later".to_string(), &codex_home)
+        .expect("prepare a later turn");
+    app.on_kill_switch_changed(/*on*/ true, /*elsewhere*/ false);
+    app.on_kill_switch_changed(/*on*/ true, /*elsewhere*/ true);
+    assert!(!later.cancel_token.is_cancelled());
+    assert!(!rendered(&mut app_event_rx).contains("another Corbanu Terminal"));
+
+    // Turned off elsewhere: nothing starts here by itself (Travis,
+    // 2026-10-12); a task held for a Claude pane stays held.
+    app.kill_switch_held_claude_tasks
+        .push((troll_pane_id.clone(), "held task".to_string()));
+    app.on_kill_switch_changed(/*on*/ false, /*elsewhere*/ true);
+    assert!(!app.kill_switch_known_on);
+    let text = rendered(&mut app_event_rx);
+    assert!(
+        text.contains("turned off in another Corbanu Terminal on this home"),
+        "{text}"
+    );
+    assert!(text.contains("Nothing restarts by itself here"), "{text}");
+    assert_eq!(
+        app.kill_switch_held_claude_tasks,
+        vec![(troll_pane_id.clone(), "held task".to_string())]
+    );
+    // It goes with that pane's next turn (#602's delivery, tested there).
+}
+
+/// #842 (Travis, 2026-10-15): Moderate confirmed in another Corbanu Terminal
+/// on this home (Core already raised this process's sessions) is announced
+/// here, saying what applies now and what waits for the restart.
+#[tokio::test]
+async fn issue_842_moderate_from_another_terminal_is_announced() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    app.on_level_raised_elsewhere(crate::legacy_core::security_revocation::SecurityLevel::Moderate);
+    let mut text = String::new();
+    while let Ok(event) = app_event_rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            text.push_str(&lines_to_single_string(&cell.display_lines(/*width*/ 400)));
+        }
+    }
+    for expected in [
+        "Moderate was confirmed in another Corbanu Terminal on this home",
+        "Core's Moderate rules apply here now",
+        "shown as Permissive until you restart",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+}
+
+/// #919 (Travis, 2026-10-16, D20): Aggressive confirmed in another Corbanu
+/// Terminal on this home (Core already raised this process's sessions and
+/// required approval for every command) is announced here, saying what
+/// applies now and what waits for the restart; the protections claimed
+/// follow `source_envelopes`, and the level shown is this session's own.
+#[tokio::test]
+async fn issue_919_aggressive_from_another_terminal_is_announced() {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    while app_event_rx.try_recv().is_ok() {}
+    app.on_level_raised_elsewhere(
+        crate::legacy_core::security_revocation::SecurityLevel::Aggressive,
+    );
+    let mut text = String::new();
+    while let Ok(event) = app_event_rx.try_recv() {
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            text.push_str(&lines_to_single_string(&cell.display_lines(/*width*/ 1000)));
+        }
+    }
+    for expected in [
+        "Aggressive was confirmed in another Corbanu Terminal on this home",
+        "Core's Aggressive protections apply here now: agent commands cannot run `corbanu vault …`",
+        "From each pane's next turn you approve every command that is not known read-only",
+        "Grants and \"for session\" approvals here ended",
+        "The rest of Aggressive starts when you restart Corbanu Terminal: its sandbox",
+        "this session is shown as Permissive",
+    ] {
+        assert!(text.contains(expected), "{expected}: {text}");
+    }
+    // A lower level is never announced as a raise.
+    app.on_level_raised_elsewhere(
+        crate::legacy_core::security_revocation::SecurityLevel::Permissive,
+    );
+    assert!(app_event_rx.try_recv().is_err());
+}
+
+/// #919: the notice claims the protected-path denials only with the
+/// untrusted-content labels on, and names the level this session is shown
+/// as until the restart.
+#[test]
+fn issue_919_aggressive_notice_follows_labels_and_the_shown_level() {
+    use crate::claude_panes::app_integration::aggressive_confirmed_elsewhere;
+    use crate::security::level::ChosenLevel;
+    let labelled =
+        aggressive_confirmed_elsewhere(/*untrusted_content*/ true, ChosenLevel::Moderate);
+    assert!(labelled.contains("protected paths"), "{labelled}");
+    assert!(labelled.contains("shown as Moderate"), "{labelled}");
+    // Moderate's credential broker already holds the model keys.
+    assert!(!labelled.contains("credential broker"), "{labelled}");
+    let vault_only =
+        aggressive_confirmed_elsewhere(/*untrusted_content*/ false, ChosenLevel::Permissive);
+    assert!(!vault_only.contains("protected paths"), "{vault_only}");
+    assert!(
+        vault_only.contains("model keys held by the credential broker, and the child-agent rules"),
+        "{vault_only}"
+    );
+    assert!(
+        vault_only.contains("in every Corbanu pane and child agent of this Corbanu Terminal"),
+        "{vault_only}"
+    );
+}
+
+fn interrupted_claude_turn(app: &App) -> crate::claude_panes::ClaudePaneTurnOutput {
+    crate::claude_panes::ClaudePaneTurnOutput {
+        text: String::new(),
+        status: crate::claude_panes::ClaudePaneTurnStatus::Interrupted,
+        session_id: None,
+        usage_summary: None,
+        turn_usage_summary: None,
+        usage_status: crate::claude_panes::ClaudePaneUsageStatus::Missing,
+        artifact_path: app.config.cwd.join("turn-0001.jsonl").to_path_buf(),
+        audit_path: app.config.cwd.join("turn-0001.audit.json").to_path_buf(),
+        duration_ms: 1,
+        terminal_reason: Some("interrupted".to_string()),
+        error_summary: Some("Claude pane turn interrupted by user.".to_string()),
+        tool_names: Vec::new(),
+        tool_events: Vec::new(),
+        reasoning_events: Vec::new(),
+        command_mode: crate::claude_panes::ClaudeCommandMode::NewSession,
+        direct_accounting: None,
+    }
+}
+
+/// #554: a Claude turn the kill switch stopped ends with the line Codex
+/// panes show, not "interrupted by user"; a person's own interrupt keeps it.
+#[tokio::test]
+async fn issue_554_kill_switch_stop_does_not_say_interrupted_by_user() {
+    let (mut app, _app_event_rx, troll_pane_id, _orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let transcript = |app: &App, pane_id: &str| {
+        app.claude_pane_transcript_cells
+            .get(pane_id)
+            .into_iter()
+            .flatten()
+            .map(|cell| lines_to_single_string(&cell.display_lines(/*width*/ 400)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let running = app
+        .claude_panes
+        .prepare_turn(&troll_pane_id, "long task".to_string(), &codex_home)
+        .expect("prepare running Troll pane");
+    app.stop_claude_panes_for_kill_switch();
+    drop(running);
+    let output = interrupted_claude_turn(&app);
+    app.on_claude_pane_turn_finished(troll_pane_id.clone(), Ok(output));
+    let said = transcript(&app, &troll_pane_id);
+    assert!(
+        said.contains("security kill switch was turned on"),
+        "{said}"
+    );
+    assert!(
+        said.contains(crate::chatwidget::KILL_SWITCH_TURN_STOPPED),
+        "{said}"
+    );
+    assert!(!said.contains("interrupted by user"), "{said}");
+
+    // The next turn, interrupted by the person, says so as before.
+    let running = app
+        .claude_panes
+        .prepare_turn(&troll_pane_id, "another task".to_string(), &codex_home)
+        .expect("prepare the next turn");
+    app.claude_panes
+        .interrupt_turn(&troll_pane_id)
+        .expect("interrupt");
+    drop(running);
+    let output = interrupted_claude_turn(&app);
+    app.on_claude_pane_turn_finished(troll_pane_id.clone(), Ok(output));
+    let said = transcript(&app, &troll_pane_id);
+    assert!(said.contains("interrupted by user"), "{said}");
+}
+
+/// #507: the person confirms `choice` in `/security`.
+fn issue_507_switch(app: &App, choice: crate::legacy_core::security_revocation::HumanRevocation) {
+    use crate::legacy_core::security_level_change::LevelBasis;
+    use crate::legacy_core::security_level_change::SecurityLevel;
+    use crate::legacy_core::security_revocation::commit_human_revocation;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let basis = LevelBasis::read(&codex_home, SecurityLevel::Permissive, /*thread*/ None);
+    commit_human_revocation(
+        &codex_home,
+        SecurityLevel::Permissive,
+        /*thread*/ None,
+        &basis,
+        choice,
+        /*now_unix_seconds*/ 1_000,
+    )
+    .expect("commit");
+}
+
+fn issue_507_transcript(app: &App, pane_id: &str) -> String {
+    app.claude_pane_transcript_cells
+        .get(pane_id)
+        .into_iter()
+        .flatten()
+        .map(|cell| lines_to_single_string(&cell.display_lines(/*width*/ 400)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// #507 (owner decision 2026-10-12): tasks other agents send to Claude panes
+/// while the kill switch is on wait (one per pane, the newest; the older one
+/// is recorded as superseded). Turning the switch off starts nothing, and a
+/// pane's turn ending does not send its waiting task either.
+#[tokio::test]
+async fn issue_507_switch_off_starts_no_claude_pane_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, _app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let held = |app: &App| app.kill_switch_held_claude_tasks.clone();
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+
+    for tick in 1..=3 {
+        app.submit_claude_pane_task(troll_pane_id.clone(), format!("assignment fire {tick}"));
+    }
+    app.submit_claude_pane_task(orc_pane_id.clone(), "orc task".to_string());
+    let waiting = vec![
+        (troll_pane_id.clone(), "assignment fire 3".to_string()),
+        (orc_pane_id.clone(), "orc task".to_string()),
+    ];
+    assert_eq!(held(&app), waiting);
+    assert!(app.claude_panes.prepared_prompts.is_empty());
+
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    app.on_kill_switch_turned_off();
+    assert!(!app.claude_panes.claude_pane_is_running(&troll_pane_id));
+    assert!(!app.claude_panes.claude_pane_is_running(&orc_pane_id));
+    assert!(
+        app.claude_panes.prepared_prompts.is_empty(),
+        "turning the switch off starts no turn"
+    );
+    assert_eq!(held(&app), waiting, "the tasks keep waiting");
+
+    // A turn that ends in the pane (one its operator started) does not send
+    // the waiting task either.
+    drop(
+        app.claude_panes
+            .prepare_turn(&troll_pane_id, "busy".to_string(), &codex_home)
+            .expect("a running turn"),
+    );
+    app.claude_panes
+        .interrupt_turn(&troll_pane_id)
+        .expect("stop the busy turn");
+    app.on_claude_pane_turn_finished(troll_pane_id.clone(), Err("interrupted".to_string()));
+    assert!(!app.claude_panes.claude_pane_is_running(&troll_pane_id));
+    assert_eq!(
+        app.claude_panes.prepared_prompts.len(),
+        1,
+        "only the busy turn"
+    );
+    assert_eq!(held(&app), waiting);
+}
+
+/// #507: after the switch is off, a Claude pane's waiting task goes with its
+/// next turn: the one a person types (the waiting task first), or one new work
+/// starts. Either way it is sent once, and the pane says so.
+#[tokio::test]
+async fn issue_507_waiting_claude_task_goes_with_the_next_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let typed_pane = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            &codex_home,
+            /*spawn_role*/ None,
+            /*spawn_nickname*/ None,
+        )
+        .expect("create user pane");
+    let worker_pane = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            &codex_home,
+            Some(crate::spawn_orchestration::SpawnRole::Orc),
+            Some("Snaga".to_string()),
+        )
+        .expect("create worker pane");
+    assert_eq!(
+        app.claude_panes.active_claude_pane_id(),
+        Some(typed_pane.as_str())
+    );
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task(typed_pane.clone(), "pf507 waiting task A".to_string());
+    app.submit_claude_pane_task(worker_pane.clone(), "pf507 waiting task B".to_string());
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    app.on_kill_switch_turned_off();
+    assert!(app.claude_panes.prepared_prompts.is_empty());
+
+    // A person types in the active pane.
+    assert!(app.try_submit_active_claude_pane_op(&claude_pane_text_op("pf507 typed message")));
+    let prompts = app.claude_panes.prepared_prompts.clone();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].0, typed_pane);
+    let prompt = &prompts[0].1;
+    let task = prompt
+        .find("pf507 waiting task A")
+        .expect("waiting task sent");
+    let typed = prompt.find("pf507 typed message").expect("typed text sent");
+    assert!(task < typed, "the waiting task arrived first: {prompt}");
+    assert!(!prompt.contains("pf507 waiting task B"));
+
+    // New work for the other pane: its waiting task goes with it.
+    app.submit_claude_pane_task(worker_pane.clone(), "pf507 new task".to_string());
+    let prompts = app.claude_panes.prepared_prompts.clone();
+    assert_eq!(prompts.len(), 2);
+    assert_eq!(prompts[1].0, worker_pane);
+    assert!(prompts[1].1.contains("pf507 waiting task B"));
+    assert!(prompts[1].1.contains("pf507 new task"));
+    assert!(
+        issue_507_transcript(&app, &worker_pane).contains("Sent with this turn"),
+        "{}",
+        issue_507_transcript(&app, &worker_pane)
+    );
+    assert!(app.kill_switch_held_claude_tasks.is_empty(), "sent once");
+}
+
+/// #507: a waiting task stays waiting when the next turn cannot start (the
+/// pane is busy), and goes with the first turn that does.
+#[tokio::test]
+async fn issue_507_waiting_claude_task_survives_a_refused_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, _app_event_rx, _troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task(orc_pane_id.clone(), "pf507 superseded".to_string());
+    app.submit_claude_pane_task(orc_pane_id.clone(), "pf507 waiting".to_string());
+    assert_eq!(
+        app.kill_switch_held_claude_tasks,
+        vec![(orc_pane_id.clone(), "pf507 waiting".to_string())],
+        "the newest waits; the older one was reported superseded"
+    );
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    let busy = app
+        .claude_panes
+        .prepare_turn(&orc_pane_id, "busy".to_string(), &codex_home)
+        .expect("a running turn");
+    app.submit_claude_pane_task(orc_pane_id.clone(), "pf507 refused".to_string());
+    assert_eq!(
+        app.claude_panes.prepared_prompts.len(),
+        1,
+        "only the busy turn"
+    );
+    assert_eq!(
+        app.kill_switch_held_claude_tasks,
+        vec![(orc_pane_id.clone(), "pf507 waiting".to_string())]
+    );
+    drop(busy);
+    app.claude_panes
+        .interrupt_turn(&orc_pane_id)
+        .expect("stop the busy turn");
+    app.on_claude_pane_turn_finished(orc_pane_id.clone(), Err("interrupted".to_string()));
+    app.submit_claude_pane_task(orc_pane_id.clone(), "pf507 next".to_string());
+    assert!(app.kill_switch_held_claude_tasks.is_empty());
+    let prompt = &app.claude_panes.prepared_prompts[1].1;
+    assert!(prompt.contains("pf507 waiting"), "{prompt}");
+    assert!(!prompt.contains("pf507 superseded"), "{prompt}");
+}
+
+/// #507: assignments and whips (timers) do not fire while the kill switch
+/// is on; they are paused, and turning it off does not resume them. A person
+/// resumes them.
+#[tokio::test]
+async fn issue_507_whips_pause_and_stay_paused_after_switch_off() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    write_test_whip(&app, "keep-going", "# whip: keep-going\nContinue the work.");
+    let pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            Some(crate::spawn_orchestration::SpawnRole::Orc),
+            Some("Krimp".to_string()),
+        )
+        .expect("create pane");
+    app.handle_orchestrate_command(format!(
+        "attach {pane_id} keep-going --mode auto --holder none --max 3"
+    ));
+    while app_event_rx.try_recv().is_ok() {}
+
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.sweep_orchestrate_whips();
+    app.note_whip_target_idle_with_fire_control(
+        &crate::spawn_orchestration::pane_node_id(&pane_id),
+        Some("done"),
+        /*allow_fire*/ true,
+        /*turn_succeeded*/ true,
+    );
+    assert!(drain_claude_pane_task_events(&mut app_event_rx).is_empty());
+    assert_eq!(
+        app.orchestrate_whips.get("whip-1").map(|whip| whip.state),
+        Some(crate::orchestrate::WhipState::Paused)
+    );
+
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    app.sweep_orchestrate_whips();
+    assert!(
+        drain_claude_pane_task_events(&mut app_event_rx).is_empty(),
+        "switch-off resumes no whip"
+    );
+
+    app.handle_orchestrate_command("resume whip-1".to_string());
+    app.sweep_orchestrate_whips();
+    let fired = drain_claude_pane_task_events(&mut app_event_rx);
+    assert_eq!(fired.len(), 1, "a person resumed it");
+    assert!(fired[0].1.contains("Continue the work."));
+}
+
+/// #507 review: the switch events themselves (as `/security` sends them):
+/// turning it on pauses armed whips at once, with no sweep in between, so the
+/// first sweep after it is turned off fires nothing; turning it off starts
+/// no turn, task, op or agent message, and the Claude pane's task keeps
+/// waiting.
+#[tokio::test]
+async fn issue_507_switch_events_pause_whips_at_once_and_start_nothing() -> Result<()> {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+    let config = app.chat_widget.config_ref().clone();
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&config)).await?;
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    write_test_whip(&app, "keep-going", "# whip: keep-going\nContinue the work.");
+    let pane_id = app
+        .claude_panes
+        .create_pane_with_role(
+            crate::claude_panes::ClaudeProviderProfileKind::ClaudePlan,
+            app.config.cwd.to_path_buf(),
+            app.config.codex_home.as_ref(),
+            Some(crate::spawn_orchestration::SpawnRole::Orc),
+            Some("Krimp".to_string()),
+        )
+        .expect("create pane");
+    app.handle_orchestrate_command(format!(
+        "attach {pane_id} keep-going --mode auto --holder none --max 3"
+    ));
+    while app_event_rx.try_recv().is_ok() {}
+
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task(pane_id.clone(), "pf507 waiting".to_string());
+    let control =
+        Box::pin(app.handle_event(&mut tui, &mut app_server, AppEvent::KillSwitchTurnedOn)).await?;
+    assert!(matches!(control, AppRunControl::Continue));
+    assert_eq!(
+        app.orchestrate_whips.get("whip-1").map(|whip| whip.state),
+        Some(crate::orchestrate::WhipState::Paused),
+        "paused when the switch went on, not at the next sweep"
+    );
+
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    Box::pin(app.handle_event(&mut tui, &mut app_server, AppEvent::KillSwitchTurnedOff)).await?;
+    app.sweep_orchestrate_whips();
+    while let Ok(event) = app_event_rx.try_recv() {
+        assert!(
+            !matches!(
+                event,
+                AppEvent::CodexOp(_)
+                    | AppEvent::SubmitSpawnAgentTask { .. }
+                    | AppEvent::SubmitSpawnClaudePaneTask { .. }
+                    | AppEvent::SendSpawnAgentMailboxMessage { .. }
+            ),
+            "switch-off sent work"
+        );
+    }
+    assert!(op_rx.try_recv().is_err(), "switch-off submitted an op");
+    assert!(app.claude_panes.prepared_prompts.is_empty());
+    assert_eq!(
+        app.kill_switch_held_claude_tasks,
+        vec![(pane_id, "pf507 waiting".to_string())]
+    );
+    Ok(())
+}
+
+/// #507 review: a Claude turn the kill switch stopped may only finish after
+/// the switch is off; its report reaches the parent but starts no turn there.
+#[tokio::test]
+async fn issue_507_report_of_a_stopped_claude_turn_starts_no_parent_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let codex_home = app.config.codex_home.to_path_buf();
+    let running = app
+        .claude_panes
+        .prepare_turn(&orc_pane_id, "long task".to_string(), &codex_home)
+        .expect("a running Orc turn");
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.stop_claude_panes_for_kill_switch();
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    drop(running);
+    let output = interrupted_claude_turn(&app);
+    app.on_claude_pane_turn_finished(orc_pane_id.clone(), Ok(output));
+
+    assert!(
+        drain_claude_pane_task_events(&mut app_event_rx).is_empty(),
+        "no auto-processing turn for the parent"
+    );
+    assert!(!app.claude_panes.claude_pane_is_running(&troll_pane_id));
+    let troll_node = crate::spawn_orchestration::pane_node_id(&troll_pane_id);
+    assert_eq!(
+        app.spawn_parent_reports_by_node
+            .get(&troll_node)
+            .map(std::collections::VecDeque::len),
+        Some(1),
+        "the parent still has the report"
+    );
+}
+
+/// #507 review: a removed Claude pane's waiting task is dropped (its sender
+/// is told), and the switch-off notice does not name it.
+#[tokio::test]
+async fn issue_507_removed_pane_drops_its_waiting_task() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, _app_event_rx, _troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task(orc_pane_id.clone(), "pf507 waiting".to_string());
+    app.claude_panes
+        .remove_managed_crew_pane(&orc_pane_id, app.config.codex_home.as_ref())
+        .expect("remove the pane");
+    app.drop_held_claude_task_of_removed_pane(&orc_pane_id);
+    assert!(app.kill_switch_held_claude_tasks.is_empty());
+}
+
+/// #507 review: while the switch is on, a child report starts no turn in a
+/// Claude parent either (it would only wait, and push out the parent's real
+/// waiting task); the report is kept for the parent's next turn.
+#[tokio::test]
+async fn issue_507_child_report_while_on_starts_no_parent_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task(troll_pane_id.clone(), "pf507 real task".to_string());
+    app.record_spawn_child_report_for_claude_pane(&orc_pane_id, "done", Some("result text"));
+    assert!(drain_claude_pane_task_events(&mut app_event_rx).is_empty());
+    assert_eq!(
+        app.kill_switch_held_claude_tasks,
+        vec![(troll_pane_id.clone(), "pf507 real task".to_string())],
+        "the real task still waits"
+    );
+    let troll_node = crate::spawn_orchestration::pane_node_id(&troll_pane_id);
+    assert_eq!(
+        app.spawn_parent_reports_by_node
+            .get(&troll_node)
+            .map(std::collections::VecDeque::len),
+        Some(1)
+    );
+}
+
+/// #507 review: the report of a stopped Claude turn reaches a native parent
+/// as mail that does not ask for a turn; an ordinary report still does.
+#[tokio::test]
+async fn issue_507_stopped_claude_report_to_a_native_parent_asks_for_no_turn() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, mut app_event_rx, _troll_pane_id, orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    let parent_thread =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000508").expect("thread id");
+    app.spawn_parent_by_node.insert(
+        crate::spawn_orchestration::pane_node_id(&orc_pane_id),
+        crate::spawn_orchestration::thread_node_id(parent_thread),
+    );
+    let codex_home = app.config.codex_home.to_path_buf();
+    let mail = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::SendSpawnAgentMailboxMessage { params } => Some(params.trigger_turn),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let running = app
+        .claude_panes
+        .prepare_turn(&orc_pane_id, "long task".to_string(), &codex_home)
+        .expect("a running Orc turn");
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.stop_claude_panes_for_kill_switch();
+    issue_507_switch(&app, HumanRevocation::KillSwitchOff);
+    drop(running);
+    let output = interrupted_claude_turn(&app);
+    app.on_claude_pane_turn_finished(orc_pane_id.clone(), Ok(output));
+    assert_eq!(mail(&mut app_event_rx), vec![false]);
+
+    app.record_spawn_child_report_for_claude_pane(&orc_pane_id, "done", Some("result text"));
+    assert_eq!(
+        mail(&mut app_event_rx),
+        vec![true],
+        "control: a normal report"
+    );
+}
+
+/// #507 review: a task for a Claude pane that does not exist is refused, not
+/// held, while the switch is on.
+#[tokio::test]
+async fn issue_507_no_waiting_task_for_a_missing_claude_pane() {
+    use crate::legacy_core::security_revocation::HumanRevocation;
+    let (mut app, _app_event_rx, _troll_pane_id, _orc_pane_id) =
+        make_child_report_auto_claude_pane_app().await;
+    issue_507_switch(&app, HumanRevocation::KillSwitchOn);
+    app.submit_claude_pane_task("claude-missing".to_string(), "pf507 task".to_string());
+    assert!(app.kill_switch_held_claude_tasks.is_empty());
+}
+
 #[tokio::test]
 async fn child_report_auto_starts_turn_on_idle_claude_pane_parent() {
     let (mut app, mut app_event_rx, troll_pane_id, orc_pane_id) =
@@ -6680,7 +8070,7 @@ async fn native_nazgul_sees_live_troll_and_orc_tree_even_if_spawned_before_them(
     let context = app
         .spawn_context_for_thread(nazgul_thread_id)
         .expect("Nazgul thread should receive live spawn context");
-    assert!(context.contains("You are the PFTerminal Nazgul/root pane"));
+    assert!(context.contains("You are the Corbanu Terminal Nazgul/root pane"));
     assert!(
         context.contains("Euclid [nazgul]"),
         "context uses the Nazgul picker label, got: {context}"
@@ -6962,6 +8352,7 @@ async fn claude_orc_completion_uses_core_edge_message_not_native_prompt_reinject
             status: crate::claude_panes::ClaudePaneTurnStatus::Success,
             session_id: Some("claude-session".to_string()),
             usage_summary: None,
+            turn_usage_summary: None,
             usage_status: crate::claude_panes::ClaudePaneUsageStatus::Missing,
             artifact_path: app.config.cwd.join("turn-0001.jsonl").to_path_buf(),
             audit_path: app.config.cwd.join("turn-0001.audit.json").to_path_buf(),
@@ -6972,6 +8363,7 @@ async fn claude_orc_completion_uses_core_edge_message_not_native_prompt_reinject
             tool_events: Vec::new(),
             reasoning_events: Vec::new(),
             command_mode: crate::claude_panes::ClaudeCommandMode::NewSession,
+            direct_accounting: None,
         }),
     );
 
@@ -6979,7 +8371,7 @@ async fn claude_orc_completion_uses_core_edge_message_not_native_prompt_reinject
         .spawn_context_for_thread(troll_thread_id)
         .expect("Troll should receive live lifecycle context");
     assert!(!context.contains("Recent child reports delivered to this pane:"));
-    assert!(context.contains("Claude Code Snaga [orc] - Opus 5 Claude Plan"));
+    assert!(context.contains("Claude Code Snaga [orc] - Opus 5.5 Claude Plan"));
     assert!(context.contains("status=idle"));
     assert!(!context.contains("result=Finished the latency benchmark table and saved the output."));
 }
@@ -7105,7 +8497,7 @@ async fn native_spawn_registration_persists_started_session_model_provider_pair(
         Some("Burzum".to_string()),
         "troll",
         started,
-        true,
+        /*persist_layout*/ true,
     )
     .await;
 
@@ -7157,10 +8549,10 @@ async fn codex_user_pane_remains_interactive_after_liveness_refresh_impl() -> Re
         .session
         .rollout_path
         .as_ref()
-        .expect("PFTerminal user pane should have a local rollout path");
+        .expect("user-pane rollout path");
     assert!(
         pane_rollout_path.is_file(),
-        "a no-task operator pane must be durable immediately after thread/start"
+        "user-pane rollout must be durable"
     );
     let pane_thread_id = started.session.thread_id;
     app.register_codex_user_pane(
@@ -7177,7 +8569,7 @@ async fn codex_user_pane_remains_interactive_after_liveness_refresh_impl() -> Re
     assert_eq!(
         persisted_pane.name.as_deref(),
         Some("Interactive"),
-        "operator-pane creation must persist its friendly name through the app-server authority"
+        "user-pane name must persist"
     );
 
     let mut tui = crate::tui::test_support::make_test_tui()?;
@@ -7268,7 +8660,7 @@ async fn human_addressable_spawn_pane_remains_interactive_after_liveness_refresh
         Some("Angmar".to_string()),
         "nazgul",
         started,
-        true,
+        /*persist_layout*/ true,
     )
     .await;
 
@@ -7471,13 +8863,21 @@ async fn standard_crew_quick_start_uses_the_expected_role_picker_label() {
     // 3 Orcs), without restoring the old demo-task behavior.
     let mut app = make_test_app().await;
     app.open_spawn_role_picker();
+    let popup = render_bottom_popup(&app.chat_widget, /*width*/ 120);
+    assert_app_snapshot!("spawn_role_picker_with_corbanu_api_crew", popup);
+    assert!(
+        popup.contains("Create standard crew: Nazgul + Troll + 3 Orcs")
+            && popup
+                .contains("Create Corbanu API crew: Kimi K3 Nazgul + Luna Troll + 3 Flash Orcs"),
+        "both built-in crew choices must remain visible:\n{popup}"
+    );
     // The picker is rendered into the chat widget; assert the role-picker path doesn't error and
     // the standard crew constants resolve to the intended models/providers.
     assert_eq!(App::STANDARD_NAZGUL_MODEL, CLAUDE_FABLE_5_PLAN_MODEL);
     assert_eq!(App::STANDARD_TROLL_MODEL, "gpt-5.6-sol");
     assert_eq!(App::STANDARD_ORC_MODEL, "gpt-5.6-luna");
     assert_eq!(App::STANDARD_ORC_2_MODEL, "gpt-5.6-terra");
-    assert_eq!(App::STANDARD_ORC_3_MODEL, "x-ai/grok-4.5");
+    assert_eq!(App::STANDARD_ORC_3_MODEL, "x-ai/grok-4.7");
     let orc_runtimes = App::standard_orc_runtimes();
     assert_eq!(
         orc_runtimes
@@ -7493,7 +8893,7 @@ async fn standard_crew_quick_start_uses_the_expected_role_picker_label() {
         vec![
             ("gpt-5.6-luna", OPENAI_PROVIDER_ID, Some("xhigh")),
             ("gpt-5.6-terra", OPENAI_PROVIDER_ID, Some("xhigh")),
-            ("x-ai/grok-4.5", OPENROUTER_PROVIDER_ID, None),
+            ("x-ai/grok-4.7", OPENROUTER_PROVIDER_ID, None),
         ]
     );
     // Provider resolution for each crew model.
@@ -7600,23 +9000,33 @@ async fn idle_claude_pane_selection_clears_previous_live_status_panel() -> Resul
 #[tokio::test]
 async fn native_spawn_auth_guard_blocks_unauthenticated_openai() {
     let app = make_test_app().await;
+    install_runtime_provider_policy(
+        &app,
+        crate::provider_status_host::ProviderAccountMetadata::default(),
+    );
 
     let error = app
         .native_spawn_provider_auth_error(Some(OPENAI_PROVIDER_ID))
         .expect("OpenAI without auth should be rejected");
 
-    assert!(error.contains("OpenAI"));
-    assert!(error.contains("not configured"));
+    assert!(error.contains("inactive or unavailable"));
 }
 
 #[tokio::test]
 async fn native_spawn_auth_guard_accepts_openai_api_key_auth() {
     let mut app = make_test_app().await;
     app.chat_widget.update_account_state(
-        Some(StatusAccountDisplay::ApiKey),
+        Some(StatusAccountDisplay::ApiKey { env_var: None }),
         /*plan_type*/ None,
         /*has_chatgpt_account*/ false,
         /*has_codex_backend_auth*/ false,
+    );
+    install_runtime_provider_policy(
+        &app,
+        crate::provider_status_host::ProviderAccountMetadata {
+            openai: codex_login::OpenAiAuthMetadata::ApiKey,
+            ..Default::default()
+        },
     );
 
     assert_eq!(
@@ -7685,16 +9095,24 @@ async fn spawn_provider_allowlist_unset_stays_unrestricted() {
 #[tokio::test]
 async fn native_spawn_auth_guard_accepts_provider_key_storage() -> Result<()> {
     let app = make_test_app().await;
+    install_runtime_provider_policy(
+        &app,
+        crate::provider_status_host::ProviderAccountMetadata::default(),
+    );
 
     let missing = app
         .native_spawn_provider_auth_error(Some(VERCEL_PROVIDER_ID))
         .expect("Vercel without key should be rejected");
-    assert!(missing.contains(VERCEL_API_KEY_ENV_VAR));
+    assert!(missing.contains("inactive or unavailable"));
 
     std::fs::write(
         app.config.codex_home.join("provider_auth.json"),
         format!(r#"{{"api_keys":{{"{VERCEL_API_KEY_ENV_VAR}":"test-key"}}}}"#),
     )?;
+    install_runtime_provider_policy(
+        &app,
+        crate::provider_status_host::ProviderAccountMetadata::default(),
+    );
 
     assert!(
         app.native_spawn_provider_auth_error(Some(VERCEL_PROVIDER_ID))
@@ -7752,9 +9170,127 @@ async fn native_spawn_auth_guard_uses_selected_provider_after_onboarding() -> Re
         app.config.codex_home.join("provider_auth.json"),
         format!(r#"{{"api_keys":{{"{OPENROUTER_API_KEY_ENV_VAR}":"test-key"}}}}"#),
     )?;
+    install_runtime_provider_policy(
+        &app,
+        crate::provider_status_host::ProviderAccountMetadata::default(),
+    );
 
-    assert!(app.native_spawn_provider_auth_error(None).is_none());
+    assert!(
+        app.native_spawn_provider_auth_error(/*provider_id*/ None)
+            .is_none()
+    );
     Ok(())
+}
+
+#[test]
+fn guarded_model_selection_rejects_inactive_provider() -> Result<()> {
+    std::thread::Builder::new()
+        .name("guarded-model-selection".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(async {
+                    let mut app = Box::pin(make_test_app()).await;
+                    std::fs::write(
+                        app.config.codex_home.join("provider_auth.json"),
+                        format!(r#"{{"api_keys":{{"{VERCEL_API_KEY_ENV_VAR}":"test-key"}}}}"#),
+                    )?;
+                    let host = crate::provider_status_host::ProviderStatusHost::from_config(
+                        &app.config,
+                        crate::provider_status_host::ProviderAccountMetadata::default(),
+                    );
+                    host.persist_policy(
+                        VERCEL_PROVIDER_ID,
+                        codex_provider_auth::ProviderActivationPolicy::Inactive,
+                    )?;
+                    app.model_catalog.set_provider_policy(
+                        crate::chatwidget::provider_model_policy::ProviderModelPolicy::new(
+                            host,
+                            codex_provider_auth::ProviderRuntimeAuthorizations::default(),
+                        ),
+                    );
+                    let original_provider = app.config.model_provider_id.clone();
+                    let original_model = app.chat_widget.current_model().to_string();
+                    let mut app_server =
+                        Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+                    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+                    let control = Box::pin(app.handle_event(
+                        &mut tui,
+                        &mut app_server,
+                        AppEvent::UpdateModelSelection {
+                            model: VERCEL_GLM_5_2_FAST_MODEL.to_string(),
+                            provider: Some(VERCEL_PROVIDER_ID.to_string()),
+                        },
+                    ))
+                    .await?;
+
+                    assert!(matches!(control, AppRunControl::Continue));
+                    assert_eq!(app.config.model_provider_id, original_provider);
+                    assert_eq!(app.chat_widget.current_model(), original_model);
+                    app_server.shutdown().await?;
+                    Ok(())
+                })
+        })?
+        .join()
+        .map_err(|_| color_eyre::eyre::eyre!("guarded model selection thread panicked"))?
+}
+
+fn install_runtime_provider_policy(
+    app: &App,
+    account: crate::provider_status_host::ProviderAccountMetadata,
+) {
+    let host = crate::provider_status_host::ProviderStatusHost::from_config(&app.config, account);
+    app.model_catalog.set_provider_policy(
+        crate::chatwidget::provider_model_policy::ProviderModelPolicy::new(
+            host,
+            codex_provider_auth::ProviderRuntimeAuthorizations::default(),
+        ),
+    );
+}
+
+#[tokio::test]
+async fn stored_corbanu_key_can_refresh_the_current_runtime_policy_in_process() {
+    let app = make_test_app().await;
+    install_runtime_provider_policy(
+        &app,
+        crate::provider_status_host::ProviderAccountMetadata::default(),
+    );
+    let policy = app
+        .model_catalog
+        .provider_policy()
+        .expect("test app should install a provider policy");
+    let host = policy.host();
+    codex_login::login_with_provider_api_key(
+        &app.config.codex_home,
+        codex_model_provider_info::PFTERMINAL_PLAN_API_KEY_ENV_VAR,
+        "corbanu-refresh-test-key",
+        app.config.cli_auth_credentials_store_mode,
+        app.config.auth_keyring_backend_kind(),
+    )
+    .expect("store Corbanu API key");
+    assert!(host.activate(codex_model_provider_info::CORBANU_PLAN_PROVIDER_ID));
+    app.model_catalog.refresh_provider_policy();
+
+    assert!(app.model_catalog.provider_is_selectable(
+        codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID,
+        "corbanu/glm-5.3-flash",
+    ));
+
+    assert!(
+        codex_login::delete_provider_api_key(
+            &app.config.codex_home,
+            codex_model_provider_info::PFTERMINAL_PLAN_API_KEY_ENV_VAR,
+        )
+        .expect("delete Corbanu API key")
+    );
+    app.model_catalog.refresh_provider_policy();
+    assert!(!app.model_catalog.provider_is_selectable(
+        codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID,
+        "corbanu/glm-5.3-flash",
+    ));
 }
 
 #[tokio::test]
@@ -8713,6 +10249,7 @@ async fn reset_memories_clears_local_memory_directories() -> Result<()> {
 #[tokio::test]
 async fn apply_permission_profile_selection_preserves_loader_overrides() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let mut app_server = start_config_write_test_app_server(&app).await?;
     let codex_home = tempdir()?;
     let selected_config = codex_home.path().join("work.config.toml");
     std::fs::write(
@@ -8730,12 +10267,15 @@ default_permissions = "locked-down"
     app.harness_overrides.permission_profile = Some(PermissionProfile::workspace_write());
 
     assert!(
-        app.apply_permission_profile_selection(PermissionProfileSelection {
-            profile_id: "locked-down".to_string(),
-            approval_policy: None,
-            approvals_reviewer: None,
-            display_label: "locked-down".to_string(),
-        })
+        app.apply_permission_profile_selection(
+            &mut app_server,
+            PermissionProfileSelection {
+                profile_id: "locked-down".to_string(),
+                approval_policy: None,
+                approvals_reviewer: None,
+                display_label: "locked-down".to_string(),
+            }
+        )
         .await
     );
 
@@ -8760,27 +10300,6 @@ default_permissions = "locked-down"
         app.runtime_permission_profile_override,
         Some(RuntimePermissionProfileOverride::from_config(&app.config))
     );
-    let op = match app_event_rx.try_recv() {
-        Ok(AppEvent::CodexOp(op)) => op,
-        other => panic!("expected CodexOp event, got {other:?}"),
-    };
-    assert_eq!(
-        op,
-        Op::OverrideTurnContext {
-            cwd: None,
-            approval_policy: None,
-            approvals_reviewer: None,
-            permission_profile: Some(app.config.permissions.permission_profile().clone()),
-            active_permission_profile: app.config.permissions.active_permission_profile(),
-            windows_sandbox_level: None,
-            model: None,
-            effort: None,
-            summary: None,
-            service_tier: None,
-            collaboration_mode: None,
-            personality: None,
-        }
-    );
     let cell = match app_event_rx.try_recv() {
         Ok(AppEvent::InsertHistoryCell(cell)) => cell,
         other => panic!("expected InsertHistoryCell event, got {other:?}"),
@@ -8791,7 +10310,8 @@ default_permissions = "locked-down"
         .map(|line| line.to_string())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(rendered.contains("Permissions updated to locked-down"));
+    assert!(rendered.contains("Permissions selected for the new session: locked-down"));
+    app_server.shutdown().await?;
     Ok(())
 }
 
@@ -9797,6 +11317,93 @@ async fn inactive_thread_approval_badge_clears_after_turn_completion_notificatio
         "turn completion should clear inactive-thread approval badge immediately"
     );
 
+    Ok(())
+}
+
+/// #867 (AGG-R14 result 2): when the security kill switch stops a sub-agent the model spawned,
+/// the thread on screen (its parent, waiting for it) names it, and `/agent` lists it as stopped
+/// until its next turn starts. The parent's own stop and a sub-agent's other warnings add nothing.
+#[tokio::test]
+async fn issue_867_kill_switch_names_a_stopped_sub_agent() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let main_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000101").expect("valid thread");
+    let agent_thread_id =
+        ThreadId::from_string("01a14100-0000-0000-0000-000000000202").expect("valid thread");
+    app.primary_thread_id = Some(main_thread_id);
+    app.active_thread_id = Some(main_thread_id);
+    app.thread_event_channels
+        .insert(main_thread_id, ThreadEventChannel::new(/*capacity*/ 4));
+    app.thread_event_channels
+        .insert(agent_thread_id, ThreadEventChannel::new(/*capacity*/ 4));
+    app.upsert_agent_picker_thread(
+        main_thread_id,
+        /*agent_nickname*/ None,
+        /*agent_role*/ None,
+        /*is_closed*/ false,
+    );
+    app.upsert_agent_picker_thread(
+        agent_thread_id,
+        Some("Robie".to_string()),
+        Some("explorer".to_string()),
+        /*is_closed*/ false,
+    );
+    let warning = |thread_id: ThreadId, message: &str| {
+        ServerNotification::Warning(codex_app_server_protocol::WarningNotification {
+            thread_id: Some(thread_id.to_string()),
+            message: message.to_string(),
+        })
+    };
+    let stopped = crate::legacy_core::security_revocation::KILL_SWITCH_STOPPED;
+    let mut drain = || {
+        let mut rendered = Vec::new();
+        while let Ok(event) = app_event_rx.try_recv() {
+            if let AppEvent::InsertHistoryCell(cell) = event {
+                rendered.push(lines_to_single_string(&cell.display_lines(/*width*/ 100)));
+            }
+        }
+        rendered
+    };
+    let agent_list = |app: &mut App| {
+        app.chat_widget
+            .show_selection_view(app.agent_picker_selection_view_params(/*selected*/ None));
+        render_bottom_popup(&app.chat_widget, /*width*/ 100)
+    };
+
+    app.enqueue_thread_notification(agent_thread_id, warning(agent_thread_id, "other"))
+        .await?;
+    assert!(!app.agent_navigation.is_kill_switch_stopped(agent_thread_id));
+    let _ = drain();
+
+    app.enqueue_thread_notification(agent_thread_id, warning(agent_thread_id, stopped))
+        .await?;
+    assert!(app.agent_navigation.is_kill_switch_stopped(agent_thread_id));
+    let notice = drain().join("\n");
+    assert_snapshot!(
+        "issue_867_kill_switch_names_a_stopped_sub_agent",
+        format!("{notice}\n\n{}", agent_list(&mut app))
+    );
+
+    // The parent's own stop names nobody (its own notice says it).
+    app.enqueue_thread_notification(main_thread_id, warning(main_thread_id, stopped))
+        .await?;
+    assert!(!app.agent_navigation.is_kill_switch_stopped(main_thread_id));
+    assert!(
+        drain().iter().all(|cell| !cell.contains("also stopped")),
+        "the parent itself is not named"
+    );
+
+    // The sub-agent's next turn clears it.
+    app.enqueue_thread_notification(
+        agent_thread_id,
+        turn_started_notification(agent_thread_id, "turn-next"),
+    )
+    .await?;
+    assert!(!app.agent_navigation.is_kill_switch_stopped(agent_thread_id));
+    assert!(
+        !agent_list(&mut app).contains("kill switch"),
+        "cleared by the next turn"
+    );
     Ok(())
 }
 
@@ -11033,6 +12640,7 @@ async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
+            provider_account: None,
         };
         Arc::new(new_session_info(
             app.chat_widget.config_ref(),
@@ -11138,7 +12746,77 @@ async fn clear_ui_header_shows_fast_status_for_fast_capable_models() {
     assert_app_snapshot!("clear_ui_header_fast_status_fast_capable_models", rendered);
 }
 
-async fn make_test_app() -> App {
+#[tokio::test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "snapshot path rendering differs on Windows"
+)]
+async fn model_change_refreshes_committed_session_header_snapshot() -> Result<()> {
+    let mut app = make_test_app().await;
+    app.config.cwd = test_path_buf("/tmp/project").abs();
+    app.chat_widget.set_model("gpt-before");
+    app.chat_widget
+        .set_reasoning_effort(Some(ReasoningEffortConfig::Medium));
+
+    let mut session = test_thread_session(ThreadId::new(), test_path_buf("/tmp/project"));
+    session.model = "gpt-before".to_string();
+    session.reasoning_effort = Some(ReasoningEffortConfig::Medium);
+    app.transcript_cells = vec![Arc::new(new_session_info(
+        app.chat_widget.config_ref(),
+        app.chat_widget.current_model(),
+        &session,
+        /*is_first_event*/ true,
+        /*tooltip_override*/ None,
+        /*auth_plan*/ None,
+        /*show_fast_status*/ false,
+    )) as Arc<dyn HistoryCell>];
+    app.has_emitted_history_lines = true;
+
+    app.chat_widget.set_model("gpt-after");
+    app.chat_widget
+        .set_reasoning_effort(Some(ReasoningEffortConfig::High));
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    app.refresh_session_header(&mut tui)?;
+
+    let rendered = app.transcript_cells[0]
+        .display_lines(/*width*/ 80)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!rendered.contains("gpt-before"));
+    assert_app_snapshot!("model_change_refreshes_committed_session_header", rendered);
+    Ok(())
+}
+
+#[tokio::test]
+async fn clear_header_remains_source_backed_for_model_refresh() -> Result<()> {
+    let mut app = make_test_app().await;
+    app.config.cwd = test_path_buf("/tmp/project").abs();
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+
+    app.queue_clear_ui_header(&mut tui);
+    assert_eq!(app.transcript_cells.len(), 1);
+    assert!(
+        app.transcript_cells[0]
+            .as_any()
+            .is::<history_cell::SessionHeaderHistoryCell>()
+    );
+
+    app.chat_widget.set_model("gpt-after-clear");
+    app.refresh_session_header(&mut tui)?;
+
+    let rendered = app.transcript_cells[0]
+        .display_lines(/*width*/ 80)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(rendered.contains("gpt-after-clear"));
+    Ok(())
+}
+
+pub(super) async fn make_test_app() -> App {
     let (chat_widget, app_event_tx, _rx, _op_rx) = make_chatwidget_manual_with_sender().await;
     let config = chat_widget.config_ref().clone();
     let file_search = FileSearchManager::new(config.cwd.to_path_buf(), app_event_tx.clone());
@@ -11153,6 +12831,13 @@ async fn make_test_app() -> App {
         workspace_command_runner: None,
         launch_cwd: config.cwd.to_path_buf(),
         config,
+        active_deferred_provider_setup: None,
+        shared_provider_setup_session: None,
+        shared_provider_status_host: None,
+        shared_provider_account_auth_host: None,
+        provider_management_host: None,
+        provider_management_generation: 0,
+        pending_wallet_create_deferred: None,
         state_db: None,
         cli_kv_overrides: Vec::new(),
         harness_overrides: ConfigOverrides::default(),
@@ -11160,6 +12845,7 @@ async fn make_test_app() -> App {
         cloud_config_bundle: CloudConfigBundleLoader::default(),
         runtime_approval_policy_override: None,
         runtime_permission_profile_override: None,
+        pending_permission_confirmation: None,
         file_search,
         transcript_cells: Vec::new(),
         claude_pane_transcript_cells: HashMap::new(),
@@ -11174,6 +12860,7 @@ async fn make_test_app() -> App {
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
         skill_load_warnings: SkillLoadWarningState::default(),
+        skills_refresh_generation: Arc::new(AtomicU64::new(0)),
         backtrack: BacktrackState::default(),
         backtrack_render_pending: false,
         feedback: codex_feedback::CodexFeedback::new(),
@@ -11202,6 +12889,9 @@ async fn make_test_app() -> App {
         spawn_processed_terminal_turns: HashSet::new(),
         spawn_auto_loop_state_by_node: HashMap::new(),
         spawn_operator_input_seen: false,
+        kill_switch_held_claude_tasks: Vec::new(),
+        kill_switch_held_native_tasks: Vec::new(),
+        kill_switch_known_on: false,
         spawn_quarantine_notified_by_node: HashSet::new(),
         spawn_context_left_by_thread: HashMap::new(),
         spawn_last_report_seq_by_node: HashMap::new(),
@@ -11230,7 +12920,7 @@ async fn make_test_app() -> App {
     }
 }
 
-async fn make_test_app_with_channels() -> (
+pub(super) async fn make_test_app_with_channels() -> (
     App,
     tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
     tokio::sync::mpsc::UnboundedReceiver<Op>,
@@ -11250,6 +12940,13 @@ async fn make_test_app_with_channels() -> (
             workspace_command_runner: None,
             launch_cwd: config.cwd.to_path_buf(),
             config,
+            active_deferred_provider_setup: None,
+            shared_provider_setup_session: None,
+            shared_provider_status_host: None,
+            shared_provider_account_auth_host: None,
+            provider_management_host: None,
+            provider_management_generation: 0,
+            pending_wallet_create_deferred: None,
             state_db: None,
             cli_kv_overrides: Vec::new(),
             harness_overrides: ConfigOverrides::default(),
@@ -11257,6 +12954,7 @@ async fn make_test_app_with_channels() -> (
             cloud_config_bundle: CloudConfigBundleLoader::default(),
             runtime_approval_policy_override: None,
             runtime_permission_profile_override: None,
+            pending_permission_confirmation: None,
             file_search,
             transcript_cells: Vec::new(),
             claude_pane_transcript_cells: HashMap::new(),
@@ -11271,6 +12969,7 @@ async fn make_test_app_with_channels() -> (
             status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
             terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
             skill_load_warnings: SkillLoadWarningState::default(),
+            skills_refresh_generation: Arc::new(AtomicU64::new(0)),
             backtrack: BacktrackState::default(),
             backtrack_render_pending: false,
             feedback: codex_feedback::CodexFeedback::new(),
@@ -11299,6 +12998,9 @@ async fn make_test_app_with_channels() -> (
             spawn_processed_terminal_turns: HashSet::new(),
             spawn_auto_loop_state_by_node: HashMap::new(),
             spawn_operator_input_seen: false,
+            kill_switch_held_claude_tasks: Vec::new(),
+            kill_switch_held_native_tasks: Vec::new(),
+            kill_switch_known_on: false,
             spawn_quarantine_notified_by_node: HashSet::new(),
             spawn_context_left_by_thread: HashMap::new(),
             spawn_last_report_seq_by_node: HashMap::new(),
@@ -11550,7 +13252,7 @@ async fn replace_goal_confirmation_snapshot() {
     );
 }
 
-fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState {
+pub(super) fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState {
     ThreadSessionState {
         thread_id,
         forked_from_id: None,
@@ -11572,6 +13274,7 @@ fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState 
         message_history: None,
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
+        provider_account: None,
     }
 }
 
@@ -11983,7 +13686,12 @@ fn token_usage_notification(
     turn_id: &str,
     model_context_window: Option<i64>,
 ) -> ServerNotification {
-    token_usage_notification_with_total(thread_id, turn_id, 10, model_context_window)
+    token_usage_notification_with_total(
+        thread_id,
+        turn_id,
+        /*total_tokens*/ 10,
+        model_context_window,
+    )
 }
 
 fn token_usage_notification_with_total(
@@ -12014,6 +13722,7 @@ fn token_usage_notification_with_total(
             },
             model_context_window,
         },
+        account_usage: None,
     })
 }
 
@@ -12285,7 +13994,7 @@ fn turn_start_capacity_classifier_rejects_message_only_match() {
 }
 
 #[test]
-fn session_start_error_surfaces_archived_guidance_without_rollout_path() {
+fn session_start_failure_surfaces_archived_guidance_without_rollout_path() {
     let thread_id =
         ThreadId::from_string("019e72f4-e09a-70f2-b2c2-a153a57b8cc0").expect("thread id");
     let target_session = SessionTarget {
@@ -12295,19 +14004,90 @@ fn session_start_error_surfaces_archived_guidance_without_rollout_path() {
         thread_id,
     };
     let expected = format!(
-        "session {thread_id} is archived. Run `pfterminal unarchive {thread_id}` to unarchive it first."
+        "session {thread_id} is archived. Run `corbanu unarchive {thread_id}` to unarchive it first."
     );
 
-    for action in ["resume", "fork"] {
+    for (action, server_binary) in [("resume", "codex"), ("fork", "pfterminal")] {
+        let server_message = expected.replace(
+            "Run `corbanu unarchive ",
+            &format!("Run `{server_binary} unarchive "),
+        );
         let err = color_eyre::eyre::eyre!(
-            "thread/{action} failed during TUI bootstrap: thread/{action} failed: {expected} (code -32600)"
+            "thread/{action} failed during TUI bootstrap: thread/{action} failed: {server_message} (code -32600)"
         );
 
-        assert_eq!(
-            session_start_error(action, &target_session, err).to_string(),
-            expected
+        assert_fatal_exit(
+            session_start_failure(action, &target_session, err),
+            &expected,
         );
     }
+}
+
+fn assert_fatal_exit(result: Result<AppExitInfo>, expected: &str) {
+    match result.expect("a refusal ends the launch with a plain message") {
+        AppExitInfo {
+            exit_reason: ExitReason::Fatal(message),
+            thread_id: None,
+            resume_hint: None,
+            ..
+        } => assert_eq!(message, expected),
+        other => panic!("expected a fatal exit, got {other:?}"),
+    }
+}
+
+#[test]
+fn session_start_failure_turns_a_server_refusal_into_a_plain_message() {
+    let thread_id =
+        ThreadId::from_string("019e72f4-e09a-70f2-b2c2-a153a57b8cc0").expect("thread id");
+    let target_session = SessionTarget {
+        path: Some(std::path::PathBuf::from(
+            "/Users/me/.corbanu/sessions/2026/10/13/rollout-01a13453.jsonl",
+        )),
+        thread_id,
+    };
+    let refusal = "failed to load configuration: the thread's recorded account zai:work: named accounts need the `named_accounts` feature (`--enable named_accounts`); `--account zai:default` (on a resume or fork) uses the default credentials instead";
+
+    for action in ["resume", "fork"] {
+        for suffix in ["", r#", data: {"reason":"cloudRequirements"}"#] {
+            let odd = "a message mentioning (code 7) itself";
+            let err = color_eyre::eyre::eyre!(
+                "thread/{action} failed during TUI bootstrap: thread/{action} failed: {odd} (code -32600){suffix}"
+            );
+            assert_fatal_exit(
+                session_start_failure(action, &target_session, err),
+                &format!("Could not {action} session {thread_id}: {odd}"),
+            );
+            let err = color_eyre::eyre::eyre!(
+                "thread/{action} failed during TUI bootstrap: thread/{action} failed: {refusal} (code -32600){suffix}"
+            );
+            assert_fatal_exit(
+                session_start_failure(action, &target_session, err),
+                &format!("Could not {action} session {thread_id}: {refusal}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn session_start_failure_keeps_a_report_for_transport_errors() {
+    let thread_id =
+        ThreadId::from_string("019e72f4-e09a-70f2-b2c2-a153a57b8cc0").expect("thread id");
+    let target_session = SessionTarget {
+        path: None,
+        thread_id,
+    };
+    let err = color_eyre::eyre::eyre!(
+        "thread/resume failed during TUI bootstrap: thread/resume transport error: broken pipe"
+    );
+
+    let report = session_start_failure("resume", &target_session, err)
+        .expect_err("a transport failure is not a refusal");
+    assert_eq!(
+        report.to_string(),
+        format!(
+            "Failed to resume session from thread {thread_id}: thread/resume failed during TUI bootstrap: thread/resume transport error: broken pipe"
+        )
+    );
 }
 
 #[test]
@@ -12485,6 +14265,7 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
+            provider_account: None,
         };
         Arc::new(new_session_info(
             app.chat_widget.config_ref(),
@@ -12556,6 +14337,7 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
+            provider_account: None,
         });
 
     app.backtrack.base_id = Some(base_id);
@@ -13426,6 +15208,7 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
                             prompt: None,
                             model: None,
                             reasoning_effort: None,
+                            provider_account: None,
                             agents_states: HashMap::new(),
                         },
                     },
@@ -13575,6 +15358,7 @@ async fn new_session_requests_shutdown_for_previous_conversation() {
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
+            provider_account: None,
         };
 
         app.chat_widget.handle_thread_session(event);
@@ -13655,6 +15439,7 @@ async fn interrupt_without_active_turn_is_treated_as_handled() {
             .await
             .expect("thread/start should succeed");
         let thread_id = started.session.thread_id;
+        app.pending_permission_confirmation = Some(test_support::pending_confirmation(thread_id));
         app.enqueue_primary_thread_session(started.session, started.turns)
             .await
             .expect("primary thread should be registered");
@@ -13671,6 +15456,7 @@ async fn interrupt_without_active_turn_is_treated_as_handled() {
 
         assert_eq!(handled, true);
         assert!(!app.backtrack.primed);
+        assert!(app.pending_permission_confirmation.is_some());
     })
     .await;
 }
@@ -13679,6 +15465,18 @@ async fn interrupt_without_active_turn_is_treated_as_handled() {
 async fn override_turn_context_sends_thread_settings_update() {
     Box::pin(async {
         let mut app = make_test_app().await;
+        // The update below selects gpt-5.4. Exact model/provider validation rejects
+        // that model on the default Ambient provider, so run the thread on OpenAI.
+        let openai_provider = app
+            .chat_widget
+            .config_ref()
+            .model_providers
+            .get(OPENAI_PROVIDER_ID)
+            .cloned()
+            .expect("OpenAI provider");
+        app.chat_widget
+            .set_model_provider(OPENAI_PROVIDER_ID.to_string(), openai_provider);
+        app.chat_widget.set_model("gpt-5.5");
         let mut app_server =
             crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
                 .await
@@ -13991,6 +15789,7 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
             message_history: None,
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
+            provider_account: None,
         });
     app.chat_widget
         .apply_external_edit("draft prompt".to_string());
@@ -14124,6 +15923,512 @@ async fn side_backtrack_rejection_reports_unavailable_message_snapshot() {
         rendered
     );
 }
+#[tokio::test]
+async fn provider_manager_reuses_policy_health_after_setup_handle_is_cleared() {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    let host = crate::provider_status_host::ProviderStatusHost::from_config(
+        &app.config,
+        crate::provider_status_host::ProviderAccountMetadata {
+            openai: codex_login::OpenAiAuthMetadata::Account,
+            ..Default::default()
+        },
+    );
+    app.model_catalog.set_provider_policy(
+        crate::chatwidget::provider_model_policy::ProviderModelPolicy::new(
+            host.clone(),
+            codex_provider_auth::ProviderRuntimeAuthorizations::default(),
+        ),
+    );
+    app.shared_provider_status_host = None;
+    host.begin_credential_attempt("recreated-host".into(), "openai");
+    assert!(host.reject_credential_attempt("recreated-host").is_some());
+    let reopened = app.reusable_provider_status_host().unwrap();
+    assert_eq!(
+        reopened.resolve_provider("openai").unwrap().configuration,
+        codex_provider_auth::ProviderConfigurationState::RecoveryRequired
+    );
+    reopened.credential_changed("openai");
+    assert_eq!(
+        host.resolve_provider("openai").unwrap().configuration,
+        codex_provider_auth::ProviderConfigurationState::Configured
+    );
+}
+
+#[path = "tests/provider_picker_refresh.rs"]
+mod provider_picker_refresh;
+
+#[tokio::test]
+async fn provider_manager_open_preserves_lazy_command_authorization_without_shared_state() {
+    let home = tempfile::tempdir().unwrap();
+    let mut config = ConfigBuilder::default()
+        .codex_home(home.path().to_path_buf())
+        .build()
+        .await
+        .unwrap();
+    let provider = codex_model_provider_info::ModelProviderInfo {
+        name: "Command".into(),
+        auth: Some(
+            serde_json::from_value(serde_json::json!({
+                "command": home.path().join("pf55-command")
+            }))
+            .unwrap(),
+        ),
+        ..Default::default()
+    };
+    config.model_provider_id = "command".into();
+    config.model_provider = provider.clone();
+    config.model_providers.insert("command".into(), provider);
+    let mut shared = crate::provider_status_host::ProviderStatusHost::from_config(
+        &config,
+        crate::provider_status_host::ProviderAccountMetadata::default(),
+    );
+    let mut authorizations = codex_provider_auth::ProviderRuntimeAuthorizations::default();
+    authorizations.set(
+        "command",
+        codex_provider_auth::ProviderRuntimeAuthorization::Authorized,
+    );
+    shared.set_runtime_authorizations(authorizations);
+
+    let reused =
+        super::provider_management_status::provider_manager_status_host(&config, Some(shared));
+    assert_eq!(
+        reused.resolve_provider("command").unwrap().availability,
+        codex_provider_auth::ProviderAvailabilityState::Ready
+    );
+    let fallback = super::provider_management_status::provider_manager_status_host(
+        &config, /*shared*/ None,
+    );
+    assert_eq!(
+        fallback.resolve_provider("command").unwrap().availability,
+        codex_provider_auth::ProviderAvailabilityState::Ready
+    );
+}
+
+#[test]
+fn provider_manager_claude_intent_uses_typed_status_and_recovery_source() {
+    use codex_provider_auth::ProviderAvailabilityState;
+    use codex_provider_auth::ProviderConfigurationState;
+    use codex_provider_auth::ProviderCurrentState;
+    use codex_provider_auth::ProviderEligibilityState;
+    use codex_provider_auth::ProviderStatusSnapshot;
+    use codex_provider_auth::claude_account_flow::ClaudeAccountIntent;
+    use codex_provider_auth::claude_account_flow::ClaudeUnauthorizedRecoverySource as Source;
+
+    let catalog = codex_provider_auth::ProviderCatalog::from_runtime_providers(
+        &codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None),
+    );
+    let provider_id = catalog
+        .get(codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID)
+        .expect("Claude Account catalog entry")
+        .id
+        .clone();
+    let status = |configuration| ProviderStatusSnapshot {
+        id: provider_id.clone(),
+        methods: Vec::new(),
+        configuration,
+        eligibility: ProviderEligibilityState::Active,
+        current: ProviderCurrentState::NotCurrent,
+        availability: ProviderAvailabilityState::Ready,
+    };
+
+    assert_eq!(
+        super::provider_management::claude_intent_for_status(
+            &status(ProviderConfigurationState::NotConfigured),
+            Source::ManagedToken,
+        ),
+        Some(ClaudeAccountIntent::Add),
+    );
+    for source in [
+        Source::ManagedToken,
+        Source::ClaudeCodeLogin,
+        Source::Environment,
+    ] {
+        assert_eq!(
+            super::provider_management::claude_intent_for_status(
+                &status(ProviderConfigurationState::RecoveryRequired),
+                source,
+            ),
+            Some(ClaudeAccountIntent::UnauthorizedRecovery { source }),
+        );
+    }
+    assert_eq!(
+        super::provider_management::claude_intent_for_status(
+            &status(ProviderConfigurationState::RecoveryRequired),
+            Source::Unknown,
+        ),
+        Some(ClaudeAccountIntent::Add),
+    );
+    assert_eq!(
+        super::provider_management::claude_intent_for_status(
+            &status(ProviderConfigurationState::Configured),
+            Source::ManagedToken,
+        ),
+        Some(ClaudeAccountIntent::UnauthorizedRecovery {
+            source: Source::ManagedToken,
+        }),
+    );
+}
+
+#[tokio::test]
+async fn stale_provider_manager_claude_recovery_source_is_inert() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let app_server = start_config_write_test_app_server(&app).await?;
+    app.open_provider_manager(&app_server);
+    let (generation, status_host, statuses) = time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(AppEvent::ProviderManagerStatusesResolved {
+                generation,
+                status_host,
+                statuses,
+                ..
+            }) = app_event_rx.recv().await
+            {
+                break (generation, status_host, statuses);
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for provider statuses");
+    app.provider_manager_statuses_resolved(
+        generation,
+        status_host,
+        statuses,
+        /*accounts*/ None,
+        &app_server,
+    );
+    let (provider_id, target, mut status) = {
+        let host = app.provider_management_host.as_ref().unwrap();
+        let entry = host
+            .status_host()
+            .catalog()
+            .entries()
+            .iter()
+            .find(|entry| {
+                entry.setup_capabilities.iter().any(|capability| {
+                    *capability == codex_provider_auth::ProviderSetupCapability::ClaudeAccount
+                })
+            })
+            .unwrap();
+        let status = host
+            .statuses()
+            .iter()
+            .find(|status| status.id == entry.id)
+            .unwrap()
+            .clone();
+        (
+            entry.id.clone(),
+            codex_provider_auth::claude_account_flow::ClaudeAccountTarget::from_catalog_entry(
+                entry,
+            )
+            .unwrap(),
+            status,
+        )
+    };
+    let host = app.provider_management_host.as_mut().unwrap();
+    host.dispatch(
+        codex_provider_auth::ProviderManagementAction::BeginAuthentication {
+            provider_id: provider_id.clone(),
+        },
+    );
+    let stale_attempt = host.authenticating_attempt().unwrap().0;
+    host.dispatch(
+        codex_provider_auth::ProviderManagementAction::AuthenticationCancelled {
+            provider_id: provider_id.clone(),
+        },
+    );
+    host.dispatch(
+        codex_provider_auth::ProviderManagementAction::BeginAuthentication { provider_id },
+    );
+    let current_attempt = app
+        .provider_management_host
+        .as_ref()
+        .unwrap()
+        .authenticating_attempt()
+        .unwrap();
+    while app_event_rx.try_recv().is_ok() {}
+    status.configuration = codex_provider_auth::ProviderConfigurationState::RecoveryRequired;
+    app.provider_manager_claude_recovery_source_resolved(
+        stale_attempt,
+        target,
+        status,
+        codex_provider_auth::claude_account_flow::ClaudeUnauthorizedRecoverySource::ManagedToken,
+    );
+
+    assert_eq!(
+        app.provider_management_host
+            .as_ref()
+            .unwrap()
+            .authenticating_attempt(),
+        Some(current_attempt),
+    );
+    assert!(app_event_rx.try_recv().is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_manager_stale_api_key_completion_is_inert_and_current_settles() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let app_server = start_config_write_test_app_server(&app).await?;
+    app.open_provider_manager(&app_server);
+    let (generation, status_host, statuses) = time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(AppEvent::ProviderManagerStatusesResolved {
+                generation,
+                status_host,
+                statuses,
+                ..
+            }) = app_event_rx.recv().await
+            {
+                break (generation, status_host, statuses);
+            }
+        }
+    })
+    .await
+    .expect("timed out waiting for provider statuses");
+    app.provider_manager_statuses_resolved(
+        generation,
+        status_host.clone(),
+        statuses,
+        /*accounts*/ None,
+        &app_server,
+    );
+    let initial_status_count = app
+        .provider_management_host
+        .as_ref()
+        .unwrap()
+        .statuses()
+        .len();
+    app.provider_manager_statuses_resolved(
+        generation.wrapping_add(1),
+        status_host.clone(),
+        Vec::new(),
+        /*accounts*/ None,
+        &app_server,
+    );
+    assert_eq!(
+        app.provider_management_host
+            .as_ref()
+            .unwrap()
+            .statuses()
+            .len(),
+        initial_status_count
+    );
+    let (provider_id, capability, target) = {
+        let host = app.provider_management_host.as_ref().unwrap();
+        let (entry, capability) = host
+            .status_host()
+            .catalog()
+            .entries()
+            .iter()
+            .find_map(|entry| {
+                entry
+                    .setup_capabilities
+                    .iter()
+                    .find(|capability| {
+                        matches!(
+                            capability,
+                            codex_provider_auth::ProviderSetupCapability::ApiKey { .. }
+                        )
+                    })
+                    .cloned()
+                    .map(|capability| (entry.clone(), capability))
+            })
+            .unwrap();
+        let target =
+            codex_provider_auth::ApiKeyAuthTarget::from_catalog_capability(&entry, &capability)
+                .unwrap();
+        (entry.id, capability, target)
+    };
+    app.provider_manager_begin_authentication(provider_id.clone(), capability.clone());
+    let authenticating_status_count = app
+        .provider_management_host
+        .as_ref()
+        .unwrap()
+        .statuses()
+        .len();
+    app.provider_manager_statuses_resolved(
+        generation,
+        status_host.clone(),
+        Vec::new(),
+        /*accounts*/ None,
+        &app_server,
+    );
+    assert!(matches!(
+        app.provider_management_host.as_ref().unwrap().phase(),
+        codex_provider_auth::ProviderManagementPhase::Authenticating { .. }
+    ));
+    assert_eq!(
+        app.provider_management_host
+            .as_ref()
+            .unwrap()
+            .statuses()
+            .len(),
+        authenticating_status_count
+    );
+    let (first_attempt, _) = app
+        .provider_management_host
+        .as_ref()
+        .unwrap()
+        .authenticating_attempt()
+        .unwrap();
+    app.provider_manager_authentication_cancelled(provider_id.clone());
+    app.provider_manager_begin_authentication(provider_id.clone(), capability);
+    let (current_attempt, _) = app
+        .provider_management_host
+        .as_ref()
+        .unwrap()
+        .authenticating_attempt()
+        .unwrap();
+    assert_ne!(first_attempt, current_attempt);
+
+    let status = codex_provider_auth::ProviderStatusSnapshot {
+        id: provider_id,
+        methods: Vec::new(),
+        configuration: codex_provider_auth::ProviderConfigurationState::Configured,
+        eligibility: codex_provider_auth::ProviderEligibilityState::Active,
+        current: codex_provider_auth::ProviderCurrentState::NotCurrent,
+        availability: codex_provider_auth::ProviderAvailabilityState::Ready,
+    };
+    app.provider_manager_api_key_finished(first_attempt, target.clone(), Some(status.clone()));
+    assert_eq!(
+        app.provider_management_host
+            .as_ref()
+            .unwrap()
+            .authenticating_attempt(),
+        Some((current_attempt, target.provider_id.clone()))
+    );
+
+    let canary = "pf54-secret-canary-do-not-log";
+    let debug = format!(
+        "{:?}",
+        AppEvent::SaveProviderManagerApiKey {
+            attempt_id: current_attempt,
+            target: target.clone(),
+            api_key: crate::app_event::ProviderApiKeySecret::new(canary.to_string()),
+        }
+    );
+    assert!(!debug.contains(canary));
+    app.provider_manager_api_key_finished(current_attempt, target, Some(status));
+    assert!(matches!(
+        app.provider_management_host.as_ref().unwrap().phase(),
+        codex_provider_auth::ProviderManagementPhase::Persisting { .. }
+    ));
+    app.provider_manager_statuses_resolved(
+        generation,
+        status_host,
+        Vec::new(),
+        /*accounts*/ None,
+        &app_server,
+    );
+    assert!(matches!(
+        app.provider_management_host.as_ref().unwrap().phase(),
+        codex_provider_auth::ProviderManagementPhase::Persisting { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn provider_status_jobs_do_not_block_the_app_task() {
+    let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+    let started_at = std::time::Instant::now();
+
+    super::provider_management_status::spawn_provider_status_job(move || {
+        std::thread::sleep(Duration::from_millis(250));
+        finished_tx.send(()).unwrap();
+    });
+    assert!(
+        started_at.elapsed() < Duration::from_millis(100),
+        "scheduling provider status resolution blocked the app task"
+    );
+
+    time::timeout(Duration::from_secs(1), async {
+        tokio::task::spawn_blocking(move || finished_rx.recv())
+            .await
+            .unwrap()
+    })
+    .await
+    .expect("background provider-status job never completed")
+    .unwrap();
+}
+
+#[test]
+fn embedded_provider_key_save_is_visible_to_one_bulk_status_refresh() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_stack_size(8 * 1024 * 1024)
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let home = tempdir()?;
+        let provider_id = "pf54-managed";
+        let env_key = "PF54_MANAGED_KEY";
+        let provider = codex_model_provider_info::ModelProviderInfo {
+            name: "PF54 Managed".into(),
+            env_key: Some(env_key.into()),
+            ..Default::default()
+        };
+        let mut config = crate::legacy_core::config::ConfigBuilder::default()
+            .codex_home(home.path().to_path_buf())
+            .build()
+            .await?;
+        config.model_provider_id = provider_id.into();
+        config.model_provider = provider.clone();
+        config.model_providers =
+            codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None);
+        config.model_providers.insert(provider_id.into(), provider);
+
+        let app_server = crate::start_embedded_app_server_for_picker(&config).await?;
+        let status_host = crate::provider_status_host::ProviderStatusHost::from_config(
+            &config,
+            crate::provider_status_host::ProviderAccountMetadata::default(),
+        );
+        let entry = status_host.catalog().get(provider_id).unwrap();
+        let capability = entry.setup_capabilities.iter().next().unwrap();
+        let target =
+            codex_provider_auth::ApiKeyAuthTarget::from_catalog_capability(entry, capability)
+                .unwrap();
+        let canary = "pf54-embedded-save-secret-canary";
+        let status = time::timeout(
+            Duration::from_secs(60),
+            crate::provider_auth_effect_executor::ProviderAuthEffectExecutor::persist_api_key(
+                app_server.request_handle(),
+                status_host.clone(),
+                target,
+                codex_provider_auth::ApiKeySecret::new(canary.to_string()),
+            ),
+        )
+        .await
+        .expect("embedded provider-key persistence timed out")
+        .expect("embedded provider-key persistence failed");
+        assert_eq!(
+            status.configuration,
+            codex_provider_auth::ProviderConfigurationState::Configured
+        );
+
+        let refresh_host = status_host.clone();
+        // An upper bound only; Bazel CI runners needed more than 30s.
+        let statuses = time::timeout(Duration::from_secs(90), async move {
+            tokio::task::spawn_blocking(move || refresh_host.resolve())
+                .await
+                .unwrap()
+        })
+        .await
+        .expect("bulk provider-status refresh timed out");
+        let managed = statuses.get(provider_id).unwrap();
+        assert_eq!(
+            managed.configuration,
+            codex_provider_auth::ProviderConfigurationState::Configured
+        );
+        assert_eq!(
+            managed.availability,
+            codex_provider_auth::ProviderAvailabilityState::Ready
+        );
+        assert!(!format!("{status:?} {statuses:?} {status_host:?}").contains(canary));
+        app_server.shutdown().await?;
+        Ok(())
+    })
+}
+
 async fn start_config_write_test_app_server(app: &App) -> Result<AppServerSession> {
     Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await
 }
@@ -14396,4 +16701,113 @@ async fn background_history_insertion_requests_a_frame_without_user_input() -> R
         .expect("history insertion should schedule a frame")
         .expect("draw notification channel should remain open");
     Ok(())
+}
+
+/// PF-84: every thread of the session reports its usage per account through
+/// `thread/tokenUsage/updated`; `/status` adds them up across a thread switch.
+/// A report without account usage (named accounts off) or from a thread of an
+/// earlier session records nothing, and a new session starts afresh.
+#[tokio::test]
+async fn thread_account_usage_reaches_status_and_resets_with_the_session() {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    let app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+        .await
+        .expect("embedded app server");
+    let report = |thread_id: ThreadId, account: &str, total_tokens: i64| {
+        let ServerNotification::ThreadTokenUsageUpdated(mut update) =
+            token_usage_notification_with_total(
+                thread_id,
+                "turn-1",
+                total_tokens,
+                /*model_context_window*/ None,
+            )
+        else {
+            unreachable!("token usage notification");
+        };
+        update.account_usage = Some(vec![codex_app_server_protocol::ThreadAccountTokenUsage {
+            provider_id: "zai".to_string(),
+            account: account.to_string(),
+            usage: update.token_usage.total.clone(),
+        }]);
+        ServerNotification::ThreadTokenUsageUpdated(update)
+    };
+    let coordinator = ThreadId::new();
+    let worker = ThreadId::new();
+    app.primary_thread_id = Some(coordinator);
+    app.agent_navigation.upsert(
+        worker, /*agent_nickname*/ None, /*agent_role*/ None, /*is_closed*/ false,
+    );
+    for notification in [
+        report(coordinator, "default", /*total_tokens*/ 9),
+        report(worker, "work", /*total_tokens*/ 7),
+        // A thread this session does not know (an earlier session's agent).
+        report(ThreadId::new(), "work", /*total_tokens*/ 100),
+        // Named accounts off: no account usage.
+        token_usage_notification_with_total(
+            worker, "turn-1", /*total_tokens*/ 50, /*model_context_window*/ None,
+        ),
+    ] {
+        app.handle_app_server_event(
+            &app_server,
+            codex_app_server_client::AppServerEvent::ServerNotification(Box::new(notification)),
+        )
+        .await;
+    }
+    let totals = |app: &App| {
+        app.chat_widget
+            .session_account_usage
+            .for_provider("zai", "default")
+            .rows
+            .into_iter()
+            .map(|(account, usage)| (account, usage.total_tokens))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        totals(&app),
+        vec![("default".to_string(), 9), ("work".to_string(), 7)]
+    );
+
+    // A thread that already reported still counts after it leaves the picker
+    // (a discarded side conversation finishing its interrupted turn).
+    app.agent_navigation.remove(worker);
+    app.handle_app_server_event(
+        &app_server,
+        codex_app_server_client::AppServerEvent::ServerNotification(Box::new(report(
+            worker, "work", /*total_tokens*/ 8,
+        ))),
+    )
+    .await;
+    let expected = vec![("default".to_string(), 9), ("work".to_string(), 8)];
+    assert_eq!(totals(&app), expected);
+
+    // A thread switch rebuilds the chat widget and keeps the session's totals.
+    let replacement = ChatWidget::new_with_app_event(ChatWidgetInit {
+        config: app.config.clone(),
+        frame_requester: crate::tui::FrameRequester::test_dummy(),
+        app_event_tx: app.app_event_tx.clone(),
+        workspace_command_runner: None,
+        initial_user_message: None,
+        enhanced_keys_supported: app.enhanced_keys_supported,
+        has_chatgpt_account: app.chat_widget.has_chatgpt_account(),
+        has_codex_backend_auth: app.chat_widget.has_codex_backend_auth(),
+        model_catalog: app.model_catalog.clone(),
+        feedback: app.feedback.clone(),
+        is_first_run: false,
+        status_account_display: app.chat_widget.status_account_display().cloned(),
+        runtime_model_provider_base_url: app
+            .chat_widget
+            .runtime_model_provider_base_url()
+            .map(str::to_string),
+        initial_plan_type: app.chat_widget.current_plan_type(),
+        model: Some(app.chat_widget.current_model().to_string()),
+        startup_tooltip_override: None,
+        status_line_invalid_items_warned: app.status_line_invalid_items_warned.clone(),
+        terminal_title_invalid_items_warned: app.terminal_title_invalid_items_warned.clone(),
+        session_telemetry: app.session_telemetry.clone(),
+    });
+    app.replace_chat_widget(replacement);
+    assert_eq!(totals(&app), expected);
+
+    app.reset_thread_event_state();
+    assert_eq!(totals(&app), vec![("default".to_string(), 0)]);
 }

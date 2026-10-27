@@ -1,0 +1,19 @@
+---
+source: tui/src/bottom_pane/security_view_tests.rs
+expression: "snapshot(&view, 80)"
+---
+Security profiles — read only
+Requested: Moderate (configuration only)
+Effective protection: unverified. Live security status is unavailable.
+Protected modes are blocked; required controls are not qualified.
+
+  Permissive
+> Moderate
+  Aggressive
+
+Protection around untrusted content and secrets while normal work continues:
+commands stay in the sandbox, credential and Corbanu files are protected, and
+protected actions after untrusted content need a person's fresh approval. Chosen
+in /security with the security_levels feature.
+
+↑/↓ explore · enter inspect · esc close

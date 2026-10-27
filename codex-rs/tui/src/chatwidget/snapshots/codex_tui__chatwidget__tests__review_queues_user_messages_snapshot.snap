@@ -1,6 +1,5 @@
 ---
 source: tui/src/chatwidget/tests/review_mode.rs
-assertion_line: 1480
 expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
 ---
 
@@ -18,6 +17,6 @@ expression: normalize_snapshot_paths(term.backend().vt100().screen().contents())
 • Messages to be submitted at end of turn
   ↳ Steer submitted while /review was running.
 
-› Ask PFTerminal to do anything
+› Ask Corbanu Terminal to do anything
 
-  Ambient GLM 5.2 standard · /tmp/project · Post Fiat Terminal · TPS: -- tok/s
+  Z.AI GLM 5.3 Flash via zai default · /tmp/project · Corbanu Terminal · TPS: -…

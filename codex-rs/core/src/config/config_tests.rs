@@ -71,12 +71,12 @@ use codex_core_plugins::PluginsManager;
 use codex_exec_server::LOCAL_FS;
 use codex_features::Feature;
 use codex_features::FeaturesToml;
-use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::WireApi;
 use codex_models_manager::bundled_models_response;
 use codex_network_proxy::NetworkMode;
+use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::ModelProviderAuthInfo;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::ServiceTier;
@@ -987,6 +987,96 @@ command = "print-token"
 }
 
 #[tokio::test]
+async fn claude_plan_auth_uses_the_runtime_executable_without_path_lookup() {
+    let codex_home = tempdir().expect("tempdir");
+    let codex_self_exe = codex_home.path().join(if cfg!(windows) {
+        "corbanu.exe"
+    } else {
+        "corbanu"
+    });
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "claude-plan"
+model = "claude-fable-5-plan"
+"#,
+    )
+    .expect("Claude Plan config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            codex_self_exe: Some(codex_self_exe.clone()),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await
+    .expect("load config");
+
+    assert_eq!(
+        config
+            .model_provider
+            .auth
+            .as_ref()
+            .map(|auth| auth.command.as_str()),
+        codex_self_exe.to_str()
+    );
+}
+
+#[test]
+fn corbanu_auth_helper_recognizes_all_supported_cli_names_without_path_lookup() {
+    let dir = tempdir().expect("tempdir");
+    for name in [
+        "corbanu",
+        "corbanu-debug",
+        "codex",
+        "pfterminal",
+        "pfterminal-debug",
+    ] {
+        let executable = dir
+            .path()
+            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        assert_eq!(
+            corbanu_auth_helper_from_executable(executable.clone()).as_deref(),
+            executable.to_str()
+        );
+    }
+}
+
+#[test]
+fn corbanu_auth_helper_rejects_an_unrelated_runtime_without_a_sibling_cli() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = temp_dir.path().join(if cfg!(windows) {
+        "codex-app-server.exe"
+    } else {
+        "codex-app-server"
+    });
+
+    assert_eq!(corbanu_auth_helper_from_executable(runtime), None);
+}
+
+#[test]
+fn corbanu_auth_helper_uses_an_installed_sibling_cli() {
+    let temp_dir = tempdir().expect("tempdir");
+    let runtime = temp_dir.path().join(if cfg!(windows) {
+        "codex-app-server.exe"
+    } else {
+        "codex-app-server"
+    });
+    let corbanu = temp_dir.path().join(if cfg!(windows) {
+        "corbanu.exe"
+    } else {
+        "corbanu"
+    });
+    std::fs::write(&corbanu, b"").expect("write sibling Corbanu CLI");
+
+    assert_eq!(
+        corbanu_auth_helper_from_executable(runtime).as_deref(),
+        corbanu.to_str()
+    );
+}
+
+#[tokio::test]
 async fn load_config_rejects_unsupported_amazon_bedrock_overrides() {
     let cfg = toml::from_str::<ConfigToml>(
         r#"
@@ -1010,8 +1100,54 @@ supports_websockets = true
 
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert!(err.to_string().contains(
-        "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, and `aws.region`; other non-default provider fields are not supported"
+        "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, `aws.region`, and `billing`; other non-default provider fields are not supported"
     ));
+}
+
+/// `model_providers.<id>.billing` declares a basis for a built-in provider,
+/// reserved IDs included, without replacing it (PF-60-S05 AC3).
+#[tokio::test]
+async fn load_config_accepts_a_billing_override_on_built_in_providers() {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "zai"
+
+[model_providers.zai]
+billing = "subscription"
+
+[model_providers.kimi-code]
+billing = "pay_per_use"
+"#,
+    )
+    .expect("billing-only overrides deserialize");
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("billing-only overrides load");
+    let built_in =
+        codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None);
+    for (id, basis) in [
+        ("zai", codex_model_provider_info::BillingBasis::Subscription),
+        (
+            "kimi-code",
+            codex_model_provider_info::BillingBasis::PayPerUse,
+        ),
+    ] {
+        assert_eq!(
+            config.model_providers[id],
+            ModelProviderInfo {
+                billing: Some(basis),
+                ..built_in[id].clone()
+            }
+        );
+    }
+    let error = toml::from_str::<ConfigToml>("[model_providers.zai]\nbilling = \"free\"\n")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("billing"), "{error}");
 }
 
 #[test]
@@ -1887,6 +2023,7 @@ respect_system_proxy = false
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cli_overrides(vec![(
             "features.respect_system_proxy".to_string(),
             toml::Value::Boolean(true),
@@ -5232,6 +5369,7 @@ enabled = true
 
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .build()
         .await?;
     let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
@@ -5292,6 +5430,7 @@ enabled = true
 
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -5395,6 +5534,7 @@ enabled = true
 
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -5617,6 +5757,167 @@ async fn memory_tool_makes_memories_root_readable_without_creating_or_widening_w
         }
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_security_state_defaults_to_permissive() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.security_level, SecurityLevel::Permissive);
+    Ok(())
+}
+
+/// PF-23-S03: a level confirmed through the trusted controller is a floor at
+/// the next start; an unreadable store enforces Aggressive and says so.
+#[tokio::test]
+async fn security_recovery_config_load_uses_the_stricter_stored_level() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let load = |home: &TempDir| {
+        Config::load_from_base_config_with_overrides(
+            ConfigToml {
+                security: Some(codex_security_policy::SecuritySettings::new(
+                    SecurityLevel::Permissive,
+                )),
+                ..Default::default()
+            },
+            ConfigOverrides::default(),
+            home.abs(),
+        )
+    };
+    std::fs::write(
+        codex_home.path().join("security_state.json"),
+        r#"{"version":1,"level":"moderate","revocations":{"schema_version":1,"generation":0,"kill_switch_active":false}}"#,
+    )?;
+    assert_eq!(
+        load(&codex_home).await?.security_level,
+        SecurityLevel::Moderate
+    );
+
+    std::fs::write(codex_home.path().join("security_state.json"), "not json")?;
+    let config = load(&codex_home).await?;
+    assert_eq!(config.security_level, SecurityLevel::Aggressive);
+    assert!(
+        config
+            .startup_warnings
+            .iter()
+            .any(|warning| warning.starts_with("Security state is unreadable")),
+        "{:?}",
+        config.startup_warnings
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_security_state_round_trips_into_effective_config() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            security: Some(codex_security_policy::SecuritySettings::new(
+                SecurityLevel::Moderate,
+            )),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.security_level, SecurityLevel::Moderate);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unsupported_security_state_version_fails_visibly() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let error = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            security: Some(codex_security_policy::SecuritySettings {
+                version: 99,
+                level: SecurityLevel::Aggressive,
+            }),
+            ..Default::default()
+        },
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("unknown persisted version must fail");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(
+        error
+            .to_string()
+            .contains("unsupported security settings version 99")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn permissive_security_state_preserves_existing_policy_resolution() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    for (approval_policy, sandbox_mode, network_access) in [
+        (AskForApproval::OnRequest, SandboxMode::ReadOnly, false),
+        (
+            AskForApproval::UnlessTrusted,
+            SandboxMode::WorkspaceWrite,
+            true,
+        ),
+        (AskForApproval::Never, SandboxMode::DangerFullAccess, true),
+    ] {
+        let base = ConfigToml {
+            approval_policy: Some(approval_policy),
+            sandbox_mode: Some(sandbox_mode),
+            sandbox_workspace_write: (sandbox_mode == SandboxMode::WorkspaceWrite).then_some(
+                SandboxWorkspaceWrite {
+                    writable_roots: Vec::new(),
+                    network_access,
+                    exclude_tmpdir_env_var: false,
+                    exclude_slash_tmp: false,
+                },
+            ),
+            ..Default::default()
+        };
+        let without_security = Config::load_from_base_config_with_overrides(
+            base.clone(),
+            ConfigOverrides::default(),
+            codex_home.abs(),
+        )
+        .await?;
+        let with_permissive = Config::load_from_base_config_with_overrides(
+            ConfigToml {
+                security: Some(codex_security_policy::SecuritySettings::new(
+                    SecurityLevel::Permissive,
+                )),
+                ..base
+            },
+            ConfigOverrides::default(),
+            codex_home.abs(),
+        )
+        .await?;
+
+        assert_eq!(without_security.security_level, SecurityLevel::Permissive);
+        assert_eq!(with_permissive.security_level, SecurityLevel::Permissive);
+        assert_eq!(
+            without_security.permissions.approval_policy.value(),
+            approval_policy
+        );
+        assert_eq!(with_permissive.permissions, without_security.permissions);
+        assert_eq!(
+            with_permissive.legacy_sandbox_policy(),
+            without_security.legacy_sandbox_policy()
+        );
+        assert_eq!(
+            with_permissive.permissions.network_sandbox_policy(),
+            without_security.permissions.network_sandbox_policy()
+        );
+    }
     Ok(())
 }
 
@@ -5945,10 +6246,9 @@ model = "gpt-project-local"
         .build()
         .await?;
 
-    // The Ambient provider always resolves to a default model even when no
-    // model is explicitly configured, so the ignored project-local profile
-    // does not leave the model as `None`.
-    assert_eq!(config.model.as_deref(), Some(AMBIENT_DEFAULT_MODEL));
+    // The ignored project-local profile does not set the model; the default
+    // provider leaves model selection to its catalog.
+    assert_eq!(config.model, None);
     assert!(
         config.startup_warnings.iter().any(|warning| {
             warning.contains("profile")
@@ -6026,7 +6326,7 @@ async fn responses_websocket_features_do_not_change_wire_api() -> std::io::Resul
         )
         .await?;
 
-        assert_eq!(config.model_provider.wire_api, WireApi::Chat);
+        assert_eq!(config.model_provider.wire_api, WireApi::Responses);
     }
 
     Ok(())
@@ -7380,6 +7680,7 @@ async fn for_config_writes_selected_user_config_file() -> anyhow::Result<()> {
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .loader_overrides(LoaderOverrides {
             user_config_path: Some(selected_config.abs()),
             user_config_profile: Some("work".parse().expect("profile-v2 name")),
@@ -7904,6 +8205,7 @@ async fn agent_role_file_without_developer_instructions_is_dropped_with_warning(
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     std::fs::create_dir_all(&nested_cwd)?;
 
     let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
@@ -8075,6 +8377,7 @@ async fn discovered_agent_role_file_without_name_is_dropped_with_warning() -> st
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     std::fs::create_dir_all(&nested_cwd)?;
 
     let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
@@ -8275,6 +8578,7 @@ async fn discovers_multiple_standalone_agent_role_files() -> std::io::Result<()>
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     std::fs::create_dir_all(&nested_cwd)?;
 
     let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
@@ -8406,6 +8710,7 @@ async fn mixed_legacy_and_standalone_agent_role_sources_merge_with_precedence()
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     std::fs::create_dir_all(&nested_cwd)?;
 
     let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
@@ -8552,6 +8857,7 @@ async fn higher_precedence_agent_role_can_inherit_description_from_lower_layer()
     let repo_root = TempDir::new()?;
     let nested_cwd = repo_root.path().join("packages").join("app");
     std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::write(repo_root.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
     std::fs::create_dir_all(&nested_cwd)?;
 
     let workspace_key = repo_root.path().to_string_lossy().replace('\\', "\\\\");
@@ -9961,6 +10267,41 @@ mcp_oauth_callback_url = "https://example.com/callback"
 }
 
 #[tokio::test]
+async fn untrusted_parent_repo_with_incomplete_child_git_keeps_unless_trusted_approval_policy()
+-> anyhow::Result<()> {
+    let codex_home = TempDir::new()?;
+    let repo = TempDir::new()?;
+    let cwd = repo.path().join("sub");
+    std::fs::create_dir_all(repo.path().join(".git"))?;
+    std::fs::write(repo.path().join(".git/HEAD"), "ref: refs/heads/main\n")?;
+    std::fs::create_dir_all(cwd.join(".git"))?;
+
+    let config = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            projects: Some(HashMap::from([(
+                repo.path().to_string_lossy().to_string(),
+                ProjectConfig {
+                    trust_level: Some(TrustLevel::Untrusted),
+                },
+            )])),
+            ..Default::default()
+        },
+        ConfigOverrides {
+            cwd: Some(cwd),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config.permissions.approval_policy.value(),
+        AskForApproval::UnlessTrusted
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_untrusted_project_gets_unless_trusted_approval_policy() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
     let test_project_dir = TempDir::new()?;
@@ -10020,6 +10361,7 @@ async fn requirements_disallowing_default_sandbox_falls_back_to_required_default
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"allowed_sandbox_modes = ["read-only"]"#,
@@ -10401,6 +10743,7 @@ async fn feature_requirements_normalize_effective_feature_values() -> std::io::R
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -10433,6 +10776,7 @@ async fn feature_requirements_auto_review_disables_guardian_approval() -> std::i
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -10455,6 +10799,7 @@ async fn browser_feature_requirements_are_valid() -> std::io::Result<()> {
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -10679,6 +11024,7 @@ async fn requirements_disallowing_default_approvals_reviewer_falls_back_to_requi
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"allowed_approvals_reviewers = ["guardian_subagent"]"#,
@@ -11435,6 +11781,7 @@ async fn feature_requirements_normalize_runtime_feature_mutations() -> std::io::
 
     let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -11469,6 +11816,7 @@ async fn feature_requirements_warn_on_collab_legacy_alias() -> std::io::Result<(
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -11499,6 +11847,7 @@ async fn feature_requirements_warn_and_ignore_unknown_feature() -> std::io::Resu
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -12216,5 +12565,453 @@ async fn absent_gpu_runtime_overlay_does_not_create_state_db() -> std::io::Resul
     );
     assert!(!sqlite_home.path().join("state_5.sqlite").exists());
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_incompatible_model_provider_pair_fails_closed() -> std::io::Result<()> {
+    use codex_model_provider_info::CLAUDE_FABLE_5_MODEL;
+    use codex_model_provider_info::VERCEL_ANTHROPIC_PROVIDER_ID;
+
+    let cfg = toml::from_str::<ConfigToml>(&format!(
+        "model_provider = {VERCEL_ANTHROPIC_PROVIDER_ID:?}\nmodel = {CLAUDE_FABLE_5_MODEL:?}\n"
+    ))
+    .expect("config should deserialize");
+
+    let error = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await
+    .expect_err("incompatible explicit pair must fail before a request is sent");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    let message = error.to_string();
+    assert!(message.contains(CLAUDE_FABLE_5_MODEL));
+    assert!(message.contains(VERCEL_ANTHROPIC_PROVIDER_ID));
+    assert!(message.contains("provider selection was preserved"));
+    assert!(message.contains("claude-plan"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn interactive_fallback_recovers_persisted_incompatible_pairs() -> std::io::Result<()> {
+    use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
+    use codex_model_provider_info::OPENAI_PROVIDER_ID;
+
+    for (model, provider) in [
+        ("gpt-5.6-sol", CLAUDE_PLAN_PROVIDER_ID),
+        ("glm-5.2", OPENAI_PROVIDER_ID),
+        (
+            "gpt-6-astra",
+            codex_model_provider_info::DEEPSEEK_PROVIDER_ID,
+        ),
+    ] {
+        let cfg = toml::from_str::<ConfigToml>(&format!(
+            "model_provider = {provider:?}\nmodel = {model:?}\n"
+        ))
+        .expect("config should deserialize");
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                allow_provider_model_fallback: true,
+                ..ConfigOverrides::default()
+            },
+            tempdir()?.abs(),
+        )
+        .await?;
+
+        assert_eq!(config.model_provider_id, provider);
+        // The provider's own default; OpenAI keeps None so its models
+        // manager picks the catalogue default.
+        assert_eq!(
+            config.model,
+            codex_model_provider_info::resolve_model_for_provider(/*model*/ None, provider)
+        );
+        assert!(config.startup_warnings.iter().any(|warning| {
+            warning.contains(model)
+                && warning.contains(provider)
+                && warning.contains("using the provider's default model")
+                && warning.contains("configuration file was not changed")
+        }));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn override_provider_with_stale_config_model_recovers_without_opt_in() -> std::io::Result<()>
+{
+    use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
+    use codex_model_provider_info::OPENAI_PROVIDER_ID;
+
+    // Mixed provenance: provider selected at runtime, incompatible model only
+    // persisted in the config file. Must fall back to the provider's default
+    // model with a warning even when the caller never opted into fallback
+    // (interactive bootstrap and resume paths hit exactly this shape).
+    for (stale_model, provider) in [
+        ("gpt-5.6-sol", CLAUDE_PLAN_PROVIDER_ID),
+        ("glm-5.2", OPENAI_PROVIDER_ID),
+        (
+            "gpt-6-astra",
+            codex_model_provider_info::DEEPSEEK_PROVIDER_ID,
+        ),
+    ] {
+        let cfg = toml::from_str::<ConfigToml>(&format!("model = {stale_model:?}\n"))
+            .expect("config should deserialize");
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides {
+                model_provider: Some(provider.to_string()),
+                ..ConfigOverrides::default()
+            },
+            tempdir()?.abs(),
+        )
+        .await?;
+
+        assert_eq!(config.model_provider_id, provider);
+        // The provider's own default; OpenAI keeps None so its models
+        // manager picks the catalogue default.
+        assert_eq!(
+            config.model,
+            codex_model_provider_info::resolve_model_for_provider(/*model*/ None, provider)
+        );
+        assert!(config.startup_warnings.iter().any(|warning| {
+            warning.contains(stale_model) && warning.contains("using the provider's default model")
+        }));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_override_pair_still_fails_closed() -> std::io::Result<()> {
+    use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
+
+    // Same-source explicitness: both model and provider requested as runtime
+    // overrides. An incompatible pair must still fail before any request.
+    let cfg = toml::from_str::<ConfigToml>("").expect("config should deserialize");
+
+    let error = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            model: Some("gpt-5.6-sol".to_string()),
+            model_provider: Some(CLAUDE_PLAN_PROVIDER_ID.to_string()),
+            ..ConfigOverrides::default()
+        },
+        tempdir()?.abs(),
+    )
+    .await
+    .expect_err("explicit override pair must fail closed");
+
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    let message = error.to_string();
+    assert!(message.contains("gpt-5.6-sol"));
+    assert!(message.contains("provider selection was preserved"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn inferred_bare_claude_uses_claude_plan_without_direct_api_spend() -> std::io::Result<()> {
+    use codex_model_provider_info::CLAUDE_FABLE_5_MODEL;
+    use codex_model_provider_info::CLAUDE_FABLE_5_PLAN_MODEL;
+    use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
+
+    let cfg = toml::from_str::<ConfigToml>(&format!("model = {CLAUDE_FABLE_5_MODEL:?}\n"))
+        .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, CLAUDE_PLAN_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(CLAUDE_FABLE_5_PLAN_MODEL));
+    assert!(config.model_provider.is_claude_plan());
+    Ok(())
+}
+
+#[tokio::test]
+async fn explicit_claude_plan_normalizes_bare_claude_alias() -> std::io::Result<()> {
+    use codex_model_provider_info::CLAUDE_FABLE_5_MODEL;
+    use codex_model_provider_info::CLAUDE_FABLE_5_PLAN_MODEL;
+    use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
+
+    let cfg = toml::from_str::<ConfigToml>(&format!(
+        "model_provider = {CLAUDE_PLAN_PROVIDER_ID:?}\nmodel = {CLAUDE_FABLE_5_MODEL:?}\n"
+    ))
+    .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, CLAUDE_PLAN_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(CLAUDE_FABLE_5_PLAN_MODEL));
+    assert!(config.model_provider.is_claude_plan());
+    Ok(())
+}
+
+/// `corbanu -m claude-opus-5-5 -c model_provider="claude-plan"`: a bare slug
+/// requested at runtime used to be sent verbatim, which the subscription refuses
+/// (429) and the ledger cannot price. It is sent as its exact plan slug; plan
+/// slugs and slugs without a plan translation are left untouched.
+#[tokio::test]
+async fn explicit_runtime_bare_claude_on_claude_plan_uses_the_plan_slug() -> std::io::Result<()> {
+    use codex_model_provider_info::ANTHROPIC_OPUS_5_5_MODEL;
+    use codex_model_provider_info::CLAUDE_FABLE_5_1_MODEL;
+    use codex_model_provider_info::CLAUDE_FABLE_5_1_PLAN_MODEL;
+    use codex_model_provider_info::CLAUDE_OPUS_5_5_PLAN_MODEL;
+    use codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID;
+
+    for (requested, sent) in [
+        (ANTHROPIC_OPUS_5_5_MODEL, CLAUDE_OPUS_5_5_PLAN_MODEL),
+        (CLAUDE_FABLE_5_1_MODEL, CLAUDE_FABLE_5_1_PLAN_MODEL),
+        (CLAUDE_OPUS_5_5_PLAN_MODEL, CLAUDE_OPUS_5_5_PLAN_MODEL),
+    ] {
+        let config = Config::load_from_base_config_with_overrides(
+            toml::from_str::<ConfigToml>("").expect("config should deserialize"),
+            ConfigOverrides {
+                model: Some(requested.to_string()),
+                model_provider: Some(CLAUDE_PLAN_PROVIDER_ID.to_string()),
+                ..ConfigOverrides::default()
+            },
+            tempdir()?.abs(),
+        )
+        .await?;
+        assert_eq!(
+            config.model_provider_id, CLAUDE_PLAN_PROVIDER_ID,
+            "{requested}"
+        );
+        assert_eq!(config.model.as_deref(), Some(sent), "{requested}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn corbanu_plan_provider_alias_normalizes_to_legacy_persisted_id() -> std::io::Result<()> {
+    use codex_model_provider_info::CORBANU_PLAN_PROVIDER_ID;
+    use codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID;
+
+    let cfg =
+        toml::from_str::<ConfigToml>(&format!("model_provider = {CORBANU_PLAN_PROVIDER_ID:?}\n"))
+            .expect("config should deserialize");
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, PFTERMINAL_PLAN_PROVIDER_ID);
+    assert!(config.model_provider.is_pfterminal_plan());
+    Ok(())
+}
+
+/// A fresh install has no `model_provider`, so it takes the Ambient default a
+/// few lines above this - and forcing the API-key login path on that default
+/// switched the provider picker off, leaving first-run onboarding with one
+/// option: "Use your Ambient API key". No ChatGPT, no Claude, no Corbanu Plan,
+/// and no way to reach them. Forcing that path is only right when the provider
+/// was actually asked for.
+#[tokio::test]
+async fn default_provider_does_not_force_the_api_only_login_path() -> std::io::Result<()> {
+    let unconfigured = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+    assert_eq!(
+        unconfigured.model_provider_id,
+        codex_model_provider_info::OPENAI_PROVIDER_ID
+    );
+    assert_eq!(unconfigured.forced_login_method, None);
+    // The overall default is GPT-6 Sol at high effort: the OpenAI catalog
+    // supplies the model and its default effort, so config states neither.
+    assert_eq!(unconfigured.model, None);
+    assert_eq!(unconfigured.model_reasoning_effort, None);
+
+    // Asking for the same provider still does, because then it is a choice.
+    let chosen = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            model_provider: Some(codex_model_provider_info::AMBIENT_PROVIDER_ID.to_string()),
+            ..ConfigToml::default()
+        },
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+    assert_eq!(chosen.forced_login_method, Some(ForcedLoginMethod::Api));
+    // Implied, not configured: it shapes sign-in but must never remove the
+    // OpenAI login this profile also holds.
+    assert_eq!(chosen.configured_forced_login_method, None);
+    let configured = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            model_provider: Some(codex_model_provider_info::AMBIENT_PROVIDER_ID.to_string()),
+            forced_login_method: Some(ForcedLoginMethod::Chatgpt),
+            ..ConfigToml::default()
+        },
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+    assert_eq!(
+        configured.configured_forced_login_method,
+        Some(ForcedLoginMethod::Chatgpt)
+    );
+
+    // And so does asking for it at runtime rather than in the config file.
+    let overridden = Config::load_from_base_config_with_overrides(
+        ConfigToml::default(),
+        ConfigOverrides {
+            model_provider: Some(codex_model_provider_info::ZAI_PROVIDER_ID.to_string()),
+            ..Default::default()
+        },
+        tempdir()?.abs(),
+    )
+    .await?;
+    assert_eq!(overridden.forced_login_method, Some(ForcedLoginMethod::Api));
+
+    // A rented GPU provider that no longer exists falls back to the same
+    // default provider. The provider was stated, but what it named is gone, so
+    // this is the one case where an explicit request is deliberately not
+    // treated as one - and it reached the same dead end.
+    let stale_gpu = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            model_provider: Some("gpu-does-not-exist".to_string()),
+            ..ConfigToml::default()
+        },
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+    assert_eq!(
+        stale_gpu.model_provider_id,
+        codex_model_provider_info::OPENAI_PROVIDER_ID
+    );
+    assert_eq!(stale_gpu.forced_login_method, None);
+
+    // A model that implies an API-key-only provider still forces the API path,
+    // because naming that model is a choice of provider by another route. Here
+    // no provider is set and the pair correction resolves it.
+    let implied = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            model: Some("glm-5.3".to_string()),
+            ..ConfigToml::default()
+        },
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+    assert_eq!(
+        implied.model_provider_id,
+        codex_model_provider_info::ZAI_PROVIDER_ID
+    );
+    assert_eq!(implied.forced_login_method, Some(ForcedLoginMethod::Api));
+
+    // An explicit OpenAI selection never forced it and must not start.
+    let openai = Config::load_from_base_config_with_overrides(
+        ConfigToml {
+            model_provider: Some(codex_model_provider_info::OPENAI_PROVIDER_ID.to_string()),
+            ..ConfigToml::default()
+        },
+        ConfigOverrides::default(),
+        tempdir()?.abs(),
+    )
+    .await?;
+    assert_eq!(openai.forced_login_method, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn incompatible_fallback_uses_non_openai_provider_default() -> std::io::Result<()> {
+    use codex_model_provider_info::DEEPSEEK_DEFAULT_MODEL;
+    use codex_model_provider_info::DEEPSEEK_PROVIDER_ID;
+
+    // A foreign `gpt-*` model next to DeepSeek must resolve to DeepSeek's own
+    // default, never to None: None hands selection to the OpenAI catalogue,
+    // which then pairs an OpenAI model with DeepSeek and blocks the turn.
+    let cfg = toml::from_str::<ConfigToml>("model = \"gpt-6-astra\"\n")
+        .expect("config should deserialize");
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides {
+            model_provider: Some(DEEPSEEK_PROVIDER_ID.to_string()),
+            ..ConfigOverrides::default()
+        },
+        tempdir()?.abs(),
+    )
+    .await?;
+
+    assert_eq!(config.model_provider_id, DEEPSEEK_PROVIDER_ID);
+    assert_eq!(config.model.as_deref(), Some(DEEPSEEK_DEFAULT_MODEL));
+    Ok(())
+}
+
+/// #412: a managed pin on shell_snapshot is detected, not silently kept on.
+#[test]
+fn issue_412_turn_off_unless_required_honours_a_shell_snapshot_pin() -> std::io::Result<()> {
+    let pinned = |enabled: bool| {
+        Some(Sourced::new(
+            FeatureRequirementsToml {
+                entries: BTreeMap::from([("shell_snapshot".to_string(), enabled)]),
+            },
+            RequirementSource::Unknown,
+        ))
+    };
+    let mut configured = Features::with_defaults();
+    configured.enable(Feature::ShellSnapshot);
+
+    let mut features = ManagedFeatures::from_configured(configured.clone(), pinned(true))?;
+    assert!(features.enabled(Feature::ShellSnapshot));
+    // `disable` succeeds and leaves the pin in place; that is why it can't
+    // be the check.
+    assert!(features.disable(Feature::ShellSnapshot).is_ok());
+    assert!(features.enabled(Feature::ShellSnapshot));
+    assert!(!features.turn_off_unless_required(Feature::ShellSnapshot));
+    assert!(features.enabled(Feature::ShellSnapshot));
+
+    let mut features =
+        ManagedFeatures::from_configured(configured, /*feature_requirements*/ None)?;
+    assert!(features.turn_off_unless_required(Feature::ShellSnapshot));
+    assert!(!features.enabled(Feature::ShellSnapshot));
+    Ok(())
+}
+
+/// #412: secret_output_gate fails closed before arming when policy pins
+/// shell snapshots on.
+#[tokio::test]
+async fn issue_412_secret_output_gate_fails_closed_on_a_shell_snapshot_pin() -> std::io::Result<()>
+{
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "[features]\nsecret_output_gate = true\n",
+    )?;
+    let err = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                "[features]\nshell_snapshot = true\n",
+            ),
+        )
+        .build()
+        .await
+        .expect_err("a pinned shell snapshot must refuse the gate");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        err.to_string()
+            .contains("secret_output_gate: shell_snapshot is required by policy"),
+        "{err}"
+    );
     Ok(())
 }

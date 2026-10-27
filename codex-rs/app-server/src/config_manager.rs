@@ -144,10 +144,17 @@ impl ConfigManager {
         &self,
         fallback_cwd: Option<PathBuf>,
     ) -> std::io::Result<Config> {
+        // Bootstrap configuration must retain an explicitly selected provider
+        // even when its configured model needs the per-thread catalog fallback.
+        // A thread/start request that does not opt into fallback still reloads
+        // with the default (fail-closed) override below.
         self.load_with_cli_overrides(
             &self.current_cli_overrides(),
             /*request_overrides*/ None,
-            ConfigOverrides::default(),
+            ConfigOverrides {
+                allow_provider_model_fallback: true,
+                ..Default::default()
+            },
             fallback_cwd,
         )
         .await
@@ -226,6 +233,17 @@ impl ConfigManager {
         mut typesafe_overrides: ConfigOverrides,
         fallback_cwd: Option<PathBuf>,
     ) -> std::io::Result<Config> {
+        if typesafe_overrides.codex_self_exe.is_none() {
+            typesafe_overrides.codex_self_exe = self.arg0_paths.codex_self_exe.clone();
+        }
+        if typesafe_overrides.codex_linux_sandbox_exe.is_none() {
+            typesafe_overrides.codex_linux_sandbox_exe =
+                self.arg0_paths.codex_linux_sandbox_exe.clone();
+        }
+        if typesafe_overrides.main_execve_wrapper_exe.is_none() {
+            typesafe_overrides.main_execve_wrapper_exe =
+                self.arg0_paths.main_execve_wrapper_exe.clone();
+        }
         let mut request_overrides = request_overrides.unwrap_or_default();
         if let Some(value) = request_overrides.remove("bypass_hook_trust") {
             typesafe_overrides.bypass_hook_trust = Some(value.as_bool().ok_or_else(|| {
@@ -333,6 +351,10 @@ impl ConfigManager {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "config_manager_tests.rs"]
+mod tests;
 
 pub(crate) fn protected_feature_keys(config_layer_stack: &ConfigLayerStack) -> BTreeSet<String> {
     let mut protected_features = config_layer_stack

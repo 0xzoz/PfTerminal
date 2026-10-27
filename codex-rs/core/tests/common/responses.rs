@@ -802,6 +802,14 @@ pub fn ev_output_text_delta(delta: &str) -> Value {
     })
 }
 
+pub fn ev_output_text_delta_for_item(item_id: &str, delta: &str) -> Value {
+    serde_json::json!({
+        "type": "response.output_text.delta",
+        "item_id": item_id,
+        "delta": delta,
+    })
+}
+
 pub fn ev_reasoning_item(id: &str, summary: &[&str], raw_content: &[&str]) -> Value {
     let summary_entries: Vec<Value> = summary
         .iter()
@@ -1121,6 +1129,68 @@ pub async fn mount_sse_once_chat_completions(server: &MockServer, body: String) 
         .mount(server)
         .await;
     response_mock
+}
+
+/// Mounts one streamed body per Chat Completions request, in order.
+/// Panics if more requests arrive than bodies were provided.
+pub async fn mount_chat_completions_sequence(
+    server: &MockServer,
+    bodies: Vec<String>,
+) -> ResponseMock {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    struct SeqResponder {
+        num_calls: AtomicUsize,
+        bodies: Vec<String>,
+    }
+
+    impl Respond for SeqResponder {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            let call_num = self.num_calls.fetch_add(1, Ordering::SeqCst);
+            let body = self
+                .bodies
+                .get(call_num)
+                .unwrap_or_else(|| panic!("no chat completions response for {call_num}"));
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body.clone())
+        }
+    }
+
+    let num_calls = bodies.len() as u64;
+    let (mock, response_mock) = chat_completions_mock();
+    mock.respond_with(SeqResponder {
+        num_calls: AtomicUsize::new(0),
+        bodies,
+    })
+    .up_to_n_times(num_calls)
+    .expect(num_calls)
+    .mount(server)
+    .await;
+    response_mock
+}
+
+/// A streamed Chat Completions response that calls one function tool.
+pub fn chat_completions_tool_call_sse(call_id: &str, name: &str, arguments: &str) -> String {
+    let chunk = serde_json::json!({
+        "id": "chatcmpl-tool",
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "tool_calls": [{
+                    "index": 0,
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    });
+    format!("data: {chunk}\n\ndata: [DONE]\n\n")
 }
 
 pub fn chat_completions_sse(model: &str, text: &str) -> String {

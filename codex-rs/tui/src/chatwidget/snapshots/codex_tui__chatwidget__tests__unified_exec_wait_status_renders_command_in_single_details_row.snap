@@ -1,12 +1,11 @@
 ---
 source: tui/src/chatwidget/tests/exec_flow.rs
-assertion_line: 788
 expression: normalize_snapshot_paths(rendered)
 ---
 • Waiting for background terminal (0s • esc to …
   └ cargo test -p codex-core -- --exact…
 
 
-› Ask PFTerminal to do anything
+› Ask Corbanu Terminal to do anything
 
-  Ambient GLM 5.2 standard · /tmp/project · Pos…
+  Z.AI GLM 5.3 Flash via zai default · /tmp/pro…

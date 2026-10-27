@@ -97,9 +97,9 @@ where
                     .finish_gpu_rental_operation(
                         operation_id.as_str(),
                         "succeeded",
-                        None,
+                        /*provider_request_id*/ None,
                         Some(resource_id.as_str()),
-                        None,
+                        /*sanitized_error*/ None,
                         now_ms,
                     )
                     .await?;
@@ -126,7 +126,7 @@ where
                     .finish_gpu_rental_operation(
                         operation_id.as_str(),
                         status,
-                        None,
+                        /*provider_request_id*/ None,
                         Some(resource_id.as_str()),
                         Some(error.safe_message.as_str()),
                         now_ms,
@@ -163,12 +163,15 @@ where
         Ok(Vec::new())
     }
 
-    async fn confirm_terminated(
+    pub(super) async fn confirm_terminated(
         &self,
         lease: GpuRentalLease,
         now_ms: i64,
     ) -> anyhow::Result<Vec<ControllerEvent>> {
         let rental_id = lease.rental.rental_id.clone();
+        if let Some(credentials) = &self.credentials {
+            credentials.delete_rental_endpoint_token(rental_id.as_str())?;
+        }
         self.apply_update(
             &lease,
             GpuRentalUpdate {

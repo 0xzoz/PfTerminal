@@ -112,6 +112,7 @@ impl McpConnectionSet {
                 connection: Arc::new(McpServerConnection {
                     identity: None,
                     client,
+                    startup_cancellation: StartupCancellation::default(),
                 }),
                 metadata: McpServerMetadata {
                     environment_id: String::new(),
@@ -2746,6 +2747,16 @@ fn server_metadata_preserves_tool_approval_policy() {
         metadata.tool_approval_mode("search"),
         AppToolApproval::Approve
     );
+    // #1001 D52: without `approve`, the tool falls back to the server
+    // default, not to Auto.
+    assert_eq!(
+        metadata.tool_approval_mode_without_approve("search"),
+        AppToolApproval::Prompt
+    );
+    assert_eq!(
+        metadata.tool_approval_mode_without_approve("read"),
+        AppToolApproval::Prompt
+    );
 }
 
 #[tokio::test]
@@ -2865,6 +2876,131 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
         "local stdio MCP server `stdio` requires a local environment"
     );
     cancel_token.cancel();
+}
+
+async fn pending_http_startup_manager() -> (
+    McpConnectionSet,
+    async_channel::Receiver<Event>,
+    tokio::net::TcpListener,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind pending MCP listener");
+    let address = listener.local_addr().expect("pending MCP listener address");
+    let config = McpServerConfig {
+        auth: Default::default(),
+        transport: McpServerTransportConfig::StreamableHttp {
+            url: format!("http://{address}/mcp"),
+            bearer_token_env_var: None,
+            http_headers: None,
+            env_http_headers: None,
+        },
+        environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+        enabled: true,
+        required: false,
+        supports_parallel_tool_calls: false,
+        disabled_reason: None,
+        startup_timeout_sec: Some(Duration::from_secs(30)),
+        tool_timeout_sec: None,
+        default_tools_approval_mode: None,
+        enabled_tools: None,
+        disabled_tools: None,
+        scopes: None,
+        oauth: None,
+        oauth_resource: None,
+        tools: HashMap::new(),
+    };
+    let codex_home = tempdir().expect("tempdir");
+    let (tx_event, rx_event) = async_channel::unbounded();
+    let manager = McpConnectionSet::new(
+        /*previous*/ None,
+        McpPublicationGate::already_published(),
+        McpRuntimeInput {
+            config: Arc::new(crate::mcp::tests::test_mcp_config(
+                codex_home.path().to_path_buf(),
+            )),
+            plugins_available: false,
+            ready_selected_capability_roots: Vec::new(),
+            mcp_servers: HashMap::from([(
+                "pending".to_string(),
+                EffectiveMcpServer::configured(config),
+            )]),
+            submit_id: "startup-test".to_string(),
+            tx_event: Some(tx_event),
+            startup_cancellation_token: CancellationToken::new(),
+            runtime_context: McpRuntimeContext::new(
+                Arc::new(environment_manager_without_environments()),
+                codex_home.path().to_path_buf(),
+            ),
+            codex_apps_tools_cache: ConnectorRuntimeManager::default(),
+            tool_catalog_cache: McpToolCatalogCache::default(),
+            codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(
+                /*account_id*/ None, /*chatgpt_user_id*/ None,
+            ),
+            supports_openai_form_elicitation: false,
+            auth: None,
+            codex_apps_auth_manager: None,
+            elicitation_reviewer: None,
+            elicitation_lifecycle: None,
+        },
+        ElicitationRequestRouter::default(),
+    )
+    .await;
+
+    (manager, rx_event, listener)
+}
+
+async fn receive_startup_complete(
+    rx_event: &async_channel::Receiver<Event>,
+) -> (bool, bool, McpStartupCompleteEvent) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        let mut saw_cancelled_update = false;
+        let mut saw_stopped_update = false;
+        loop {
+            match rx_event.recv().await.expect("startup event channel").msg {
+                EventMsg::McpStartupUpdate(McpStartupUpdateEvent {
+                    status: McpStartupStatus::Cancelled,
+                    ..
+                }) => saw_cancelled_update = true,
+                EventMsg::McpStartupUpdate(McpStartupUpdateEvent {
+                    status: McpStartupStatus::Stopped,
+                    ..
+                }) => saw_stopped_update = true,
+                EventMsg::McpStartupComplete(summary) => {
+                    return (saw_cancelled_update, saw_stopped_update, summary);
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("MCP startup should finish after cancellation")
+}
+
+#[tokio::test]
+async fn dropping_pending_connection_suppresses_lifecycle_cancellation_warning() {
+    let (manager, rx_event, _listener) = pending_http_startup_manager().await;
+
+    drop(manager);
+    let (saw_cancelled_update, saw_stopped_update, summary) =
+        receive_startup_complete(&rx_event).await;
+
+    assert!(!saw_cancelled_update);
+    assert!(saw_stopped_update);
+    assert!(summary.cancelled.is_empty());
+}
+
+#[tokio::test]
+async fn explicit_startup_cancellation_remains_user_visible() {
+    let (manager, rx_event, _listener) = pending_http_startup_manager().await;
+
+    manager.cancel_startup();
+    let (saw_cancelled_update, saw_stopped_update, summary) =
+        receive_startup_complete(&rx_event).await;
+
+    assert!(saw_cancelled_update);
+    assert!(!saw_stopped_update);
+    assert_eq!(summary.cancelled, vec!["pending".to_string()]);
 }
 
 #[test]
@@ -3109,6 +3245,7 @@ async fn manager_with_reusable_ready_server(
             connection: Arc::new(McpServerConnection {
                 identity: Some(reusable_server_identity(config, runtime_context)),
                 client: create_ready_async_managed_client(tools).await,
+                startup_cancellation: StartupCancellation::default(),
             }),
             metadata: McpServerMetadata::from(&server),
             tool_filter: ToolFilter::from_config(config),
@@ -3238,6 +3375,7 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
                     startup_reconnect: None,
                     cancel_token: CancellationToken::new(),
                 },
+                startup_cancellation: StartupCancellation::default(),
             }),
             metadata: McpServerMetadata::from(&server),
             tool_filter: ToolFilter::from_config(&config),
@@ -3541,6 +3679,7 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
             startup_reconnect: None,
             cancel_token: CancellationToken::new(),
         },
+        startup_cancellation: StartupCancellation::default(),
     });
 
     assert!(!client.is_closed().await);

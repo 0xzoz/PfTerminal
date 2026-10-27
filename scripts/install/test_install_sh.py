@@ -24,15 +24,15 @@ class InstallShTest(unittest.TestCase):
         self.assertEqual(
             requests,
             [
-                "https://api.github.com/repos/agtico/PfTerminal/releases/tags/"
+                "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/tags/"
                 f"rust-v{VERSION}"
             ],
         )
         self.assertIn(
-            f"Could not fetch GitHub release metadata for Codex {VERSION}",
+            f"Could not fetch GitHub release metadata for Corbanu Terminal {VERSION}",
             result.stderr,
         )
-        self.assertNotIn("Could not find Codex package", result.stderr)
+        self.assertNotIn("Could not find Corbanu Terminal package", result.stderr)
 
     def test_exact_release_opt_out_uses_github_metadata_once(self) -> None:
         result, requests = run_installer(VERSION, use_mirror=False)
@@ -41,9 +41,9 @@ class InstallShTest(unittest.TestCase):
         self.assertEqual(
             requests,
             [
-                "https://api.github.com/repos/agtico/PfTerminal/releases/tags/"
+                "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/tags/"
                 f"rust-v{VERSION}",
-                "https://github.com/agtico/PfTerminal/releases/download/"
+                "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                 f"rust-v{VERSION}/codex-package_SHA256SUMS",
             ],
         )
@@ -57,9 +57,9 @@ class InstallShTest(unittest.TestCase):
         self.assertEqual(
             requests,
             [
-                "https://api.github.com/repos/agtico/PfTerminal/releases/tags/"
+                "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/tags/"
                 f"rust-v{version}",
-                "https://github.com/agtico/PfTerminal/releases/download/"
+                "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                 f"rust-v{version}/codex-package_SHA256SUMS",
             ],
         )
@@ -72,8 +72,8 @@ class InstallShTest(unittest.TestCase):
         self.assertEqual(
             requests,
             [
-                "https://api.github.com/repos/agtico/PfTerminal/releases/latest",
-                "https://github.com/agtico/PfTerminal/releases/download/"
+                "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/latest",
+                "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                 f"rust-v{VERSION}/codex-package_SHA256SUMS",
             ],
         )
@@ -88,8 +88,8 @@ class InstallShTest(unittest.TestCase):
         self.assertEqual(
             requests,
             [
-                "https://api.github.com/repos/agtico/PfTerminal/releases/latest",
-                "https://github.com/agtico/PfTerminal/releases/download/"
+                "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/latest",
+                "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                 f"rust-v{VERSION}/codex-package_SHA256SUMS",
             ],
         )
@@ -105,10 +105,12 @@ class InstallShTest(unittest.TestCase):
         self.assertIn("/codex-npm-", requests[1])
         self.assertNotIn("codex-package_SHA256SUMS", requests[1])
 
-    def test_macos_install_exposes_code_mode_host_beside_pfterminal(self) -> None:
+    def test_macos_install_exposes_corbanu_release_and_debug_launchers(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            archive_path, checksum_path, metadata_json = create_package_release(root)
+            archive_path, checksum_path, metadata_json = create_package_release(
+                root, debug_binaries=("corbanu-debug", "pfterminal-debug")
+            )
 
             result, _requests = run_installer_in(
                 root,
@@ -122,16 +124,226 @@ class InstallShTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             install_bin = root / "install-bin"
             current = root / "pfterminal-home" / "packages" / "standalone" / "current"
-            pfterminal_path = install_bin / "pfterminal"
+            corbanu_path = install_bin / "corbanu"
+            corbanu_debug_path = install_bin / "corbanu-debug"
             host_path = install_bin / "codex-code-mode-host"
-            wrapper = pfterminal_path.read_text(encoding="utf-8")
-            self.assertIn(str(current / "bin" / "pfterminal"), wrapper)
-            self.assertIn("$HOME/.pfterminal", wrapper)
+            corbanu_wrapper = corbanu_path.read_text(encoding="utf-8")
+            corbanu_debug_wrapper = corbanu_debug_path.read_text(encoding="utf-8")
+            expected_target = str(current / "bin" / "corbanu")
+            expected_debug_target = str(current / "bin" / "corbanu-debug")
+            expected_home = str(root / "pfterminal-home")
+            expected_debug_home = f"{expected_home}-debug"
+            self.assertIn(expected_target, corbanu_wrapper)
+            self.assertIn(expected_home, corbanu_wrapper)
+            self.assertIn(expected_debug_target, corbanu_debug_wrapper)
+            self.assertIn(expected_debug_home, corbanu_debug_wrapper)
+            self.assertNotIn(expected_debug_home, corbanu_wrapper)
+            self.assertTrue(Path(expected_debug_home).is_dir())
+            self.assertNotIn("CODEX_HOME points to", result.stderr)
+            self.assertFalse((install_bin / "pfterminal").exists())
+            self.assertFalse((install_bin / "pfterminal-debug").exists())
+            self.assertEqual(
+                subprocess.run(
+                    [str(corbanu_debug_path), "--version"],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                ).returncode,
+                0,
+            )
             self.assertEqual(
                 os.readlink(host_path),
                 str(current / "bin" / "codex-code-mode-host"),
             )
             self.assertTrue(os.access(host_path, os.X_OK))
+
+    def test_release_wrapper_keeps_a_caller_selected_home(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path, checksum_path, metadata_json = create_package_release(
+                root, debug_binaries=("corbanu-debug",)
+            )
+            result, _requests = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata_json,
+                archive_path=archive_path,
+                checksum_path=checksum_path,
+                force_macos=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            current = root / "pfterminal-home" / "packages" / "standalone" / "current"
+            for binary in ("corbanu", "corbanu-debug"):
+                (current / "bin" / binary).resolve().write_text(
+                    '#!/bin/sh\nprintf "%s|%s\\n" "${CORBANU_HOME:-}" "${CODEX_HOME:-}"\n',
+                    encoding="utf-8",
+                )
+
+            def homes(binary: str, **overrides: str) -> str:
+                env = {"PATH": "/usr/bin:/bin", **overrides}
+                return subprocess.run(
+                    [str(root / "install-bin" / binary)],
+                    env=env,
+                    capture_output=True,
+                    check=True,
+                    text=True,
+                ).stdout.strip()
+
+            default_home = str(root / "pfterminal-home")
+            self.assertEqual(homes("corbanu"), f"|{default_home}")
+            self.assertEqual(homes("corbanu", CORBANU_HOME="/worker"), "/worker|")
+            self.assertEqual(homes("corbanu", PFTERMINAL_HOME="/worker"), "|")
+            self.assertEqual(homes("corbanu", CODEX_HOME="/worker"), "|/worker")
+            # The debug wrapper supplies the debug home only when the caller
+            # chose no home; a caller-set CORBANU_HOME is kept, as for corbanu.
+            debug_home = f"{default_home}-debug"
+            self.assertEqual(homes("corbanu-debug"), f"|{debug_home}")
+            self.assertEqual(homes("corbanu-debug", CORBANU_HOME="/worker"), "/worker|")
+            self.assertEqual(homes("corbanu-debug", PFTERMINAL_HOME="/worker"), "|")
+            self.assertEqual(homes("corbanu-debug", CODEX_HOME="/worker"), "|/worker")
+            self.assertEqual(homes("corbanu-debug", CORBANU_DEBUG_HOME="/dbg"), "|")
+
+    def test_package_without_debug_binary_removes_managed_stale_launchers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path, checksum_path, metadata_json = create_package_release(
+                root, debug_binaries=()
+            )
+            install_bin = root / "install-bin"
+            install_bin.mkdir()
+            current = root / "pfterminal-home" / "packages" / "standalone" / "current"
+            for name in ("corbanu-debug", "pfterminal-debug"):
+                write_executable(
+                    install_bin / name,
+                    f"#!/bin/sh\nexec '{current}/bin/{name}' \"$@\"\n",
+                )
+
+            result, _requests = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata_json,
+                archive_path=archive_path,
+                checksum_path=checksum_path,
+                force_macos=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                result.stderr.count(
+                    "release has no debug binary; skipping corbanu-debug launcher"
+                ),
+                1,
+            )
+            self.assertFalse((install_bin / "corbanu-debug").exists())
+            self.assertFalse((install_bin / "pfterminal-debug").exists())
+            version_result = subprocess.run(
+                [str(install_bin / "corbanu"), "--version"],
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            self.assertEqual(version_result.returncode, 0, version_result.stderr)
+
+    def test_install_prunes_to_current_plus_two_prior_releases(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path, checksum_path, metadata_json = create_package_release(root)
+            releases = root / "pfterminal-home" / "packages" / "standalone" / "releases"
+            releases.mkdir(parents=True)
+            for index in range(1, 5):
+                release = releases / f"old-{index}"
+                release.mkdir()
+                os.utime(release, (index, index))
+            current = releases.parent / "current"
+            current.symlink_to(releases / "old-1")
+
+            result, _requests = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata_json,
+                archive_path=archive_path,
+                checksum_path=checksum_path,
+                force_macos=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                {path.name for path in releases.iterdir()},
+                {
+                    f"{VERSION}-aarch64-apple-darwin",
+                    "old-3",
+                    "old-4",
+                },
+            )
+            self.assertEqual(
+                current.resolve(), releases / f"{VERSION}-aarch64-apple-darwin"
+            )
+            self.assertEqual(result.stdout.count("Pruned old standalone release:"), 2)
+
+    def test_zero_release_retention_keeps_only_current(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            archive_path, checksum_path, metadata_json = create_package_release(root)
+            releases = root / "pfterminal-home" / "packages" / "standalone" / "releases"
+            releases.mkdir(parents=True)
+            for name in ("old-a", "old-b"):
+                (releases / name).mkdir()
+
+            result, _requests = run_installer_in(
+                root,
+                VERSION,
+                metadata_json=metadata_json,
+                archive_path=archive_path,
+                checksum_path=checksum_path,
+                force_macos=True,
+                keep_releases="0",
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                {path.name for path in releases.iterdir()},
+                {f"{VERSION}-aarch64-apple-darwin"},
+            )
+
+    def test_dangling_current_link_skips_release_pruning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            releases = root / "pfterminal-home" / "packages" / "standalone" / "releases"
+            releases.mkdir(parents=True)
+            for name in ("old-a", "old-b", "old-c", "old-d"):
+                (releases / name).mkdir()
+            (releases.parent / "current").symlink_to(releases / "missing")
+
+            result = run_prune_function(root, keep_releases="0")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                {path.name for path in releases.iterdir()},
+                {"old-a", "old-b", "old-c", "old-d"},
+            )
+            self.assertIn(
+                "current release link is missing or dangling; skipping release pruning",
+                result.stderr,
+            )
+
+    def test_release_pruning_never_deletes_current_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            releases = root / "pfterminal-home" / "packages" / "standalone" / "releases"
+            releases.mkdir(parents=True)
+            for name in ("old-a", "current-release", "old-c", "old-d"):
+                (releases / name).mkdir()
+            current_target = releases / "current-release"
+            (releases.parent / "current").symlink_to(current_target)
+
+            result = run_prune_function(root, keep_releases="0")
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                {path.name for path in releases.iterdir()},
+                {"current-release"},
+            )
+            self.assertEqual((releases.parent / "current").resolve(), current_target)
 
     def test_releases_mirror_opt_in_installs_verified_package(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -209,10 +421,10 @@ class InstallShTest(unittest.TestCase):
                         requests,
                         [
                             "https://releases.openai.com/codex/channels/latest",
-                            "https://api.github.com/repos/agtico/PfTerminal/releases/latest",
-                            "https://github.com/agtico/PfTerminal/releases/download/"
+                            "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/latest",
+                            "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                             f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                            "https://github.com/agtico/PfTerminal/releases/download/"
+                            "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                             f"rust-v{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
                         ],
                     )
@@ -243,11 +455,11 @@ class InstallShTest(unittest.TestCase):
                 requests,
                 [
                     f"https://releases.openai.com/codex/releases/{VERSION}/release.json",
-                    "https://api.github.com/repos/agtico/PfTerminal/releases/tags/"
+                    "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/tags/"
                     f"rust-v{VERSION}",
-                    "https://github.com/agtico/PfTerminal/releases/download/"
+                    "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                     f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/agtico/PfTerminal/releases/download/"
+                    "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                     f"rust-v{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
                 ],
             )
@@ -275,10 +487,10 @@ class InstallShTest(unittest.TestCase):
                 [
                     "https://releases.openai.com/codex/channels/latest",
                     f"https://releases.openai.com/codex/releases/{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/agtico/PfTerminal/releases/download/"
+                    "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                     f"rust-v{VERSION}/codex-package_SHA256SUMS",
                     f"https://releases.openai.com/codex/releases/{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
-                    "https://github.com/agtico/PfTerminal/releases/download/"
+                    "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                     f"rust-v{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
                 ],
             )
@@ -306,10 +518,10 @@ class InstallShTest(unittest.TestCase):
                 [
                     "https://releases.openai.com/codex/channels/latest",
                     f"https://releases.openai.com/codex/releases/{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/agtico/PfTerminal/releases/download/"
+                    "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                     f"rust-v{VERSION}/codex-package_SHA256SUMS",
                     f"https://releases.openai.com/codex/releases/{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
-                    "https://github.com/agtico/PfTerminal/releases/download/"
+                    "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                     f"rust-v{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
                 ],
             )
@@ -342,9 +554,9 @@ class InstallShTest(unittest.TestCase):
                 [
                     "https://releases.openai.com/codex/channels/latest",
                     f"https://releases.openai.com/codex/releases/{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/agtico/PfTerminal/releases/download/"
+                    "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                     f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                    "https://api.github.com/repos/agtico/PfTerminal/releases/tags/"
+                    "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/tags/"
                     f"rust-v{VERSION}",
                     f"https://releases.openai.com/codex/releases/{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
                 ],
@@ -386,9 +598,9 @@ class InstallShTest(unittest.TestCase):
                 [
                     "https://releases.openai.com/codex/channels/latest",
                     f"https://releases.openai.com/codex/releases/{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/agtico/PfTerminal/releases/download/"
+                    "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                     f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                    "https://api.github.com/repos/agtico/PfTerminal/releases/tags/"
+                    "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/tags/"
                     f"rust-v{VERSION}",
                     f"https://releases.openai.com/codex/releases/{VERSION}/codex-package-aarch64-apple-darwin.tar.gz",
                 ],
@@ -417,9 +629,9 @@ class InstallShTest(unittest.TestCase):
                 [
                     "https://releases.openai.com/codex/channels/latest",
                     f"https://releases.openai.com/codex/releases/{VERSION}/codex-package_SHA256SUMS",
-                    "https://github.com/agtico/PfTerminal/releases/download/"
+                    "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                     f"rust-v{VERSION}/codex-package_SHA256SUMS",
-                    "https://api.github.com/repos/agtico/PfTerminal/releases/tags/"
+                    "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/tags/"
                     f"rust-v{VERSION}",
                 ],
             )
@@ -478,9 +690,9 @@ class InstallShTest(unittest.TestCase):
                 first_requests,
                 [
                     f"https://releases.openai.com/codex/releases/{VERSION}/release.json",
-                    "https://api.github.com/repos/agtico/PfTerminal/releases/tags/"
+                    "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/tags/"
                     f"rust-v{VERSION}",
-                    "https://github.com/agtico/PfTerminal/releases/download/"
+                    "https://github.com/CorbanuCore/CorbanuTerminal/releases/download/"
                     f"rust-v{VERSION}/codex-npm-darwin-arm64-{VERSION}.tgz",
                 ],
             )
@@ -500,11 +712,11 @@ class InstallShTest(unittest.TestCase):
                 second_requests,
                 [
                     f"https://releases.openai.com/codex/releases/{VERSION}/release.json",
-                    "https://api.github.com/repos/agtico/PfTerminal/releases/tags/"
+                    "https://api.github.com/repos/CorbanuCore/CorbanuTerminal/releases/tags/"
                     f"rust-v{VERSION}",
                 ],
             )
-            self.assertNotIn("Downloading Codex CLI", second_result.stdout)
+            self.assertNotIn("Downloading PFTerminal CLI", second_result.stdout)
 
 
 def run_installer(
@@ -538,6 +750,7 @@ def run_installer_in(
     force_macos: bool = False,
     use_mirror: bool | None = False,
     releases_mode: str = "",
+    keep_releases: str | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     bin_dir = root / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -604,7 +817,7 @@ def run_installer_in(
                   exit 22
                 fi
                 ;;
-              https://github.com/agtico/PfTerminal/releases/download/*/codex-package_SHA256SUMS)
+              https://github.com/CorbanuCore/CorbanuTerminal/releases/download/*/codex-package_SHA256SUMS)
                 if [ "$CODEX_TEST_RELEASES_MODE" = "corrupt_checksum_and_github" ]; then
                   printf '<html>proxy error</html>\n' >"$output"
                   exit 0
@@ -615,14 +828,14 @@ def run_installer_in(
                   exit 22
                 fi
                 ;;
-              https://github.com/agtico/PfTerminal/releases/download/*/codex-package-*.tar.gz)
+              https://github.com/CorbanuCore/CorbanuTerminal/releases/download/*/codex-package-*.tar.gz)
                 if [ -n "$CODEX_TEST_ARCHIVE_PATH" ]; then
                   cp "$CODEX_TEST_ARCHIVE_PATH" "$output"
                 else
                   exit 22
                 fi
                 ;;
-              https://github.com/agtico/PfTerminal/releases/download/*/codex-npm-*.tgz)
+              https://github.com/CorbanuCore/CorbanuTerminal/releases/download/*/codex-npm-*.tgz)
                 if [ -n "$CODEX_TEST_LEGACY_ARCHIVE_PATH" ]; then
                   cp "$CODEX_TEST_LEGACY_ARCHIVE_PATH" "$output"
                 else
@@ -689,6 +902,8 @@ def run_installer_in(
         env["CODEX_INSTALLER_USE_RELEASES_OPENAI_COM"] = (
             "TRUE" if use_mirror else "false"
         )
+    if keep_releases is not None:
+        env["CORBANU_KEEP_RELEASES"] = keep_releases
     result = subprocess.run(
         ["/bin/sh", str(INSTALL_SCRIPT)],
         capture_output=True,
@@ -704,25 +919,58 @@ def run_installer_in(
     return result, requests
 
 
+def run_prune_function(
+    root: Path, *, keep_releases: str
+) -> subprocess.CompletedProcess[str]:
+    installer_source = INSTALL_SCRIPT.read_text(encoding="utf-8")
+    definitions, _main = installer_source.split('\nparse_args "$@"\n', 1)
+    script = root / "prune-only.sh"
+    script.write_text(
+        f"{definitions}\nos=linux\nprune_old_releases\n",
+        encoding="utf-8",
+    )
+    home = root / "home"
+    home.mkdir()
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "PATH": "/usr/bin:/bin",
+            "CORBANU_HOME": str(root / "pfterminal-home"),
+            "CORBANU_INSTALL_DIR": str(root / "install-bin"),
+            "CORBANU_KEEP_RELEASES": keep_releases,
+        }
+    )
+    return subprocess.run(
+        ["/bin/sh", script],
+        capture_output=True,
+        check=False,
+        env=env,
+        text=True,
+    )
+
+
 def create_package_release(
     root: Path,
     *,
     metadata_version: str = VERSION,
+    debug_binaries: tuple[str, ...] = ("corbanu-debug",),
 ) -> tuple[Path, Path, str]:
     package_dir = root / "package"
     (package_dir / "bin").mkdir(parents=True)
     (package_dir / "codex-path").mkdir()
     (package_dir / "codex-package.json").write_text("{}\n", encoding="utf-8")
     write_executable(
-        package_dir / "bin" / "pfterminal",
-        f"#!/bin/sh\nprintf 'pfterminal {VERSION}\\n'\n",
+        package_dir / "bin" / "corbanu",
+        f"#!/bin/sh\nprintf 'corbanu {VERSION}\\n'\n",
     )
+    for binary in debug_binaries:
+        write_executable(
+            package_dir / "bin" / binary,
+            f"#!/bin/sh\nprintf '{binary} {VERSION}\\n'\n",
+        )
     write_executable(
-        package_dir / "bin" / "pfterminal-debug",
-        f"#!/bin/sh\nprintf 'pfterminal {VERSION}\\n'\n",
-    )
-    write_executable(
-        package_dir / "bin" / "pfterminal-walletd",
+        package_dir / "bin" / "corbanu-walletd",
         "#!/bin/sh\nexit 0\n",
     )
     write_executable(
