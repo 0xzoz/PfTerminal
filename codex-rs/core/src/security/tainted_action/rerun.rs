@@ -7,7 +7,8 @@
 //! options whose value is a command: `find -exec`, `split --filter`, git's
 //! `rebase -x`, `submodule foreach`, `bisect run`, `filter-branch
 //! --tree-filter`, `difftool -x`. An operand holding a value the classifier
-//! cannot see is code it cannot read.
+//! cannot see is code it cannot read. #1405: `mapfile -C` runs a callback
+//! on each line it reads.
 //!
 //! #1159: git options that make git run a program the classifier does not
 //! read whatever their value: `--upload-pack`/`--receive-pack`, `--exec` (of
@@ -15,6 +16,7 @@
 //! the new repository by `clone -c`/`--config`.
 
 use super::git_helpers;
+use super::shell::SimpleCommand;
 use super::work;
 
 /// Commands that run, or keep as code, their operands. Without a command
@@ -125,6 +127,32 @@ fn prints_prompt(args: &[String]) -> bool {
         }
     }
     false
+}
+
+/// #1405: whether `mapfile`/`readarray` may run a callback (`-C eval`) on
+/// each line it reads, so its input is code. Any option word may hold `C`
+/// (`-tC`, `-Ceval`), and a word the classifier cannot see (`$o`, `-$x`)
+/// may spell it; redirection targets (`< <(ls)`) are not its words.
+pub(super) fn mapfile_callback(
+    simple: &SimpleCommand,
+    name: &str,
+    words: &[String],
+    unseen: &[bool],
+    index: usize,
+) -> bool {
+    if !matches!(name, "mapfile" | "readarray") {
+        return false;
+    }
+    let writes: std::collections::HashSet<usize> = simple.writes_to.iter().copied().collect();
+    words.iter().enumerate().skip(index + 1).any(|(at, word)| {
+        work::step();
+        let redirect =
+            simple.stdin_from == Some(at) || simple.here_string == Some(at) || writes.contains(&at);
+        !redirect
+            && ((word.starts_with('-') && !word.starts_with("--") && word.contains('C'))
+                || super::may_be_built(word)
+                || unseen.get(at).is_some_and(|unseen| *unseen))
+    })
 }
 
 /// #1159: whether git's words after `git` (`args`) name a program git runs

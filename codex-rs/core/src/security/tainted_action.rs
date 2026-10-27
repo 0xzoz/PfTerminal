@@ -1750,7 +1750,8 @@ impl Classifier {
             // #1064: and other commands that run an operand as code.
             let eval_unseen = (matches!(name.as_str(), "eval" | "trap")
                 && unseen[index + 1..].iter().any(|unseen| *unseen))
-                || rerun::runs_unseen(name, words, unseen, *index);
+                || rerun::runs_unseen(name, words, unseen, *index)
+                || rerun::mapfile_callback(simple, name, words, unseen, *index);
             if self.rebuilt == 0 && (unseen[*index] || inline_unseen || eval_unseen) {
                 self.note(ProtectedActionKind::UnseenCode);
             }
@@ -2207,7 +2208,10 @@ impl Classifier {
         }
         for preload in invocation.preloads {
             work::step();
-            if local(preload) {
+            // #1405: a shell's start-up file is a path it sources.
+            if shell {
+                self.required_script(preload, cwd, depth, shell);
+            } else if local(preload) {
                 self.required_script(preload, cwd, depth, /*shell*/ false);
             } else {
                 let file = self.homes.resolve(preload, cwd);

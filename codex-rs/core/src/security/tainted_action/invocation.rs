@@ -26,7 +26,8 @@ pub(super) enum Code<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Invocation<'a> {
     pub(super) code: Code<'a>,
-    /// Files loaded before the code (`node -r ./p.js`, `ruby -r ./p.rb`).
+    /// Files loaded before the code (`node -r ./p.js`, `ruby -r ./p.rb`,
+    /// `bash --rcfile f`).
     pub(super) preloads: Vec<&'a str>,
 }
 
@@ -232,8 +233,10 @@ impl Family {
             };
             return match key {
                 "command" if self == Self::Shell => Opt::Inline,
-                "rcfile" | "init-file" if self == Self::Shell => {
-                    attached.map_or(Opt::Value, |_| Opt::Flag)
+                // #1405: an interactive shell sources its start-up file
+                // first (`bash --rcfile f -i`, yash `--profile=f -l`).
+                "rcfile" | "init-file" | "profile" if self == Self::Shell => {
+                    attached.map_or(Opt::Preload, Opt::PreloadAttached)
                 }
                 "check-hash-based-pycs" if self == Self::Python => {
                     attached.map_or(Opt::Value, |_| Opt::Flag)

