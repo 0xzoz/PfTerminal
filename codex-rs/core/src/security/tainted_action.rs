@@ -1473,9 +1473,6 @@ impl Classifier {
                 .any(|arg| shell::prompt_expansion(arg, foreign))
             || lexed.too_deep
             || indirect::opaque_execution(&lexed.commands)
-            || command
-                .iter()
-                .any(|arg| rerun::quoted_mapfile_callback(arg))
         {
             self.note(ProtectedActionKind::UnseenCode);
         }
@@ -1530,10 +1527,13 @@ impl Classifier {
         // (`{}`, `{.}`) are only seen in the text as written.
         let braces = command.iter().any(|arg| arg.contains('{'));
         let mut loops = launched_git::PositionalLoops::default();
+        // #1405: a `mapfile` was found, by any spelling.
+        let mut mapfile = false;
         for (index, simple) in lexed.commands.iter().enumerate() {
             work::step();
             let (words, unseen, skipped) =
                 substitute(simple, &variables, &mut self.substitution_budget);
+            mapfile = mapfile || rerun::names_mapfile(&words);
             if self.substitution_budget.left == 0 {
                 self.note(ProtectedActionKind::UnseenCode);
             }
@@ -1622,6 +1622,15 @@ impl Classifier {
             }
         }
         certain_cd::finish(&mut folders);
+        // #1405: the word lexer ignores quotes (`-d 'x>' "$o"`): a line
+        // with a `mapfile` is read with them too.
+        if mapfile
+            && command
+                .iter()
+                .any(|arg| rerun::quoted_mapfile_callback(arg))
+        {
+            self.note(ProtectedActionKind::UnseenCode);
+        }
         // #937: arithmetic on a variable filled from command output or
         // `read` runs the substitutions in its value, like `eval`.
         // #1028: zsh `e`/`+` glob qualifiers run code the classifier does
@@ -1754,7 +1763,7 @@ impl Classifier {
             let eval_unseen = (matches!(name.as_str(), "eval" | "trap")
                 && unseen[index + 1..].iter().any(|unseen| *unseen))
                 || rerun::runs_unseen(name, words, unseen, *index)
-                || rerun::mapfile_callback(simple, name, words, unseen, *index);
+                || rerun::mapfile_callback(simple, words, unseen);
             if self.rebuilt == 0 && (unseen[*index] || inline_unseen || eval_unseen) {
                 self.note(ProtectedActionKind::UnseenCode);
             }

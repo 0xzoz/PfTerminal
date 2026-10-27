@@ -141,19 +141,14 @@ fn prints_prompt(args: &[String]) -> bool {
 /// case into it (`o=' -C'`, `IFS=,`, `declare -u o=-c`). Redirection
 /// targets holding a value (`< "$f"`, `< <(ls)`) are not its words, but
 /// one right after an option that takes a value is (`-d '<' -C`: the
-/// lexer ignores quotes). `words`/`unseen`: the command's words with known
-/// values filled in, index for index with `simple.words`.
-pub(super) fn mapfile_callback(
-    simple: &SimpleCommand,
-    name: &str,
-    words: &[String],
-    unseen: &[bool],
-    index: usize,
-) -> bool {
+/// lexer ignores quotes; [`quoted_mapfile_callback`] reads such lines with
+/// their quotes). `words`/`unseen`: the command's words with known values
+/// filled in, index for index with `simple.words`.
+pub(super) fn mapfile_callback(simple: &SimpleCommand, words: &[String], unseen: &[bool]) -> bool {
     use std::collections::HashSet;
-    if !matches!(name, "mapfile" | "readarray") {
+    let Some(index) = mapfile_word(words, |_| false) else {
         return false;
-    }
+    };
     let set = |indexes: &[usize]| indexes.iter().copied().collect::<HashSet<usize>>();
     let (writes, misread) = (set(&simple.writes_to), set(&simple.operated));
     let hidden = set(&simple.hidden);
@@ -199,25 +194,44 @@ pub(super) fn mapfile_callback(
 /// it is a length, and an option's value that may split or glob into more
 /// words (`-n $n`). A double-quoted value of an option (`-n "$n"`) is one
 /// word. A reading that is unsure where a quote or substitution ends asks
-/// too. `coproc` runs the command after it.
+/// too. `coproc` runs the command after it. Called only for a line the
+/// word lexer found a `mapfile` in, whatever its spelling (`ma''pfile`,
+/// `$m`).
 pub(super) fn quoted_mapfile_callback(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    if !lower.contains("mapfile") && !lower.contains("readarray") {
-        return false;
-    }
     let reading = quoted::commands(text);
     if reading.too_deep || reading.unterminated || reading.unsure {
         return true;
     }
     reading.commands.iter().any(|command| {
         let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
-        let start = usize::from(texts.first().is_some_and(|word| word == "coproc"));
-        let Some((at, name)) = indirect::command_word(&texts[start..]) else {
-            return false;
-        };
-        matches!(name.as_str(), "mapfile" | "readarray")
-            && quoted_callback(&command.words[start + at + 1..])
+        // The word lexer found a `mapfile` in this line: a command named by
+        // a value (`$m`) may be it.
+        let dynamic = |at: usize| command.words.get(at).is_some_and(|word| word.dynamic);
+        mapfile_word(&texts, dynamic).is_some_and(|at| quoted_callback(&command.words[at + 1..]))
     })
+}
+
+/// #1405: whether `words` (a command's, values filled in) run `mapfile` or
+/// `readarray`.
+pub(super) fn names_mapfile(words: &[String]) -> bool {
+    mapfile_word(words, |_| false).is_some()
+}
+
+/// #1405: the index of a `mapfile`/`readarray` command word in `words`,
+/// past assignments, keywords, wrappers and `coproc` (`time coproc
+/// mapfile`), or of a word `also` accepts there.
+fn mapfile_word(words: &[String], also: impl Fn(usize) -> bool) -> Option<usize> {
+    let mut start = 0;
+    while let Some((at, name)) = words.get(start..).and_then(indirect::command_word) {
+        work::step();
+        let at = start + at;
+        if name == "coproc" {
+            start = at + 1;
+            continue;
+        }
+        return (matches!(name.as_str(), "mapfile" | "readarray") || also(at)).then_some(at);
+    }
+    None
 }
 
 /// #1405: see [`quoted_mapfile_callback`]; `args` are the words after the

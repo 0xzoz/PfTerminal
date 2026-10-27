@@ -8119,6 +8119,37 @@ fn issue_1405_mapfile_callbacks_and_shell_start_up_files_are_judged() {
             "bash -c \"mapfile -d 'x>' \\\"\\$o\\\" a < notes\"",
             Some(UnseenCode),
         ),
+        // Review 4: other spellings of the name, `coproc` after a keyword
+        // or wrapper.
+        (
+            "o=-Ceval; ma''pfile -c 1 -d 'x>' \"$o\" a < notes",
+            Some(UnseenCode),
+        ),
+        (
+            "o=-Ceval; mapfil\\e -c 1 -d 'x>' \"$o\" a < notes",
+            Some(UnseenCode),
+        ),
+        (
+            "o=-Ceval; $'\\x6d'apfile -c 1 -d 'x>' \"$o\" a < notes",
+            Some(UnseenCode),
+        ),
+        (
+            "o=-Ceval; read''array -c 1 -d 'x>' \"$o\" a < notes",
+            Some(UnseenCode),
+        ),
+        (
+            "m=mapfile; o=-Ceval; $m -c 1 -d 'x>' \"$o\" a < notes",
+            Some(UnseenCode),
+        ),
+        ("! coproc mapfile -C eval -c 1 a < notes", Some(UnseenCode)),
+        (
+            "time coproc mapfile -C eval -c 1 a < notes",
+            Some(UnseenCode),
+        ),
+        (
+            "if coproc mapfile -C eval -c 1 a < notes; then :; fi",
+            Some(UnseenCode),
+        ),
         ("bash -rcfile dl.rc -i", Some(UnseenCode)),
         ("bash -rcfile notes -i", Some(UnseenCode)),
         ("bash -init-file dl.rc -i", Some(UnseenCode)),
@@ -8137,6 +8168,8 @@ fn issue_1405_mapfile_callbacks_and_shell_start_up_files_are_judged() {
             None,
         ),
         ("echo mapfile; cat notes", None),
+        ("node -e \"const readArray = (f) => f;\"", None),
+        ("git commit -m \"readArray: don't copy\"", None),
         ("mapfile -t -d $'\\0' a < <(ls)", None),
         ("mapfile -t a <<-EOF\nx\nEOF", None),
         ("mapfile -c 1 a < notes", None),
