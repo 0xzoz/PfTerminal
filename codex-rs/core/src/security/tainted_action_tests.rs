@@ -7091,6 +7091,9 @@ fn d195_git_working_tree_writes_in_an_unknown_folder_ask() {
         "cd \"$d\" && sh -c 'git status'",
         "cd \"$d\" && sh -c 'git -C /work pull'",
         "cd sub && git checkout -- notes.txt",
+        // D194: certain changes keep the folder known.
+        "cd a && cd b && cd c && git checkout -- notes.txt",
+        "cd a || exit; cd b || exit; cd c || exit; git pull",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
