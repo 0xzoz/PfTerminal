@@ -1473,6 +1473,9 @@ impl Classifier {
                 .any(|arg| shell::prompt_expansion(arg, foreign))
             || lexed.too_deep
             || indirect::opaque_execution(&lexed.commands)
+            || command
+                .iter()
+                .any(|arg| rerun::quoted_mapfile_callback(arg))
         {
             self.note(ProtectedActionKind::UnseenCode);
         }

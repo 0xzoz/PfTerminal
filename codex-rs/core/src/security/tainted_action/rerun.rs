@@ -16,7 +16,10 @@
 //! the new repository by `clone -c`/`--config`.
 
 use super::git_helpers;
+use super::indirect;
+use super::quoted;
 use super::shell::SimpleCommand;
+use super::shell::UNSEEN_OUTPUT;
 use super::work;
 
 /// Commands that run, or keep as code, their operands. Without a command
@@ -154,7 +157,6 @@ pub(super) fn mapfile_callback(
     let set = |indexes: &[usize]| indexes.iter().copied().collect::<HashSet<usize>>();
     let (writes, misread) = (set(&simple.writes_to), set(&simple.operated));
     let hidden = set(&simple.hidden);
-    let globbed = |word: &str| word.contains(['*', '?', '[', ']', '(', ')', '!', '@', '+']);
     // An option word whose last letter takes the next word as its value.
     let takes_value = |word: &str| {
         word.starts_with('-')
@@ -186,6 +188,83 @@ pub(super) fn mapfile_callback(
         }
         globbed(word) || (word.starts_with('-') && !word.starts_with("--") && word.contains('C'))
     })
+}
+
+/// #1405: whether shell `text`, read with its quotes (`quoted.rs`), holds a
+/// `mapfile`/`readarray` that may run a callback. The word lexer ignores
+/// quotes, so a quoted `<` or `>` (`-d 'x>' "$o"`) reads as a redirection
+/// there and hides the word after it from [`mapfile_callback`]. Here its
+/// options are read as bash reads them: a literal option word holding `C`
+/// or a glob asks; so does a value in an option's place (`"$o"`), unless
+/// it is a length, and an option's value that may split or glob into more
+/// words (`-n $n`). A double-quoted value of an option (`-n "$n"`) is one
+/// word. A reading that is unsure where a quote or substitution ends asks
+/// too. `coproc` runs the command after it.
+pub(super) fn quoted_mapfile_callback(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains("mapfile") && !lower.contains("readarray") {
+        return false;
+    }
+    let reading = quoted::commands(text);
+    if reading.too_deep || reading.unterminated || reading.unsure {
+        return true;
+    }
+    reading.commands.iter().any(|command| {
+        let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
+        let start = usize::from(texts.first().is_some_and(|word| word == "coproc"));
+        let Some((at, name)) = indirect::command_word(&texts[start..]) else {
+            return false;
+        };
+        matches!(name.as_str(), "mapfile" | "readarray")
+            && quoted_callback(&command.words[start + at + 1..])
+    })
+}
+
+/// #1405: see [`quoted_mapfile_callback`]; `args` are the words after the
+/// command word.
+fn quoted_callback(args: &[quoted::Word]) -> bool {
+    let mut value_next = false;
+    for word in args {
+        work::step();
+        let text = word.text.as_str();
+        let dynamic = word.dynamic || text.contains(UNSEEN_OUTPUT);
+        if std::mem::take(&mut value_next) {
+            if (dynamic && word.splits && !length(text)) || (!dynamic && globbed(text)) {
+                return true;
+            }
+            continue;
+        }
+        if dynamic {
+            if !length(text) {
+                return true;
+            }
+            continue;
+        }
+        if text == "--" {
+            return false;
+        }
+        if globbed(text) {
+            return true;
+        }
+        if let Some(cluster) = text.strip_prefix('-')
+            && !cluster.is_empty()
+        {
+            if cluster.contains('C') {
+                return true;
+            }
+            // The first letter taking a value takes the rest of the word,
+            // or the next word.
+            if let Some(at) = cluster.find(['d', 'n', 'O', 's', 'u', 'c']) {
+                value_next = at + 1 == cluster.len();
+            }
+        }
+    }
+    false
+}
+
+/// #1405: whether `word` may glob (or extglob) into another word.
+fn globbed(word: &str) -> bool {
+    word.contains(['*', '?', '[', ']', '(', ')', '!', '@', '+'])
 }
 
 /// Whether `raw` is only the length of a variable or array (`${#a[@]}`,

@@ -8095,6 +8095,30 @@ fn issue_1405_mapfile_callbacks_and_shell_start_up_files_are_judged() {
         ("yash --prof=notes -l", Some(UnseenCode)),
         ("yash --RCFILE=dl.rc -i", Some(UnseenCode)),
         ("yash --rc-file=dl.rc -i", Some(UnseenCode)),
+        // Review 3: a quoted `<`/`>` inside a value, `coproc`.
+        (
+            "o=-Ceval; mapfile -d 'x>' \"$o\" a < notes",
+            Some(UnseenCode),
+        ),
+        (
+            "o=-Ceval; mapfile -dx'>' \"$o\" a < notes",
+            Some(UnseenCode),
+        ),
+        (
+            "read -r o < cfg; mapfile -d 'x<<<' \"$o\" a < notes",
+            Some(UnseenCode),
+        ),
+        (
+            "mapfile -d 'x<' \"$o\" a <<< \"$(cat notes)\"",
+            Some(UnseenCode),
+        ),
+        ("mapfile -d ' >' \"$o\" a < notes", Some(UnseenCode)),
+        ("coproc mapfile -C eval a < notes", Some(UnseenCode)),
+        ("coproc readarray -tC eval a < notes", Some(UnseenCode)),
+        (
+            "bash -c \"mapfile -d 'x>' \\\"\\$o\\\" a < notes\"",
+            Some(UnseenCode),
+        ),
         ("bash -rcfile dl.rc -i", Some(UnseenCode)),
         ("bash -rcfile notes -i", Some(UnseenCode)),
         ("bash -init-file dl.rc -i", Some(UnseenCode)),
@@ -8108,6 +8132,11 @@ fn issue_1405_mapfile_callbacks_and_shell_start_up_files_are_judged() {
         ("n=5; mapfile -t -n \"$n\" a < notes", None),
         ("sep=,; mapfile -t -d \"$sep\" a < notes", None),
         ("mapfile -t a < \"$f\"", None),
+        (
+            "mapfile -t a < \"$f\" 2>&1; readarray -t b <<< \"$s\"",
+            None,
+        ),
+        ("echo mapfile; cat notes", None),
         ("mapfile -t -d $'\\0' a < <(ls)", None),
         ("mapfile -t a <<-EOF\nx\nEOF", None),
         ("mapfile -c 1 a < notes", None),
@@ -8140,6 +8169,7 @@ fn issue_1405_checks_are_linear() {
     for (label, unit) in [
         ("mapfile options", "mapfile -t -n 1 "),
         ("mapfile redirections", "mapfile a >$x "),
+        ("quoted mapfile", "mapfile -d '>' -t a < \"$f\"; "),
         ("start-up files", "bash --rcfile a "),
     ] {
         work::assert_linear(label, |scale| {
