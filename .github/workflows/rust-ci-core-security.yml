@@ -170,8 +170,10 @@ jobs:
       # #1367: a test binary once died with a bare SIGSEGV and no output, and
       # the log could not say which thread faulted. When this job fails on
       # macOS, keep the crash reports (`*.ips`) so the next occurrence can.
-      # ReportCrash writes them a few seconds after the crash, so wait briefly
-      # when none are there yet.
+      # The runner image ships old reports from its own build, so only take
+      # files changed within this job's 60-minute timeout (+10). ReportCrash
+      # writes a report a few seconds after the crash, so wait briefly when
+      # none is there yet.
       - name: Collect macOS crash reports (#1367)
         if: ${{ failure() && runner.os == 'macOS' }}
         working-directory: .
@@ -181,7 +183,7 @@ jobs:
           mkdir -p "$out"
           for _ in 1 2 3 4 5 6; do
             find "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports \
-              -maxdepth 1 -name '*.ips' -exec cp -p {} "$out/" \; 2>/dev/null
+              -maxdepth 1 -name '*.ips' -mmin -70 -exec cp -p {} "$out/" \; 2>/dev/null
             [ -n "$(ls -A "$out")" ] && break
             sleep 5
           done
