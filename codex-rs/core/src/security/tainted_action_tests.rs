@@ -6824,6 +6824,7 @@ fn d194_commands_after_a_certain_cd_run_where_it_went() {
         "[ -d a ] || mkdir a; cd a && cd b && cd c && make 2>&1 | tee log",
         "set -e; cd a && cd b && cd c && make > log",
         "set -euo pipefail; cd a || exit 1; cd b && cd c && make > log",
+        "cd /home/fixture; cd /tmp && python3 -m pip install x >> .zshenv",
     ]
     .into_iter()
     .filter(|command| script(command).is_some())
@@ -6929,6 +6930,21 @@ fn d194_uncertain_changes_still_ask() {
         "cd /home/fixture; h=/home/fixture; setopt -T; cd h && echo x >> .zshenv",
         "cd /home/fixture; set -o cdablevars; cd h && echo x >> .zshenv",
         "cd /home/fixture; declare -n r; read r < f; read r < g; cd u && echo x >> .zshenv",
+        // Review 5: zsh numeric patterns after another redirection
+        // character; option B: only `COMMANDS`, named first.
+        "cd /home/fixture; >&<2-2> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; ><1-1> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; >><-> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; <><-> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; cp a b; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; X=1 make; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; command make; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; >log make; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; 2>log make; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; make < in; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; python3 -c x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; set -e > f; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; set -o; cd /tmp && echo x >> .zshenv",
         // Words the word lexer splits otherwise (review 1).
         "cd /home/fixture; cd /nope || exit,; echo x >> .zshenv",
         "cd /home/fixture; cd /nope || exit\r\necho x >> .zshenv",

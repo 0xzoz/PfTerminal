@@ -9,9 +9,12 @@
 //! Only in the action's own shell script (`bash -lc '...'`), and only when
 //! it is plain: ASCII words, no quotes, backslashes, expansions (`$`,
 //! patterns, `~`), groups, comments or here-documents, so both readings
-//! split it as a shell does and every value is visible; and when nothing
-//! in the line may make `cd` or `exit` other than the builtins, change
-//! where `cd` goes, or read a value from data. `|| return` stays
+//! split it as a shell does and every value is visible; when every command
+//! is one of a fixed list (`COMMANDS`, option B after review 5: `cd`,
+//! `exit`, `set -e`, a few harmless builtins and build programs) named by
+//! its first word; and when nothing in the line may make `cd` or `exit`
+//! other than the builtins, change where `cd` goes, or read a value from
+//! data. `|| return` stays
 //! uncertain: bash's `return` outside a function fails and the line goes
 //! on.
 //!
@@ -138,29 +141,19 @@ const REDEFINERS: &[&str] = &[
 /// The options `set -o` may name.
 const SET_OPTIONS: &[&str] = &["errexit", "nounset", "pipefail", "xtrace"];
 
-/// Reserved words and wrappers after which the next word may be a
-/// command's name.
-const BEFORE_NAME: &[&str] = &[
-    "then",
-    "do",
-    "else",
-    "elif",
-    "if",
-    "while",
-    "until",
-    "!",
-    "time",
-    "command",
-    "builtin",
-    "exec",
-    "noglob",
-    "nocorrect",
-    "-",
-    "coproc",
-    "repeat",
-    // zsh `if [[ x ]] cmd`.
-    "]]",
+/// D194 option B: the commands a plain script may hold for its changes to
+/// be certain, each as the first word of every command. The builtins here
+/// cannot make `cd` or `exit` other than the builtins or change where `cd`
+/// goes (`set` only with `SET_LETTERS`/`SET_OPTIONS`); the rest are
+/// programs, which run in their own process. `python`/`python3` only as
+/// `-m pip`.
+const COMMANDS: &[&str] = &[
+    "cd", "exit", "set", "true", "echo", "[", "ls", "cat", "mkdir", "tee", "make", "cargo", "npm",
+    "pnpm", "yarn", "git", "go", "python", "python3",
 ];
+
+/// The letters `set` may take (zsh `set -T` is `CDABLE_VARS`).
+const SET_LETTERS: &str = "eux";
 
 impl Aside {
     /// For the action's own line (`argv`): a shell's plain script.
@@ -225,7 +218,7 @@ fn allowed(argv: &[String]) -> Allowed {
             work::step();
             unknown_folder::searches(word)
         });
-    let and = !scan.named && !redefines && !searches;
+    let and = !redefines && !searches;
     Allowed {
         and,
         exit: and && !scan.exit_redirected && !unknown_folder::starts_loop(&scan.words),
@@ -235,28 +228,27 @@ fn allowed(argv: &[String]) -> Allowed {
 /// What `scan` finds in a plain script.
 struct Scan {
     words: Vec<String>,
-    /// `.` or `r` may be a command's name.
-    named: bool,
     /// An `exit` has a redirection.
     exit_redirected: bool,
 }
 
-/// Read a plain script's words as a shell splits them (`None`: a `[` or
-/// `]` that may be a pattern, a redirection shells read otherwise, a zsh
-/// numeric pattern `<1-9>`, or `set` with an option other than `e`, `u`,
-/// `x` and `-o pipefail`). Commands end at `;`, `&`, `|` and line breaks
-/// (not in `>&`, `<&`, `>|`); a redirection's operator (`2>`,
-/// `>&`, zsh `>!`) takes the next word as its file, joined or not, except
-/// one that closes (`>&-`). A word may be a command's name first, or after
-/// assignments, redirections, reserved words and wrappers with their
-/// options (`time -p`, `exec -a x`, `repeat 3`).
+/// Read a plain script's words (`None`: a command whose first word is not
+/// one of `COMMANDS`, `set` with an option other than `SET_LETTERS` and
+/// `-o` with one of `SET_OPTIONS` or with a redirection, `python` other
+/// than `-m pip`, a `[` or `]` that may be a pattern, any `<` (zsh `<1-9>`
+/// is a pattern) or any `!` (zsh `>!`)). Commands end at `;`, `&`, `|` and
+/// line breaks (not in `>&`, `>|`); words end at spaces and redirection
+/// characters.
 fn scan(script: &str) -> Option<Scan> {
+    if script.contains(['<', '!']) {
+        return None;
+    }
     let chars: Vec<char> = script.chars().collect();
     let mut segments: Vec<&[char]> = Vec::new();
     let mut from = 0;
     for (at, ch) in chars.iter().enumerate() {
         work::step();
-        let redirect = at > 0 && matches!(chars[at - 1], '<' | '>');
+        let redirect = at > 0 && chars[at - 1] == '>';
         if matches!(ch, ';' | '\n') || (matches!(ch, '&' | '|') && !redirect) {
             segments.push(&chars[from..at]);
             from = at + 1;
@@ -265,106 +257,62 @@ fn scan(script: &str) -> Option<Scan> {
     segments.push(&chars[from..]);
     let mut found = Scan {
         words: Vec::new(),
-        named: false,
         exit_redirected: false,
     };
     for segment in segments {
         work::step();
-        let redirected = segment.iter().any(|ch| matches!(ch, '<' | '>'));
-        let mut starts = true;
-        let mut value = false;
-        let mut file = false;
-        let mut setting = false;
-        let mut option_name = false;
-        let mut at = 0;
-        while at < segment.len() {
+        let text: String = segment.iter().collect();
+        let redirected = text.contains('>');
+        let words: Vec<String> = text
+            .split(|ch: char| ch.is_ascii_whitespace() || matches!(ch, '>' | '&' | '|'))
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect();
+        let Some(name) = words.first() else {
+            continue;
+        };
+        // The name is the first word: not a redirection, its descriptor
+        // or an assignment.
+        if text.trim_start().starts_with('>') || !COMMANDS.contains(&name.as_str()) {
+            return None;
+        }
+        for word in &words {
             work::step();
-            if segment[at].is_ascii_whitespace() {
-                at += 1;
-                continue;
-            }
-            if matches!(segment[at], '<' | '>') {
-                // zsh `<->`, `<1-9>`: a pattern, not a redirection.
-                let digits = segment[at + 1..]
-                    .iter()
-                    .take_while(|ch| ch.is_ascii_digit())
-                    .count();
-                if segment[at] == '<' && segment.get(at + 1 + digits) == Some(&'-') {
-                    return None;
-                }
-                at += 1;
-                while at < segment.len() && "<>&|!".contains(segment[at]) {
-                    work::step();
-                    // zsh `>!` takes a file; in bash `!` is the file.
-                    if segment[at] == '!' {
-                        return None;
-                    }
-                    at += 1;
-                }
-                file = true;
-                if segment.get(at) == Some(&'-') && segment[at - 1] == '&' {
-                    at += 1;
-                    file = false;
-                }
-                continue;
-            }
-            let start = at;
-            while at < segment.len()
-                && !segment[at].is_ascii_whitespace()
-                && !matches!(segment[at], '<' | '>')
-            {
-                work::step();
-                at += 1;
-            }
-            let word: String = segment[start..at].iter().collect();
-            if word.contains(['[', ']']) && !matches!(word.as_str(), "[" | "]" | "[[" | "]]") {
+            if word.contains(['[', ']']) && !matches!(word.as_str(), "[" | "]") {
                 return None;
             }
-            found.words.push(word.clone());
-            let operator_next = segment.get(at).is_some_and(|ch| matches!(ch, '<' | '>'));
-            if std::mem::take(&mut file)
-                || (operator_next && word.bytes().all(|byte| byte.is_ascii_digit()))
-            {
-                // A redirection's file, or its descriptor (`2>`).
-                continue;
-            }
-            if setting {
-                // zsh `set -T` is `CDABLE_VARS`: only `e`, `u`, `x` and
-                // `-o` with one of `SET_OPTIONS`.
-                if std::mem::take(&mut option_name) {
-                    if !SET_OPTIONS.contains(&word.as_str()) {
-                        return None;
-                    }
-                    continue;
-                }
-                let letters = word.get(1..).unwrap_or_default();
-                let letters = letters.strip_suffix('o').map_or(letters, |rest| {
-                    option_name = true;
-                    rest
-                });
-                if !word.starts_with(['-', '+'])
-                    || word.len() < 2
-                    || !letters.chars().all(|letter| "eux".contains(letter))
-                {
-                    return None;
-                }
-                continue;
-            }
-            if starts && !value {
-                found.named |= matches!(word.as_str(), "." | "r");
-                setting = word == "set";
-                // bash and zsh go on when a builtin's redirection fails.
-                found.exit_redirected |= word == "exit" && redirected;
-            }
-            let keeps = value
-                || BEFORE_NAME.contains(&word.as_str())
-                || (starts && (word.starts_with('-') || word.contains('=')));
-            // The next word is `exec -a`'s name or `repeat`'s count.
-            value = keeps && matches!(word.as_str(), "-a" | "repeat");
-            starts = keeps;
         }
+        match name.as_str() {
+            "set" if redirected || !set_options(&words[1..]) => return None,
+            "python" | "python3" if words.get(1..3) != Some(&["-m".into(), "pip".into()]) => {
+                return None;
+            }
+            "exit" => found.exit_redirected |= redirected,
+            _ => {}
+        }
+        found.words.extend(words);
     }
     Some(found)
+}
+
+/// `set`'s words: options of `SET_LETTERS`, a final `o` taking one of
+/// `SET_OPTIONS`.
+fn set_options(words: &[String]) -> bool {
+    let mut option_name = false;
+    words.iter().all(|word| {
+        work::step();
+        if std::mem::take(&mut option_name) {
+            return SET_OPTIONS.contains(&word.as_str());
+        }
+        let letters = word.get(1..).unwrap_or_default();
+        let letters = letters.strip_suffix('o').map_or(letters, |rest| {
+            option_name = true;
+            rest
+        });
+        word.starts_with(['-', '+'])
+            && word.len() > 1
+            && letters.chars().all(|letter| SET_LETTERS.contains(letter))
+    }) && !option_name
 }
 
 /// Before each command a reading follows, in order (`joint`: `Other` for
