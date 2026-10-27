@@ -301,7 +301,7 @@ fn reparses(text: &str) -> bool {
 /// `${(P)n::=on}`: a `${(` flag group with any later `P` and `=` may
 /// assign the variable a value names (`options` included). Linear.
 fn assigns_named(text: &str) -> bool {
-    let (Some(flag), Some(assign)) = (text.rfind('P'), text.rfind('=')) else {
+    let (Some(flag), Some(assign)) = (work::rfind(text, "P"), work::rfind(text, "=")) else {
         return false;
     };
     text.find("${(").is_some_and(|at| flag > at && assign > at)
@@ -312,7 +312,7 @@ fn assigns_named(text: &str) -> bool {
 /// delimiter (`${(s:,:~pj:$x:)a}`, `${(@)=~x}`), so a later home folder
 /// (`${(f)x} ~/dir`) counts too. Linear.
 fn substitutes_globs(text: &str) -> bool {
-    let Some(last) = text.rfind('~') else {
+    let Some(last) = work::rfind(text, "~") else {
         return false;
     };
     text.match_indices('$').any(|(at, _)| {
@@ -473,7 +473,7 @@ fn expand_braces(text: &str) -> (String, bool) {
 /// The alternatives of the first innermost `{a,b}` group, if any.
 fn brace_alternatives(word: &str) -> Option<Vec<String>> {
     let close = word.find('}')?;
-    let open = word[..close].rfind('{')?;
+    let open = work::rfind(&word[..close], "{")?;
     let inner = &word[open + 1..close];
     if !inner.contains(',') {
         return None;
