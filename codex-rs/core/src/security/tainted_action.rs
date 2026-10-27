@@ -1686,14 +1686,17 @@ impl Classifier {
             }
         }
         // #1159: git writing the working tree in a folder that is or holds
-        // a home.
+        // a home. D195 (#1309): or in one the classifier cannot know, unless
+        // a folder flag names one (`-C /x`).
         if command
             .as_ref()
             .is_some_and(|(index, name)| outputs::writes_working_tree(name, &words[index + 1..]))
-            && bases
+            && (bases
                 .iter()
                 .chain(other_bases.iter())
                 .any(|base| self.homes.holds_a_home(&self.homes.resolve(".", base)))
+                || (self.unknown_place(folders, ".")
+                    && flags.iter().all(|flag| self.relative_place(flag))))
         {
             self.note(ProtectedActionKind::Persistence);
         }

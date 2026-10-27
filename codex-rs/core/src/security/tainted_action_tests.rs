@@ -5001,7 +5001,6 @@ fn issue_1268_git_given_input_words_asks() {
         "git config get \"$@\"",
         "sh -c 'git log \"$1\"' _ x",
         "xargs sh -c 'git log --oneline'",
-        "find . -type d -name .git -execdir sh -c 'git pull' \\;",
         "env -S'git log' --oneline",
         "xargs env -S'git log' --oneline",
         "parallel 'cd x && git log' ::: a",
@@ -6835,4 +6834,54 @@ fn issue_1132_shared_target_judgement_preserves_classification() {
         ("sed -i '1a bash present.sh' r.sh; bash r.sh; sed p", None),
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
+}
+
+/// D195 (#1309): git writing the working tree in a folder the classifier
+/// cannot know asks, unless a folder flag names one; reading it stays quiet.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d195_git_working_tree_writes_in_an_unknown_folder_ask() {
+    // These were quiet before D195.
+    let quiet = [
+        "cd a; cd b; cd c; git checkout -- .zshrc",
+        "cd a; cd b; cd c; git -C sub pull",
+        "cd a; cd b; cd c; git -C .. stash pop",
+        "cd a; cd b; cd c; git restore .",
+        // A nested script in a folder the quote-aware reading cannot know.
+        "cd \"$d\" && sh -c 'git checkout -- .zshrc'",
+        "env -C \"$d\" sh -c 'git reset --hard'",
+        "find . -type d -name .git -execdir sh -c 'git pull' \\;",
+    ]
+    .into_iter()
+    .filter(|command| script(command).is_none())
+    .collect::<Vec<_>>();
+    assert_eq!(quiet, Vec::<&str>::new());
+    for command in [
+        "cd a; cd b; cd c; git status",
+        "cd a; cd b; cd c; git diff",
+        "cd a; cd b; cd c; git log",
+        "cd a; cd b; cd c; git -C /work checkout -- notes.txt",
+        "cd a; cd b; cd c; git -C sub -C /work pull",
+        "cd \"$d\" && sh -c 'git status'",
+        "cd \"$d\" && sh -c 'git -C /work pull'",
+        "cd sub && git checkout -- notes.txt",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// D195: the check stays linear in the number of folder flags.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d195_checks_are_linear() {
+    work::assert_linear("folder flags", |scale| {
+        let flags = " -C x".repeat(100 * scale);
+        let _ = script(&format!("cd a; cd b; cd c; git{flags} checkout -- f"));
+    });
 }
