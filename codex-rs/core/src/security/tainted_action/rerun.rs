@@ -131,8 +131,12 @@ fn prints_prompt(args: &[String]) -> bool {
 
 /// #1405: whether `mapfile`/`readarray` may run a callback (`-C eval`) on
 /// each line it reads, so its input is code. Any option word may hold `C`
-/// (`-tC`, `-Ceval`), and a word the classifier cannot see (`$o`, `-$x`)
-/// may spell it; redirection targets (`< <(ls)`) are not its words.
+/// (`-tC`, `-Ceval`) or a glob that may match a file `-C` (`-?`); a value
+/// the classifier cannot see (`$o`, `-$x`) may spell it, and a known one
+/// (`o=' -C'`, `IFS=,`) may split into it. A length (`"${#a[@]}"`, the
+/// append idiom) is a number. Redirection targets (`< <(ls)`) are not its
+/// words. `words`/`unseen`: the command's words with known values filled
+/// in, index for index with `simple.words`.
 pub(super) fn mapfile_callback(
     simple: &SimpleCommand,
     name: &str,
@@ -144,15 +148,41 @@ pub(super) fn mapfile_callback(
         return false;
     }
     let writes: std::collections::HashSet<usize> = simple.writes_to.iter().copied().collect();
+    let globbed = |word: &str| word.contains(['*', '?', '[']);
     words.iter().enumerate().skip(index + 1).any(|(at, word)| {
         work::step();
-        let redirect =
-            simple.stdin_from == Some(at) || simple.here_string == Some(at) || writes.contains(&at);
-        !redirect
-            && ((word.starts_with('-') && !word.starts_with("--") && word.contains('C'))
-                || super::may_be_built(word)
-                || unseen.get(at).is_some_and(|unseen| *unseen))
+        if simple.stdin_from == Some(at) || simple.here_string == Some(at) || writes.contains(&at) {
+            return false;
+        }
+        let raw = simple.words.get(at).map_or(word.as_str(), String::as_str);
+        if unseen.get(at).is_some_and(|unseen| *unseen) || super::may_be_built(word) {
+            return !length(raw);
+        }
+        if super::may_be_built(raw) {
+            return word.contains('-') && (word.contains('C') || globbed(word));
+        }
+        globbed(word) || (word.starts_with('-') && !word.starts_with("--") && word.contains('C'))
     })
+}
+
+/// Whether `raw` is only the length of a variable or array (`${#a[@]}`,
+/// `${#s}`, `$#`), as written or with the lexer's braces dropped.
+fn length(raw: &str) -> bool {
+    if raw == "$#" {
+        return true;
+    }
+    let Some(rest) = raw.strip_prefix("${#").or_else(|| raw.strip_prefix("$#")) else {
+        return false;
+    };
+    let rest = rest.strip_suffix('}').unwrap_or(rest);
+    let name = rest
+        .strip_suffix("[@]")
+        .or_else(|| rest.strip_suffix("[*]"))
+        .unwrap_or(rest);
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 /// #1159: whether git's words after `git` (`args`) name a program git runs

@@ -2208,9 +2208,12 @@ impl Classifier {
         }
         for preload in invocation.preloads {
             work::step();
-            // #1405: a shell's start-up file is a path it sources.
+            // #1405: a shell's start-up file is a path it sources; an empty
+            // one (`--rcfile /dev/null`) runs nothing.
             if shell {
-                self.required_script(preload, cwd, depth, shell);
+                if preload != "/dev/null" {
+                    self.required_script(preload, cwd, depth, shell);
+                }
             } else if local(preload) {
                 self.required_script(preload, cwd, depth, /*shell*/ false);
             } else {

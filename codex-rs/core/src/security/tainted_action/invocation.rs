@@ -64,6 +64,11 @@ pub(super) fn parse<'a>(name: &str, args: &'a [String]) -> Option<Invocation<'a>
                 preloads,
             });
         }
+        // #1405: bash also reads `-rcfile f` as `--rcfile f`; other shells
+        // read its letters, so they are read too (`-rcfile` holds `-c`).
+        if family == Family::Shell && matches!(arg.as_str(), "-rcfile" | "-init-file") {
+            preloads.extend(next);
+        }
         let is_option = arg.starts_with('-') || (family == Family::Shell && arg.starts_with('+'));
         if !is_option {
             // Subcommands that pick what runs (`deno run x.ts`, `bun run x`).
