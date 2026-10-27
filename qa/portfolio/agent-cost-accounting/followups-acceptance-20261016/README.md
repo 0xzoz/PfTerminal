@@ -8,14 +8,20 @@ known gap. **Not accepted: S10 needs Travis's acceptance.**
 
 ## Current status (2026-10-27)
 
-- **35 passed, 0 failed, 2 blocked** of 37 cases. Two dated results after the first run, below, produced this count:
-  - **Re-run R1 (2026-10-27):** ACC-06, ACC-11, ACC-14, ACC-15 and ACC-18 all passed. They ran code-blind under a frozen
-    amendment, on build `63c9daca26`. Record: [rerun-r1-20261022/](rerun-r1-20261022/README.md).
+- **33 passed, 0 failed, 4 blocked** of 37 cases. Two dated results after the first run, below, produced this count:
+  - **Re-run R1 (2026-10-27):** ACC-06, ACC-15 and ACC-18 passed. ACC-11 and ACC-14 stay blocked, each on one result
+    that the tester judged but did not capture. Record: [rerun-r1-20261022/](rerun-r1-20261022/README.md).
   - **D113 (2026-10-21):** ACC-04 is recorded as passed.
-- The 2 cases still blocked are ACC-22 (advisory, starting condition not met) and ACC-35 (optional, D3 not granted).
-- No blocker case is left unresolved.
+- The 4 blocked cases:
+  - ACC-11 and ACC-14 (blockers), see the next point;
+  - ACC-22 (advisory; its starting condition was not met);
+  - ACC-35 (optional; D3 was not granted).
+- No case failed. ACC-11 and ACC-14 have every other result observed and passing:
+  - ACC-11's missing result is "exactly one link contains Reopen warm-up". It shows only in a later capture.
+  - ACC-14's missing result is the exact-cost comparison of its two oldest requests. Those were read only rounded in
+    ACC-14, and exactly later, in ACC-18.
 - [dispositions.md](dispositions.md) and [results.json](results.json) carry the R1 dispositions for the five re-run
-  cases. Each keeps its first-run entry under `prior_run`. Their totals read 34 passed and 3 blocked, because ACC-04
+  cases. Each keeps its first-run entry under `prior_run`. Their totals read 32 passed and 5 blocked, because ACC-04
   stays blocked there and D113 is recorded only in the addendum below.
 
 ## Result (first run, 2026-10-16)
@@ -150,19 +156,24 @@ Dated addendum; the record above is unchanged.
 
 ## After this record: re-run R1 (2026-10-27)
 
-Dated addendum. The first-run sections above are unchanged.
+Dated addendum. The first-run sections above are unchanged in substance. This PR adds a current-status section,
+renames the result heading, and adds one note to a named limit.
 
-- ACC-06 (#898 is closed as fixed), ACC-11, ACC-14, ACC-15 and ACC-18 were re-run under amendment R1. A fresh designer
-  wrote it, a separate reviewer checked it, and it was frozen before the first VM started.
-- The candidate was a private signed build of `63c9daca26`. Testers were GLM 5.3 Flash, running code-blind on fresh
-  Tart clones. No real key entered a guest: host relays held the keys.
-- All five passed, and the screens confirm each result that was missing in the first run:
-  - ACC-06: `Turn: code-review:…` on the review's five requests;
-  - ACC-15: `Turn: side:…` on the side turn;
-  - ACC-11, ACC-14, ACC-18: earlier Request IDs re-read after each reopen;
-  - ACC-18: per-conversation sums for both conversations.
-- Two attempts did not count:
+- ACC-06 (#898 is closed as fixed), ACC-11, ACC-14, ACC-15 and ACC-18 were re-run under amendment R1.
+  - A fresh designer wrote it. A separate reviewer returned CHANGES with a full revised text, and that revised text was
+    frozen word for word, before the first VM started.
+  - The candidate was a private signed build of `63c9daca26`.
+  - Testers were GLM 5.3 Flash, running code-blind on fresh Tart clones. Host relays held the keys, so no real key
+    entered a guest.
+- **ACC-06 passed:** each of the review's five requests shows `Turn: code-review:…`.
+- **ACC-15 passed:** the side turn shows `Turn: side:…`, and exactly one new notice appeared.
+- **ACC-18 passed:** after every reopen, the earlier Request IDs come back with exact costs, and the per-conversation
+  sums hold for both conversations.
+- **ACC-11 and ACC-14 stay blocked**, each on one result the tester judged without a capture (dispositions.md).
+  - Their first-run gap, re-reading earlier Request IDs after the reopen, is now observed and passes.
+  - The tester reported both as passed.
+- **Attempts that did not count:**
   - A-R1 on 2026-10-22 (Z.AI balance);
   - C-R1 attempt 1 (the tester's stream stalled mid-ACC-14).
-- The expired synthetic mediation CA was re-issued. Details, evidence and integrator checks:
-  [rerun-r1-20261022/README.md](rerun-r1-20261022/README.md).
+- The expired synthetic mediation CA was re-issued.
+- Details, evidence and integrator checks: [rerun-r1-20261022/README.md](rerun-r1-20261022/README.md).

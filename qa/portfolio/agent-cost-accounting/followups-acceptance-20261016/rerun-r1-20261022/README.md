@@ -1,16 +1,24 @@
 # PF-60-S10 re-run R1: ACC-06, ACC-11, ACC-14, ACC-15, ACC-18 (2026-10-22 to 2026-10-27)
 
 A targeted code-blind re-run of the one failed and four blocked S10 cases ([../README.md](../README.md)). Decided QA
-work; no new owner decision. **Result: all five passed** (raw executor verdicts and the integrator's dispositions agree).
-ACC-35 (needs a live Moonshot cache-read grant, D3) and the advisory cases ACC-04 and ACC-22 were not re-run.
+work; no new owner decision.
 
-| Case | First run (2026-10-16) | R1 | Run |
-| --- | --- | --- | --- |
-| ACC-06 | failed (#898) | **passed** | [A-R1](runs/acc-A-R1-agmx1-20261027T175348Z/evidence/result.md) |
-| ACC-11 | blocked | **passed** | [C-R1](runs/acc-C-R1-agmx1-20261027T190341Z/evidence/result.md) |
-| ACC-14 | blocked | **passed** | C-R1 |
-| ACC-15 | blocked | **passed** | C-R1 |
-| ACC-18 | blocked | **passed** | C-R1 |
+**Result: 3 passed (ACC-06, ACC-15, ACC-18), 2 blocked (ACC-11, ACC-14), none failed.**
+
+- The executor reported all five passed.
+- The integrator dispositions ACC-11 and ACC-14 as blocked. Each has one expected result that the executor judged
+  without a captured screen showing it, and the frozen rules (G7, G11, G16) count such a result as NOT OBSERVED, never
+  PASS. This is the same rule the first run applied to ACC-15.
+- In both cases the first run's own gap, re-reading earlier Request IDs after the reopen, is now observed and passes.
+- ACC-35 (needs a live Moonshot cache-read grant, D3) and the advisory cases ACC-04 and ACC-22 were not re-run.
+
+| Case | First run (2026-10-16) | R1 raw | R1 disposition | Run |
+| --- | --- | --- | --- | --- |
+| ACC-06 | failed (#898) | passed | **passed** | [A-R1](runs/acc-A-R1-agmx1-20261027T175348Z/evidence/result.md) |
+| ACC-11 | blocked | passed | **blocked** (result 3 not observed) | [C-R1](runs/acc-C-R1-agmx1-20261027T190341Z/evidence/result.md) |
+| ACC-14 | blocked | passed | **blocked** (result 3: two exact costs not read) | C-R1 |
+| ACC-15 | blocked | passed | **passed** | C-R1 |
+| ACC-18 | blocked | passed | **passed** | C-R1 |
 
 Per-case summaries are in [../dispositions.md](../dispositions.md) and [../results.json](../results.json) (each re-run
 case keeps its first-run entry under `prior_run`).
@@ -27,8 +35,21 @@ case keeps its first-run entry under `prior_run`).
 
 - A fresh designer wrote amendment R1 from an intent packet ([design-r1/run-observations-r1.md](design-r1/run-observations-r1.md)).
   It replaces only these five cases and adds the steps needed to observe the results that were left unjudged.
-- A separate fresh reviewer checked it. The amendment was frozen on 2026-10-22T12:05:59Z
-  ([design-r1/FROZEN.sha256](design-r1/FROZEN.sha256), `c03044a2…`), before the first VM started.
+- A separate fresh reviewer returned **`VERDICT: CHANGES`** together with a complete revised text, its section (b)
+  ([design-r1/review-output.md](design-r1/review-output.md)).
+- The integrator froze that revised text word for word on 2026-10-22T12:05:59Z
+  ([design-r1/FROZEN.sha256](design-r1/FROZEN.sha256), `c03044a2…`), before the first VM started (12:07:16Z).
+  - There was no second review of the revised text.
+  - The reviewer's own section (c) holds five open questions "for the integrator; none blocks freezing"
+    ([design-r1/open-questions-r1.md](design-r1/open-questions-r1.md)). They were not answered before the freeze.
+  - In this run they resolved as follows:
+    1. `agms-tui help` lists no file-writing control, so A-S1 used the fallback product turn.
+    2. ACC-15's rule would count a notice in the side view and another in the saved view as two (a FAIL). That did not
+       arise: the saved view showed one notice both before (`-pre`) and after (`-back`) `/side`, so no second notice
+       was added there.
+    3. No request was reached only through Descendant attempts.
+    4. Calibration: the executors read exact costs from technical pages.
+    5. Group A took 31 minutes.
 - The executors got the staged packet in [executor-packet-r1/](executor-packet-r1/). Its `amendment-r1.md` is
   byte-identical to the frozen file.
 
@@ -63,10 +84,11 @@ Every attempt is kept as evidence ([logs/resume-driver.log](logs/resume-driver.l
    **does not count.**
    - The tester's Z.AI stream stalled twice, each time hitting the product's 180 s actionable-silence timeout
      (18:54 to 19:00Z, with a request near 625 KB). The executor turn failed in the middle of ACC-14.
-   - ACC-11 had already been observed as passing. ACC-18 needs the whole group's history, so C-R1 was re-run in full
+   - The executor had already judged ACC-11, with no verdict line. ACC-18 needs the whole group's history, so C-R1 was re-run in full
      on a fresh clone.
 5. **2026-10-27, C-R1 attempt 2** ([runs/acc-C-R1-agmx1-20261027T190341Z](runs/acc-C-R1-agmx1-20261027T190341Z)):
-   gate 110/110; ACC-11, ACC-14, ACC-15 and ACC-18 passed.
+   gate 110/110. The executor reported ACC-11, ACC-14, ACC-15 and ACC-18 passed. The dispositions are ACC-15 and
+   ACC-18 passed, and ACC-11 and ACC-14 blocked (see above).
 
 ## Integrator checks
 
@@ -76,25 +98,45 @@ the executor's report.
 - **ACC-06:**
   - `r1a-acc06-after-req5-tech` through `-req9-tech` each show `Turn: code-review:01a17e90-…`.
   - Requests 1–4 show the same Request IDs on the before and after pages.
-- **ACC-11, ACC-14 (the result left unjudged in the first run):**
+- **ACC-11 and ACC-14.** The first run's gap is now observed:
   - After the restart, the earlier IDs `950fc3fe…` and `06d205ef…` are on `r1c-acc11-after-req1` and `-req2`.
   - After `/resume`, all four ALPHA IDs are on request pages captured between 19:19 and 19:21Z.
+- **ACC-11 and ACC-14: two results not observed.** The independent review found these, and the integrator confirmed
+  them on the screens.
+  - ACC-11, expected result 3 ("exactly one request link contains `Reopen warm-up`"):
+    - Every link list captured in ACC-11 shows either only the provider line (`r1c-acc11-after-links`, 19:13:10Z) or
+      bare `→ Request 1/2/3` lines (`-after-links-2`, `-after-provider-list`).
+    - The labelled list first appears in ACC-14 (`r1c-acc14-after-provider-list3`, 19:20:33Z).
+    - The executor's report claims `r1c-acc11-after-links` shows the links. It does not.
+  - ACC-14, expected result 3, first part (every earlier ID found again "with the same cost", G11):
+    - `950fc3fe…` and `06d205ef…` were re-read in ACC-14 only on request pages showing rounded costs.
+    - ACC-14's only technical money pages are those of the two warm-ups (19:20:19Z and 19:21:39Z).
 - **ACC-15 (the `side:` label):**
   - `r1c-acc15-side-req6-tech` shows `Turn: side:01a17ed0-6a0d-70e3-8ad2-b455f7ffdad9`.
   - The warm-up page shows `Turn: side:prewarm:reopen:…`.
-  - Notice placement: `r1c-acc15-pre` and the ALPHA view after Ctrl+C (`r1c-acc15-back`) show the same single notice
-    under `• ALPHA`, which is ACC-14's.
-  - The side view (`r1c-acc15-side-open`, and again `-side-reply`) shows one notice and none of ALPHA's transcript
-    lines. That is exactly one new notice, which matches the executor's reading.
+  - Notice placement:
+    - The side view (`r1c-acc15-side-open`, and again `-side-reply`) shows one notice and none of ALPHA's transcript
+      lines, so that notice is new.
+    - The ALPHA view after Ctrl+C (`r1c-acc15-back`) shows one notice under `• ALPHA`, as `r1c-acc15-pre` did.
+    - The product showed no return confirmation: the executor's wait for it timed out at 19:23:25Z. So the rule's third
+      test could not apply.
+    - The `-back` view is re-rendered without pre's `Token usage` and `To continue` lines, so calling its notice ACC-14's
+      is an inference. The notice count in the saved view stayed at 1.
+    - Result: exactly one new notice, as the executor read it.
 - **ACC-18:**
   - All eight IDs from ACC-11, ACC-14 and ACC-15 are found again on `r1c-acc18-alpha-*` and `r1c-acc18-charlie-*`
     pages. Request 5's page was captured under the label `r1c-acc18-alpha-links-2`, and its money page is
     `r1c-acc18-alpha-req5-tech-money`.
   - Neither `r1c-acc18-open-1` nor `r1c-acc18-open-2` shows a notice.
+  - Several captures carry the label of a different page; for example, some `-tech-money` labels show the conversation
+    total. The exact cost of each of the eight IDs is still on a correctly identified capture.
 - **Keys:**
   - Every clone's teardown reported the real key files absent (never placed), `auth.json` a synthetic placeholder, and
     the mediator leaf key removed.
-  - The key scan of this record is in [keyscan-r1.txt](keyscan-r1.txt).
+  - [keyscan-r1.txt](keyscan-r1.txt) holds the key scan of the final tree, made by
+    [harness/keyscan-r1.sh](harness/keyscan-r1.sh). It scans for key pattern classes and for the exact values under
+    vault labels `zai_key_3`, `openai-api-key`, `provider/zai_api_key` and `kimi_api3`, and prints names and counts
+    only. `harness/keyscan.sh` is the first run's script, with three labels.
 - **Relays** ([logs/](logs/), 2026-10-27):
   - Z.AI: 402 chat completions, all 200, plus 3 model listings.
   - OpenAI: 8 WebSocket upgrades (101) and 3 model listings.
@@ -104,8 +146,16 @@ the executor's report.
     usage. C-R1 attempt 1 reported no usage before it failed; it was comparable.
   - Products under test: Z.AI $0.0048 (ACC-06); OpenAI about $0.014 (C-R1 attempt 2) plus a few thousandths in
     attempt 1.
-- **Clean-up:** the Tart lock was released, every clone was deleted (`tart list` shows only `corbanu-qa-base`), and
-  the relays were stopped.
+- **Clean-up:** the Tart lock was released, every clone was deleted and the relays were stopped. Evidence:
+  [logs/cleanup-state.txt](logs/cleanup-state.txt).
+
+## Review
+
+- R1 has its own budget, set by the brief: a fresh designer, a separate design review, and up to 3 independent
+  read-only Opus 5.5 High review rounds for the record PR.
+- The rounds are listed in [../review-ledger.md](../review-ledger.md#re-run-r1-acct-rerun--acct-rerun2-2026-10-22-to-2026-10-27).
+- Round 1 returned CHANGES. Its findings are applied above: ACC-11 and ACC-14 are now blocked, and the disclosures and
+  record fixes are in.
 
 ## Observations (not case failures)
 

@@ -14,7 +14,7 @@
  },
  "dispositions": {
   "path": "dispositions.md",
-  "sha256": "017a071072196c3fe9426a216e4f9fd76e025bae9d4296cb6ea82633594579f7"
+  "sha256": "67bee8a020f37a98a5f2c55cacce1f76e3861eaeb72ee45dc504444e5fd1dfea"
  },
  "cases": [
   {
@@ -900,8 +900,8 @@
   {
    "id": "ACC-11",
    "priority": "blocker",
-   "disposition": "passed",
-   "summary": "Re-run R1: restart with resume --last showed the notice naming skip_reopen_warmup; Reopen warm-up: 1 request, $0.001465 (14,650 x $0.10/M); exactly one warm-up link, whose request page says Reopen warm-up; total 0.0036999 -> 0.0051649 = T + warm-up; both earlier request pages re-read after the restart with the same Request IDs (950fc3fe…, 06d205ef…) and exact costs; three distinct IDs = request count 3. First run (C2): blocked, the earlier Request IDs were not re-read.",
+   "disposition": "blocked",
+   "summary": "Re-run R1: blocked on expected result 3 (not observed). Restart with resume --last showed the notice naming skip_reopen_warmup. The first screen showed Reopen warm-up: 1 request, $0.001465 (14,650 x $0.10/M). The warm-up's request page says Reopen warm-up. The total went 0.0036999 -> 0.0051649 = T + warm-up. Both earlier request pages were re-read after the restart with the same Request IDs (950fc3fe…, 06d205ef…) and exact costs (0.0014646, 0.0022353). Three distinct IDs = request count 3. Not observed (G7/G16): 'exactly one request link contains Reopen warm-up'. No link list captured during ACC-11 shows link labels: r1c-acc11-after-links shows only the provider line, and -after-links-2 / -after-provider-list show bare '→ Request 1/2/3'. The executor reported passed (raw verdict passed), so the disposition differs from the raw verdict. Supporting but later evidence: ACC-14's r1c-acc14-after-provider-list3 (19:20:35Z) shows Request 3 (this warm-up, 0764d934…) as the only Reopen warm-up link among Requests 1-3. First run (C2): blocked, the earlier Request IDs were not re-read; that result is now observed and passes.",
    "candidate_sha256": "e942b095de975f95ca3fa1f09b9576f6bb408d91499e05235e35ab37b9d6aa42",
    "method": "tmux",
    "execution": {
@@ -1404,8 +1404,8 @@
   {
    "id": "ACC-14",
    "priority": "blocker",
-   "disposition": "passed",
-   "summary": "Re-run R1: from a new conversation CHARLIE (2 requests, 0.003700525), /resume to ALPHA showed the notice; Reopen warm-up 1 -> 2 (new warm-up 72199ffe…, $0.001465); ALPHA total 0.0051649 -> 0.0066299; every ALPHA request page re-read after /resume: four distinct Request IDs (950fc3fe…, 06d205ef…, 0764d934…, 72199ffe…) = count 4, earlier costs unchanged; CHARLIE shown under other conversations as 2 requests, $0.003701 (rounded, within G12). First run (C2): blocked, no Request ID on screen.",
+   "disposition": "blocked",
+   "summary": "Re-run R1: blocked on part of expected result 3 (not observed). From a new conversation CHARLIE (2 requests, 0.003700525), /resume to ALPHA showed the notice. Reopen warm-up went 1 -> 2 (new warm-up 72199ffe…, exact 0.001465), and ALPHA's total went 0.0051649 -> 0.0066299. Every ALPHA request page was re-read after /resume: four distinct Request IDs (950fc3fe…, 06d205ef…, 0764d934…, 72199ffe…) = count 4, with no CHARLIE ID among them. CHARLIE was shown under other conversations as 2 requests, $0.003701 (rounded, within G12). Not observed (G11/G16): 'every earlier ID is found again with the same cost'. The two oldest requests (950fc3fe…, 06d205ef…) were re-read in ACC-14 only on request pages with rounded costs; no technical money page was captured for them, so the exact-cost comparison is NOT OBSERVED. The executor reported passed (raw verdict passed), so the disposition differs from the raw verdict. Supporting but later evidence: ACC-18 re-read both with exact costs 0.0014646 and 0.0022353, equal to ACC-11's, and ACC-14's own total arithmetic (0.0051649 + 0.001465 = 0.0066299) leaves no room for a change. First run (C2): blocked, no Request ID on screen; the IDs are now observed and pass.",
    "candidate_sha256": "e942b095de975f95ca3fa1f09b9576f6bb408d91499e05235e35ab37b9d6aa42",
    "method": "tmux",
    "execution": {
@@ -1619,7 +1619,7 @@
    "id": "ACC-15",
    "priority": "blocker",
    "disposition": "passed",
-   "summary": "Re-run R1: /side on ALPHA: exactly one new notice, in the side view (r1c-acc15-side-open shows none of ALPHA's transcript lines; the notice in the ALPHA view after Ctrl+C is ACC-14's, already on r1c-acc15-pre); warm-up count 2 -> 3; the new request 16c24e22… says Reopen warm-up (Turn: side:prewarm:reopen:…); the side turn's request 7046d8ab… is listed in ALPHA's /cost with 'Turn: side:01a17ed0-…' captured on r1c-acc15-side-req6-tech; other-conversations lines unchanged (2 requests in 1 conversation, $0.003701). First run (C2): blocked, the side: label was not captured.",
+   "summary": "Re-run R1: /side on ALPHA. Exactly one new notice appeared, in the side view: r1c-acc15-side-open shows none of ALPHA's transcript lines, and -side-reply is the same view again. The ALPHA view after Ctrl+C (r1c-acc15-back) shows one notice under '• ALPHA', where r1c-acc15-pre showed ACC-14's. None of the rule's three tests makes it new. The product showed no return confirmation (the executor's wait timed out), so the third test could not apply. The -back view also lacks pre's 'Token usage' and 'To continue' lines, so calling its notice ACC-14's is an inference. The warm-up count went 2 -> 3. The new request 16c24e22… says Reopen warm-up (Turn: side:prewarm:reopen:…). The side turn's request 7046d8ab… is listed in ALPHA's /cost, and r1c-acc15-side-req6-tech captures 'Turn: side:01a17ed0-…'. The other-conversations lines are unchanged (2 requests in 1 conversation, $0.003701). First run (C2): blocked, the side: label was not captured.",
    "candidate_sha256": "e942b095de975f95ca3fa1f09b9576f6bb408d91499e05235e35ab37b9d6aa42",
    "method": "tmux",
    "execution": {
@@ -2123,7 +2123,7 @@
    "id": "ACC-18",
    "priority": "blocker",
    "disposition": "passed",
-   "summary": "Re-run R1, skip_reopen_warmup = true in config.toml: no notice on either open; ALPHA's Reopen warm-up line still counts 3 and CHARLIE has none; all eight Request IDs from ACC-11/14/15 found again in the same conversation with the same exact costs; ALPHA's six requests sum to 0.010238475 and CHARLIE's two to 0.003700525, each equal to its own total; each conversation's other-conversations count and cost match the other's own figures (G12, difference 0.000000475); no ID repeated within or across conversations. Deviation: resume --last opened CHARLIE, not ALPHA (as expected by the action's note); ALPHA was then opened from /resume, the only other entry; no expected result depends on which opened first. First run (C2): blocked, IDs not read and sums checked for ALPHA only.",
+   "summary": "Re-run R1, skip_reopen_warmup = true in config.toml: no notice on either open; ALPHA's Reopen warm-up line still counts 3 and CHARLIE has none; all eight Request IDs from ACC-11/14/15 were found again in the same conversation with the same exact costs. Several captures carry the wrong label, so cite by time: for example, Request 5's page was captured as r1c-acc18-alpha-links-2 at 19:33:44Z, and some '-tech-money' labels show the conversation total; ALPHA's six requests sum to 0.010238475 and CHARLIE's two to 0.003700525, each equal to its own total; each conversation's other-conversations count and cost match the other's own figures (G12, difference 0.000000475); no ID repeated within or across conversations. Deviation: resume --last opened CHARLIE, contrary to the action's note that ALPHA was expected; ALPHA was then opened from /resume, the only other entry; no expected result depends on which opened first. First run (C2): blocked, IDs not read and sums checked for ALPHA only.",
    "candidate_sha256": "e942b095de975f95ca3fa1f09b9576f6bb408d91499e05235e35ab37b9d6aa42",
    "method": "tmux",
    "execution": {
@@ -4813,7 +4813,7 @@
   "limit": 5,
   "ledger": {
    "path": "review-ledger.md",
-   "sha256": "cf9edee527faabca3cecd46bbc12f02ac47764d3d54e2876ad35e9843580224e"
+   "sha256": "0c0925f0c8356a8a867bd646b5a807dcd3aa5a0767b8fcf3dd19781f48c35fa5"
   }
  },
  "evidence_check": {
@@ -4851,8 +4851,17 @@
   },
   "record": {
    "path": "rerun-r1-20261022/README.md",
-   "sha256": "73449dbae3fd7f8e689448e071f3ef66481f638af178af11d5ff4f2ac502c8f3"
+   "sha256": "f94a62d55307ef3273a1110bed7db961bf54c4b01088b7588ab835d278f8a0b1"
   },
+  "review_budget": {
+   "limit": 3,
+   "scope": "independent read-only Opus 5.5 High review of the record PR (acct-rerun brief); designer and design review are separate sessions required by the brief",
+   "ledger": {
+    "path": "review-ledger.md",
+    "sha256": "0c0925f0c8356a8a867bd646b5a807dcd3aa5a0767b8fcf3dd19781f48c35fa5"
+   }
+  },
+  "raw_vs_disposition": "executor: all five passed; integrator: ACC-11 and ACC-14 blocked (one result each NOT OBSERVED, G7/G11/G16)",
   "note": "Top-level candidate is the first run's build; the five re-run cases carry the R1 candidate hash, so check.py reports them as stale against the first-run candidate by design."
  }
 }
