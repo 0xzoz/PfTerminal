@@ -6795,6 +6795,223 @@ fn issue_1309_own_writes_in_possible_folders_are_linear() {
     }
 }
 
+/// D194 (#1309): in the action's own plain script, the commands after `cd
+/// x && ...` (its `&&` list) and after `cd x || exit` (the rest of the
+/// shell) run only where the change happened.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d194_commands_after_a_certain_cd_run_where_it_went() {
+    // These asked before D194.
+    let asked = [
+        "cd /home/fixture; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp && make && echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp && make | tee -a .zshenv",
+        "cd /home/fixture; true && cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; cd -P /tmp && echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp || exit; echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp || exit 1; make; echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp || exit && echo x >> .zshenv",
+        "cd /home/fixture; cd /work && cd /tmp || exit; echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp || exit\necho x >> .zshenv",
+        // Multi-cd build lines past `MAX_POSSIBLE_FOLDERS`.
+        "cd frontend && npm i && cd .. && cd backend && cargo build > build.log",
+        "cd /a && cd /b && cd /c && cd /d && echo x > log",
+        "cd a || exit; cd b || exit; cd c || exit; make > log",
+        "cd a && cd b && cd c && git log --output=out.txt",
+        "cd a && cd b && cd c && ls . > list.txt",
+        "[ -d a ] || mkdir a; cd a && cd b && cd c && make 2>&1 | tee log",
+        "set -e; cd a && cd b && cd c && make > log",
+        "set -euo pipefail; cd a || exit 1; cd b && cd c && make > log",
+        "cd /home/fixture; cd /tmp && python3 -m pip install x >> .zshenv",
+    ]
+    .into_iter()
+    .filter(|command| script(command).is_some())
+    .collect::<Vec<_>>();
+    assert_eq!(asked, Vec::<&str>::new());
+    for command in [
+        "cd build && make > log",
+        "cd a && cd b && make > log",
+        "(cd sub && make); make > log",
+        "cd /tmp || exit; make > log",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// D194 (#1309): a line whose `cd` may fail (or not move the shell) and
+/// still run the next command asks as before; so does any line the rule
+/// does not read as plain.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d194_uncertain_changes_still_ask() {
+    let quiet = [
+        "cd /home/fixture; cd /tmp; echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp\necho x >> .zshenv",
+        "cd /home/fixture; cd /tmp || true; echo x >> .zshenv",
+        // bash's `return` outside a function fails and the line goes on.
+        "cd /home/fixture; cd /tmp || return; echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp || exit x; echo x >> .zshenv",
+        // After the `&&` list.
+        "cd /home/fixture; cd /tmp && true; echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp && true || echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp && true & echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp && echo x > /dev/null; echo x >> .zshenv",
+        // A change that may be skipped, or in a pipeline, subshell or
+        // background job.
+        "cd /home/fixture; true || cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; ! cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; echo | cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp | cat && echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp || exit | cat; echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp || exit & echo x >> .zshenv",
+        "cd /home/fixture; (cd /tmp || exit); echo x >> .zshenv",
+        "cd /home/fixture; (cd /tmp && true) && echo x >> .zshenv",
+        // In a compound command that may not run it.
+        "cd /home/fixture; if false; then true; cd /tmp || exit; fi; echo x >> .zshenv",
+        "cd /home/fixture; if false\nthen\ncd /tmp || exit\nfi\necho x >> .zshenv",
+        "cd /home/fixture; for d in; cd /tmp || exit; echo x >> .zshenv",
+        // `cd` or `exit` may not be the builtin.
+        "cd /home/fixture; alias cd=true; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; enable -n cd; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; disable cd; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; functions[cd]=true; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; source ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; X=1 . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; time -p . ./x; cd /tmp && echo x >> .zshenv",
+        // A command name the line spells otherwise (review 1).
+        "cd /home/fixture; a=ena; b=ble; $a$b -n exit; cd /nope || exit; echo x >> .zshenv",
+        "cd /home/fixture; a=ena; b=ble; $a$b -n cd; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; ena?le -n cd; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; d=.; $d ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; >/dev/null . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; 2>&1 . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; > f . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; >| f . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; repeat 1 . ./x; cd /tmp && echo x >> .zshenv",
+        // Review 2.
+        "cd /home/fixture; cd /nope || exit >&9; echo x >> .zshenv",
+        "cd /home/fixture; cd /nope || exit >&2; echo x >> .zshenv",
+        "cd /home/fixture; cd /nope || exit>/nope/x; echo x >> .zshenv",
+        "cd /home/fixture; .>/dev/null ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; .</dev/null ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; dis?ble>x exit; cd /nope || exit; echo x >> .zshenv",
+        "cd /home/fixture; ^x -n cd; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; if [[ -n x ]] . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; mapfile -C . -c 1 < l; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; fc -s; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; r; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; declare HOME[0]=~/x; cd ~/.. && echo x >> .zshenv",
+        "cd /home/fixture; declare -n v=HOME; v=~/x; cd ~/.. && echo x >> .zshenv",
+        // Review 3.
+        "cd /home/fixture; builtin>/dev/null . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; time>/dev/null . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; a=1> /dev/null . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; builtin> /dev/null . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; >! /dev/null . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; >&- . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; if [[ -n x ]]>/dev/null . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; echo HOMEx=0 | tr -d x > f; read v < f; let v; cd ~/.. && echo x >> .zshenv",
+        "cd /home/fixture; pwd > p; read x < p; noglob setopt -m cdable*; cd x && echo x >> .zshenv",
+        "cd /home/fixture; read HOM? < q; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; cd /tm[p] && echo x >> .zshenv",
+        "cd /home/fixture; cd ~/x && echo x >> .zshenv",
+        // Review 4.
+        "cd /home/fixture; a=<-> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; a=<0-9> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; h=/home/fixture; set -T; cd h && echo x >> .zshenv",
+        "cd /home/fixture; h=/home/fixture; set -eT; cd h || exit; echo x >> .zshenv",
+        "cd /home/fixture; h=/home/fixture; builtin set -T; cd h && echo x >> .zshenv",
+        "cd /home/fixture; h=/home/fixture; setopt -T; cd h && echo x >> .zshenv",
+        "cd /home/fixture; set -o cdablevars; cd h && echo x >> .zshenv",
+        "cd /home/fixture; declare -n r; read r < f; read r < g; cd u && echo x >> .zshenv",
+        // Review 5: zsh numeric patterns after another redirection
+        // character; option B: only `COMMANDS`, named first.
+        "cd /home/fixture; >&<2-2> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; ><1-1> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; >><-> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; <><-> . ./x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; cp a b; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; X=1 make; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; command make; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; >log make; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; 2>log make; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; make < in; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; python3 -c x; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; set -e > f; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; set -o; cd /tmp && echo x >> .zshenv",
+        // Review 6 (P2): the leading-`>` check; a pipe after `>&`.
+        "cd /home/fixture; >cd make; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; make >&| cp a b; cd /tmp && echo x >> .zshenv",
+        // Words the word lexer splits otherwise (review 1).
+        "cd /home/fixture; cd /nope || exit,; echo x >> .zshenv",
+        "cd /home/fixture; cd /nope || exit\r\necho x >> .zshenv",
+        "cd /home/fixture; cd /nope || exit\u{a0}; echo x >> .zshenv",
+        // `&>` puts the command before it in the background in dash.
+        "cd /home/fixture; cd /tmp &>/dev/null && echo x >> .zshenv",
+        // Where `cd` goes may change too.
+        "cd /home/fixture; CDPATH=/x; cd /tmp && echo x >> .zshenv",
+        // Not plain.
+        "cd /home/fixture; cd /tmp && echo 'x' >> .zshenv",
+        "cd /home/fixture; cd /tmp && echo x >> .zshenv # x",
+        "cd /home/fixture; cd /tmp\\\n&& echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp~ && echo x >> .zshenv",
+        "cd /home/fixture; cd /tmp* && echo x >> .zshenv",
+    ]
+    .into_iter()
+    .filter(|command| script(command).is_none())
+    .collect::<Vec<_>>();
+    assert_eq!(quiet, Vec::<&str>::new());
+    // Not the action's own shell script.
+    for command in [
+        &[
+            "env",
+            "bash",
+            "-c",
+            "cd /home/fixture; cd /tmp && echo x >> .zshenv",
+        ][..],
+        &[
+            "bash",
+            "-i",
+            "-c",
+            "cd /home/fixture; cd /tmp && echo x >> .zshenv",
+        ],
+        &["bash", "-lc", "sh -c 'cd ~; cd /tmp && echo x >> .zshenv'"],
+        &[
+            "bash",
+            "-c",
+            "cd /home/fixture; cd /tmp || exit",
+            "echo x >> .zshenv",
+        ],
+    ] {
+        assert!(kind(command).is_some(), "{command:?}");
+    }
+}
+
+/// D194: following certain changes stays linear.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d194_certain_changes_are_linear() {
+    for (label, unit) in [
+        ("and lists", "cd /a && cd /b && echo x > a; "),
+        ("exits", "cd /a && cd /b || exit; make | tee b; "),
+        ("mixed", "cd /a || exit; cd /b; cd /c && make > c; "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let _ = script(&unit.repeat(100 * scale));
+        });
+    }
+}
+
 /// D191 (owner-approved relaxation): a variable the line sets first from a
 /// plain `mktemp` holds a known temp path. Writing that file and a trap
 /// that only removes it no longer ask; each line asked on main.
