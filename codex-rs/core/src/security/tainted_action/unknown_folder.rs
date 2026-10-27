@@ -228,6 +228,14 @@ pub(super) fn odd_change(name: &str, args: &[String]) -> bool {
     }
 }
 
+/// #1403: whether a folder change is named by a path (`./cd`,
+/// `"$PWD/pushd"`): that file runs, not the builtin, so the folder it
+/// leaves is not known. `word` is the command word, `name` its lowercase
+/// basename.
+pub(super) fn path_change(word: &str, name: &str) -> bool {
+    CHANGERS.contains(&name) && word.contains('/')
+}
+
 /// Whether `pushd`/`popd` changes the folder stack rather than (only) the
 /// folder: `-n` keeps the folder, `+N`/`-N` pick an entry of a stack that
 /// is not followed, and `pushd -` goes back (zsh).

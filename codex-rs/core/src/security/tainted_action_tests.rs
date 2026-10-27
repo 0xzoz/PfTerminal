@@ -8221,3 +8221,60 @@ fn issue_1161_attached_file_value_preserves_main_editor_boundary() {
     // to the filename. Keep main's attached-value boundary for this safe key.
     assert_eq!(script("git config -fpager.log user.name marker"), None);
 }
+
+/// #1403: a builtin named by a path (`./cd`, `"$PWD/cd"`, `./export`) runs
+/// that file, so it asks even when the file was read as the command's
+/// script, and a folder change named by a path is not followed: the
+/// script after it is not judged in the folder it names.
+#[cfg(unix)]
+#[test]
+fn issue_1403_builtins_named_by_a_path_ask_and_change_no_folder() {
+    let evil = "echo x >> ~/.zshenv\n";
+    let mut files = vec![("run.sh", evil), ("sub/run.sh", "true\n")];
+    for builtin in ["cd", "pushd", "popd", "chdir", "export", "eval", "source"] {
+        files.push((builtin, "true\n"));
+    }
+    let mut wrong = Vec::new();
+    for line in [
+        "\"$PWD/cd\" sub; bash run.sh",
+        "\"$PWD/cd\" sub && bash run.sh",
+        "\"$PWD/pushd\" sub && bash run.sh",
+        "./cd sub; bash run.sh",
+        "command ./cd sub; bash run.sh",
+        "./chdir sub; bash run.sh",
+        "bash -c './cd sub; bash run.sh'",
+        "bash -c '\"$PWD/cd\" sub && bash run.sh'",
+        "./cd sub; true",
+        "./export X=1",
+        "./eval true",
+        "./source run.sh",
+    ] {
+        if in_workspace(&files, line).is_none() {
+            wrong.push(line);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+    // Ordinary lines stay quiet.
+    let quiet = [("run.sh", "true\n"), ("sub/run.sh", "true\n")];
+    for line in [
+        "cd sub && bash run.sh",
+        "cd \"$PWD/sub\" && ./run.sh",
+        "pushd sub; bash run.sh; popd",
+        "./run.sh && sub/run.sh",
+        "/bin/echo cd sub; bash run.sh",
+    ] {
+        assert_eq!(in_workspace(&quiet, line), None, "{line}");
+    }
+}
+
+/// #1403: the checks stay linear.
+#[cfg(unix)]
+#[test]
+fn issue_1403_checks_are_linear() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cwd = root.path().to_string_lossy().into_owned();
+    work::assert_linear("path-named folder changes", |scale| {
+        let line = "./cd sub; ./export X=1; ".repeat(40 * scale);
+        assert!(classify_fixture(&shell_in(&cwd, &["bash", "-lc", &line])).is_some());
+    });
+}

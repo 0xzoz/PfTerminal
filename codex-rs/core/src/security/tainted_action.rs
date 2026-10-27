@@ -1769,7 +1769,11 @@ impl Classifier {
                 && unchecked[index + 1..].iter().any(|word| *word);
             // `pushd -n x`, `popd +1`: the folder stack changes, the folder
             // may not (or goes to an entry of a stack not followed).
-            if unknown_folder::stack_change(name, args) {
+            // #1403: nor does a program named by a path (`./cd sub`): the
+            // file runs, not the builtin (or a function of that name).
+            if unknown_folder::stack_change(name, args)
+                || unknown_folder::path_change(&words[*index], name)
+            {
                 folders.unfollowed = true;
             } else {
                 // #1309: this reading knows the words of `cd "$d"`; it loses
@@ -2122,12 +2126,13 @@ impl Classifier {
         for at in indirect::programs(words) {
             work::step();
             let word = &words[at];
-            if !word.contains('/') || Some(at) == read {
+            if !word.contains('/') {
                 continue;
             }
+            // #1403: also when `scripts_of` read it (`./cd`, `./export`).
             if PATH_BUILTINS.contains(&basename(&word.to_lowercase())) {
                 self.note(ProtectedActionKind::UnseenCode);
-            } else if !self.runs_elsewhere(elsewhere, at, word) {
+            } else if Some(at) != read && !self.runs_elsewhere(elsewhere, at, word) {
                 self.named_program_file(word, cwd, depth);
             }
         }

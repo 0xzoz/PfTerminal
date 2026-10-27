@@ -351,6 +351,12 @@ impl Classifier {
             // A substitution's `cd` does not move this line.
             if !command.substituted
                 && let Some((index, name)) = &command_at
+                && unknown_folder::path_change(&texts[*index], name)
+            {
+                // #1403: `./cd sub` runs that file: the folder is unknown.
+                folders.unchecked = true;
+            } else if !command.substituted
+                && let Some((index, name)) = &command_at
             {
                 let unknown = folders.unchecked;
                 self.follow_change(
