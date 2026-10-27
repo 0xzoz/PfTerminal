@@ -6945,6 +6945,9 @@ fn d194_uncertain_changes_still_ask() {
         "cd /home/fixture; python3 -c x; cd /tmp && echo x >> .zshenv",
         "cd /home/fixture; set -e > f; cd /tmp && echo x >> .zshenv",
         "cd /home/fixture; set -o; cd /tmp && echo x >> .zshenv",
+        // Review 6 (P2): the leading-`>` check; a pipe after `>&`.
+        "cd /home/fixture; >cd make; cd /tmp && echo x >> .zshenv",
+        "cd /home/fixture; make >&| cp a b; cd /tmp && echo x >> .zshenv",
         // Words the word lexer splits otherwise (review 1).
         "cd /home/fixture; cd /nope || exit,; echo x >> .zshenv",
         "cd /home/fixture; cd /nope || exit\r\necho x >> .zshenv",
