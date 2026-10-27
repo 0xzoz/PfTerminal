@@ -28,7 +28,7 @@ opentelemetry-http = { workspace = true }
 # Default features are off so the exporter's own reqwest 0.13 client (and its
 # aws-lc-rs TLS stack) is not pulled in. Every OTLP/HTTP exporter receives a
 # reqwest 0.12 client from `crate::otlp` instead.
-opentelemetry-otlp = { workspace = true, default-features = false, features = [
+opentelemetry-otlp = { workspace = true, features = [
     "grpc-tonic",
     "http-proto",
     "http-json",

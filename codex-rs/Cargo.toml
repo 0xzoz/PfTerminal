@@ -412,7 +412,7 @@ openssl-sys = "*"
 opentelemetry = "0.33.1"
 opentelemetry-appender-tracing = "0.33.1"
 opentelemetry-http = { version = "0.33.1", default-features = false }
-opentelemetry-otlp = "0.33.1"
+opentelemetry-otlp = { version = "0.33.1", default-features = false }
 opentelemetry-semantic-conventions = "0.33.1"
 opentelemetry_sdk = "0.33.1"
 os_info = "3.12.0"
