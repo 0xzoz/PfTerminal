@@ -151,6 +151,7 @@ mod tests {
         ("nested.rs", include_str!("nested.rs")),
         ("code_variables.rs", include_str!("code_variables.rs")),
         ("outbound.rs", include_str!("outbound.rs")),
+        ("rerun.rs", include_str!("rerun.rs")),
         ("outputs.rs", include_str!("outputs.rs")),
         ("git_helpers.rs", include_str!("git_helpers.rs")),
         ("paths.rs", include_str!("paths.rs")),
@@ -160,6 +161,7 @@ mod tests {
         ("shell.rs", include_str!("shell.rs")),
         ("unknown_folder.rs", include_str!("unknown_folder.rs")),
         ("windows_paths.rs", include_str!("windows_paths.rs")),
+        ("windows_reads.rs", include_str!("windows_reads.rs")),
         ("windows_shell.rs", include_str!("windows_shell.rs")),
     ];
 

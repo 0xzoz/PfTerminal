@@ -140,8 +140,12 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
 /// removed (`${v@'P'}`). The lexed words (braces dropped, `$'...'` decoded,
 /// known variables substituted) are checked the same way by the caller.
 /// Read without quotes, so nested shells' scripts count. Linear.
+///
+/// #1064: also a transformation whose operator is not one of the letters
+/// that only quote or describe the value (`${v@$p}`, `${!r@${p^}}`): it may
+/// be `P` when it runs.
 pub(super) fn prompt_expansion(text: &str) -> bool {
-    if !text.contains('P') {
+    if !text.contains('@') {
         return false;
     }
     let joined = text.replace("\\\n", "");
@@ -152,6 +156,59 @@ pub(super) fn prompt_expansion(text: &str) -> bool {
     [joined.as_str(), bare.as_str()].iter().any(|text| {
         text.match_indices("@P").any(|(at, _)| {
             !text[at + 2..].starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
+        }) || computed_transformation(text)
+    })
+}
+
+/// Whether text holds `${name@op}` (`name` with an optional `!` or `#`
+/// before it and a subscript after it) whose `op` is not one of `QEAKakUuL`
+/// (`${!prefix@}` lists names). A subscript is read at most 64 bytes; one
+/// not closed by then counts. Linear.
+fn computed_transformation(text: &str) -> bool {
+    text.match_indices("${").any(|(at, _)| {
+        work::step();
+        let mut rest = &text[at + "${".len()..];
+        let bang = rest.starts_with('!');
+        if rest.len() > 1 && rest.starts_with(['!', '#']) && !rest[1..].starts_with('}') {
+            rest = &rest[1..];
+        }
+        let name = rest
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .unwrap_or(rest.len());
+        let name = match name {
+            0 if rest.starts_with(['@', '*', '#', '?', '$', '!', '-']) => 1,
+            name => name,
+        };
+        rest = &rest[name..];
+        // A subscript ends at its matching `]` (`${a[b[0]]@$p}`); one
+        // holding a quote, backslash or substitution, which may hide a `]`
+        // (`${a["]"]@$p}`, `${a[$(echo ])]@$p}`, `${a[${x:-]}]@$p}`), or not
+        // closed within 64 bytes, counts.
+        if rest.starts_with('[') {
+            let mut depth = 0usize;
+            let mut close = None;
+            for (at, byte) in rest.as_bytes().iter().take(64).enumerate() {
+                work::step();
+                match byte {
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(at);
+                            break;
+                        }
+                    }
+                    b'\'' | b'"' | b'\\' | b'`' | b'(' | b'{' => return true,
+                    _ => {}
+                }
+            }
+            let Some(close) = close else {
+                return true;
+            };
+            rest = &rest[close + 1..];
+        }
+        rest.strip_prefix('@').is_some_and(|op| {
+            !(op.starts_with(|ch: char| "QEAKakUuL".contains(ch)) || (bang && op.starts_with('}')))
         })
     })
 }
@@ -410,6 +467,9 @@ struct Open {
     outer_hidden: bool,
     /// The outer word already holds a parameter operator.
     outer_operated: bool,
+    /// #1159: the redirection the outer word is the target of (`> $(cat
+    /// f)`), not the substitution's first word.
+    outer_redirect: Redirect,
     first: usize,
     backtick: bool,
     /// `>(...)`: the substitution reads the outer command's output.
@@ -580,12 +640,14 @@ impl Lexer {
         let outer_looked_up = std::mem::take(&mut self.looked_up);
         let outer_hidden = std::mem::take(&mut self.hidden);
         let outer_operated = std::mem::take(&mut self.operated);
+        let outer_redirect = std::mem::take(&mut self.redirect);
         self.open.push(Open {
             outer,
             outer_word,
             outer_looked_up,
             outer_hidden,
             outer_operated,
+            outer_redirect,
             first: self.done.len(),
             backtick,
             output,
@@ -612,7 +674,9 @@ impl Lexer {
             self.looked_up = open.outer_looked_up;
             self.hidden = open.outer_hidden;
             self.operated = open.outer_operated;
+            // `> >(cmd)` adds no outer word: its redirection is done.
             if !open.output {
+                self.redirect = open.outer_redirect;
                 self.word.push_str(UNSEEN_OUTPUT);
             }
             return;
@@ -654,6 +718,7 @@ impl Lexer {
         self.hidden = open.outer_hidden || spliced.is_some();
         self.operated = open.outer_operated;
         if !open.output {
+            self.redirect = open.outer_redirect;
             // Not literal text: the output of a lookup or of `cd X && pwd`.
             self.looked_up |= spliced.is_some()
                 && !matches!(top.as_slice(), [only] if fact_output(&self.done[*only]));
