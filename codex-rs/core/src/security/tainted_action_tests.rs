@@ -6854,6 +6854,12 @@ fn d195_git_working_tree_writes_in_an_unknown_folder_ask() {
         "cd \"$d\" && sh -c 'git checkout -- .zshrc'",
         "env -C \"$d\" sh -c 'git reset --hard'",
         "find . -type d -name .git -execdir sh -c 'git pull' \\;",
+        // Review 1: a folder flag that is another option's value.
+        "cd a; cd b; cd c; git merge -m --cd=/tmp evil/main",
+        "cd \"$d\" && sh -c 'git merge -m --directory=/tmp FETCH_HEAD'",
+        "env -C \"$d\" sh -c 'git stash push -m --cwd=/tmp'",
+        "cd a; cd b; cd c; git --namespace -C /tmp pull",
+        "cd a; cd b; cd c; git pull -C /tmp",
     ]
     .into_iter()
     .filter(|command| script(command).is_none())
