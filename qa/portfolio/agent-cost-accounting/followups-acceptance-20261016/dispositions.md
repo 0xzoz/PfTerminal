@@ -57,3 +57,16 @@ The R1 executor reported all five passed. The integrator's dispositions differ f
 The rule is the first run's: a result counts only if a captured screen shows it (G7, G11, G16). Later captures support both results (see the rows), but they do not replace the case's own observation.
 
 Not re-run: ACC-04, ACC-22 (advisory) and ACC-35 (optional, D3).
+## Owner decisions after the record (2026-10-27)
+
+The rows and totals above are the integrator's dispositions and stay as recorded. Owner acceptance is not a clean pass,
+so it is listed here, separately:
+
+- **D113** (2026-10-21): ACC-04 recorded as passed by owner decision (local-model re-run, #1191).
+- **D207** (2026-10-27): ACC-11 and ACC-14 recorded as passed by owner decision. Each is still **blocked** above, on
+  one result not captured in the case's own screens (G7/G11/G16).
+- **D208** (2026-10-27): Travis signed off S10. Named limits: ACC-22 (advisory; starting condition not met) and ACC-35
+  (optional; needs real Moonshot spend, D3 not granted).
+
+With D113 and D207, the final disposition is **35 passed, 0 failed, 2 blocked** of 37 (blocked: ACC-22, ACC-35).
+Three of the 35 are passed by owner decision (ACC-04, ACC-11, ACC-14); 32 are passed on the record.
