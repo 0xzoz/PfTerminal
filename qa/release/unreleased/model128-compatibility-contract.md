@@ -3,8 +3,9 @@
 Prepared October 23, 2026 for current main, following the [PR #141 maintainer
 request][retarget]. This regression-only change covers local compatibility for
 [issue #128][issue] and the proposed [PR #140 specification][spec]. The adapted
-tests have not yet run on this main-based tree. This record does not close all of
-issue #128 or establish that a provider currently serves a retained model.
+tests have since run on this main-based tree (see [Test runs](#test-runs)). This
+record does not close all of issue #128 or establish that a provider currently
+serves a retained model.
 
 Change class: **Routine** tests and QA documentation under `AGENTS.md` for the
 PR #141 part. The 2026-10-28 dispositions below (PR #1486) are a **Bounded
@@ -92,7 +93,7 @@ serialized request remains equal, and none of `max_tokens`,
 `max_completion_tokens`, or `max_output_tokens` is present—not even as JSON null.
 The current builders and serialization types still omit these wire keys; adding
 catalogue caps did not add fields to these two request formats. The real provider
-constructors and wire API variants are used. Actual test execution remains pending.
+constructors and wire API variants are used.
 
 The source-level contract on these paths remains wire-limit omission. A catalogue
 value alone is not an enforced output budget in these request types. This record
@@ -112,16 +113,29 @@ just test --locked -p codex-models-manager
 just test --locked -p codex-core
 ```
 
-Nextest fails when a filter matches zero tests. The two manager tests are intended
-to cover 24 six-ID/state assertions; the core matrix is intended to build and
-serialize 24 requests (including `gpt-5.5`'s repeated absent-metadata case). Record
-the tested PR head and actual command outcomes in the PR, including tool or
-baseline failures. A passing focused run does not imply a passing workspace.
+Nextest fails when a filter matches zero tests. The filter matches three manager
+tests: PR #141's two regressions, which cover 24 six-ID/state assertions, and
+PR #1486's `catalogue_issue_128_retained_ids_have_explicit_dispositions`, which
+makes one whole-row assertion per ID. The core matrix builds and serializes 24
+requests (including `gpt-5.5`'s repeated absent-metadata case). Record the tested
+PR head and actual command outcomes in the PR, including tool or baseline
+failures. A passing focused run does not imply a passing workspace.
 
-Until those tests execute, this unit supplies prepared coverage rather than
-qualification. Its intended scope is local resolution, cache transitions, and
-builder/serializer behavior. It does **not** exercise reading saved profile/session files, a live TUI,
-credentials, HTTP transport or endpoint acceptance, current provider serving
+### Test runs
+
+- PR #141's replayed head: all 78 `codex-models-manager` tests passed, including
+  its two manager regressions; the core wire test was not run there.
+- PR #1486's head: `cargo test --locked -p codex-models-manager --lib
+  catalogue_issue_128` passed 3/3.
+- main `5ed2aca27249b3657ee52e14b10b844c5cfe4c8d` (2026-10-28, Linux debug
+  build, `RUST_MIN_STACK=8388608` and a disposable `CODEX_HOME`): `cargo test
+  --locked -p codex-models-manager --lib catalogue_issue_128` passed 3/3, and
+  `cargo test --locked -p codex-core --lib catalogue_issue_128` passed 1/1
+  (`catalogue_issue_128_saved_id_wire_requests_omit_output_limits`).
+
+These are focused runs, not a full-suite or release qualification. Their scope
+is local resolution, cache transitions, and builder/serializer behavior. They do
+**not** exercise reading saved profile/session files, a live TUI, credentials, HTTP transport or endpoint acceptance, current provider serving
 status, token-capacity boundaries, endpoint fallback, billing, or a release.
 No live inference calls are required. Those limits are material: provider
 retirement/migration decisions and the broader #129 output-budget policy need
