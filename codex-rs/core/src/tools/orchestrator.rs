@@ -954,7 +954,12 @@ impl ToolOrchestrator {
             git_held_back = true;
         }
         if git_held_back {
-            warn(tool_ctx, &git_held_note(&git_held, rules_held_back)).await;
+            let withheld = if rules_held_back {
+                Withheld::Rules
+            } else {
+                Withheld::Namespaces
+            };
+            warn(tool_ctx, &git_held_note(&git_held, withheld)).await;
         }
         // A person's approval of this command when asked about it now: it
         // counts for nothing below while the git check's findings stand
@@ -992,6 +997,28 @@ impl ToolOrchestrator {
                     let cwds: Vec<&std::path::Path> = cwds.iter().map(AsRef::as_ref).collect();
                     let opened =
                         crate::security::protected_additional::opened(check, additional, &cwds);
+                    // #943 (#1503 review): where the run is refused only
+                    // because the findings discount the person's approval,
+                    // the refusal alone would read as if none was given: the
+                    // person is told why (unless the rules note above was).
+                    if opened.is_some()
+                        && !rules_held_back
+                        && !git_held.is_empty()
+                        && approved_by == Some(ApprovalResolutionSource::User)
+                    {
+                        let counted = crate::security::protected_additional::Check {
+                            writes:
+                                crate::security::protected_additional::ReadOnlyScope::after_approval(
+                                    level, /*by_person*/ true,
+                                ),
+                            ..check
+                        };
+                        if crate::security::protected_additional::opened(counted, additional, &cwds)
+                            .is_none()
+                        {
+                            warn(tool_ctx, &git_held_note(&git_held, Withheld::Writes)).await;
+                        }
+                    }
                     refuse_opened(opened, level, tool_ctx).await?;
                 }
                 (Some(exec_server), materialized)
@@ -1301,10 +1328,11 @@ impl ToolOrchestrator {
                     network_approval_context.is_some(),
                 );
                 // #943 item 3: never after the note above: the rules it kept
-                // deny reads, which keep the run in the sandbox, and under
-                // Moderate (D48) it never leaves it.
+                // deny reads, which keep the run in the sandbox (an external
+                // sandbox, which takes no rules, never reaches this retry),
+                // and under Moderate (D48) it never leaves it.
                 if unsandboxed_allowed && !git_held.is_empty() {
-                    warn(tool_ctx, &git_held_note(&git_held, /*rules*/ true)).await;
+                    warn(tool_ctx, &git_held_note(&git_held, Withheld::Rules)).await;
                 }
                 let unsandboxed_allowed = unsandboxed_allowed && git_held.is_empty();
                 // Under `Never` or `OnRequest`, do not retry without sandbox;
@@ -1686,10 +1714,22 @@ async fn git_refresh(
     held
 }
 
-/// Why an approval or grant didn't lift the protected-file rules (#874), or
-/// (`rules` false: a D48 approval, which lifts no rule) only didn't let the
-/// command create user namespaces.
-fn git_held_note(held: &[String], rules: bool) -> String {
+/// What an approval or grant didn't do while the git check's findings stand
+/// (#874).
+#[derive(Clone, Copy)]
+enum Withheld {
+    /// Lift the protected-file rules.
+    Rules,
+    /// Let the command create user namespaces only (a D48 approval, which
+    /// lifts no rule).
+    Namespaces,
+    /// Let the command's additional permissions write to a read-only path
+    /// (#513, Moderate).
+    Writes,
+}
+
+/// Why an approval or grant didn't do `withheld` (#874).
+fn git_held_note(held: &[String], withheld: Withheld) -> String {
     const SHOWN: usize = 20;
     let mut shown = held
         .iter()
@@ -1700,11 +1740,15 @@ fn git_held_note(held: &[String], rules: bool) -> String {
     if held.len() > SHOWN {
         shown.push_str(&format!(" and {} more", held.len() - SHOWN));
     }
-    let withheld = if rules {
-        "doesn't lift the protected-file rules for this command (nor run it outside the \
-         sandbox, nor let it create user namespaces)"
-    } else {
-        "doesn't let this command create user namespaces"
+    let withheld = match withheld {
+        Withheld::Rules => {
+            "doesn't lift the protected-file rules for this command (nor run it outside the \
+             sandbox, nor let it create user namespaces)"
+        }
+        Withheld::Namespaces => "doesn't let this command create user namespaces",
+        Withheld::Writes => {
+            "doesn't let this command's additional permissions write to read-only paths"
+        }
     };
     format!(
         "The approval {withheld} while the project's git folder still holds what Corbanu \
