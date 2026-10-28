@@ -7476,7 +7476,7 @@ fn d194_zsh_append_redirections_keep_a_change_certain() {
         let line = |script: &str| kind(&[shell, "-lc", script]);
         // Quiet: the file is written where the change went, and `cp` is
         // a file too.
-        let asked = [
+        let unexpectedly_asked = [
             "cd /home/fixture; cd /tmp && make >>| .zshenv",
             "cd /home/fixture; cd /tmp && make >>& .zshenv",
             "cd /home/fixture; cd /tmp || exit; make >>|.zshenv",
@@ -7488,9 +7488,9 @@ fn d194_zsh_append_redirections_keep_a_change_certain() {
         .into_iter()
         .filter(|script| line(script).is_some())
         .collect::<Vec<_>>();
-        assert_eq!(asked, Vec::<&str>::new(), "{shell}");
-        // These ask: a file the home's, or written in the folder before.
-        let quiet = [
+        assert_eq!(unexpectedly_asked, Vec::<&str>::new(), "{shell}");
+        // These ask: a file of the home, or written in the folder before.
+        let unexpectedly_quiet = [
             "cd /home/fixture; make >>| .zshenv",
             "cd /home/fixture; make >>& .zshenv",
             "cd /home/fixture; cd /tmp && make >>| /home/fixture/.zshenv",
@@ -7499,15 +7499,21 @@ fn d194_zsh_append_redirections_keep_a_change_certain() {
             // An `exit` with a redirection.
             "cd /home/fixture; cd /tmp || exit >>| f; echo x >> .zshenv",
             "cd /home/fixture; cd /tmp || exit >>& f; echo x >> .zshenv",
-            // A pipe after them ends the command (`cp` is not one of
-            // `COMMANDS`); zsh `>>&|` is split there too.
+            // `scan` ends the command at a second `|` (zsh: `>>||` does not
+            // parse, `>>&|` is one redirection), so `cp` is a command not
+            // in `COMMANDS`: stricter than needed.
             "cd /home/fixture; make >>|| cp a b; cd /tmp && echo x >> .zshenv",
             "cd /home/fixture; make >>&| cp a b; cd /tmp && echo x >> .zshenv",
+            // The word reading splits `>|` as a pipe: the file `fi` reaches
+            // `certain_cd::before` as a compound keyword, which ends what
+            // `|| exit` set aside.
+            "cd /home/fixture; cd /tmp || exit; make >| fi; echo x >> .zshenv",
+            "cd /home/fixture; cd /tmp || exit; make >>| done; echo x >> .zshenv",
         ]
         .into_iter()
         .filter(|script| line(script).is_none())
         .collect::<Vec<_>>();
-        assert_eq!(quiet, Vec::<&str>::new(), "{shell}");
+        assert_eq!(unexpectedly_quiet, Vec::<&str>::new(), "{shell}");
     }
 }
 

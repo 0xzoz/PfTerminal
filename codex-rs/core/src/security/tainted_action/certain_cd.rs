@@ -104,9 +104,10 @@ pub(super) struct Aside {
 
 const MAX_ASIDE: usize = 8;
 
-/// Words that start or end a part of a compound command. #1409: kept as
-/// a defence in `before`: under option B none of them may start a command
-/// of a script whose changes are certain (`scan`).
+/// Words that start or end a part of a compound command. #1409: `scan`
+/// lets none of them start a command, but the word reading splits `>|`
+/// and `>>|` as a pipe, so the file after one may reach `before` as a
+/// command's first word (`cd x || exit; make >| fi; ...`): keep them.
 const COMPOUND: &[&str] = &[
     "if", "then", "else", "elif", "fi", "do", "done", "case", "esac", "end", "{", "}",
 ];
