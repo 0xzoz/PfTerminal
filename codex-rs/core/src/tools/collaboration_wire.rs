@@ -3,7 +3,7 @@ use crate::session::turn_context::TurnContext;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 
 /// OpenAI's regional processing domain prefixes (`<prefix>.api.openai.com`), as listed in
-/// the OpenAI platform data controls guide.
+/// the OpenAI platform data controls guide (checked 2026-10-28). New regions need adding here.
 const OPENAI_REGIONAL_DOMAIN_PREFIXES: [&str; 10] =
     ["ae", "au", "ca", "eu", "gb", "in", "jp", "kr", "sg", "us"];
 
