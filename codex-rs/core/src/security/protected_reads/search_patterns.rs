@@ -145,19 +145,20 @@ pub(super) fn search_pattern_indices(
     let Some(starts) = line_starts(command, words, windows) else {
         return patterns;
     };
-    let Some(literal_ends) = literal_word_ends(command, words, windows) else {
+    let Some((literal_ends, assignments)) = literal_word_ends(command, words, windows) else {
         return patterns;
     };
     let words = Words {
         words,
         starts: &starts,
         literal_ends: &literal_ends,
+        assignments: &assignments,
     };
     let mut index = 0;
     while index < words.words.len() {
-        let start = program_position(&words, index)
-            .then(|| search_program(words.words, index))
-            .flatten();
+        // #1480: the cheap name check first, so the walk back over prefixes
+        // runs only at search programs (linear in a long `A=1 B=1 …` chain).
+        let start = search_program(&words, index).filter(|_| program_position(&words, index));
         match start {
             Some((search, first)) => {
                 index = mark_patterns(&words, search, first, &mut patterns);
@@ -173,6 +174,9 @@ struct Words<'a> {
     words: &'a [String],
     starts: &'a [bool],
     literal_ends: &'a [bool],
+    /// #1480: which words the shell takes for an assignment: one whose name
+    /// and `=` are neither quoted nor escaped (`'X=1'` and `X\=1` are not).
+    assignments: &'a [bool],
 }
 
 impl Words<'_> {
@@ -186,21 +190,35 @@ impl Words<'_> {
     fn separator(&self, index: usize) -> bool {
         !self.literal_ends[index] && SEPARATORS.contains(&self.words[index].as_str())
     }
+
+    fn assignment(&self, index: usize) -> bool {
+        self.assignments[index]
+    }
 }
 
-/// Whether each word's last character was quoted or escaped. Shlex removes
-/// this distinction: `grep 'a|' rg .env` must not start another search at `rg`.
-/// Keep its tokenization authoritative; unclear or mismatching words bail out.
-fn literal_word_ends(command: &[String], words: &[String], windows: bool) -> Option<Vec<bool>> {
+/// Whether each word's last character was quoted or escaped, and (#1480)
+/// whether it is an assignment as written, before unquoting. Shlex removes
+/// these distinctions: `grep 'a|' rg .env` must not start another search at
+/// `rg`, and `'X=1' grep` runs a program named `X=1`. Keep its tokenization
+/// authoritative; unclear or mismatching words bail out.
+fn literal_word_ends(
+    command: &[String],
+    words: &[String],
+    windows: bool,
+) -> Option<(Vec<bool>, Vec<bool>)> {
     let posix = !windows
         || command
             .first()
             .is_some_and(|program| super::posix_shell(program));
     if !posix {
-        return Some(vec![false; words.len()]);
+        return Some((
+            vec![false; words.len()],
+            words.iter().map(|word| assignment_word(word)).collect(),
+        ));
     }
     let mut joined = Vec::with_capacity(words.len());
     let mut literal_ends = Vec::with_capacity(words.len());
+    let mut assignments = Vec::with_capacity(words.len());
     for argument in command {
         let mut raw_words = Vec::new();
         let (mut start, mut quote, mut escaped, mut comment) = (None, None, false, false);
@@ -249,10 +267,13 @@ fn literal_word_ends(command: &[String], words: &[String], windows: bool) -> Opt
             }
             // A standalone backslash-newline produces no word.
             literal_ends.extend(std::iter::repeat_n(literal_end, parsed.len()));
+            // Quotes or a backslash in the name or before the `=` leave no
+            // valid name in the raw text.
+            assignments.extend(std::iter::repeat_n(assignment_word(raw), parsed.len()));
             joined.extend(parsed);
         }
     }
-    (joined == words).then_some(literal_ends)
+    (joined == words).then_some((literal_ends, assignments))
 }
 
 /// For each of `words`, whether it starts a new line of the script it is
@@ -335,11 +356,11 @@ fn program_position(lines: &Words<'_>, mut index: usize) -> bool {
     while index > 0
         && !lines.starts[index]
         && !lines.ends(index - 1)
-        && (assignment_word(&words[index - 1])
-            || PROGRAM_BEFORE.contains(&words[index - 1].as_str())
+        && (lines.assignment(index - 1)
+            || (PROGRAM_BEFORE.contains(&words[index - 1].as_str())
                 // `nohup X=1 grep` runs a program named `X=1`.
-                && !(assignment_word(&words[index])
-                    && NO_ASSIGNMENTS_AFTER.contains(&words[index - 1].as_str())))
+                && !(lines.assignment(index)
+                    && NO_ASSIGNMENTS_AFTER.contains(&words[index - 1].as_str()))))
     {
         index -= 1;
     }
@@ -374,7 +395,15 @@ fn assignment_word(word: &str) -> bool {
 }
 
 /// The search `words[index]` starts, and the index of its first argument.
-fn search_program(words: &[String], index: usize) -> Option<(Search, usize)> {
+/// #1480: never an assignment word: `X=1/grep .env` runs `.env`. (After
+/// `nohup`, `command` or `exec` such a word is the program, a path ending in
+/// `/grep`, but [`program_position`] does not take it, so its pattern stays
+/// unmarked there.)
+fn search_program(lines: &Words<'_>, index: usize) -> Option<(Search, usize)> {
+    if lines.assignment(index) {
+        return None;
+    }
+    let words = lines.words;
     let word = words[index].trim_start_matches('(');
     let name = word.rsplit('/').next().unwrap_or(word);
     match name {
