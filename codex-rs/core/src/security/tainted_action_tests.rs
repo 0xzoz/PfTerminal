@@ -9134,3 +9134,205 @@ fn issue_1436_checks_are_linear() {
         });
     }
 }
+
+/// #1422: more spellings that run `mapfile -C`, aliases, `compgen -C`,
+/// and folder changes that run a program rather than the builtin (`CD`,
+/// `env cd`), so the folder they leave is not followed.
+#[cfg(unix)]
+#[test]
+fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
+    let evil = "echo x >> ~/.zshenv\n";
+    // The shell runs `run.sh` where it is, unless it changes folder.
+    let files = [
+        ("evil.sh", evil),
+        ("run.sh", evil),
+        ("sub/run.sh", "true\n"),
+    ];
+    let mut wrong = Vec::new();
+    for line in [
+        // A quoted blank or separator in an assignment before the name.
+        "x='a b' mapfile -C eval -c 1 a < notes",
+        "x='a;b' readarray -tC eval a < notes",
+        "x=\"a|b\" mapfile -C eval a < notes",
+        // A brace-spelled name and a quoted separator.
+        "{,mapfile} -d ';' -C eval -c 1 a < notes",
+        "{,readarray} -d '|' -C eval a < notes",
+        "{mapfile,-C} -d ';' eval -c 1 a < notes",
+        "mapfile -d ';' -c 1 {-C,eval} a < notes",
+        // Aliases.
+        "shopt -s expand_aliases; alias m=mapfile\nm -C eval a < notes",
+        "shopt -s expand_aliases; alias e=eval\ne \"$1\"",
+        "shopt -s expand_aliases; alias s=source\ns ./evil.sh",
+        "shopt -s expand_aliases; alias b=bash\nb evil.sh",
+        "shopt -s expand_aliases; alias a=b b=bash\na evil.sh",
+        "bash -c 'shopt -s expand_aliases; alias b=bash\nb evil.sh'",
+        // Review 1: uses the readings would misread, and definitions.
+        "shopt -s expand_aliases; alias m=mapfile\nm -d ';' -c 1 -C eval a < notes",
+        "shopt -s expand_aliases; alias c=compgen\nc -W 'x;y' -C '. ./evil.sh' w",
+        "shopt -s expand_aliases; alias e='true;eval'\ne \"$1\"",
+        "shopt -s expand_aliases; alias b='env X=1 bash'\nb evil.sh",
+        "shopt -s expand_aliases; x='a b' alias e=eval\ne \"$1\"",
+        "shopt -s expand_aliases; eval 'alias e=eval'\ne \"$1\"",
+        "shopt -s expand_aliases; BASH_ALIASES[e]=eval\ne \"$1\"",
+        "shopt -s expand_aliases; BASH_ALIASES=([e]=eval)\ne \"$1\"",
+        "shopt -s expand_aliases; alias b=bash\neval 'b evil.sh'",
+        // Review 2: a use read before the definition but run after it,
+        // and other changes to the alias tables.
+        "f() { eval 'b evil.sh'; }\nalias b=bash\nf",
+        "shopt -s expand_aliases\ntrap 'b evil.sh' EXIT\nalias b=bash",
+        "aliases=(e eval)\ne \"$1\"",
+        "aliases+=(e eval)\ne \"$1\"",
+        "galiases[X]='| sh'\necho X",
+        "saliases[sh]=bash\n./run.sh",
+        "alias -s sh=bash\n./run.sh",
+        "declare -n r=BASH_ALIASES; r[e]=eval\ne \"$1\"",
+        // Review 3: definitions spelled through values, other writes.
+        "shopt -s expand_aliases; a=alias; $a b=bash\nb evil.sh",
+        "shopt -s expand_aliases; k=b; BASH_ALIASES[$k]=bash\nb evil.sh",
+        "k=b; aliases[$k]=bash\nb evil.sh",
+        "t=BASH_ALIASES; declare -n r=$t; r[b]=bash\nb evil.sh",
+        "shopt -s expand_aliases; printf -v 'BASH_ALIASES[b]' bash\nb evil.sh",
+        "shopt -s expand_aliases; read 'BASH_ALIASES[b]' <<< bash\nb evil.sh",
+        "shopt -s expand_aliases; : ${BASH_ALIASES[b]:=bash}\nb evil.sh",
+        "f() { a=alias; $a b=bash; }; f\nb evil.sh",
+        // Review 4: definitions whose value holds the name.
+        "shopt -s expand_aliases; f() { alias $1; }; f b=bash\nb evil.sh",
+        "shopt -s expand_aliases; f() { alias \"$@\"; }; f b=bash\nb evil.sh",
+        "shopt -s expand_aliases\ntrap 'b evil.sh' EXIT\nd=b=bash; alias $d",
+        "shopt -s expand_aliases\ntrap 'b evil.sh' EXIT\nx=ias; al$x b=bash",
+        "f() { eval 'b evil.sh'; }\nx=ias; al$x b=bash\nf",
+        // Review 5: `eval --`, zsh precommand modifiers, an attached
+        // option value, globs, zsh array assignments.
+        "shopt -s expand_aliases; f() { eval -- alias $1; }; f b=bash\nb evil.sh",
+        "f() { noglob alias $1 }; f b=bash\nb evil.sh",
+        "noglob alias -s sh=bash\n./run.sh",
+        "shopt -s expand_aliases; printf -vBASH_ALIASES[b] %s bash\nb evil.sh",
+        "print -valiases[b] bash\nb evil.sh",
+        "touch b=bash; alias b?bash\nb evil.sh",
+        "alias *\nb evil.sh",
+        "alias b[=]bash\nb evil.sh",
+        "set -A aliases b bash\nb evil.sh",
+        // `compgen -C` runs its command.
+        "compgen -C 'bash evil.sh' x",
+        "compgen -A file -C 'bash evil.sh' x",
+        "compgen -Wfoo -C'bash evil.sh' x",
+        "bash -c \"compgen -C 'bash evil.sh' x\"",
+        "o=-C; compgen \"$o\" 'bash evil.sh' x",
+        "compgen {-C,'bash evil.sh'} x",
+        // A folder change that runs a program.
+        "CD sub; bash run.sh",
+        "Cd sub && bash run.sh",
+        "PUSHD sub; bash run.sh",
+        "env cd sub; bash run.sh",
+        "sudo cd sub; bash run.sh",
+        "nice cd sub; bash run.sh",
+        "nohup cd sub; bash run.sh",
+        "timeout 5 cd sub; bash run.sh",
+        "bash -c 'CD sub; bash run.sh'",
+        "bash -c 'env cd sub; bash run.sh'",
+    ] {
+        if in_workspace(&files, line).is_none() {
+            wrong.push(line);
+        }
+    }
+    // An alias that changes the folder is not followed either.
+    let moved = [("run.sh", "true\n"), ("sub/run.sh", evil)];
+    for line in [
+        "shopt -s expand_aliases; alias c=cd\nc sub; bash run.sh",
+        "shopt -s expand_aliases; alias c=command\nc cd sub; bash run.sh",
+        "shopt -s expand_aliases; alias c=\nc cd sub; bash run.sh",
+    ] {
+        if in_workspace(&moved, line).is_none() {
+            wrong.push(line);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+    // Ordinary lines stay quiet.
+    let quiet = [
+        ("run.sh", "true\n"),
+        ("sub/run.sh", "true\n"),
+        ("notes", "a\nb\n"),
+        ("tool.py", "msg = 'don\\'t'\nmapfile = load()\n"),
+        ("vi", "true\n"),
+    ];
+    for line in [
+        "cd sub; bash run.sh",
+        "builtin cd sub; bash run.sh",
+        "command cd sub; bash run.sh",
+        "time cd sub; bash run.sh",
+        "alias ll='ls -l'; ls",
+        "alias ll='ls -s' gs='git status'",
+        "grep BASH_ALIASES notes",
+        "grep -e alias --color=auto notes",
+        "git config --get alias.co",
+        "grep -n alias --include='*.sh' notes",
+        "grep alias -s notes",
+        "grep alias \"$f\"",
+        "CC=gcc; $CC -std=c11 x.c",
+        "P=printf; $P '%s\\n' \"$f\"",
+        "LC_ALL=C grep -n alias \"$f\"",
+        "LC_ALL=C grep alias -s notes",
+        "env FOO=1 grep alias \"$f\"",
+        "alias path='echo $PATH'",
+        "alias k='kubectl --context $CTX' l='ls *.txt'",
+        "jq '.aliases[]' notes",
+        "jq '.aliases[0]' notes; head -n 0 notes",
+        "compgen -c git",
+        "compgen -W 'a b' -- a",
+        "compgen -W '-C x' -- a",
+        "compgen -C 'echo hi' x",
+        "x=1 mapfile -t a < notes",
+        "x='a b' mapfile -t a < notes",
+        "echo mapfile; cat notes",
+        "printf '%s\\n' readarray",
+        "python3 tool.py",
+        "bash --rcfile=missing.rc run.sh",
+        "bash --init-file missing.rc run.sh",
+        "bash --rcfile missing.rc -l run.sh",
+    ] {
+        assert_eq!(in_workspace(&quiet, line), None, "{line}");
+    }
+    // A start-up file an interactive shell reads is still judged, as is
+    // one for `-c` (review 1: bash reads it under sshd).
+    for line in [
+        "bash --rcfile missing.rc -c 'ls'",
+        "bash --init-file missing.rc -c 'ls'",
+        "bash --rcfile missing.rc -i run.sh",
+        // Review 2: bash's `-ov vi` is `-o vi -v`, not a script `vi`.
+        "bash --rcfile missing.rc -ov vi",
+        "bash --rcfile missing.rc -Ov vi -c true",
+        "bash --rcfile missing.rc -ic 'ls'",
+        "bash --rcfile missing.rc -c -i 'ls'",
+        "bash --rcfile missing.rc",
+    ] {
+        assert!(in_workspace(&quiet, line).is_some(), "{line}");
+    }
+}
+
+/// #1422: the checks stay linear.
+#[cfg(unix)]
+#[test]
+fn issue_1422_checks_are_linear() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cwd = root.path().to_string_lossy().into_owned();
+    for (label, unit) in [
+        ("assigned mapfile", "x='a b' mapfile -t a < n; "),
+        ("aliases", "alias b='bash -c true'; b; "),
+        ("compgen", "compgen -A file -C 'true' x; "),
+        ("external cd", "CD sub; env cd sub; "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = unit.repeat(40 * scale);
+            let _ = classify_fixture(&shell_in(&cwd, &["bash", "-lc", &line]));
+        });
+    }
+    // Review 5: `eval`s before many `alias` words.
+    work::assert_linear("eval alias", |scale| {
+        let line = format!(
+            "{}{}",
+            "eval ".repeat(200 * scale),
+            "alias ".repeat(200 * scale)
+        );
+        let _ = classify_fixture(&shell_in(&cwd, &["bash", "-lc", &line]));
+    });
+}

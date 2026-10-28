@@ -34,6 +34,27 @@ pub(super) struct Invocation<'a> {
 /// Parse an invocation of `name` (a lowercase basename) with `args`.
 /// `None` when `name` is not a shell or interpreter.
 pub(super) fn parse<'a>(name: &str, args: &'a [String]) -> Option<Invocation<'a>> {
+    let mut start_up = Vec::new();
+    let mut invocation = parse_options(name, args, &mut start_up)?;
+    // #1422: a shell running a script file reads `--rcfile`/`--init-file`
+    // only when interactive (`-i`). Any `i` letter in an option word
+    // counts, wherever it is. With `-c`, bash also reads it when it seems
+    // to run under sshd, and from its input it may be interactive. An `o`
+    // or `O` in an option word takes the next word (bash `-ov vi`), which
+    // `Family::option` reads as the script, so then it is judged too.
+    if !start_up.is_empty() && (!matches!(invocation.code, Code::File(_)) || may_start_up(args)) {
+        invocation.preloads.extend(start_up);
+    }
+    Some(invocation)
+}
+
+/// `parse`, setting aside in `start_up` the start-up files that a shell
+/// reads only when interactive.
+fn parse_options<'a>(
+    name: &str,
+    args: &'a [String],
+    start_up: &mut Vec<&'a str>,
+) -> Option<Invocation<'a>> {
     if matches!(name, "source" | ".") {
         let code = args.first().map_or(Code::Stdin, |file| Code::File(file));
         return Some(Invocation {
@@ -150,6 +171,11 @@ pub(super) fn parse<'a>(name: &str, args: &'a [String]) -> Option<Invocation<'a>
                 index += 1;
             }
             Opt::PreloadAttached(file) => preloads.push(file),
+            Opt::StartUp => {
+                start_up.extend(next);
+                index += 1;
+            }
+            Opt::StartUpAttached(file) => start_up.push(file),
             Opt::Value => index += 1,
             Opt::Stdin => {
                 return Some(Invocation {
@@ -192,6 +218,9 @@ enum Opt<'a> {
     ModuleAttached(&'a str),
     Preload,
     PreloadAttached(&'a str),
+    /// #1422: a start-up file an interactive shell reads.
+    StartUp,
+    StartUpAttached(&'a str),
     Value,
     Stdin,
     Flag,
@@ -240,6 +269,12 @@ impl Family {
                 "command" if self == Self::Shell => Opt::Inline,
                 // #1405: an interactive shell sources its start-up file
                 // first (`bash --rcfile f -i`, yash `--profile=f -l`).
+                // #1422: for a script file, only when interactive; as
+                // written (bash's spellings). Before #1405 they were values,
+                // not judged.
+                "rcfile" | "init-file" if self == Self::Shell => {
+                    attached.map_or(Opt::StartUp, Opt::StartUpAttached)
+                }
                 _ if self == Self::Shell && start_up_file(key) => {
                     attached.map_or(Opt::Preload, Opt::PreloadAttached)
                 }
@@ -302,13 +337,35 @@ impl Family {
 /// any case, ignores other than letters and digits, and takes a prefix of
 /// two letters or more (`--rc=f`, `--RC-FILE=f`, `--prof f`).
 fn start_up_file(key: &str) -> bool {
-    let key: String = key
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|ch| ch.to_ascii_lowercase())
-        .collect();
+    let key = normalized(key);
     key.len() >= 2
         && ["rcfile", "initfile", "profile"]
             .iter()
             .any(|name| name.starts_with(key.as_str()))
+}
+
+/// A long option name as yash compares it: letters and digits, lowercased.
+fn normalized(key: &str) -> String {
+    key.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
+}
+
+/// #1422: whether a shell invoked with `args` and a script file may read
+/// its start-up file: it may be interactive (an option word with an `i`
+/// letter, `-i`, `-il`, `-rcfile`, or a long one yash may read as
+/// `--interactive`, `--in`), or an option word holds `o`/`O`, whose value
+/// may be the word read as the script. Read loosely, so the file is
+/// judged: any word counts, operands too.
+fn may_start_up(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        work::step();
+        if let Some(long) = arg.strip_prefix("--") {
+            let key = normalized(long.split_once('=').map_or(long, |(key, _)| key));
+            key.len() >= 2 && "interactive".starts_with(key.as_str())
+        } else {
+            arg.starts_with(['-', '+']) && arg.contains(['i', 'o', 'O'])
+        }
+    })
 }

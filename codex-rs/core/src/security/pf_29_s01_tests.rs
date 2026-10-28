@@ -672,6 +672,102 @@ fn pf_29_s01_symlink_at_a_corbanu_store_is_drift() {
     assert_eq!(drift.removed.len(), 1, "{drift:?}");
 }
 
+/// #1428: a database's `-wal`, `-shm` and `-journal` files count like the
+/// database: Corbanu's own writes to them are not drift.
+#[test]
+fn pf_29_s01_database_side_file_writes_are_not_drift() {
+    let fixture = Fixture::new();
+    let corbanu = fixture.corbanu();
+    fixture.write(&corbanu.join("state_5.sqlite"), b"pages");
+    fixture.write(&corbanu.join("state_5.sqlite-wal"), b"frames");
+    fixture.write(&corbanu.join("state_5.sqlite-shm"), b"index");
+    let sources = fixture.sources();
+    let first = fixture.run(&sources);
+    let entries = first
+        .inventory
+        .manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.path.to_string_lossy().contains("state_5"))
+        .count();
+    assert_eq!(entries, 3, "one manifest entry per database file");
+
+    fixture.write(&corbanu.join("state_5.sqlite-wal"), b"more frames");
+    std::fs::remove_file(corbanu.join("state_5.sqlite-shm")).expect("remove shm");
+    fixture.write(&corbanu.join("state_5.sqlite-journal"), b"rollback");
+    fixture.write(&corbanu.join("logs_2.sqlite-wal"), b"frames");
+    let (_, drift) = first.recheck(&sources, ALL_ON);
+    assert!(drift.is_empty(), "{drift:?}");
+}
+
+/// #1428: a symlink at a database's side file is drift, and its target is
+/// isolated like a symlinked database's.
+#[cfg(unix)]
+#[test]
+fn pf_29_s01_symlink_at_a_database_side_file_is_drift() {
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let fixture = Fixture::new();
+        let corbanu = fixture.corbanu();
+        let secret = fixture.home().join("secret.txt");
+        fixture.write(&secret, b"TOKEN=1");
+        fixture.write(&corbanu.join("state_5.sqlite"), b"pages");
+        let sources = fixture.sources();
+        let first = fixture.run(&sources);
+
+        let side = corbanu.join(format!("state_5.sqlite{suffix}"));
+        std::os::unix::fs::symlink(&secret, &side).expect("symlink");
+        let (second, drift) = first.recheck(&sources, ALL_ON);
+        assert_eq!(drift.changed.len(), 1, "{suffix}: {drift:?}");
+        let real = std::fs::canonicalize(&secret).expect("canonical secret");
+        assert!(
+            second.inventory.isolation_paths().contains(&real),
+            "{suffix}: target not isolated"
+        );
+
+        // A dangling one counts too, and so does its removal.
+        std::fs::remove_file(&side).expect("remove symlink");
+        std::os::unix::fs::symlink(fixture.home().join("missing"), &side).expect("dangling");
+        let (third, drift) = second.recheck(&sources, ALL_ON);
+        assert_eq!(drift.changed.len(), 1, "{suffix}: {drift:?}");
+        std::fs::remove_file(&side).expect("remove dangling symlink");
+        let (_, drift) = third.recheck(&sources, ALL_ON);
+        assert_eq!(drift.changed.len(), 1, "{suffix}: {drift:?}");
+    }
+}
+
+/// #1428: a database file that is not a regular file with one link (a
+/// pipe, or a hard link to a file elsewhere) is drift, the database itself
+/// included.
+#[cfg(unix)]
+#[test]
+fn pf_29_s01_irregular_database_files_are_drift() {
+    let fixture = Fixture::new();
+    let corbanu = fixture.corbanu();
+    let secret = fixture.home().join("secret.txt");
+    fixture.write(&secret, b"TOKEN=1");
+    fixture.write(&corbanu.join("state_5.sqlite"), b"pages");
+    let sources = fixture.sources();
+    let first = fixture.run(&sources);
+
+    std::fs::hard_link(&secret, corbanu.join("state_5.sqlite-shm")).expect("hard link");
+    let (second, drift) = first.recheck(&sources, ALL_ON);
+    assert_eq!(drift.changed.len(), 1, "{drift:?}");
+
+    std::fs::remove_file(corbanu.join("state_5.sqlite-shm")).expect("remove hard link");
+    let (third, drift) = second.recheck(&sources, ALL_ON);
+    assert_eq!(drift.changed.len(), 1, "{drift:?}");
+
+    let fifo = |path: &Path| {
+        let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).expect("path");
+        // SAFETY: `path` is a valid NUL-terminated string.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
+    };
+    std::fs::remove_file(corbanu.join("state_5.sqlite")).expect("remove database");
+    fifo(&corbanu.join("state_5.sqlite"));
+    let (_, drift) = third.recheck(&sources, ALL_ON);
+    assert_eq!(drift.changed.len(), 1, "{drift:?}");
+}
+
 #[test]
 fn pf_29_s01_ids_are_stable_and_digests_are_keyed() {
     let fixture = Fixture::new();

@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 
+mod aliases;
 mod arithmetic;
 mod certain_cd;
 mod code_variables;
@@ -1690,6 +1691,7 @@ impl Classifier {
         let mut loops = launched_git::PositionalLoops::default();
         // #1405: a `mapfile` was found, by any spelling.
         let mut mapfile = false;
+        let mut aliases = aliases::Aliases::of(&lexed.commands);
         // #1436: a loop's later passes start where the one before left
         // (`for i in 1 2; do echo x >> .zshrc; cd ~; done`): a loop with a
         // folder change whose pass moves the folder (`Place`) is read again
@@ -1808,6 +1810,11 @@ impl Classifier {
                     || simple.here_string.is_some()
                     || !simple.writes_to.is_empty(),
             );
+            // #1422: an alias the line defines runs text neither reading
+            // reads as the shell does (`alias b=bash` then `b run.sh`).
+            if aliases.read(&words) {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
             self.simple_command(
                 simple,
                 &words,
@@ -1943,11 +1950,13 @@ impl Classifier {
         }
         certain_cd::finish(&mut folders);
         // #1405: the word lexer ignores quotes (`-d 'x>' "$o"`): a line
-        // with a `mapfile` is read with them too.
+        // with a `mapfile` is read with them too. #1422: text that may not
+        // be shell is read loosely.
+        let strict = self.not_shell == 0 && self.rebuilt == 0;
         if mapfile
             && command
                 .iter()
-                .any(|arg| rerun::quoted_mapfile_callback(arg))
+                .any(|arg| rerun::quoted_mapfile_callback(arg, strict))
         {
             self.note(ProtectedActionKind::UnseenCode);
         }
@@ -2129,8 +2138,9 @@ impl Classifier {
             // may not (or goes to an entry of a stack not followed).
             // #1403: nor does a program named by a path (`./cd sub`): the
             // file runs, not the builtin (or a function of that name).
+            // #1422: nor `CD sub` or a wrapper's `env cd sub`.
             if unknown_folder::stack_change(name, args)
-                || unknown_folder::path_change(&words[*index], name)
+                || unknown_folder::external_change(words, *index, name)
             {
                 folders.unfollowed = true;
             } else {
