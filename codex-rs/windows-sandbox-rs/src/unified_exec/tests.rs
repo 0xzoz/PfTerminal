@@ -1523,6 +1523,133 @@ fn legacy_writable_roots_are_the_labelled_roots() {
     }
 }
 
+const BREAKAWAY_PROBE_ENV: &str = "CODEX_733_BREAKAWAY_PROBE";
+const BREAKAWAY_PROBE_TEST: &str = "unified_exec::tests::legacy_breakaway_probe_entry";
+const BREAKAWAY_PROBE_RESULT: &str = "breakaway-probe: ";
+
+/// The command of [`legacy_command_cannot_break_away_from_its_job`]: starts
+/// a short `cmd.exe` normally, then with `CREATE_BREAKAWAY_FROM_JOB`, and
+/// reports whether Windows allowed each. Does nothing otherwise.
+#[test]
+fn legacy_breakaway_probe_entry() {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::System::Threading::CREATE_BREAKAWAY_FROM_JOB;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    use windows_sys::Win32::System::Threading::CreateProcessW;
+    use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
+    use windows_sys::Win32::System::Threading::STARTUPINFOW;
+
+    if std::env::var_os(BREAKAWAY_PROBE_ENV).is_none() {
+        return;
+    }
+    let start = |flags: u32| -> (bool, u32) {
+        let mut command_line = crate::winutil::to_wide(format!(
+            "\"{}\" /d /c exit 0",
+            system32_exe("cmd.exe").display()
+        ));
+        // SAFETY: zeroed plain-data structs; the call fills in `info`.
+        let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: every pointer refers to a live buffer above; nothing is inherited.
+        let started = unsafe {
+            CreateProcessW(
+                std::ptr::null(),
+                command_line.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                /*binherithandles*/ 0,
+                CREATE_NO_WINDOW | flags,
+                std::ptr::null(),
+                std::ptr::null(),
+                &startup,
+                &mut info,
+            )
+        } != 0;
+        if !started {
+            // SAFETY: read right after the call.
+            return (false, unsafe { GetLastError() });
+        }
+        // SAFETY: returned by the call above and not used again.
+        unsafe {
+            CloseHandle(info.hThread);
+            CloseHandle(info.hProcess);
+        }
+        (true, 0)
+    };
+    // The control shows a refusal below comes from the job, not from the
+    // token or the desktop.
+    let (control, control_error) = start(/*flags*/ 0);
+    let (started, error) = start(CREATE_BREAKAWAY_FROM_JOB);
+    // Own line: libtest prints the test name without a newline first.
+    println!(
+        "\n{BREAKAWAY_PROBE_RESULT}control={control}/{control_error} breakaway={started}/{error}"
+    );
+}
+
+/// #733: a legacy command can't start a child outside its job. With
+/// breakaway allowed, such a child outlived the job, so neither cancellation
+/// nor the integrity lease's release (which waits for the job to empty)
+/// reached it, and it kept running at Low integrity in roots whose label
+/// was being put back.
+#[test]
+fn legacy_command_cannot_break_away_from_its_job() {
+    let _guard = legacy_process_test_guard();
+    let test_root = user_owned_test_root();
+    let runtime = current_thread_runtime();
+    let (stdout, exit_code, log) = runtime.block_on(async {
+        let codex_home = sandbox_home("legacy-breakaway");
+        let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let env_map = HashMap::from([
+            (BREAKAWAY_PROBE_ENV.to_string(), "1".to_string()),
+            ("SystemRoot".to_string(), system_root),
+        ]);
+        let spawned = spawn_windows_sandbox_session_legacy(
+            &PermissionProfile::workspace_write(),
+            workspace_roots_for(test_root.path()).as_slice(),
+            codex_home.path(),
+            vec![
+                std::env::current_exe()
+                    .expect("test exe")
+                    .display()
+                    .to_string(),
+                "--exact".to_string(),
+                BREAKAWAY_PROBE_TEST.to_string(),
+                "--nocapture".to_string(),
+                "--test-threads=1".to_string(),
+            ],
+            test_root.path(),
+            env_map,
+            /*timeout_ms*/ Some(60_000),
+            &[],
+            &[],
+            /*tty*/ false,
+            /*stdin_open*/ false,
+            /*use_private_desktop*/ true,
+        )
+        .await
+        .expect("spawn legacy breakaway probe");
+        let (stdout, exit_code) =
+            collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(/*secs*/ 90))
+                .await;
+        (
+            String::from_utf8_lossy(&stdout).into_owned(),
+            exit_code,
+            sandbox_log(codex_home.path()),
+        )
+    });
+    let result = stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(BREAKAWAY_PROBE_RESULT));
+    // 5 is ERROR_ACCESS_DENIED: the job refuses the breakaway.
+    assert_eq!(
+        (exit_code, result),
+        (0, Some("control=true/0 breakaway=false/5")),
+        "stdout={stdout:?}\n{log}"
+    );
+}
+
 const CRASH_ROOTS_ENV: &str = "CODEX_158_CRASH_ROOTS";
 const CRASH_CHILD_TEST: &str = "unified_exec::tests::legacy_integrity_crash_child_entry";
 const CRASH_CHILD_READY: &str = "integrity-crash-child: leased";

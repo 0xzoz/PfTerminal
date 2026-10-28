@@ -149,6 +149,15 @@ sign-off by Travis on 2026-10-13):
   desktop, or Core's own desktop when Core runs off the interactive window
   station with `sandbox_private_desktop = false`.
 
+A legacy command's job doesn't allow breaking away (#733; not covered by that
+sign-off): a child started with `CREATE_BREAKAWAY_FROM_JOB` fails with access
+denied, so its descendants stay in its job, where cancelling ends them and the
+lease waits for them. A program that asks to break away gets that error unless
+it retries without the flag. The elevated backend and unsandboxed commands
+still allow breaking away. Routes that job limits can't close (starting a
+child under another legacy session's process, or through a launch broker such
+as WMI) are tracked in #1507.
+
 Protected paths that already exist inside writable roots when a session
 starts, such as `.git`, `.codex`, and `.agents`, also get an Everyone deny of
 `FILE_DELETE_CHILD` on the path, its subdirectories, and its parent directory.
