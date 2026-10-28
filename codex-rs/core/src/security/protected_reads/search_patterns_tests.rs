@@ -347,9 +347,22 @@ fn assignment_shaped_program_words_do_not_start_searches() {
         "command 'X=1/grep' .env logs",
         "exec X\\=1/grep .env logs",
         "nohup \"X\"=1/rg .env logs",
+        // A search it declines still ends where the command ends: no later
+        // word of it starts another one.
+        "X=1/grep rg .env logs",
+        "X=1/grep sh -c rg .env logs",
+        "'X=1' grep sh -c rg .env logs",
     ] {
         assert_eq!(patterns(script), Vec::<String>::new(), "{script}");
     }
+    // Run directly, without a shell: `X=1/grep` is a program path then.
+    let command = ["X=1/grep", "rg", ".env", "logs"].map(String::from);
+    let words = super::super::command_words(&command, /*windows*/ false);
+    let marked: Vec<&String> = search_pattern_indices(&command, &words, /*windows*/ false)
+        .into_iter()
+        .map(|index| &words[index])
+        .collect();
+    assert!(!marked.iter().any(|word| *word == ".env"), "{marked:?}");
     // A program path that only contains `=` past a slash is no assignment.
     assert_eq!(patterns("./X=1/grep .env logs"), [".env"]);
 }

@@ -158,10 +158,24 @@ pub(super) fn search_pattern_indices(
     while index < words.words.len() {
         // #1480: the cheap name check first, so the walk back over prefixes
         // runs only at search programs (linear in a long `A=1 B=1 …` chain).
-        let start = search_program(&words, index).filter(|_| program_position(&words, index));
+        let start = search_program(words.words, index)
+            .filter(|_| program_position(&words, index, Assignments::Parsed));
         match start {
+            // A search as the words read once unquoted. #1480: where the
+            // shell runs another program (`X=1/grep .env`, `'X=1' grep .env`)
+            // its patterns are not marked, but the scan still resumes after
+            // it, so a later word of that command (`X=1/grep rg .env`) can't
+            // start a search either.
             Some((search, first)) => {
-                index = mark_patterns(&words, search, first, &mut patterns);
+                let shell_runs_it = !words.assignment(index)
+                    && program_position(&words, index, Assignments::AsWritten);
+                let mut not_patterns = HashSet::new();
+                let marked = if shell_runs_it {
+                    &mut patterns
+                } else {
+                    &mut not_patterns
+                };
+                index = mark_patterns(&words, search, first, marked);
             }
             None => index += 1,
         }
@@ -349,14 +363,20 @@ fn unquoted_lines(script: &str) -> Vec<&str> {
 }
 
 /// Whether `words[index]` is where a program is named.
-fn program_position(lines: &Words<'_>, mut index: usize) -> bool {
+/// `assignments` says which words count as assignments: those of the
+/// unquoted words, or (#1480) those the shell takes for one as written.
+fn program_position(lines: &Words<'_>, mut index: usize, assignments: Assignments) -> bool {
     let words = lines.words;
+    let assignment = |index: usize| match assignments {
+        Assignments::Parsed => assignment_word(&words[index]),
+        Assignments::AsWritten => lines.assignment(index),
+    };
     // Prefixes must themselves start a command: `LC_ALL=C grep` and
     // `sudo grep`, but not `cat LC_ALL=C grep` or `cat do grep`.
     while index > 0
         && !lines.starts[index]
         && !lines.ends(index - 1)
-        && (lines.assignment(index - 1)
+        && (assignment(index - 1)
             || (PROGRAM_BEFORE.contains(&words[index - 1].as_str())
                 // `nohup X=1 grep` runs a program named `X=1`. The word as
                 // the shell passes it (also quoted: `nohup "X=1/grep"`).
@@ -395,16 +415,21 @@ fn assignment_word(word: &str) -> bool {
         && name.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+/// Which words [`program_position`] takes for assignments.
+#[derive(Clone, Copy)]
+enum Assignments {
+    /// Those of the unquoted words.
+    Parsed,
+    /// #1480: those the shell takes for one, as written (not `'X=1'`).
+    AsWritten,
+}
+
 /// The search `words[index]` starts, and the index of its first argument.
-/// #1480: never an assignment word: `X=1/grep .env` runs `.env`. (After
-/// `nohup`, `command` or `exec` such a word, quoted or not, is the program, a
-/// path ending in `/grep`, but [`program_position`] does not take it, so its
-/// pattern stays unmarked there.)
-fn search_program(lines: &Words<'_>, index: usize) -> Option<(Search, usize)> {
-    if lines.assignment(index) {
-        return None;
-    }
-    let words = lines.words;
+/// #1480: the caller marks nothing where it is an assignment word
+/// (`X=1/grep .env` runs `.env`). After `nohup`, `command` or `exec` such a
+/// word, quoted or not, is the program, a path ending in `/grep`, but
+/// [`program_position`] does not take it, so its pattern stays unmarked.
+fn search_program(words: &[String], index: usize) -> Option<(Search, usize)> {
     let word = words[index].trim_start_matches('(');
     let name = word.rsplit('/').next().unwrap_or(word);
     match name {
