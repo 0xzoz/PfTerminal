@@ -268,16 +268,20 @@ const RUNTIME_STORES: [&str; 5] = [
 ];
 
 /// Whether `entry` is one of Corbanu's own history stores or state
-/// database files, not a symlink. A protected launch denies these whatever
-/// they hold and whether or not they exist (see [`CORBANU_HOME_STORES`] and
-/// [`database_glob`]), so Corbanu's own writes to them leave the review
-/// true and are not drift. A symlink there still counts, and so does a
-/// folder named like a database (the glob does not deny what it holds).
+/// database files (`-wal`, `-shm` and `-journal` included, #1428), not a
+/// symlink. A protected launch denies these whatever they hold and whether
+/// or not they exist (see [`CORBANU_HOME_STORES`] and [`database_glob`]),
+/// so Corbanu's own writes to them leave the review true and are not drift.
+/// A symlink there still counts, and so does a database file that is not a
+/// regular file with a single link, and a folder named like a database (the
+/// glob does not deny what it holds).
 fn runtime_store(entry: &ManifestEntry, codex_home: &std::path::Path) -> bool {
+    let plain_file = entry.regular && entry.links.is_none_or(|links| links == 1);
     entry.scope == Scope::CorbanuHome
         && !entry.symlink
-        && ((entry.len.is_some() && is_database_file(codex_home, &entry.path))
-            || (entry.path.parent() == Some(codex_home)
+        && ((plain_file && is_database_file(codex_home, &entry.path))
+            || ((plain_file || entry.len.is_none())
+                && entry.path.parent() == Some(codex_home)
                 && entry
                     .path
                     .file_name()
@@ -286,19 +290,24 @@ fn runtime_store(entry: &ManifestEntry, codex_home: &std::path::Path) -> bool {
 
 fn drift(before: &Preflight, after: &Preflight, codex_home: &std::path::Path) -> Drift {
     let entries = |preflight: &Preflight| {
-        preflight
-            .inventory
-            .manifest
-            .entries
-            .iter()
-            .map(|entry| (entry.finding_id.clone(), entry.clone()))
-            .collect::<BTreeMap<_, _>>()
+        preflight.inventory.manifest.entries.iter().fold(
+            BTreeMap::<String, Vec<ManifestEntry>>::new(),
+            |mut entries, entry| {
+                entries
+                    .entry(entry.finding_id.clone())
+                    .or_default()
+                    .push(entry.clone());
+                entries
+            },
+        )
     };
     let (old_entries, new_entries) = (entries(before), entries(after));
-    let counts = |entries: &BTreeMap<String, ManifestEntry>, id: &String| {
+    // A database finding holds one entry per file (#1428): it is ignored
+    // only when every one of them is a runtime store.
+    let counts = |entries: &BTreeMap<String, Vec<ManifestEntry>>, id: &String| {
         !entries
             .get(id)
-            .is_some_and(|entry| runtime_store(entry, codex_home))
+            .is_some_and(|entries| entries.iter().all(|entry| runtime_store(entry, codex_home)))
     };
     let ids = |preflight: &Preflight| preflight.inventory.finding_ids();
     let (old, new) = (ids(before), ids(after));

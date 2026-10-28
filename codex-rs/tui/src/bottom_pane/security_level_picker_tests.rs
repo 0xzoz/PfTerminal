@@ -476,6 +476,35 @@ mod pf_29_s01 {
         );
     }
 
+    /// #1428: a symlink placed at a database's `-wal` file between the
+    /// review and the confirmation refuses the save, while Corbanu's own
+    /// writes to that file do not.
+    #[cfg(unix)]
+    #[test]
+    fn pf_29_s01_symlinked_database_side_file_after_review_refuses_save() {
+        let machine = Machine::new();
+        let corbanu = machine.corbanu();
+        std::fs::write(corbanu.join("pfterminal_state_5.sqlite"), "pages").unwrap();
+        std::fs::write(corbanu.join("pfterminal_state_5.sqlite-wal"), "one").unwrap();
+        std::fs::write(machine.home().join("secret.txt"), "TOKEN=1").unwrap();
+        let mut picker = machine.picker(/*flags_on*/ true, ChosenLevel::Permissive);
+        review_aggressive(&mut picker);
+        std::fs::write(corbanu.join("pfterminal_state_5.sqlite-wal"), "one, two").unwrap();
+        std::os::unix::fs::symlink(
+            machine.home().join("secret.txt"),
+            corbanu.join("pfterminal_state_5.sqlite-shm"),
+        )
+        .unwrap();
+        picker.handle_key_event(key(KeyCode::Enter));
+        assert_eq!(picker.screen, Screen::Review(ChosenLevel::Aggressive));
+        assert!(
+            text(&picker).contains("Not saved: 1 item changed since you reviewed this."),
+            "{}",
+            text(&picker)
+        );
+        assert_eq!(level::load(&machine.corbanu()), StoredLevel::Absent);
+    }
+
     /// Toggling nested agents on a saved Aggressive skips the preflight only
     /// while a receipt is on record (review 3).
     #[test]
