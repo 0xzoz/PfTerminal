@@ -13,8 +13,17 @@ import security_platform_probe as probe
 import security_platform_self_test as runner
 from test_security_platform_probe import synthetic_report
 
+REAL_WARM_UP = runner.warm_windows_boot_query
+
 
 class SecurityPlatformSelfTestTests(unittest.TestCase):
+    def setUp(self):
+        # The warm-up has its own tests below; elsewhere it must not add a
+        # child process (or a live one on a Windows host) to the wrapper path.
+        patcher = mock.patch.object(runner, "warm_windows_boot_query")
+        self.warm_up = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def capture(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -183,6 +192,88 @@ class SecurityPlatformSelfTestTests(unittest.TestCase):
         with mock.patch.object(probe, "self_test", side_effect=error) as delegated:
             self.assert_failure(self.capture(), "self_test_error")
             delegated.assert_called_once_with()
+
+    def test_warm_up_runs_once_before_the_self_test(self):
+        calls = mock.Mock()
+        calls.attach_mock(self.warm_up, "warm_up")
+        with mock.patch.object(probe, "self_test") as delegated:
+            calls.attach_mock(delegated, "self_test")
+            self.assertEqual(
+                self.capture(),
+                (0, "security-platform-probe: 8 contract regressions passed\n", ""),
+            )
+        self.assertEqual(calls.mock_calls, [mock.call.warm_up(), mock.call.self_test()])
+
+    def test_warm_up_repeats_the_probe_query_with_a_longer_budget(self):
+        response = subprocess.CompletedProcess(["PRIVATE_COMMAND"], 0, "boot", "")
+        with self.windows_identity(response=response) as (query, _):
+            probe.target_identity()
+            REAL_WARM_UP()
+        self.assertEqual(query.call_count, 2)
+        timed, warm = query.call_args_list
+        self.assertEqual(warm.args, timed.args)
+        self.assertEqual(timed.kwargs["timeout"], 8)
+        self.assertEqual(
+            warm.kwargs,
+            {
+                "stdin": subprocess.DEVNULL,
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+                "timeout": runner.WARM_UP_TIMEOUT_SECONDS,
+                "check": False,
+            },
+        )
+
+    def test_failed_warm_up_does_not_mask_the_timed_query_outcome(self):
+        cases = (
+            (
+                subprocess.TimeoutExpired(["PRIVATE_COMMAND"], 60),
+                "boot_identity_timeout",
+            ),
+            (OSError(5, "PRIVATE_ERROR", "PRIVATE_PATH"), "boot_identity_os_error"),
+        )
+        for failure, category in cases:
+            with self.subTest(failure=type(failure).__name__):
+                with self.windows_identity(error=failure) as (query, report):
+                    with mock.patch.object(
+                        runner, "warm_windows_boot_query", REAL_WARM_UP
+                    ):
+                        self.assert_failure(self.capture(), category)
+                    warm, timed = query.call_args_list
+                    self.assertEqual(
+                        warm.kwargs["timeout"], runner.WARM_UP_TIMEOUT_SECONDS
+                    )
+                    self.assertEqual(timed.kwargs["timeout"], 8)
+                    report.assert_called_once_with("self-test")
+
+    def test_warm_up_starts_no_process_off_windows(self):
+        kernel = mock.Mock()
+        for os_name in ("linux", "macos", "unknown"):
+            with self.subTest(os=os_name):
+                with (
+                    mock.patch.object(probe, "target_os", return_value=os_name),
+                    mock.patch.object(
+                        probe.ctypes,
+                        "windll",
+                        types.SimpleNamespace(kernel32=kernel),
+                        create=True,
+                    ),
+                    mock.patch.object(probe.subprocess, "run") as query,
+                ):
+                    REAL_WARM_UP()
+                    query.assert_not_called()
+        kernel.GetWindowsDirectoryW.assert_not_called()
+
+    def test_unexpected_warm_up_error_is_ignored(self):
+        with (
+            mock.patch.object(probe, "target_os", return_value="windows"),
+            mock.patch.object(
+                probe.ctypes, "create_unicode_buffer", side_effect=ValueError
+            ),
+            mock.patch.object(probe.subprocess, "run") as query,
+        ):
+            self.assertIsNone(REAL_WARM_UP())
+            query.assert_not_called()
 
 
 if __name__ == "__main__":
