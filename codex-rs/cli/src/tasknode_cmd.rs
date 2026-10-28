@@ -795,14 +795,94 @@ async fn task_evidence(
         .await?;
     if response_is_ok(&response) {
         let refreshed_detail = task_detail(client, &args.task_id).await.ok();
+        let Some(submission_ref) = evidence_receipt_reference(&response.body) else {
+            return Ok(unconfirmed_evidence_receipt(
+                &args.task_id,
+                mode,
+                response.body,
+                refreshed_detail.as_ref(),
+            ));
+        };
         annotate_evidence_lifecycle(
             &mut response.body,
             &args.task_id,
             mode,
             refreshed_detail.as_ref(),
         );
+        if let Some(lifecycle) = response
+            .body
+            .get_mut("pfterminalLifecycle")
+            .and_then(Value::as_object_mut)
+        {
+            lifecycle.insert("submissionRef".to_string(), submission_ref);
+        }
     }
     Ok(response)
+}
+
+/// The references Task Node returns for a recorded evidence event. Every
+/// genuine receipt carries at least one; success without any cannot be
+/// confirmed as recorded (#1280).
+fn evidence_receipt_reference(receipt: &Value) -> Option<Value> {
+    fn text(value: Option<&Value>) -> Option<&str> {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    }
+    let mut reference = Map::new();
+    for (key, value) in [
+        (
+            "eventId",
+            text(receipt.pointer("/offchainLifecycle/eventId"))
+                .or_else(|| text(receipt.get("eventId"))),
+        ),
+        ("txHash", text(receipt.get("txHash"))),
+        ("cid", text(receipt.get("cid"))),
+        ("receiptId", text(receipt.get("receiptId"))),
+    ] {
+        if let Some(value) = value {
+            reference.insert(key.to_string(), Value::String(value.to_string()));
+        }
+    }
+    (!reference.is_empty()).then_some(Value::Object(reference))
+}
+
+fn unconfirmed_evidence_receipt(
+    task_id: &str,
+    mode: TaskEvidenceMode,
+    receipt: Value,
+    refreshed_detail: Option<&TaskNodeResponse>,
+) -> TaskNodeResponse {
+    let gate = match mode {
+        TaskEvidenceMode::InitialSubmission => "canSubmitInitialEvidence",
+        TaskEvidenceMode::VerificationResponse => "canSubmitVerificationEvidence",
+    };
+    let evidence_gate_open = refreshed_detail
+        .filter(|detail| response_is_ok(detail))
+        .and_then(|detail| detail.body.pointer(&format!("/actions/{gate}")))
+        .and_then(Value::as_bool);
+    let message = match evidence_gate_open {
+        Some(true) => {
+            "Task Node returned success but no event, transaction or CID reference, and the task still accepts this evidence. Nothing was confirmed as recorded; check the task before submitting again."
+        }
+        _ => {
+            "Task Node returned success but no event, transaction or CID reference, so this evidence cannot be confirmed as recorded. Do not resubmit: the evidence step may already be used. Check the task; if it shows the submission without your evidence or a verification request, report the task id to Task Node operators instead of cancelling the task."
+        }
+    };
+    TaskNodeResponse {
+        status: 502,
+        body: json!({
+            "ok": false,
+            "error": "task_evidence_receipt_unconfirmed",
+            "message": message,
+            "taskId": task_id,
+            "submittedMode": mode.as_str(),
+            "evidenceGateOpen": evidence_gate_open,
+            "nextCommand": format!("corbanu tasknode task show {task_id} --json"),
+            "receipt": receipt,
+        }),
+    }
 }
 
 fn evidence_mode_preflight(
@@ -893,9 +973,15 @@ fn annotate_evidence_lifecycle(
         .and_then(|actions| actions.get("canSubmitVerificationEvidence"))
         .and_then(Value::as_bool)
         == Some(true);
+    // Task Node reports "no request" as `{}` as well as null.
     let current_verification_request = detail
         .and_then(|detail| detail.get("currentVerificationRequest"))
-        .filter(|request| !request.is_null())
+        .filter(|request| {
+            !request.is_null()
+                && request
+                    .as_object()
+                    .is_none_or(|request| !request.is_empty())
+        })
         .cloned();
 
     let (phase, next_command, notice) = if reward_issued {
@@ -920,7 +1006,7 @@ fn annotate_evidence_lifecycle(
         (
             "awaiting_verification",
             format!("corbanu tasknode task show {task_id} --json"),
-            "Initial evidence is submitted, but completion is not confirmed. Recheck for the normal verification request and answer it.",
+            "Initial evidence is submitted, but completion is not confirmed and the initial evidence gate is now closed, so do not resubmit. Recheck for the verification request and answer it. If none appears, report the task id and submission reference to Task Node operators instead of cancelling the task.",
         )
     };
 
@@ -1983,6 +2069,142 @@ mod tests {
         assert_eq!(
             parsed.1.get("message").and_then(Value::as_str),
             Some("failed")
+        );
+    }
+
+    /// Stub Task Node: the pre-submit detail opens the initial gate, the POST
+    /// returns `receipt`, and the post-submit detail returns `after`.
+    async fn submit_initial_evidence_against_stub(
+        receipt: Value,
+        after: Value,
+    ) -> TaskNodeResponse {
+        use wiremock::Mock;
+        use wiremock::MockServer;
+        use wiremock::ResponseTemplate;
+        use wiremock::matchers::method;
+        use wiremock::matchers::path;
+
+        let server = MockServer::start().await;
+        let detail_path = "/api/terminal/tasknode/tasks/task_stub";
+        Mock::given(method("GET"))
+            .and(path(detail_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true,
+                "task": { "statusKey": "accepted" },
+                "actions": {
+                    "canSubmitInitialEvidence": true,
+                    "canSubmitVerificationEvidence": false
+                }
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(detail_path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(after))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("{detail_path}/evidence")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(receipt))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = TaskNodeClient {
+            transport: codex_tasknode_session::Client::anonymous(&server.uri()).unwrap(),
+            commands: Err("unused".to_string()),
+        };
+        let args = TaskEvidenceArgs {
+            task_id: "task_stub".to_string(),
+            summary: Some("Five passing runs: https://gist.github.com/example/abc".to_string()),
+            body_file: None,
+            artifacts: Vec::new(),
+        };
+        task_evidence(&client, args, TaskEvidenceMode::InitialSubmission)
+            .await
+            .unwrap()
+    }
+
+    /// The task view after a direct-write submission in #1280: the gate is
+    /// closed, but there are no summaries and no verification request.
+    fn submitted_without_review_detail() -> Value {
+        json!({
+            "ok": true,
+            "task": { "statusKey": "submitted" },
+            "actions": {
+                "canSubmitInitialEvidence": false,
+                "canSubmitVerificationEvidence": false
+            },
+            "submission": { "summaries": [] },
+            "currentVerificationRequest": {},
+            "rewardOutcome": null,
+            "forensics": { "source": "direct_write" }
+        })
+    }
+
+    #[tokio::test]
+    async fn evidence_success_without_a_recorded_reference_fails_loudly() {
+        let response = submit_initial_evidence_against_stub(
+            json!({ "ok": true, "phase": "submitted" }),
+            submitted_without_review_detail(),
+        )
+        .await;
+
+        assert!(!response_is_ok(&response), "{}", response.body);
+        assert_eq!(response.status, 502);
+        assert_eq!(
+            response.body["error"],
+            json!("task_evidence_receipt_unconfirmed")
+        );
+        assert_eq!(response.body["evidenceGateOpen"], json!(false));
+        assert_eq!(
+            response.body["nextCommand"],
+            json!("corbanu tasknode task show task_stub --json")
+        );
+        assert_eq!(
+            response.body["receipt"],
+            json!({ "ok": true, "phase": "submitted" })
+        );
+    }
+
+    #[tokio::test]
+    async fn direct_write_receipt_reports_event_and_unanswered_review_honestly() {
+        let response = submit_initial_evidence_against_stub(
+            json!({
+                "ok": true,
+                "phase": "submitted",
+                "message": "Task evidence recorded directly in Task Node.",
+                "taskId": "task_stub",
+                "cid": "postgres:task_evt_stub",
+                "txHash": "offchain:task_evt_stub",
+                "offchainLifecycle": {
+                    "writeSource": "direct_write",
+                    "eventId": "task_evt_stub",
+                    "transition": "submitted"
+                }
+            }),
+            submitted_without_review_detail(),
+        )
+        .await;
+
+        assert!(response_is_ok(&response), "{}", response.body);
+        assert_eq!(
+            response.body["pfterminalLifecycle"],
+            json!({
+                "taskId": "task_stub",
+                "submittedMode": "initial_submission",
+                "phase": "awaiting_verification",
+                "completionConfirmed": false,
+                "nextCommand": "corbanu tasknode task show task_stub --json",
+                "notice": "Initial evidence is submitted, but completion is not confirmed and the initial evidence gate is now closed, so do not resubmit. Recheck for the verification request and answer it. If none appears, report the task id and submission reference to Task Node operators instead of cancelling the task.",
+                "currentVerificationRequest": null,
+                "submissionRef": {
+                    "eventId": "task_evt_stub",
+                    "txHash": "offchain:task_evt_stub",
+                    "cid": "postgres:task_evt_stub"
+                }
+            })
         );
     }
 }
