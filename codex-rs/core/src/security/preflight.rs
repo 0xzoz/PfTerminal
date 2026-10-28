@@ -268,14 +268,15 @@ const RUNTIME_STORES: [&str; 5] = [
 ];
 
 /// Whether `entry` is one of Corbanu's own history stores or state
-/// databases, not a symlink. A protected launch denies these whatever they
-/// hold and whether or not they exist (see [`CORBANU_HOME_STORES`] and
+/// database files, not a symlink. A protected launch denies these whatever
+/// they hold and whether or not they exist (see [`CORBANU_HOME_STORES`] and
 /// [`database_glob`]), so Corbanu's own writes to them leave the review
-/// true and are not drift. A symlink there still counts.
+/// true and are not drift. A symlink there still counts, and so does a
+/// folder named like a database (the glob does not deny what it holds).
 fn runtime_store(entry: &ManifestEntry, codex_home: &std::path::Path) -> bool {
     entry.scope == Scope::CorbanuHome
         && !entry.symlink
-        && (is_database_file(codex_home, &entry.path)
+        && ((entry.len.is_some() && is_database_file(codex_home, &entry.path))
             || (entry.path.parent() == Some(codex_home)
                 && entry
                     .path

@@ -8,6 +8,7 @@ use tempfile::TempDir;
 
 use super::preflight::ConfigLayerInput;
 use super::preflight::Disposition;
+use super::preflight::Drift;
 #[cfg(unix)]
 use super::preflight::EntryStatus;
 use super::preflight::Finding;
@@ -614,10 +615,29 @@ fn pf_29_s01_corbanu_own_store_writes_are_not_drift() {
     let (_, drift) = second.recheck(&sources, ALL_ON);
     assert!(drift.is_empty(), "{drift:?}");
 
-    // Another file in the Corbanu home still counts.
+    // Another file in the Corbanu home still counts, and so does a folder
+    // named like a database.
     fixture.write(&corbanu.join(".env"), b"PLAIN=2\n");
-    let (_, drift) = second.recheck(&sources, ALL_ON);
-    assert_eq!(drift.changed.len(), 1, "{drift:?}");
+    fixture.write(&corbanu.join("odd.sqlite/inside"), b"x");
+    let (third, drift) = second.recheck(&sources, ALL_ON);
+    let id = |location: &str| {
+        third
+            .inventory
+            .findings
+            .iter()
+            .find(|finding| finding.location.ends_with(location))
+            .unwrap_or_else(|| panic!("no finding for {location}"))
+            .id
+            .clone()
+    };
+    assert_eq!(
+        drift,
+        Drift {
+            added: vec![id("odd.sqlite")],
+            changed: vec![id(".env")],
+            ..Drift::default()
+        }
+    );
 }
 
 #[cfg(unix)]
@@ -635,11 +655,18 @@ fn pf_29_s01_symlink_at_a_corbanu_store_is_drift() {
     let (second, drift) = first.recheck(&sources, ALL_ON);
     assert_eq!(drift.changed.len(), 1, "{drift:?}");
 
-    // A symlink that appears where no store was also counts.
+    // A symlink that appears where no store was also counts, a database
+    // included, and so does a symlinked store going away.
     std::os::unix::fs::symlink(fixture.home().join("missing"), corbanu.join("sessions"))
         .expect("dangling symlink");
-    let (_, drift) = second.recheck(&sources, ALL_ON);
-    assert_eq!(drift.added.len(), 1, "{drift:?}");
+    std::os::unix::fs::symlink(fixture.home().join("elsewhere"), corbanu.join("x.sqlite"))
+        .expect("database symlink");
+    let (third, drift) = second.recheck(&sources, ALL_ON);
+    assert_eq!(drift.added.len(), 2, "{drift:?}");
+
+    std::fs::remove_file(corbanu.join("log")).expect("remove log symlink");
+    let (_, drift) = third.recheck(&sources, ALL_ON);
+    assert_eq!(drift.removed.len(), 1, "{drift:?}");
 }
 
 #[test]
