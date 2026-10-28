@@ -496,7 +496,13 @@ const MAX_SYMLINK_HOPS: usize = 40;
 /// #1441: where a file created through the dangling symlink at `path` would
 /// land (SQLite creates `-wal` and `-journal` files through one): the end of
 /// its chain, with the part that exists canonical. `None` for a loop.
+///
+/// Always `None` on Windows: its sandbox creates a folder at every missing
+/// path it denies, so a planted link would choose where Corbanu creates one.
 fn would_be_target(path: &Path) -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
     let mut link = path.to_path_buf();
     for _ in 0..MAX_SYMLINK_HOPS {
         let target = std::fs::read_link(&link).ok()?;
