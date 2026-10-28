@@ -53,17 +53,25 @@ const SHORT_FOLDER_FLAGS: &[(&str, char)] = &[
 ];
 
 /// #1309: wrappers whose login spelling starts the command in the target
-/// user's home (`su -`, `sudo --login`, `machinectl shell`, `systemd-run
-/// --user`), with the word that does it: `-` alone, or a prefix of the long
-/// option from its first two letters (getopt's abbreviations).
-const LOGIN_WORDS: &[(&str, &str)] = &[
-    ("su", "-"),
-    ("su", "--login"),
-    ("runuser", "-"),
-    ("runuser", "--login"),
-    ("sudo", "--login"),
-    ("machinectl", "shell"),
-    ("systemd-run", "--user"),
+/// user's home (`su -`, `sudo --login`, `machinectl shell`), with the word
+/// that does it: `-` alone, or for a long option a prefix of it at least
+/// this long (getopt's abbreviations; sudo's `--l` may be `--list`).
+const LOGIN_WORDS: &[(&str, &str, usize)] = &[
+    ("su", "-", 1),
+    ("su", "--login", 3),
+    ("runuser", "-", 1),
+    ("runuser", "--login", 3),
+    ("sudo", "--login", 4),
+    ("machinectl", "shell", 5),
+];
+
+/// #1309: programs that start what they run in another folder unless an
+/// option keeps the caller's: `pkexec` (the target user's home, unless
+/// `--keep-cwd`), `systemd-run` (a service starts in `/`, or a user
+/// service in home, unless `--scope`, `-d` or `--same-dir`).
+const ELSEWHERE_UNLESS: &[(&str, &[&str])] = &[
+    ("pkexec", &["--keep-cwd"]),
+    ("systemd-run", &["--scope", "-d", "--same-dir"]),
 ];
 
 /// Commands that run what they are given in another folder whatever their
@@ -256,7 +264,7 @@ pub(super) fn runs_elsewhere(texts: &[String], redefined: bool) -> bool {
 /// it holds for the texts before a position after it, and only those.
 pub(super) fn elsewhere_at(texts: &[String], redefined: bool) -> Option<usize> {
     let mut letters: Vec<char> = Vec::new();
-    let mut logins: Vec<&str> = Vec::new();
+    let mut logins: Vec<(&str, usize)> = Vec::new();
     let closes = sudo_close_from(texts, redefined);
     for (at, text) in texts.iter().enumerate() {
         work::step();
@@ -291,10 +299,20 @@ pub(super) fn elsewhere_at(texts: &[String], redefined: bool) -> Option<usize> {
         {
             return Some(at);
         }
-        if logins.iter().any(|word| {
+        if logins.iter().any(|(word, shortest)| {
             work::step();
-            login_word(text, word)
+            login_word(text, word, *shortest)
         }) {
+            return Some(at);
+        }
+        if let Some((_, keeps)) = ELSEWHERE_UNLESS
+            .iter()
+            .find(|(program, _)| basename(text) == *program)
+            && !texts[at + 1..].iter().any(|later| {
+                work::step();
+                keeps.contains(&later.as_str())
+            })
+        {
             return Some(at);
         }
         for (wrapper, letter) in SHORT_FOLDER_FLAGS {
@@ -303,10 +321,10 @@ pub(super) fn elsewhere_at(texts: &[String], redefined: bool) -> Option<usize> {
                 letters.push(*letter);
             }
         }
-        for (wrapper, word) in LOGIN_WORDS {
+        for (wrapper, word, shortest) in LOGIN_WORDS {
             work::step();
-            if basename(text) == *wrapper && !logins.contains(word) {
-                logins.push(word);
+            if basename(text) == *wrapper && !logins.contains(&(*word, *shortest)) {
+                logins.push((word, *shortest));
             }
         }
     }
@@ -314,12 +332,10 @@ pub(super) fn elsewhere_at(texts: &[String], redefined: bool) -> Option<usize> {
 }
 
 /// Whether `text` is `word` (a login spelling), or for a long option an
-/// abbreviation of it from its first two letters (`--log`, `--us`).
-fn login_word(text: &str, word: &str) -> bool {
-    text == word
-        || (word.starts_with("--")
-            && text.len() > 3
-            && word.starts_with(text.split_once('=').map_or(text, |(flag, _)| flag)))
+/// abbreviation of it at least `shortest` long (`su --l`, `sudo --log`).
+fn login_word(text: &str, word: &str, shortest: usize) -> bool {
+    let flag = text.split_once('=').map_or(text, |(flag, _)| flag);
+    text == word || (word.starts_with("--") && flag.len() >= shortest && word.starts_with(flag))
 }
 
 /// Whether `text` defines code that runs later than it is read: a
@@ -511,11 +527,14 @@ pub(super) fn searches(text: &str) -> bool {
 /// the text again (`eval 'c\d ~'`, `alias go='c""d ~'`, `eval 'c?'`,
 /// `eval '{c,}d'`).
 pub(super) fn carries_change(name: &str, args: &[String]) -> bool {
-    // #1309: zsh `zmodload` and bash `enable` load or switch builtins (a
-    // `cd` of a module, `enable -f x.so cd`, `enable -n cd`), and `fc`
-    // other than `fc -l` runs commands from the history.
-    matches!(name, "source" | "." | "zmodload" | "enable")
-        || (name == "fc" && !args.iter().any(|arg| arg.starts_with("-l")))
+    // #1309: zsh `zmodload`/`disable` and bash `enable` load or switch
+    // builtins (a `cd` of a module, `enable -f x.so cd`, `enable -n cd`,
+    // `disable cd`); `fc`, unless it only lists (`-l` without `-s`/`-e`),
+    // and zsh `r` run commands from the history.
+    matches!(
+        name,
+        "source" | "." | "zmodload" | "enable" | "disable" | "r"
+    ) || (name == "fc" && !fc_lists(args))
         || (CARRIERS.contains(&name)
             && args.iter().any(|arg| {
                 work::step();
@@ -527,6 +546,22 @@ pub(super) fn carries_change(name: &str, args: &[String]) -> bool {
                     .any(|token| CHANGERS.contains(&token) || CARRIED_LOADERS.contains(&token))
                     || arg.split([' ', '=']).any(|piece| piece == ".")
             }))
+}
+
+/// #1309: whether `fc` given `args` only lists the history: an `l` in an
+/// option group and no `s` or `e` (`fc -l -s` and `fc -l -e -` run).
+fn fc_lists(args: &[String]) -> bool {
+    let options = || {
+        args.iter()
+            .filter(|arg| arg.starts_with('-') && !arg.starts_with("--"))
+    };
+    options().any(|arg| {
+        work::step();
+        arg.contains('l')
+    }) && !options().any(|arg| {
+        work::step();
+        arg.contains(['s', 'e'])
+    })
 }
 
 /// Commands that, run from carrier text, load more text into the current
@@ -582,8 +617,17 @@ pub(super) fn pattern_word(word: &str) -> bool {
     }
     word.contains(['?', '*'])
         || word.find('[').is_some_and(|at| word[at..].contains(']'))
-        || word.find('{').is_some_and(|at| word[at..].contains(','))
+        // `{c,}d`, `{c..c}d`.
+        || word
+            .find('{')
+            .is_some_and(|at| word[at..].contains(',') || word[at..].contains(".."))
+        // extglob `@(c)d`, `+(c)d`, `!(x)`, zsh `(c|x)d`; not `f()`.
+        || (word.contains('(') && !word.ends_with("()"))
 }
+
+/// #1309: zsh's precommand modifiers, which run the command after them:
+/// `noglob cd ~` changes the folder.
+pub(super) const MODIFIERS: &[&str] = &["noglob", "nocorrect", "-"];
 
 /// #1403: whether a folder change is named by a path (`./cd`,
 /// `"$PWD/pushd"`): that file runs, not the builtin, so the folder it

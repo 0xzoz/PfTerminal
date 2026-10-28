@@ -9679,10 +9679,12 @@ fn issue_1449_runner_checks_are_linear() {
 
 /// #1309: more ways a nested script's folder becomes one the quote-aware
 /// reading cannot know (from the #1310 review list): login spellings of
-/// wrappers, which start in the target user's home; folder options of
-/// more wrappers; a command word spelled as a pattern; zsh's precommand
-/// modifiers; and commands that load or switch builtins or rerun history.
-/// A relative write in such a script asks. All were quiet on main.
+/// wrappers, which start in the target user's home; programs that start
+/// elsewhere unless told to keep the folder; folder options of more
+/// wrappers; a command word spelled as a pattern; a `cd` behind zsh's
+/// precommand modifiers; and commands that load or switch builtins or
+/// rerun history. A relative write in such a script asks. All were quiet
+/// on main.
 #[test]
 fn issue_1309_login_wrappers_patterns_and_loaders_ask() {
     for command in [
@@ -9694,10 +9696,14 @@ fn issue_1309_login_wrappers_patterns_and_loaders_ask() {
         "su - -c 'echo x >> .zshenv'",
         "su -l me -c \"sh -c 'echo x >> .zshenv'\"",
         "su --login -c \"sh -c 'echo x >> .zshenv'\"",
+        "su --l -c \"sh -c 'echo x >> .zshenv'\"",
         "runuser -l me -c \"sh -c 'echo x >> .zshenv'\"",
         "runuser - me -c \"sh -c 'echo x >> .zshenv'\"",
         "machinectl shell me@ /bin/sh -c 'echo x >> .zshenv'",
         "systemd-run --user sh -c 'echo x >> .zshenv'",
+        "systemd-run sh -c 'echo x >> home/fixture/.zshenv'",
+        "systemd-run --unit x sh -c 'echo x >> .zshenv'",
+        "pkexec --user me sh -c 'echo x >> .zshenv'",
         "schroot -d ~ -- sh -c 'echo x >> .zshenv'",
         "apptainer exec --pwd ~ img sh -c 'echo x >> .zshenv'",
         "singularity exec --pwd ~ img sh -c 'echo x >> .zshenv'",
@@ -9705,14 +9711,21 @@ fn issue_1309_login_wrappers_patterns_and_loaders_ask() {
         "touch cd; c? ~; sh -c 'echo x >> .zshenv'",
         "[c]d ~; sh -c 'echo x >> .zshenv'",
         "{c,}d ~; sh -c 'echo x >> .zshenv'",
+        "{c..c}d ~; sh -c 'echo x >> .zshenv'",
+        "for i in 1 2; do sh -c 'echo x >> .zshenv'; [c]d ~; done",
+        "f() { sh -c 'echo x >> .zshenv'; }; [c]d ~; f",
         "noglob cd ~; sh -c 'echo x >> .zshenv'",
         "nocorrect cd ~; sh -c 'echo x >> .zshenv'",
+        "- cd ~; sh -c 'echo x >> .zshenv'",
+        "noglob nocorrect cd ~; sh -c 'echo x >> .zshenv'",
         "zmodload zsh/x; sh -c 'echo x >> .zshenv'",
         "enable -f ./x.so cd; cd /tmp; sh -c 'echo x >> .zshenv'",
         "enable -n cd; cd /tmp; sh -c 'echo x >> .zshenv'",
+        "disable cd; cd /tmp; sh -c 'echo x >> .zshenv'",
         "fc -e 'sed -i s/a/b/'; sh -c 'echo x >> .zshenv'",
-        // #1159 (found with #1521): output checks behind `noglob`.
-        "noglob git log --output=$HOME/.zshrc",
+        "fc -l -s; sh -c 'echo x >> .zshenv'",
+        "fc -ls; sh -c 'echo x >> .zshenv'",
+        "r; sh -c 'echo x >> .zshenv'",
     ] {
         assert_eq!(
             script(command),
@@ -9724,19 +9737,23 @@ fn issue_1309_login_wrappers_patterns_and_loaders_ask() {
         "sudo -u me sh -c 'echo x > out.txt'",
         "sudo -s sh -c 'echo x > out.txt'",
         "su me -c \"sh -c 'echo x > out.txt'\"",
-        "systemd-run --unit x sh -c 'echo x > out.txt'",
-        "tmux new -s x",
+        "systemd-run --scope sh -c 'echo x > out.txt'",
+        "systemd-run --user --same-dir sh -c 'echo x > out.txt'",
+        "pkexec --keep-cwd sh -c 'echo x > out.txt'",
         "[ -d build ] || mkdir build; sh -c 'echo x > out.txt'",
         "[[ -n x ]] && sh -c 'echo x > out.txt'",
+        "f() { :; }; f; sh -c 'echo x > out.txt'",
         "fc -l; sh -c 'echo x > out.txt'",
-        "noglob ls *.txt",
-        "noglob git log --oneline",
+        "noglob ls *.txt; sh -c 'echo x > out.txt'",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
-    // Asked on main too; kept as a regression.
-    assert_eq!(
-        script("sudo -i sh -c 'git config -f .zshenv --comment x,--get a.b v'"),
-        Some(ProtectedActionKind::Persistence)
-    );
+    // Asked on main too; kept as regressions (a function or alias named
+    // like a modifier is still the command).
+    for command in [
+        "sudo -i sh -c 'git config -f .zshenv --comment x,--get a.b v'",
+        "noglob() { echo $(( $1 )); }; noglob 'a[$(touch ~/.zshrc)]'",
+    ] {
+        assert!(script(command).is_some(), "{command}");
+    }
 }

@@ -360,13 +360,22 @@ impl Classifier {
             found.deferred |= unknown_folder::starts_loop(&texts);
             let command_at = indirect::command_word(&texts);
             // #1309: a command word spelled as a pattern (`c? ~`, `[c]d ~`,
-            // `{c,}d ~`) may be `cd`, `eval` or `source`.
+            // `{c,}d ~`) may be `cd`, `eval` or `source`; a `cd` behind
+            // zsh's precommand modifiers (`noglob cd ~`) is not followed.
             if !command.substituted
-                && command_at
-                    .as_ref()
-                    .is_some_and(|(index, _)| unknown_folder::pattern_word(&texts[*index]))
+                && let Some((index, name)) = &command_at
+                && (unknown_folder::pattern_word(&texts[*index])
+                    || (unknown_folder::MODIFIERS.contains(&name.as_str())
+                        && texts[index + 1..]
+                            .iter()
+                            .find(|text| !unknown_folder::MODIFIERS.contains(&text.as_str()))
+                            .is_some_and(|text| {
+                                unknown_folder::CHANGERS.contains(&basename(text))
+                                    || unknown_folder::pattern_word(text)
+                            })))
             {
                 folders.unchecked = true;
+                found.before_change = found.scripts.len();
             }
             // A substitution's `cd` does not move this line.
             if !command.substituted
