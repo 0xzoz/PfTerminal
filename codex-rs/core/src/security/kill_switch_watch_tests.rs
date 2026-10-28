@@ -53,18 +53,16 @@ fn busy_writer(
 
 /// A dropping thread that is often preempted makes the race far likelier.
 fn lower_priority() {
+    // SAFETY: only changes the calling thread's scheduling class.
     #[cfg(target_os = "macos")]
-    {
-        unsafe extern "C" {
-            fn pthread_set_qos_class_self_np(class: u32, relative_priority: i32) -> i32;
-        }
-        const QOS_CLASS_BACKGROUND: u32 = 0x09;
-        // SAFETY: only changes the calling thread's scheduling class.
-        unsafe {
-            pthread_set_qos_class_self_np(QOS_CLASS_BACKGROUND, 0);
-        }
+    unsafe {
+        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_BACKGROUND, 0);
     }
 }
+
+/// The crash was macOS-only; elsewhere a few droppers keep the cycles
+/// covered without nearing Linux's inotify instance limit.
+const DROPPERS: usize = if cfg!(target_os = "macos") { 16 } else { 2 };
 
 #[test]
 fn notifications_survive_start_stop_drop_cycles_on_a_busy_home() {
@@ -87,7 +85,7 @@ fn notifications_survive_start_stop_drop_cycles_on_a_busy_home() {
             }
         }));
     }
-    for _ in 0..16 {
+    for _ in 0..DROPPERS {
         let (home, done, cycles) = (home.clone(), Arc::clone(&done), Arc::clone(&cycles));
         threads.push(std::thread::spawn(move || {
             lower_priority();
