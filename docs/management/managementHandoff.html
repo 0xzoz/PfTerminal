@@ -15,7 +15,21 @@ th{background:#f5f5f7}.warn{background:#fff4e5;border-left:4px solid #f0a020;pad
 </head>
 <body>
 <h1>Corbanu Terminal — management handoff</h1>
-<p><small>Resume update, 2026-10-26 (closeout update, 2026-10-22). Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code>. This update supersedes earlier operational snapshots below.</small></p>
+<p><small>Update 2026-10-28 ~03:15Z (resume update, 2026-10-26; closeout update, 2026-10-22). Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code>. This update supersedes earlier operational snapshots below.</small></p>
+<div class="note"><b>Update 2026-10-28 ~03:15Z (handoff-doc12).</b> Sources: <code>$W/todo.md</code> from “2026-10-26 19:05Z TRAVIS: Resume everything” through its 03:13Z line, the worker results in
+<code>$HOME/.corbanu-workers/*.result.md</code> written since 10-26, <code>wave2-common.md</code>, and GitHub re-checked at about 03:15Z. Main is at <code>1a613a7e4c</code> (#1433, 03:13Z; its postmerge run was still running at this snapshot).
+<ul>
+<li><b>54 PRs merged</b> since the resume (10-26 19:14Z – 10-28 03:13Z): 19 ours, 30 from outside contributors and 5 Dependabot workflow/action bumps (section 8.0f).</li>
+<li><b>cargo-deny unblocked:</b> since about 10-24 new RustSec advisories failed <code>cargo-deny</code> (and so <code>CI required</code>) on every PR. #1407 (zstd 0.14.3, tokio 1.53.3) and #1408 (a dated
+exception for RUSTSEC-2026-0387, crypto-bigint via aws-config, D198) merged at 21:08Z on 10-27; #1401 tracks removing the exception (re-review by 2027-01-31).</li>
+<li><b>Security classifier:</b> D194 (#1404, narrowed to option B, a strict command allowlist), D195 (#1415), D191 (#1406) and the follow-ups #1354, #1356, #1418, #1421 and #1433 merged. D191 and D194
+are the owner-approved relaxations; D195 adds prompts, and the others are reviewed follow-up fixes (section 8.0f). Follow-ups #1410 and #1422 are open; D217 (<code>sudo -C</code>) is pending.</li>
+<li><b>Accounting S10 signed off</b> (#1419): the raw re-run record (#1411) is 33 passed, 0 failed, 4 blocked (ACC-04 counted by D113); with the owner decisions D207/D208 it is 35/0/2, ACC-22 and ACC-35 as
+named limits. ACC-11 and ACC-14 stay <i>blocked</i> in the raw rows; their pass is an owner decision, listed separately.</li>
+<li><b>PF-84 Windows gate not run:</b> the Windows PC has been offline in Tailscale since 10-27 21:07Z (last poll 03:10Z: down). #1080 stays draft at <code>db6b6fa35e</code> (CI 35 passed, 0 failed).</li>
+<li><b>Installed build:</b> main <code>21db61709f</code> (#1406), installed 10-28 01:08Z (section 7).</li>
+<li><b>Waiting on Travis:</b> D217 and D218 (#1430), plus turning the Windows PC on (D212, accepted 01:54Z, not yet online). Running: ci-nightly, contrib-10, sec-fu2, sec-1428, win-gate-pf84 and this handoff-doc12 (section 10).</li>
+</ul></div>
 <div class="note"><b>Resumed 2026-10-26.</b> Travis said “Resume everything”. Opus 5.5 High is available again (smoke OK 19:02Z), so reviews are Opus again; the 2026-10-22 Astra High exception covered only that batch (#1305/#1318/#1365).
 #1305 and #1318 merged during the pause (<code>180a24b5cc</code> / <code>55ffd02770</code>) after review of their unchanged heads and green CI.
 <b>Now running:</b> sec-recover (#1354 and #1356 conflict recovery and review), sec-d194 (D194 definite-cd handling, then D195 unknown-folder git checks), sec-d191 (bounded plain-mktemp recognition) and a contributor sweep.
@@ -29,7 +43,7 @@ No alternate worker model was substituted. The recovery watchdog has been stoppe
 See sections 10–12 for the current state; earlier “running” statements are historical.</div>
 <p><b>Approved decisions:</b> D182–D195 are accepted. Security evidence dispositions are recorded in the
 <a href="../../qa/security-levels/milestones/localmodel-run3-20261022/owner-decisions-20261022.md">owner decision addendum</a>.
-Raw failed/blocked results are retained separately from owner acceptance. The Windows gate and the #1337 account-key input defect still block #1080's default-on rollout.</p>
+Raw failed/blocked results are retained separately from owner acceptance. The Windows gate and the #1337 account-key input defect still block #1080's default-on rollout. (Update 10-28: #1337 merged 10-26 19:14Z; the Windows gate and Travis's sign-off remain.)</p>
 <details><summary>Previous update at 12:45Z (historical; superseded by this closeout)</summary>
 <p><small>Kept by the coordinating agent (Claude, running in Corbanu Terminal as “coordinator”) for its successor; this update written by the coordinator's handoff-doc11 worker.
 State as of <b>2026-10-22 12:45 UTC (05:45 America/Phoenix)</b>, with <code>todo.md</code> read through its 12:59Z lines (including the install of <code>d88d018ab2</code>) and GitHub re-checked at about 13:03Z. Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
@@ -532,6 +546,32 @@ models; the coordinator relaunches it with a RECOVERY NOTE after the recharge.</
 </ul>
 No request is waiting at this update.</li>
 </ul>
+<h3>Wave 2 additions (2026-10-26/28, since #1365): coordinator standing rules and lessons</h3>
+<p>All rules are in <code>wave2-common.md</code>; write them into briefs where they apply.</p>
+<ul>
+<li><b>NO GIT STASH RULE</b> (coordinator, 10-27): never use <code>git stash</code> (push, pop or apply). The stash is shared by every worktree of the repository: sec-d194 and sec-d191 both popped another
+worktree's “PF58 resumable source…” stash into their own worktrees (each reset only its own worktree; the stash is intact). For fail-before checks use <code>git worktree add</code> at main,
+<code>git show main:path &gt; /tmp/…</code>, or a scratch commit that is then reverted. Never <code>drop</code> or <code>clear</code> the existing stash.</li>
+<li><b>CARGO-DENY</b> (10-27): fixed on main by #1407/#1408 (D198). The <code>cargo-deny</code> job checks out the PR head, not the merge ref, so a PR only goes green after origin/main is merged into it
+(a plain merge commit, never a force-push; for contributor branches ask kindly, or push the merge when maintainer edits are allowed). A main merge whose
+<code>git diff &lt;approved-head&gt; &lt;new-head&gt; -- &lt;the PR's own files&gt;</code> is empty needs no re-review. Don't edit <code>deny.toml</code>/<code>audit.toml</code> outside an owner decision.</li>
+<li><b>CLASSIFIER MERGE QUEUE</b> (coordinator, 10-27 23:20Z): post-taint classifier PRs merge in the order #1354, #1406 (D191), then the D195 and sec-fu PRs; each green run takes about 55 minutes and every
+merge forces a re-merge on the others. (#1415, D195, merged at 23:41Z, before #1406; sec-d191-2 reports it caused no conflict.)</li>
+<li><b>BUILD DIR RULE</b> (coordinator, 10-28): Mac build and target directories (<code>CARGO_TARGET_DIR</code>, Bazel output) go on <code>/Volumes/CorbanuDrive</code>, e.g.
+<code>.codex-work/targets/&lt;worker&gt;</code>, never under <code>$HOME/.cache</code> or elsewhere on the internal disk. Prefer glitch for heavy builds.</li>
+</ul>
+<p><b>Lessons from this stretch</b> (the facts are in <code>todo.md</code>):</p>
+<ul>
+<li><b>Grant-file naming.</b> Workers poll exactly <code>$W/&lt;name&gt;.grant.md</code>. On 10-27 the coordinator wrote the grants for sec-d191-2 and contrib-8 as <code>&lt;name&gt;.grant1.md</code>; at 19:01Z
+the slip was found and the files copied, and sec-d191-2 had lost about an hour. Related: contrib-8 exited at 22:23Z without carrying out the decisions in its <code>contrib-8.grant2.md</code>/<code>grant4.md</code>
+files (D199–D204), so contrib-9 was launched to do them. Write <code>&lt;name&gt;.grant.md</code> first (then keep a numbered copy if useful), and confirm the worker acknowledged it.</li>
+<li><b>Workers don't re-read rules mid-run.</b> A rule added to <code>wave2-common.md</code> reaches only workers launched afterwards. Example: sec-1428, launched before the BUILD DIR RULE, kept using
+<code>~/.cache/sec-1428-target</code>. Tell running workers directly (a <code>.grant.md</code> note or the brief's message channel) and act on the machine where needed.</li>
+<li><b>Internal-disk build dirs.</b> The internal disk dropped from 59 to 47 GB free at 02:51Z on 10-28 (sec-1428's target in <code>~/.cache</code>, 14 GB) and to 33 GB by 02:57Z. With no cargo running,
+the coordinator deleted that target (27 GB) and symlinked <code>~/.cache/sec-1428-target</code> to <code>.codex-work/targets/sec-1428</code> on CorbanuDrive. Watch free space (stop a worker's
+rustc if it falls below about 25 GB). <code>~/.cache/huggingface</code> (124 GB) and <code>~/Library/Caches</code> (47 GB) are not the program's.</li>
+</ul>
+
 <h2>4. Merge and CI rules</h2>
 <ul>
 <li>Merge commits only: <code>gh pr merge N --merge --match-head-commit &lt;sha&gt;</code>, only when <b>all</b> checks are
@@ -753,7 +793,17 @@ whose targets and temp folders are on CorbanuDrive. Travis was told. At handoff-
 It execs <code>.codex-work/corbanu-terminal/bin/corbanu</code>, a <b>symlink</b> to the real binary
 <code>.codex-work/integration-build-20260922a/integration-package-dev/bin/corbanu</code>. <b>Install over the real binary, never over the launcher</b>: at 10:53–10:56Z the
 coordinator briefly copied a binary over the launcher by mistake and restored it; sessions started in those three minutes ran without <code>activate.sh</code>'s environment.</li>
-<li>Last install: main <code>d88d018ab2</code> (installed 2026-10-22 12:59Z per <code>todo.md</code>, just after this update's snapshot; <code>INSTALL.json</code>'s
+<li><b>Current install (2026-10-28):</b> main <b><code>21db61709f</code></b>, the merge of #1406 (D191), postmerge green at 01:03Z; installed 01:08Z (<code>INSTALL.json</code>
+<code>built_at</code> 01:10Z), Rust 1.99.1, signed with the same Developer ID, sha256 begins <code>c8fc3f61d00a6b7a</code>, smoke OK. Installs since the resume:
+<ul>
+<li><code>55ffd0277c</code> (10-27 17:50Z; the merge of #1318, the pause's last merge);</li>
+<li><code>c1ad482df9</code> (10-27 19:21Z; the merge of #1390; adds the contributor merges of 10-26/27: #1337, #1147, #1342, #1395, #1316, #1389, #1387, #1381, #1378, #1359, #1073, #1063, #1152, #1388, #1386, #1379 and #1390);</li>
+<li><code>21db61709f</code> (10-28 01:08Z; adds #1407/#1408, #1411, #1404, #1397, #1365, #1398, #1161, #1356, #1377, #1419, #1382, #1113, #1399, #1354, #1415, #99, #100, #96 and #1406).</li>
+</ul>
+Kept next to the real binary: <code>corbanu.prev-c1ad482df9</code>, <code>corbanu.prev-55ffd0277c</code> and <code>corbanu.prev-d88d018ab2</code>. Moved to <code>old-binaries/</code>: <code>prev-11443dc2b5</code>
+(17:50Z), <code>prev-0e2c02529d</code> (19:21Z) and <code>prev-b0fa02105f</code> (01:08Z). <b>Not in it</b> (merged after #1406): #1391, #1423, #1417, #1424, #1414, #1418, #1425, #1375, #979, #141, #252, #1029,
+#98, #1429, #1421, #1427 and #1433. Next install: the newest main whose postmerge run is green in every real job.</li>
+<li>Install at the 10-22 pause: main <code>d88d018ab2</code> (installed 2026-10-22 12:59Z per <code>todo.md</code>, just after this update's snapshot; <code>INSTALL.json</code>'s
 <code>built_at</code> reads 13:05Z; the merge of #1319, postmerge fully green; sha256 begins <code>69a609b614de1baa</code>), built with Rust 1.99.1. It is a dev build with
 developer-accounting, signed with Travis's Developer ID (“Developer ID Application: Travis Good”; <code>codesign --force -s DB43D928… -i com.corbanu.corbanu -o runtime</code>), swapped atomically, and the smoke
 <code>exec</code> passed through the launcher. <code>.codex-work/integration-build-20260922a/INSTALL.json</code> is authoritative (commit, time, toolchain, checksum, previous binary). Build target dir:
@@ -1257,6 +1307,39 @@ revertable with no effect on what runs</td><td>agg-1312</td></tr>
 #1267, #1268, #1269, #1283, #1286, #1287, #1291, #1296, #1311, #1312 and #1324. Filed: #1283, #1286–#1291, #1296, #1298, #1309, #1311, #1312, #1323, #1324, #1326, #1331, #1334 and #1335 (both
 with credit to the contributor who found them), #1340 (a #1327 follow-up) and #1343 (websocket identity cases #1330 doesn't cover).
 Merged just after this snapshot: <b>#1341</b> (12:51Z, tui-qa2): the record of post-merge true-TUI checks of #1327, #1322, #1320 and #1319 (no model step declined).</p>
+<h3>8.0f What landed since the resume (2026-10-26 19:05Z – 2026-10-28 03:15Z), by area</h3>
+<p>Every merge used the literal head SHA with all checks green after an independent Opus 5.5 High APPROVE; a later main-merge commit whose own-files diff was unchanged needed no re-review (CARGO-DENY rule). Merge times are GitHub's (UTC).</p>
+<ul>
+<li><b>CI and dependencies:</b>
+<ul>
+<li>#1407 (zstd 0.14.3, tokio 1.53.3: RUSTSEC-2026-0386/0391/0398/0403/0410, none reached by our code) and #1408 (D198: exception for RUSTSEC-2026-0387, crypto-bigint 0.5.5 via p256 ← aws-config ←
+codex-aws-auth; reached only with an <code>aws login</code> session; remove when aws-config moves to p256 0.14+, re-review by 2027-01-31), both 10-27 21:08Z (deny-1401). #1402 closed as a duplicate of #1401.</li>
+<li>#1382 (D199, build-test limit 10→20 min, citadelculture), #1377 (D200), #1113 (D202, setup-node 7.1.0), #99 then #100, #96, #98 (D210 workflow bumps), #1417 (D206, darkmatter-sudo: upload macOS crash
+reports only when the job fails; #1367 stays open).</li>
+<li>#1423 (#1416: the Windows CI self-test warms the boot-time PowerShell query with a 60 s budget; the probe and archived results are unchanged; D215).</li>
+<li>#1424 and #1425 (ci-nightly, #636: Bazel Noble zlib repin; two Windows timing bounds widened). The nightly repair continues (section 10).</li>
+<li>#1414 (maint-1400: OpenTelemetry 0.33.1 and tracing-opentelemetry 0.34.0; reqwest 0.12 adapter keeps TLS; export retries off on all 7 exporters, D216; closes #1400 and credits #1117).</li>
+<li>#1429 (flake-1413: test-only <code>ScopedTestSubscriber</code>; exec-server trace-propagation test 12/20 → 20/20 on glitch; closes #1413; CI was never affected).</li>
+</ul></li>
+<li><b>Security classifier</b> (post-taint):
+<ul>
+<li>#1356 (#1064: code-loading variables set to risky values ask, with the Korn <code>ENV</code> fix <code>67422ee1d8</code>) and #1354 (#1261 follow-up; <code>pushd -n</code> and other stack changes still ask), sec-recover-2.</li>
+<li>#1404 (D194, option B after round 5 found a zsh hole: after <code>cd x &amp;&amp;</code> or <code>cd x || exit</code> the folder change is certain only if every command on the line is on a fixed list) and
+#1415 (D195: git commands that write the working tree ask in an unknown folder; read-only git stays quiet; <code>find … -execdir sh -c 'git pull'</code> now asks), sec-d194-2. Follow-ups #1409 (closed by #1433) and #1410 (open).</li>
+<li>#1406 (D191: a variable the action's own script sets from a plain <code>mktemp</code> counts as a known temp path; writing it and a remove-only trap no longer ask), sec-d191-2, 6 rounds plus 2 granted merge-only rounds.</li>
+<li>#1418 (#1405: <code>mapfile -C</code> callbacks and shell start-up files are judged) and #1421 (#1403 item 1: a builtin run by a path asks; <code>./cd</code> is not followed), sec-fu; neither makes a line quieter than main. Leftovers in #1422; the <code>sudo -C</code> item is D217.</li>
+<li>#1433 (#1409: zsh <code>&gt;&gt;|</code> and <code>&gt;&gt;&amp;</code> pinned in D194's scan), sec-fu2, 03:13Z.</li>
+<li>Contributor PRs touching the classifier: #1147, #1152, #1161 (D145/D158) and #1399 (D203, under a security sign-off).</li>
+</ul></li>
+<li><b>Preflight:</b> #1427 (#802: Aggressive's recheck ignores content changes of Corbanu's own history folders and <code>*.sqlite</code> files; symlinks and all other reviewed files still block), rel-fix. New issue #1428 (<code>-wal</code>/<code>-shm</code> symlinks), being fixed by sec-1428.</li>
+<li><b>Accounting:</b> #1411 (S10 re-run R1: ACC-06, ACC-15, ACC-18 passed; ACC-11, ACC-14 still blocked; #898 confirmed fixed) and #1419 (D207–D209 sign-off, owner decisions in a separate section of <code>dispositions.md</code> and an <code>owner_decisions</code> entry in <code>results.json</code>). Filed #1412 (<code>resume --last</code>, low).</li>
+<li><b>Outside contributors (D152 unless noted):</b> bradsbots #1337 (key paste into the add-account name field; unblocks #1080), #1342, #1395, #1397, #1375; citadelculture #1147, #1152, #1316 (fixes #1290), #1389, #1387, #1381,
+#1378, #1359, #1073, #1063, #1388, #1386, #1379, #1390, #1391, #1161, #1382, #1377, #979, #141, #1029; local-maxi #1398; grapemarketer #1399, #252; darkmatter-sudo #1417. #1375, #979, #141, #252 and #1029 were merged
+by contrib-10 (still running; its report is pending).</li>
+<li><b>Docs:</b> #1365 (the 10-26 resume handoff plus the Windows closeout script fixes; coordinator merge at <code>3a4efdd1c7</code>, own-files diff empty against the approved <code>da467e3db8</code>).</li>
+<li><b>Closed, not merged:</b> #1277 (D169), #1117 (→ #1400/#1414), #1396 (D201, warmly; its author then opened #1417), #124, #112, #113, #105, #104 (D211); issues #1290, #1402, #1413, #1416 and #1409 closed, and #802, #1400 and #1405 closed by their fixes.</li>
+</ul>
+
 <h3>8.1 Security levels (P0/P1) — “Aggressive ships” milestone (signed off 2026-10-16)</h3>
 <div class="note"><b>Signed off by Travis on 2026-10-16</b> (“all as recommended”, D10; with D8 option (a) and D9), on the third targeted re-run's combined status:
 <b>58 passed, 0 failed, 2 blocked (AGG-R14 result 2, AGG-R06), 4 accepted (AGG-18, R07, R10, 20) of 64</b> (record #868, resting on #819, #788, #741, #628 and #447).
@@ -2151,8 +2234,79 @@ finish it ourselves with credit (D146). Offered by contrib-4; the author hasn't 
 key is Travis's own <code>/vault</code> action (D178b, section 11).</td><td><code>todo.md</code></td></tr>
 <tr><td>10-22</td><td>(D180) Skip a re-record of #1273's reel clip; cover it in the next reel.</td><td>#1297</td></tr>
 <tr><td>10-22</td><td>(D181) Approve one ChatGPT test-account sign-in for the D136/NA-05/NA-06 re-runs (approved and done 08:24Z).</td><td>#1080</td></tr>
+<tr><td colspan="3"><i>2026-10-26 19:05Z “Resume everything”; 10-27 21:04Z “All recommendations accepted. I'll try and boot the machine in a bit.” (D196, D198–D205; todo.md “21:04Z TRAVIS”):</i></td></tr>
+<tr><td>10-27</td><td>(D196) PF-84 Windows gate: Travis boots the Windows machine; launch win-gate-pf84 when SSH answers (launched 21:05Z; the PC stayed offline, so the gate did not run; see D212).</td><td>#1080</td></tr>
+<tr><td>10-27</td><td>(D197) Z.AI balance for the GLM runs: resolved by Travis's recharge; <code>zai_key_3</code> answered 200 again at 17:42Z (closes D190's open recharge). acct-rerun2 then ran (#1411).</td><td><code>todo.md</code> 17:42Z</td></tr>
+<tr><td>10-27</td><td>(D198) Approve the RUSTSEC-2026-0387 exception (#1408; option 1, dated and explained); merged 21:08Z with #1407.</td><td>#1401, #1408</td></tr>
+<tr><td>10-27</td><td>(D199) Merge #1382 (build-test limit 10→20 min) and file the skip-the-download follow-up (#1382 merged, #1391 then merged, #1420 filed).</td><td>#1382, #1420</td></tr>
+<tr><td>10-27</td><td>(D200) Merge #1377 (merged 22:59Z).</td><td>#1377</td></tr>
+<tr><td>10-27</td><td>(D201) Decline #1396 warmly (briefly held while flake-1367 checked #1367; closed by contrib-9, inviting a crash-report PR and a narrow <code>request_compression</code> stack fix).</td><td>#1396, #1367</td></tr>
+<tr><td>10-27</td><td>(D202) Merge #1113 (actions/setup-node 7.1.0; merged 23:20Z).</td><td>#1113</td></tr>
+<tr><td>10-27</td><td>(D203) Security sign-off and merge #1399 (merged 23:26Z after a short re-review of its main merge).</td><td>#1399</td></tr>
+<tr><td>10-27</td><td>(D204) Accept #1373's <code>exec --json</code> format change (<code>usage</code> may be <code>null</code>) once the SDK, script, docs (#1336) and release-notes changes land (note posted; #1373 still open).</td><td>#1373, #290</td></tr>
+<tr><td>10-27</td><td>(D205) Accept D194's residual gap (an exported <code>CDPATH</code>, a <code>cd</code> function from start-up files, or a symlink can still move a “certain” <code>cd</code>); track it with #932.</td><td>#1404, #932</td></tr>
+<tr><td colspan="3"><i>2026-10-27 22:49Z, “All recommendations accepted” (D206–D211; todo.md “22:49Z TRAVIS”):</i></td></tr>
+<tr><td>10-27</td><td>(D206) macOS crash reports in CI: wait about a week for darkmatter-sudo's offered PR (else a worker opens one around 11-03). It arrived as #1417 and merged 10-28 01:01Z; #1367 stays open.</td><td>#1367, #1417</td></tr>
+<tr><td>10-27</td><td>(D207) Record ACC-11 and ACC-14 as passed by owner decision, as D113 did for ACC-04; their raw rows stay blocked (#1419).</td><td>#1411, #1419</td></tr>
+<tr><td>10-27</td><td>(D208) Accept S10 at 35 passed, 0 failed, 2 blocked, with ACC-22 (advisory) and ACC-35 (optional; needs D3) as named limits (#1419).</td><td>#1419</td></tr>
+<tr><td>10-27</td><td>(D209) Update the S10 sprint page and the sprint index to the final counts (#1419).</td><td>#1419</td></tr>
+<tr><td>10-27</td><td>(D210) Merge the workflow bumps, #99 first (main pinned a pnpm commit no longer in pnpm's repository), then #96, #98, #100 (all merged).</td><td>#96, #98, #99, #100</td></tr>
+<tr><td>10-27</td><td>(D211) Close #104 (Cargo.lock only, no Bazel lockfile) and fold it into the next dependency update (closed).</td><td>#104</td></tr>
+<tr><td colspan="3"><i>2026-10-28 01:54Z, “All recommendations approved. Windows will come online in a couple hours” (D212–D216; todo.md “01:54Z TRAVIS”):</i></td></tr>
+<tr><td>10-28</td><td>(D212) Boot the Windows PC, sign it into Tailscale and keep it awake for 2–3 hours; win-gate-pf84 relaunched to poll for up to 5 hours (still offline at 03:10Z).</td><td>#1080</td></tr>
+<tr><td>10-28</td><td>(D213) The Windows gate covers the API-key route only; ChatGPT sign-in already passed on macOS.</td><td>#1080</td></tr>
+<tr><td>10-28</td><td>(D214) Approve #1420's approach (skip artifact staging on PRs that don't touch packaging); the finished PR comes back to Travis (now #1430, D218).</td><td>#1420, #1430</td></tr>
+<tr><td>10-28</td><td>(D215) Keep the probe's 8 s Windows boot-query limit for now; raise it to about 30 s at the next planned three-platform re-measurement (b). Recorded on #1416.</td><td>#1416, #1423</td></tr>
+<tr><td>10-28</td><td>(D216) Keep OTLP export retries off (one line per exporter to turn them on later). Recorded on #1414.</td><td>#1414</td></tr>
+<tr><td colspan="3"><i>Pending at this update (section 11):</i></td></tr>
+<tr><td>10-28</td><td>(D217) <b>Pending.</b> <code>sudo -C N ./x</code>: <code>-C</code> is sudo's close-file-descriptors option, not a folder, but the classifier's shared <code>-C</code> list makes it ask. (a) A small PR titled
+“… needs security sign-off” that stops treating <code>-C</code> as a folder flag for sudo only (<code>-D</code>/<code>--chdir</code> keep asking), or (b) keep the extra prompt. Recommended: (a).</td><td>#1403, sec-fu</td></tr>
+<tr><td>10-28</td><td>(D218) <b>Pending.</b> Final approval to merge #1430 at <code>ab8a33e12899abcd5424009c4da7fbbd186cd6ee</code> (green, 2 APPROVE rounds; docs-only PR build-test 1m09s, packaging changes stage in full, a broken
+staging script still fails <code>CI required</code>). Recommended: yes, and leave <code>docs/*</code> out of the filter (the quick pack already checks them).</td><td>#1420, #1430</td></tr>
 </table>
 
+<h2>10. Current state</h2>
+<p><b>Running</b> at about 03:15Z on 2026-10-28, as tmux sessions on <code>$HOME/.corbanu-workers/tmux.sock</code> (6 Opus workers including this one; the cap is 6). <code>wgp-poll</code> is win-gate-pf84's SSH poller, not a worker.
+Running workers report through <code>$HOME/.corbanu-workers/&lt;name&gt;.result.md</code> when they exit; the states below are from their logs, not their reports.</p>
+<table><tr><th>Worker (launched, UTC)</th><th>Task</th><th>State at the snapshot</th></tr>
+<tr><td>ci-nightly (10-28 00:22Z)</td><td>nightly-ci has failed every night (#636: Bazel tests on Linux musl/gnu and Windows, Bazel clippy, release-build verify, sdk).</td><td>Merged #1424 (zlib repin) and #1425 (Windows timing bounds). The sdk lane passed on a branch run; the verifying nightly run on main (40615049351, on <code>c36c8d4b61</code>) was still running. Interim note only; no final report yet.</td></tr>
+<tr><td>contrib-10 (00:22Z)</td><td>#1417 (D206), the contributor sweep (incl. goodalexander's #126/#94, drafts #1362/#1361) and D152 merges.</td><td>Merged #1417, #1375, #979, #141, #252 and #1029; waiting on #998's checks. Report pending.</td></tr>
+<tr><td>sec-fu2 (01:44Z)</td><td>#1409 and #1410 (D194/D195 review follow-ups).</td><td>#1433 merged 03:13Z (closes #1409); #1410 still open.</td></tr>
+<tr><td>win-gate-pf84 (relaunched 01:54Z, D212)</td><td>PF-84 Windows gate, API-key route only (D213); polls SSH for up to 5 hours.</td><td>Windows PC still down at 03:10Z. Gate scripts in <code>$W/win-gate-pf84/</code> have never run on Windows; expect first-run fixes.</td></tr>
+<tr><td>sec-1428 (02:40Z)</td><td>#1428 (<code>-wal</code>/<code>-shm</code>/<code>-journal</code> side files count like the database: content ignored, symlinks block), then citadelculture's drafts #994/#995 (D146/D151: ask first, finish with credit if no reply in about 2 hours).</td><td>Fixing clippy errors in its #1428 change. Its <code>~/.cache/sec-1428-target</code> is now a symlink to <code>.codex-work/targets/sec-1428</code> (BUILD DIR RULE).</td></tr>
+<tr><td>handoff-doc12 (03:13Z)</td><td>This refresh.</td><td>—</td></tr>
+</table>
+<h3>Open items</h3>
+<table><tr><th>Item</th><th>State</th><th>Next</th></tr>
+<tr><td>#1080 (PF-84 named accounts on by default)</td><td>Draft at <code>db6b6fa35e</code> (main merged after #1408, includes #1337), CI 35 passed, 9 skipped, 0 failed. Mac: CLI named-account tests 6/6 and filtered TUI tests 725/725 passed, but 8 TUI tmux integration tests failed on an earlier local merge (at least one because the wallet program wasn't built); unconfirmed on the final head, not a pass.</td><td>Windows gate (D212/D213), then Travis's sign-off, then merge. Without #1362 a sub-agent on a removed account still waits silently (not a safety blocker, per tui-fix3).</td></tr>
+<tr><td>#1430 (#1420)</td><td>Ready, green, 2 APPROVE rounds, head <code>ab8a33e12899abcd5424009c4da7fbbd186cd6ee</code>.</td><td>D218. If main moves before the merge, the CARGO-DENY rule applies.</td></tr>
+<tr><td>D217 (<code>sudo -C</code>)</td><td>No PR; in #1403's thread (sec-fu report).</td><td>Travis's answer; option (a) would be a PR titled “… needs security sign-off”.</td></tr>
+<tr><td>Security follow-ups</td><td>#1422 (remaining <code>mapfile -C</code> spellings, <code>CD sub</code>/<code>env cd sub</code>, a few needless prompts), #1410 (D195), #1428 (sec-1428). #1409 closed by #1433.</td><td>sec-fu2 and sec-1428 are on #1410 and #1428; #1422 is unassigned.</td></tr>
+<tr><td>Contributor drafts</td><td>citadelculture #1362 (Opus APPROVE at <code>ad8d9124c8</code>; needs ready, main merge, green), #1361 (clippy: lock held across an <code>await</code> in its new test), #994 and #995 (last #928 items).</td><td>Coordinator call: wait for the contributor, then finish with credit after about 10-28 (D146/D151). #994/#995 are with sec-1428.</td></tr>
+<tr><td>Other contributor PRs</td><td>#1373 (D204; waits on its follow-ups), #1284 and #1380 (changes requested), #103 (regenerate its lockfile), #1055 (merge main), #101 (its failed job passed on re-run; mergeable once checks are green), #998 (contrib-10).</td><td>contrib sweeps; warm replies; D151 after about a week of silence.</td></tr>
+<tr><td>Tracking issues</td><td>#1367 (one macOS SIGSEGV; crash reports now upload via #1417), #1401 (0387 exception, re-review by 2027-01-31), #1412 (low), #932 (D205 gap).</td><td>Close #1367 as a one-off if it doesn't recur once crash reports are collected.</td></tr>
+</table>
+<p><b>Main CI:</b> postmerge green at <code>21db61709f</code> (01:03Z, the installed build). Later merges up to #1427 (<code>0dee885a38</code>) and #1433 (<code>1a613a7e4c</code>) were not checked green in this update; the run for <code>1a613a7e4c</code> was pending at 03:15Z. Nightly is red until ci-nightly's fixes are verified.</p>
+<p><b>Raw results vs owner acceptance:</b> the S10 raw record keeps ACC-11 and ACC-14 blocked (33/0/4 with ACC-04 under D113); 35/0/2 is the owner-accepted count (D207/D208). The PF-84 Windows gate has no result yet; the earlier 24 CLI assertions on Windows (10-22) are not the gate.</p>
+<p><b>Evidence:</b> worker reports and reviewer outputs in <code>$HOME/.corbanu-workers/</code>; requests and grants in <code>$W</code>; the decision log is <code>$W/todo.md</code>. Don't delete unmerged worktrees (#1430's <code>worktrees/ci-1420</code> stays until it is merged or closed).</p>
+
+<h2>11. Decisions and remaining external actions</h2>
+<p><b>Pending numbered decisions: D217 and D218</b> (section 9, with options and recommendations). D196–D216 are answered (Travis at 10-27 21:04Z, 22:49Z and 10-28 01:54Z; D197 was resolved by his Z.AI recharge). Repeat D217 and D218 in every check-in until answered.</p>
+<p><b>Owner action:</b> bring the Windows PC online in Tailscale and keep it awake 2–3 hours (D212, accepted; not online at 03:10Z). Not re-checked in this update and still unconfirmed from 10-22: D178b (point <code>provider/zai_api_key</code> at the new key in <code>/vault</code>) and D18 (delete the malformed <code>kimi_api</code> label). D190's recharge is done (D197).</p>
+<p><b>Coordinator-owned follow-ups:</b> #1362/#1361 and #994/#995 under D146/D151; D215's probe limit at the next planned three-platform re-measurement; #1401's exception review by 2027-01-31; contrib-10's report may add decisions.</p>
+
+<h2>12. Resume sequence</h2>
+<ol>
+<li>Read the top box and the <code>todo.md</code> tail; check <code>tmux -S $HOME/.corbanu-workers/tmux.sock ls</code> and each running worker's log before launching anything. Don't relaunch a worker that is still running.</li>
+<li>Windows: when <code>wgp-poll</code> reports UP, win-gate-pf84 runs the gate (API-key route only). Then Travis signs off and #1080 merges with the literal head SHA after a fresh green run.</li>
+<li>Ask D217 and D218. On a D218 yes, merge #1430 with <code>--match-head-commit</code> on the literal SHA (merge main first if the cargo-deny check needs it).</li>
+<li>Collect ci-nightly, contrib-10, sec-fu2 and sec-1428 reports; confirm the next scheduled nightly run on main is green before closing #636.</li>
+<li>Rebuild and install from the newest main whose postmerge run is green in every real job (it would add the PRs listed under section 7's “Not in it”).</li>
+<li>Write grants as <code>&lt;name&gt;.grant.md</code>, tell running workers about new rules directly, keep build dirs on CorbanuDrive, never use <code>git stash</code>.</li>
+<li>Keep the 5-minute reports, the overnight rule (section 3) and warm contributor and Task Node notes.</li>
+</ol>
+
+<details><summary>Sections 10–12 at the 2026-10-26 resume (historical; superseded by the sections above)</summary>
 <h2>10. Current state</h2>
 <p><b>Paused at the owner's request.</b> No program worker is running. The remaining work is preserved in pushed PRs and clean worktrees.
 The old <code>watchdog</code> tmux session was explicitly stopped; do not restart it during the pause. The old <code>f905</code> shell was confirmed idle in <code>worktrees/flake-905/codex-rs</code> with no child processes and closed. The program's worker tmux server has no sessions.</p>
@@ -2193,6 +2347,8 @@ Windows availability is now confirmed. PF-84's final sign-off is a future gate, 
 <li>Rebuild/install only from a validated green main with signed-binary smoke evidence. Maintain demo reels and warm, factual contributor/Task Node acknowledgments.</li>
 <li>Resume periodic progress reports and repeat unresolved owner questions until answered; keep the overnight rule from section 3.</li>
 </ol>
+
+</details>
 
 <details><summary>Previous sections 10–12, recorded at 12:45Z (historical; instructions superseded)</summary>
 <h2>10. Current state</h2>
