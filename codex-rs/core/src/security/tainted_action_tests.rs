@@ -7463,6 +7463,60 @@ fn d194_uncertain_changes_still_ask() {
     }
 }
 
+/// #1409: zsh reads `>>|` and `>>&` as redirections, whose next word is a
+/// file (bash, sh and dash stop with a syntax error before running the
+/// line), so they do not end a command: a change stays certain.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d194_zsh_append_redirections_keep_a_change_certain() {
+    for shell in ["zsh", "bash"] {
+        let line = |script: &str| kind(&[shell, "-lc", script]);
+        // Quiet: the file is written where the change went, and `cp` is
+        // a file too.
+        let unexpectedly_asked = [
+            "cd /home/fixture; cd /tmp && make >>| .zshenv",
+            "cd /home/fixture; cd /tmp && make >>& .zshenv",
+            "cd /home/fixture; cd /tmp || exit; make >>|.zshenv",
+            "cd /home/fixture; cd /tmp || exit; make >>&.zshenv",
+            "cd /home/fixture; make >>| cp a b; cd /tmp && echo x >> .zshenv",
+            "cd /home/fixture; make >>& cp a b; cd /tmp && echo x >> .zshenv",
+            "cd /home/fixture; cd /tmp && make >>| cp a b && echo x >> .zshenv",
+        ]
+        .into_iter()
+        .filter(|script| line(script).is_some())
+        .collect::<Vec<_>>();
+        assert_eq!(unexpectedly_asked, Vec::<&str>::new(), "{shell}");
+        // These ask: a file of the home, or written in the folder before.
+        let unexpectedly_quiet = [
+            "cd /home/fixture; make >>| .zshenv",
+            "cd /home/fixture; make >>& .zshenv",
+            "cd /home/fixture; cd /tmp && make >>| /home/fixture/.zshenv",
+            "cd /home/fixture; cd /tmp && make >>| log; echo x >> .zshenv",
+            "cd /home/fixture; cd /tmp && make >>& log; echo x >> .zshenv",
+            // An `exit` with a redirection.
+            "cd /home/fixture; cd /tmp || exit >>| f; echo x >> .zshenv",
+            "cd /home/fixture; cd /tmp || exit >>& f; echo x >> .zshenv",
+            // `scan` ends the command at a second `|` (zsh: `>>||` does not
+            // parse, `>>&|` is one redirection), so `cp` is a command not
+            // in `COMMANDS`: stricter than needed.
+            "cd /home/fixture; make >>|| cp a b; cd /tmp && echo x >> .zshenv",
+            "cd /home/fixture; make >>&| cp a b; cd /tmp && echo x >> .zshenv",
+            // The word reading splits `>|` as a pipe: the file `fi` reaches
+            // `certain_cd::before` as a compound keyword, which ends what
+            // `|| exit` set aside.
+            "cd /home/fixture; cd /tmp || exit; make >| fi; echo x >> .zshenv",
+            "cd /home/fixture; cd /tmp || exit; make >>| done; echo x >> .zshenv",
+        ]
+        .into_iter()
+        .filter(|script| line(script).is_none())
+        .collect::<Vec<_>>();
+        assert_eq!(unexpectedly_quiet, Vec::<&str>::new(), "{shell}");
+    }
+}
+
 /// D194: following certain changes stays linear.
 #[test]
 #[cfg_attr(

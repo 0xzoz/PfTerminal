@@ -104,7 +104,10 @@ pub(super) struct Aside {
 
 const MAX_ASIDE: usize = 8;
 
-/// Words that start or end a part of a compound command.
+/// Words that start or end a part of a compound command. #1409: `scan`
+/// lets none of them start a command, but the word reading splits `>|`
+/// and `>>|` as a pipe, so the file after one may reach `before` as a
+/// command's first word (`cd x || exit; make >| fi; ...`): keep them.
 const COMPOUND: &[&str] = &[
     "if", "then", "else", "elif", "fi", "do", "done", "case", "esac", "end", "{", "}",
 ];
@@ -233,8 +236,8 @@ struct Scan {
 }
 
 /// Read a plain script's words (`None`: a command whose first word is not
-/// one of `COMMANDS`, `set` with an option other than `SET_LETTERS` and
-/// `-o` with one of `SET_OPTIONS` or with a redirection, `python` other
+/// one of `COMMANDS`, `set` with a redirection or with options other than
+/// `SET_LETTERS` and `-o` naming one of `SET_OPTIONS`, `python` other
 /// than `-m pip`, a `[` or `]` that may be a pattern, any `<` (zsh `<1-9>`
 /// is a pattern) or any `!` (zsh `>!`)). Commands end at `;`, `&`, `|` and
 /// line breaks (not in `>&`, `>|`); words end at spaces and redirection
