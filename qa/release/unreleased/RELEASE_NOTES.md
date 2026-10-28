@@ -56,10 +56,10 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   marker for that conversation and the UTC days the request could have been
   sent on, and `/cost` for such a day says "Totals for this day may be
   incomplete" under its heading (a range or period that includes it says so
-  too). A home's ledger moves to format 7 the first
-  time this happens, so older builds then treat it as written by a newer
-  build and leave collection off. A home with no ledger yet gets none: its
-  `/cost` already shows as unavailable (#314, D228).
+  too). A home's ledger moves to format 7 the first time this happens, so
+  older builds then treat it as written by a newer build and leave
+  collection off. A home with no ledger yet gets none: its `/cost` already
+  shows as unavailable (#314, D228).
 
 ## `/security` wording
 

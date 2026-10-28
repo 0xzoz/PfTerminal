@@ -2,8 +2,9 @@
 //!
 //! The ledger has no durable record of when a writer was running, and marks
 //! only the days on which a write is known to have failed (#314), so an
-//! empty day never proves on its own that no request was sent. Only a day that ends before the conversation started
-//! does: no request of a conversation, or of its subagents, can precede it.
+//! empty day never proves on its own that no request was sent. Only a day
+//! that ends before the conversation started does: no request of a
+//! conversation, or of its subagents, can precede it.
 
 use super::EmptyDay;
 use anyhow::Context;

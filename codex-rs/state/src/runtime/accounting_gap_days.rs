@@ -24,11 +24,12 @@ pub(in crate::runtime) async fn installed(conn: &mut SqliteConnection) -> anyhow
     .await?)
 }
 
-/// The most days one span marks besides its first.
+/// A longer span marks its first day and the days from `SPAN_DAYS` before
+/// its last through the last (32 days).
 const SPAN_DAYS: i64 = 31;
 
 /// The UTC days a gap between `from_ms` and `to_ms` (ordered, nonnegative)
-/// marks: the first, up to the last `SPAN_DAYS` through the last, and the
+/// marks: the first, the last and up to `SPAN_DAYS` before it, and the
 /// checkpoint's day when the clock read behind it.
 pub(in crate::runtime) fn days(from_ms: i64, to_ms: i64, checkpoint: Option<i64>) -> Vec<i64> {
     let (first, last) = (from_ms.div_euclid(DAY_MS), to_ms.div_euclid(DAY_MS));

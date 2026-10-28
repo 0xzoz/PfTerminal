@@ -452,11 +452,11 @@ impl<'a> AccountingStore<'a> {
     /// #314 (D228): durably mark that accounting failed to record at least one
     /// of `owner`'s model requests sent between `from_ms` and `to_ms` (UTC
     /// ms, either order), so `/cost` says those days' totals may be
-    /// incomplete. Every UTC day of the span is marked (the last 31 and the
-    /// first, for a span longer than that), and, when the clock reads behind
-    /// the ledger's checkpoint, the checkpoint's day too: the true time is at
-    /// least that, so a far-behind clock cannot leave the real day reading
-    /// complete. Upgrades the ledger to format 7 in the same transaction; it
+    /// incomplete. Every UTC day of the span is marked (the first and the 32
+    /// ending on the last, for a longer span), and, when the clock reads
+    /// behind the ledger's checkpoint, the checkpoint's day too: the earliest
+    /// day the true time can be, which retention will not expire at once.
+    /// Upgrades the ledger to format 7 in the same transaction; it
     /// runs no retention or clock check, since the failure it marks may be
     /// one. Marking a day twice is one marker. A home with no ledger is left
     /// without one: its `/cost` already reads unavailable, never complete,

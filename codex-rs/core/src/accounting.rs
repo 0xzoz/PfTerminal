@@ -25,6 +25,7 @@ use sha2::Sha256;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
@@ -235,8 +236,9 @@ pub(crate) struct TurnScopes {
     /// The ledger and conversation this turn records under, to notice records
     /// the ledger writer refused after their request stopped waiting.
     ledger: Option<(Arc<StateRuntime>, ThreadId)>,
-    /// #314 (D228): this unit's gap marker is written or on its way.
-    gap_marked: AtomicBool,
+    /// #314 (D228): the last UTC day this unit's gap marker covers, once one
+    /// is written or on its way; `-1` before.
+    gap_marked_through: AtomicI64,
     /// When this unit attached (Unix ms): its unrecorded requests were sent
     /// between then and when it is marked.
     attached_at_ms: i64,
@@ -264,8 +266,8 @@ impl TurnScopes {
 
     /// #314 (D228): durably mark the UTC days this unit ran on (attach to
     /// now) as days on which accounting failed to record one of this
-    /// conversation's requests, once per unit, so `/cost` says those days'
-    /// totals may be incomplete. Nothing when the ledger was never reached; a
+    /// conversation's requests, again only once the UTC day has moved on, so
+    /// `/cost` says those days' totals may be incomplete. Nothing when the ledger was never reached; a
     /// failed mark is logged. A record the ledger writer refuses marks its own
     /// day (`accounting_writer::refuse`).
     pub(crate) async fn mark_gap(&self) {
@@ -276,7 +278,8 @@ impl TurnScopes {
 
     fn claim_gap_mark(&self) -> Option<(Arc<StateRuntime>, ThreadId, i64)> {
         let (db, owner) = self.ledger.as_ref()?;
-        (!self.gap_marked.swap(true, Ordering::AcqRel))
+        let today = now().div_euclid(86_400_000);
+        (self.gap_marked_through.fetch_max(today, Ordering::AcqRel) < today)
             .then(|| (Arc::clone(db), *owner, self.attached_at_ms))
     }
 
@@ -688,7 +691,7 @@ pub(crate) async fn attach_scopes(
             .count_refusals_from(db, *owner);
     }
     Ok(TurnScopes {
-        gap_marked: AtomicBool::new(false),
+        gap_marked_through: AtomicI64::new(-1),
         attached_at_ms: now(),
         ledger,
         anthropic,
