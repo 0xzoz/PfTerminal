@@ -48,7 +48,8 @@ const OBJECT_FOLDERS_LOOKED_AT: [&str; 2] = ["info", "pack"];
 /// `gpg_sign_opt` and `options.gpg-sign` only pick the signing key (the
 /// program comes from config, which is protected), `strategy_opts` and
 /// `options.strategy-option` are options to the merge strategy, and
-/// `author-script` is parsed, not run, by the C sequencer.
+/// `author-script` is parsed, not run, by the C sequencer (git 2.34 and
+/// later; older scripted backends sourced it).
 const STATE_FILES: [&str; 5] = [
     "rebase-merge/git-rebase-todo",
     "rebase-apply/git-rebase-todo",
