@@ -1674,6 +1674,7 @@ mod tests {
     use crate::protocol::WriteParams;
     use crate::protocol::WriteResponse;
     use crate::protocol::WriteStatus;
+    use crate::test_tracing::ScopedTestSubscriber;
 
     async fn read_jsonrpc_line<R>(lines: &mut tokio::io::Lines<BufReader<R>>) -> JSONRPCMessage
     where
@@ -1768,8 +1769,7 @@ mod tests {
                 .with_tracer(tracer)
                 .with_filter(filter_fn(codex_otel::OtelProvider::trace_export_filter)),
         );
-        let _subscriber_guard = tracing::subscriber::set_default(subscriber);
-        tracing::callsite::rebuild_interest_cache();
+        let _subscriber_guard = ScopedTestSubscriber::set_default(subscriber);
         let parent_span = tracing::info_span!("process-start-parent");
         let expected_trace = codex_otel::span_w3c_trace_context(&parent_span)
             .expect("parent span should have trace context");

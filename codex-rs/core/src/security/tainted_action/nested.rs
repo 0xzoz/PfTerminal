@@ -16,6 +16,7 @@ use super::GitConfigWrites;
 use super::MAX_FOLDER_BYTES;
 use super::ProtectedActionKind;
 use super::WRITERS;
+use super::certain_cd;
 use super::git_helpers;
 use super::indirect;
 use super::invocation;
@@ -213,6 +214,13 @@ impl Classifier {
             unchecked: false,
             others: Vec::new(),
             lost: false,
+            aside: if depth == 0 {
+                certain_cd::Aside::for_line(command)
+            } else {
+                certain_cd::Aside::default()
+            },
+            unseen: false,
+            unseen_in_substitution: false,
         };
         let mut found = Found {
             braces: command.iter().any(|arg| arg.contains('{')),
@@ -286,9 +294,18 @@ impl Classifier {
             self.unknown_folder -= usize::from(unknown);
             self.launched = outer;
         }
+        // Shared targets are the same for every sed in this reading. If
+        // present, they make `elsewhere` true, so judging a sed cannot reach
+        // `self.script` and add a new executed file. If absent, this is false
+        // regardless of later scripts. Judge them once, without copying their
+        // potentially large names for every sed (#1132).
+        let shared_may_run = found
+            .shared_targets
+            .iter()
+            .any(|target| self.may_run(target.as_deref()));
         for sed in std::mem::take(&mut found.seds) {
             work::step();
-            self.judge_sed(sed, &found, depth);
+            self.judge_sed(sed, &found, depth, shared_may_run);
         }
         // A command the word lexer finds that this reading does not
         // (spelled through a variable, braces or `$IFS`) fails closed.
@@ -315,12 +332,32 @@ impl Classifier {
                 return;
             }
             let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
+            // D194: where a certain `cd` stops being certain.
+            let certain = certain_cd::before(
+                folders,
+                if command.substituted {
+                    certain_cd::Joint::Other
+                } else {
+                    command.after
+                },
+                &texts,
+                !command.writes_to.is_empty()
+                    || command.writes_descriptor
+                    || !command.input.is_empty()
+                    || !command.other_text.is_empty(),
+            );
             // #1309: a later iteration of a loop starts where the one
             // before it left.
             found.deferred |= unknown_folder::starts_loop(&texts);
             let command_at = indirect::command_word(&texts);
             // A substitution's `cd` does not move this line.
             if !command.substituted
+                && let Some((index, name)) = &command_at
+                && unknown_folder::path_change(&texts[*index], name)
+            {
+                // #1403: `./cd sub` runs that file: the folder is unknown.
+                folders.unchecked = true;
+            } else if !command.substituted
                 && let Some((index, name)) = &command_at
             {
                 let unknown = folders.unchecked;
@@ -330,6 +367,7 @@ impl Classifier {
                     folders,
                     &mut HashMap::new(),
                     unknown,
+                    certain,
                 );
                 // #1283: `cd "$d"` goes where this reading cannot follow.
                 folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
@@ -655,6 +693,9 @@ impl Classifier {
                     unchecked: folders.unchecked,
                     others: folders.others.clone(),
                     lost: folders.lost,
+                    aside: folders.aside.inner(),
+                    unseen: folders.unseen,
+                    unseen_in_substitution: folders.unseen_in_substitution,
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;
@@ -683,6 +724,7 @@ impl Classifier {
                 found.unreadable |= counted.unreadable || inner.unfollowed;
             }
         }
+        certain_cd::finish(folders);
     }
 
     /// #1283: the git checks of `simple_command` on the words as the shell
@@ -783,7 +825,7 @@ impl Classifier {
     /// classifier cannot read, or that saves what it outputs to a file the
     /// line runs is code the host cannot read; an in-place edit that only
     /// keeps, drops or adds lines has the text it adds judged instead.
-    fn judge_sed(&mut self, sed: Sed, line: &Found, depth: usize) {
+    fn judge_sed(&mut self, sed: Sed, line: &Found, depth: usize, shared_may_run: bool) {
         // #1240: judged once, by the first judgment (it reads program
         // files; the Windows view does not open files).
         if self.homes.is_windows_view() {
@@ -838,7 +880,6 @@ impl Classifier {
             return;
         }
         let mut targets = sed.saved_to.clone();
-        targets.extend(line.shared_targets.iter().cloned());
         targets.extend(readings.iter().flat_map(|reading| {
             reading
                 .writes
@@ -850,7 +891,7 @@ impl Classifier {
         if sed.substituted && line.other_writes {
             targets.push(None);
         }
-        let elsewhere = !targets.is_empty();
+        let elsewhere = !targets.is_empty() || !line.shared_targets.is_empty();
         if !elsewhere && !call.in_place {
             return;
         }
@@ -861,7 +902,7 @@ impl Classifier {
         if call.in_place {
             targets.extend(call.operands.iter().map(|word| target(known(word))));
         }
-        if !targets.iter().any(|target| self.may_run(target.as_deref())) {
+        if !shared_may_run && !targets.iter().any(|target| self.may_run(target.as_deref())) {
             return;
         }
         if elsewhere || !readings.iter().all(|reading| reading.keeps_lines) {
@@ -885,7 +926,8 @@ impl Classifier {
     /// subshell or in a background job. Those are the folders before it and
     /// its target from each of them; past `MAX_POSSIBLE_FOLDERS`, or one
     /// too long, the folder is unknown. `unknown`: the reading already
-    /// cannot know its folder.
+    /// cannot know its folder. `certain` (D194): what follows runs only
+    /// where the change happened, so the folders before it are set aside.
     pub(super) fn follow_change(
         &self,
         name: &str,
@@ -893,6 +935,7 @@ impl Classifier {
         folders: &mut Folders,
         variables: &mut HashMap<String, String>,
         unknown: bool,
+        certain: bool,
     ) {
         let before = folders.cwd.clone();
         if !self.change_folder(name, args, folders, variables) {
@@ -921,23 +964,19 @@ impl Classifier {
                 None => folders.cwd.clone(),
             });
         }
-        possible.extend(reached);
+        if certain {
+            // D194: what follows runs only where the change happened.
+            certain_cd::set_aside(folders, std::mem::replace(&mut possible, reached));
+        } else {
+            possible.extend(reached);
+        }
         for folder in possible {
             work::step();
             if folder != folders.cwd && !folders.others.contains(&folder) {
                 folders.others.push(folder);
             }
         }
-        if folders.others.len() >= MAX_POSSIBLE_FOLDERS
-            || folders
-                .others
-                .iter()
-                .any(|folder| folder.len() > MAX_FOLDER_BYTES)
-        {
-            folders.unchecked = true;
-            folders.lost = true;
-            folders.others.clear();
-        }
+        too_many(folders);
     }
 
     /// #1309: the folders a command's relative words resolve against from
@@ -986,6 +1025,21 @@ impl Classifier {
                 self.ran.iter().any(|ran| name(ran) == target)
             }
         }
+    }
+}
+
+/// #1309: past `MAX_POSSIBLE_FOLDERS`, or with one too long, the folder
+/// is unknown.
+pub(super) fn too_many(folders: &mut Folders) {
+    if folders.others.len() >= MAX_POSSIBLE_FOLDERS
+        || folders
+            .others
+            .iter()
+            .any(|folder| folder.len() > MAX_FOLDER_BYTES)
+    {
+        folders.unchecked = true;
+        folders.lost = true;
+        folders.others.clear();
     }
 }
 
