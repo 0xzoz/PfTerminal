@@ -27,6 +27,8 @@ const MAX_REPOS_PER_THREAD: usize = 16;
 const MAX_THREADS: usize = 64;
 /// New, empty config files and hooks folders remembered (`Global::empty_new`).
 const MAX_EMPTY_NEW: usize = 1024;
+/// `.git` folders reported as swaps remembered (`Global::swapped`).
+const MAX_SWAPPED: usize = 1024;
 const SHOWN_FINDINGS: usize = 20;
 /// Links followed per chain, like the kernel's limit.
 const MAX_LINK_HOPS: usize = 40;
@@ -497,6 +499,13 @@ struct Snapshot {
     /// what it saw of that tree may be less than a look of that folder alone
     /// sees.
     overlapping: bool,
+    /// Its `.git` is held as a reported swap (#943 r8 N1): reported by this
+    /// look, or by another session or an earlier look and still the same
+    /// one. Kept here, not only in `Global::held` (which a `held_for` of
+    /// any session prunes once the `.git` is swapped again, before this
+    /// session's next look), so that a later swap, also for another empty
+    /// folder, is reported (#1497 review).
+    swap_held: bool,
 }
 
 impl Snapshot {
@@ -512,6 +521,7 @@ impl Snapshot {
             empty_new: HashSet::new(),
             git_dirs: Vec::new(),
             overlapping: false,
+            swap_held: false,
         }
     }
 }
@@ -1069,6 +1079,14 @@ struct ThreadState {
 struct Global {
     threads: HashMap<ThreadId, ThreadState>,
     held: HashSet<Held>,
+    /// `.git` folders (by identity) any session reported as a swap: not
+    /// pruned like `held`, so that a session whose last look saw one before
+    /// that report (#943 r8 N1, #1502 review) still reports its next swap.
+    swapped: HashSet<DotGit>,
+    /// `swapped` was full when another was reported: from then on every
+    /// `.git` folder counts as one (fails closed; dropping entries would
+    /// reopen the gap they close).
+    swapped_full: bool,
     /// New config files and hooks folders that were empty when a session
     /// looked (`is_empty_stub`): any session's later look reports one once
     /// something is in it. Kept when a session forgets the repository.
@@ -1288,6 +1306,7 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 let mut baseline = remade_baseline(repo, prev, &cur);
                 if !prev.went_missing {
                     baseline.dot_git = prev.dot_git.clone();
+                    baseline.swap_held = prev.swap_held;
                 }
                 baseline
             });
@@ -1304,14 +1323,17 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 .collect()
         });
         // #943 (r8 N1): the `.git` the last look saw is held as a reported
-        // swap (by any session).
+        // swap (by this session's looks, or reported by any session).
         let swap_held = prev.is_some_and(|prev| {
-            with_global(|global| {
-                global.held.iter().any(|held| {
-                    matches!(&held.what, HeldWhat::Replaced { dot_git, now }
-                        if *dot_git == repo.dot_git && *now == prev.dot_git)
+            prev.swap_held
+                || with_global(|global| {
+                    (global.swapped_full && matches!(prev.dot_git, DotGit::Folder { .. }))
+                        || global.swapped.contains(&prev.dot_git)
+                        || global.held.iter().any(|held| {
+                            matches!(&held.what, HeldWhat::Replaced { dot_git, now }
+                            if *dot_git == repo.dot_git && *now == prev.dot_git)
+                        })
                 })
-            })
         });
         let (mut found, empty) = match prev {
             Some(prev) => compare(
@@ -1331,6 +1353,21 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 /*swap_held*/ false,
             ),
         };
+        // Reported as a swap now, or held as one and still the same `.git`.
+        let swapped = found
+            .iter()
+            .any(|finding| matches!(finding, Finding::Replaced { .. }));
+        if swapped && matches!(cur.dot_git, DotGit::Folder { .. }) {
+            with_global(|global| {
+                if global.swapped.len() < MAX_SWAPPED || global.swapped.contains(&cur.dot_git) {
+                    global.swapped.insert(cur.dot_git.clone());
+                } else {
+                    global.swapped_full = true;
+                }
+            });
+        }
+        cur.swap_held =
+            swapped || (swap_held && prev.is_some_and(|prev| prev.dot_git == cur.dot_git));
         cur.empty_new = empty.keep.iter().cloned().collect();
         // Full: those gone meanwhile (a deleted scratch repository) go,
         // looked at without holding `GLOBAL`.

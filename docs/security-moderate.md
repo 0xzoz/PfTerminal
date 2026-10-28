@@ -208,7 +208,8 @@ The kill switch (`/security` → `g`) works under every level.
   files and folders in place while a command runs: a new config file or hooks
   folder that is empty is reported (in any session) once something is put in
   it, and an empty `.git` folder replaced by another empty one isn't reported
-  (unless the first empty one is held as a reported replacement).
+  (unless the first empty one was reported as a replacement, or after 1024
+  such reports in this Corbanu Terminal, any).
   It doesn't watch in between: a process a command left running can change
   `.git` after the last look, even while an approved command runs, and what it
   changes after a turn ends is found at the next command, not before you run
