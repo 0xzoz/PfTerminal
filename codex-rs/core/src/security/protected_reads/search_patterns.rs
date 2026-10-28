@@ -76,8 +76,9 @@ impl Search {
             "--directories",
             "--binary-files",
         ];
-        const RIPGREP: [&str; 15] = [
+        const RIPGREP: [&str; 16] = [
             "--file",
+            "--hostname-bin",
             "--pre",
             "--pre-glob",
             "--ignore-file",
@@ -94,7 +95,13 @@ impl Search {
             "--sortr",
         ];
         let any = match self {
-            Self::Grep => GREP.contains(&option),
+            Self::Grep => {
+                GREP.contains(&option)
+                    // GNU grep accepts unambiguous long-option prefixes.
+                    // `--exclude-f` distinguishes this path-valued option
+                    // from `--exclude` and `--exclude-dir`.
+                    || (option.starts_with("--exclude-f") && "--exclude-from".starts_with(option))
+            }
             Self::Ripgrep => RIPGREP.contains(&option),
         };
         if NUMBER.contains(&option) || (self == Self::Ripgrep && option == "--context") {
