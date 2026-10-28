@@ -51,8 +51,11 @@ async fn legacy_glm_reasoning_choices_survive_config_load_and_troll_role() {
     for (provider, model, expected_standard) in [
         ("zai", "glm-5.2", ReasoningEffort::Medium),
         ("ambient", "z-ai/glm-5.2", ReasoningEffort::Medium),
+        // Corbanu Plan lists the same GLM 5.2 row (Standard and Deep) (#1476).
+        ("pfterminal-plan", "z-ai/glm-5.2", ReasoningEffort::Medium),
         // An unrelated legacy Ambient model keeps its existing normalization.
         ("ambient", "ambient/large", ReasoningEffort::XHigh),
+        ("pfterminal-plan", "ambient/large", ReasoningEffort::XHigh),
     ] {
         for (effort, expected_effort) in [
             (Some(ReasoningEffort::Medium), Some(expected_standard)),
