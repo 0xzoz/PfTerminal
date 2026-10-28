@@ -612,7 +612,7 @@ Finish-Launch
     let _ = std::process::Command::new(system32_exe("schtasks.exe"))
         .args(["/delete", "/tn", task.as_str(), "/f"])
         .output();
-    outcome.assert_contained("Task Scheduler", &["0x80070003"]);
+    outcome.assert_contained("Task Scheduler", &["error=[folder] ", "0x80070003"]);
 }
 
 /// #1507 route 4: out-of-process COM servers that start programs on the

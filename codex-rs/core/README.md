@@ -159,8 +159,8 @@ still allow breaking away.
 Other ways to start a process (#1507), measured on the hosted Windows runner
 (no Explorer running; not yet measured on a desktop): WMI's
 `Win32_Process.Create` refuses a legacy command (access denied), as do
-activating Explorer's `ShellWindows` (E_ACCESSDENIED) and registering a task
-with the Task Scheduler (0x80070003).
+activating Explorer's `ShellWindows` (E_ACCESSDENIED) and the Task
+Scheduler (opening its task folder fails with 0x80070003).
 Three routes still start a child outside the command's job: naming another
 legacy session's process as the parent (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`;
 the child gets that session's job and token, because every legacy process's
