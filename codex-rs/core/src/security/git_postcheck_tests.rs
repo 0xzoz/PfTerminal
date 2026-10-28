@@ -846,6 +846,33 @@ fn issue_943_a_held_empty_git_folder_swapped_again_is_reported() {
     assert!(project.held().contains(&git.display().to_string()));
 }
 
+/// #943 (#1497 review): a `held_for` (of any session) between the second
+/// swap and this session's next look drops the first swap's hold, which no
+/// longer stands; the second swap is still reported, and held.
+#[test]
+fn issue_943_a_held_swap_dropped_before_the_next_look_is_still_reported() {
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    std::fs::rename(&git, project.base.join("saved-git")).expect("moved");
+    std::fs::create_dir(&git).expect("empty .git");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("replaced {}", git.display())]
+    );
+    // An unchanged look keeps it held.
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    std::fs::rename(&git, project.base.join("first-empty")).expect("moved");
+    std::fs::create_dir(&git).expect("another empty .git");
+    // Another session's check prunes the hold that no longer stands.
+    assert!(!project.held().contains(&git.display().to_string()));
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("replaced {}", git.display())]
+    );
+    assert!(project.held().contains(&git.display().to_string()));
+}
+
 /// Review r7 (B2): another session forgetting an empty one that went (its
 /// look saw it gone) doesn't make this session miss what is put there
 /// next.
