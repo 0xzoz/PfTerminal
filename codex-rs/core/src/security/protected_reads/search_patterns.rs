@@ -358,8 +358,9 @@ fn program_position(lines: &Words<'_>, mut index: usize) -> bool {
         && !lines.ends(index - 1)
         && (lines.assignment(index - 1)
             || (PROGRAM_BEFORE.contains(&words[index - 1].as_str())
-                // `nohup X=1 grep` runs a program named `X=1`.
-                && !(lines.assignment(index)
+                // `nohup X=1 grep` runs a program named `X=1`. The word as
+                // the shell passes it (also quoted: `nohup "X=1/grep"`).
+                && !(assignment_word(&words[index])
                     && NO_ASSIGNMENTS_AFTER.contains(&words[index - 1].as_str()))))
     {
         index -= 1;
@@ -396,9 +397,9 @@ fn assignment_word(word: &str) -> bool {
 
 /// The search `words[index]` starts, and the index of its first argument.
 /// #1480: never an assignment word: `X=1/grep .env` runs `.env`. (After
-/// `nohup`, `command` or `exec` such a word is the program, a path ending in
-/// `/grep`, but [`program_position`] does not take it, so its pattern stays
-/// unmarked there.)
+/// `nohup`, `command` or `exec` such a word, quoted or not, is the program, a
+/// path ending in `/grep`, but [`program_position`] does not take it, so its
+/// pattern stays unmarked there.)
 fn search_program(lines: &Words<'_>, index: usize) -> Option<(Search, usize)> {
     if lines.assignment(index) {
         return None;

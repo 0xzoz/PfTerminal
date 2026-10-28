@@ -339,9 +339,14 @@ fn assignment_shaped_program_words_do_not_start_searches() {
         "sudo X=1/rg .env logs",
         "env X=1/grep .env logs",
         "cat logs; X=1/grep .env logs",
-        // After these the word is the program, which is not taken either.
+        // After these the word is the program, which is not taken either,
+        // also quoted or escaped (as on main).
         "nohup X=1/grep .env logs",
         "command X=1/grep .env logs",
+        "nohup \"X=1/grep\" .env logs",
+        "command 'X=1/grep' .env logs",
+        "exec X\\=1/grep .env logs",
+        "nohup \"X\"=1/rg .env logs",
     ] {
         assert_eq!(patterns(script), Vec::<String>::new(), "{script}");
     }
