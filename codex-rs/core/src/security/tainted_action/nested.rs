@@ -17,6 +17,8 @@ use super::MAX_FOLDER_BYTES;
 use super::ProtectedActionKind;
 use super::WRITERS;
 use super::certain_cd;
+use super::code_variables;
+use super::git_config;
 use super::git_helpers;
 use super::indirect;
 use super::invocation;
@@ -771,6 +773,10 @@ impl Classifier {
     /// core.pager sh` as a read); here each value stays one word. Git
     /// spelled by text this reading cannot see is checked there instead
     /// (`hidden_words`).
+    /// D156: git's options are read here too. The lexer splits a value at
+    /// `;`, `|` or `&` (`git -c 'user.name=a; b' -c core.pager=sh log`), so
+    /// its scan from `git` ends before the settings after that value; here
+    /// it reads to the command's end. This only adds findings.
     /// `loops`: loop variables over the positional parameters so far.
     fn judge_git(
         &self,
@@ -794,6 +800,28 @@ impl Classifier {
                 ..launched_git::Marks::default()
             },
         );
+        let mut git_programs_read = false;
+        let mut local_config = git_config::Writes::new(texts);
+        let command_at = indirect::command_word(texts);
+        // D156: whether a word from here on may be a brace expansion, which
+        // the shell may expand into options (`{--upload-pack=./x,}`): in a
+        // line with quoted text the lexer may have cut git's command before
+        // it, and this reading keeps it as written. Only a `,` or `..`
+        // between braces expands (not `{x}`).
+        let mut braced_from = vec![false; texts.len() + 1];
+        for at in (0..texts.len()).rev() {
+            work::step();
+            let text = &texts[at];
+            let expands = text.find('{').is_some_and(|open| {
+                work::rfind(text, "}").is_some_and(|close| {
+                    open < close && {
+                        let inside = &text[open..close];
+                        inside.contains(',') || inside.contains("..")
+                    }
+                })
+            });
+            braced_from[at] = braced_from[at + 1] || expands;
+        }
         for (index, word) in lower.iter().enumerate() {
             work::step();
             // #1276: or a finder's exec option with git attached.
@@ -806,7 +834,34 @@ impl Classifier {
             {
                 kinds.push(ProtectedActionKind::Persistence);
             }
-            kinds.extend(launched.judge(index, helper.as_ref()));
+            // D156: as `simple_command` reads them (#1142, #1159), on these
+            // words; as written, so `raw` is the same words.
+            let is_git = basename(git_word) == "git" || indirect::equals_git(git_word);
+            let args = &texts[index + 1..];
+            let git_program = (is_git || helper.is_some())
+                && !std::mem::replace(&mut git_programs_read, true)
+                && rerun::git_runs_program(args, subcommand);
+            if (is_git && code_variables::git_runs_code_after_git(args, args))
+                || (helper == Some(None) && code_variables::git_runs_code(args, args))
+                || git_program
+                || ((is_git || helper.is_some()) && self.quoted_text && braced_from[index + 1])
+            {
+                kinds.push(ProtectedActionKind::UnseenCode);
+            }
+            // D156: and local config writes (#1161), with the same
+            // exemption for wrappers that only inspect the command.
+            let inspecting = command_at.as_ref().is_some_and(|(at, _)| {
+                *at == index && git_config::inspection_only_prefix(&texts[..index])
+            });
+            let launched_kind = launched.judge(index, helper.as_ref());
+            if (basename(git_word) == "git" || helper.is_some())
+                && !inspecting
+                && launched_kind != Some(ProtectedActionKind::UnseenCode)
+                && local_config.writes_code_setting(index + 1, subcommand)
+            {
+                kinds.push(ProtectedActionKind::Persistence);
+            }
+            kinds.extend(launched_kind);
             launched.step(index);
             for kind in kinds {
                 work::step();
