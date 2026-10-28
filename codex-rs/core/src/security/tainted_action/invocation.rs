@@ -26,7 +26,8 @@ pub(super) enum Code<'a> {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct Invocation<'a> {
     pub(super) code: Code<'a>,
-    /// Files loaded before the code (`node -r ./p.js`, `ruby -r ./p.rb`).
+    /// Files loaded before the code (`node -r ./p.js`, `ruby -r ./p.rb`,
+    /// `bash --rcfile f`).
     pub(super) preloads: Vec<&'a str>,
 }
 
@@ -62,6 +63,11 @@ pub(super) fn parse<'a>(name: &str, args: &'a [String]) -> Option<Invocation<'a>
                 code: Code::Stdin,
                 preloads,
             });
+        }
+        // #1405: bash also reads `-rcfile f` as `--rcfile f`; other shells
+        // read its letters, so they are read too (`-rcfile` holds `-c`).
+        if family == Family::Shell && matches!(arg.as_str(), "-rcfile" | "-init-file") {
+            preloads.extend(next);
         }
         let is_option = arg.starts_with('-') || (family == Family::Shell && arg.starts_with('+'));
         if !is_option {
@@ -232,8 +238,10 @@ impl Family {
             };
             return match key {
                 "command" if self == Self::Shell => Opt::Inline,
-                "rcfile" | "init-file" if self == Self::Shell => {
-                    attached.map_or(Opt::Value, |_| Opt::Flag)
+                // #1405: an interactive shell sources its start-up file
+                // first (`bash --rcfile f -i`, yash `--profile=f -l`).
+                _ if self == Self::Shell && start_up_file(key) => {
+                    attached.map_or(Opt::Preload, Opt::PreloadAttached)
                 }
                 "check-hash-based-pycs" if self == Self::Python => {
                     attached.map_or(Opt::Value, |_| Opt::Flag)
@@ -287,4 +295,20 @@ impl Family {
         }
         Opt::Flag
     }
+}
+
+/// #1405: whether a shell's long option `key` names a start-up file it
+/// sources: `--rcfile`, `--init-file`, yash `--profile`. yash also takes
+/// any case, ignores other than letters and digits, and takes a prefix of
+/// two letters or more (`--rc=f`, `--RC-FILE=f`, `--prof f`).
+fn start_up_file(key: &str) -> bool {
+    let key: String = key
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    key.len() >= 2
+        && ["rcfile", "initfile", "profile"]
+            .iter()
+            .any(|name| name.starts_with(key.as_str()))
 }
