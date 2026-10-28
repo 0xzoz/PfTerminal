@@ -4,12 +4,8 @@ use codex_state::accounting::Patch;
 use codex_state::accounting::Presence;
 use pretty_assertions::assert_eq;
 
-fn usage(
-    input: Option<u64>,
-    cached: Option<u64>,
-    output: Option<u64>,
-    total: Option<u64>,
-) -> RealtimeResponseUsage {
+/// Input, cached input, output and total, as a response reports them.
+fn usage([input, cached, output, total]: [Option<u64>; 4]) -> RealtimeResponseUsage {
     RealtimeResponseUsage {
         input_tokens: input,
         cached_input_tokens: cached,
@@ -33,11 +29,11 @@ fn counts(patch: &Patch) -> [Option<i64>; 4] {
 fn realtime_usage_sums_each_reported_response() {
     let mut session = SessionUsage::default();
     let first = session
-        .add(&usage(Some(132), Some(64), Some(121), Some(253)))
+        .add(&usage([Some(132), Some(64), Some(121), Some(253)]))
         .expect("first report");
     assert_eq!(counts(&first), [Some(132), Some(64), Some(121), Some(253)]);
     let second = session
-        .add(&usage(Some(200), Some(150), Some(30), Some(230)))
+        .add(&usage([Some(200), Some(150), Some(30), Some(230)]))
         .expect("second report");
     assert_eq!(
         counts(&second),
@@ -63,27 +59,27 @@ fn realtime_usage_sums_each_reported_response() {
 fn realtime_usage_keeps_the_first_reports_shape() {
     let mut session = SessionUsage::default();
     // A total alone fixes nothing.
-    assert_eq!(session.add(&usage(None, None, None, Some(9))), None);
+    assert_eq!(session.add(&usage([None, None, None, Some(9)])), None);
     let first = session
-        .add(&usage(Some(100), None, Some(10), None))
+        .add(&usage([Some(100), None, Some(10), None]))
         .expect("first report");
     assert_eq!(counts(&first), [Some(100), None, Some(10), Some(110)]);
     // Extra counts are ignored; the stated ones still add.
     let second = session
-        .add(&usage(Some(50), Some(20), Some(5), Some(55)))
+        .add(&usage([Some(50), Some(20), Some(5), Some(55)]))
         .expect("second report");
     assert_eq!(counts(&second), [Some(150), None, Some(15), Some(165)]);
     // Output missing: not counted at all.
-    assert_eq!(session.add(&usage(Some(70), None, None, None)), None);
+    assert_eq!(session.add(&usage([Some(70), None, None, None])), None);
     let third = session
-        .add(&usage(Some(1), None, Some(1), None))
+        .add(&usage([Some(1), None, Some(1), None]))
         .expect("third report");
     assert_eq!(counts(&third), [Some(151), None, Some(16), Some(167)]);
 
     // Input alone: no total, since output is unknown.
     let mut input_only = SessionUsage::default();
     let report = input_only
-        .add(&usage(Some(7), Some(2), None, Some(7)))
+        .add(&usage([Some(7), Some(2), None, Some(7)]))
         .expect("input only");
     assert_eq!(counts(&report), [Some(7), Some(2), None, None]);
 }
@@ -95,22 +91,25 @@ fn realtime_usage_keeps_the_first_reports_shape() {
 #[test]
 fn realtime_usage_rejects_inconsistent_reports() {
     let mut session = SessionUsage::default();
-    assert_eq!(session.add(&usage(Some(10), Some(11), Some(1), None)), None);
+    assert_eq!(
+        session.add(&usage([Some(10), Some(11), Some(1), None])),
+        None
+    );
     let first = session
-        .add(&usage(Some(10), Some(5), Some(1), Some(12)))
+        .add(&usage([Some(10), Some(5), Some(1), Some(12)]))
         .expect("first report");
     assert_eq!(counts(&first), [Some(10), Some(5), Some(1), Some(11)]);
     assert_eq!(
-        session.add(&usage(Some(u64::MAX), Some(0), Some(1), None)),
+        session.add(&usage([Some(u64::MAX), Some(0), Some(1), None])),
         None
     );
     assert_eq!(
-        session.add(&usage(Some(i64::MAX as u64), Some(0), Some(1), None)),
+        session.add(&usage([Some(i64::MAX as u64), Some(0), Some(1), None])),
         None,
         "a sum past the ledger's range is not counted"
     );
     let second = session
-        .add(&usage(Some(2), Some(0), Some(2), Some(99)))
+        .add(&usage([Some(2), Some(0), Some(2), Some(99)]))
         .expect("second report");
     assert_eq!(counts(&second), [Some(12), Some(5), Some(3), Some(15)]);
 }

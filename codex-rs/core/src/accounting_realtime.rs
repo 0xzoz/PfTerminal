@@ -204,7 +204,7 @@ impl SessionUsage {
             input: presence(stated[0], Some(sums[0])),
             read: presence(stated[1], Some(sums[1])),
             output: presence(stated[2], Some(sums[2])),
-            total: presence(true, total),
+            total: presence(/*stated*/ true, total),
             ..Patch::default()
         })
     }
