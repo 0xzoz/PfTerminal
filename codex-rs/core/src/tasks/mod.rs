@@ -1163,28 +1163,52 @@ impl Session {
         }
     }
 
-    async fn handle_task_abort(self: &Arc<Self>, task: RunningTask, reason: TurnAbortReason) {
+    async fn handle_task_abort(self: &Arc<Self>, mut task: RunningTask, reason: TurnAbortReason) {
         let sub_id = task.turn_context.sub_id.clone();
         if task.cancellation_token.is_cancelled() {
             return;
         }
 
         trace!(task_kind = ?task.kind, sub_id, "aborting running task");
+        let cancelled_at = Instant::now();
         task.cancellation_token.cancel();
         task.turn_context
             .turn_metadata_state
             .cancel_git_enrichment_task();
         let session_task = task.task;
 
-        select! {
-            _ = task.done.notified() => {
-            },
+        let hard_aborted = select! {
+            _ = task.done.notified() => false,
             _ = tokio::time::sleep(Duration::from_millis(GRACEFULL_INTERRUPTION_TIMEOUT_MS)) => {
                 warn!("task {sub_id} didn't complete gracefully after {}ms", GRACEFULL_INTERRUPTION_TIMEOUT_MS);
+                true
             }
-        }
+        };
 
         task.handle.abort();
+        if hard_aborted {
+            // The turn did not record its tool outputs in time. Once it has stopped,
+            // record each pending call's abort output, as the turn would have (#1467).
+            // Joining waits only for the turn's current poll to return, so the turn
+            // cannot record an output after the check below. The join is skipped only
+            // when the turn task aborts itself; aborts from tasks the turn spawned must
+            // run in a detached task (as guardian's does), or the join cancels them.
+            if tokio::task::try_id() != Some(task.handle.abort_handle().id()) {
+                let _ = (&mut task.handle).await;
+            }
+            let mut outputs: Vec<ResponseItem> = task
+                .turn_context
+                .pending_tool_calls
+                .take_aborted_outputs(cancelled_at)
+                .into_iter()
+                .map(ResponseItem::from)
+                .collect();
+            self.retain_unrecorded_tool_outputs(&mut outputs).await;
+            if !outputs.is_empty() {
+                self.record_conversation_items(task.turn_context.as_ref(), &outputs)
+                    .await;
+            }
+        }
 
         let session_ctx = Arc::new(SessionTaskContext::new(
             Arc::clone(self),

@@ -190,3 +190,11 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   remain compatible" note no longer covers this ID. The other retained IDs
   (Grok 4.6 and 4.5, DeepSeek V4 Pro and V4 Flash 0731 on OpenRouter, and
   GPT-5.5 on OpenAI) are still served and unchanged.
+
+## Interrupting a tool on a busy machine keeps its elapsed time
+
+- **The model now always sees how long an interrupted tool ran** (#1467,
+  #1448). On a loaded machine, an interrupted turn could miss its 100 ms grace
+  period. The interrupted tool's output (`Wall time: N seconds` /
+  `aborted by user`) was then replaced by a bare `aborted`. That output is now
+  recorded in this case too, timed to the moment of the interrupt.
