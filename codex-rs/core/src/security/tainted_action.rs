@@ -500,6 +500,12 @@ fn judged(action: &ApprovalAction, homes: Homes, as_named: bool) -> Classifier {
             }
             ApprovalAction::ApplyPatch { .. } => false,
         };
+    judged_avoiding(action, homes, avoids_zsh)
+}
+
+/// [`judged`] with the zsh-only checks skipped at the top level when
+/// `avoids_zsh` (#932's measuring harness also judges with it forced).
+fn judged_avoiding(action: &ApprovalAction, homes: Homes, avoids_zsh: bool) -> Classifier {
     let mut classifier = Classifier::new(homes, avoids_zsh);
     match action {
         ApprovalAction::Shell { command, cwd, .. }
@@ -1538,7 +1544,10 @@ enum Script {
 }
 
 impl Classifier {
+    #[cfg_attr(test, track_caller)]
     fn note(&mut self, kind: ProtectedActionKind) {
+        #[cfg(test)]
+        named_shell::measure_tests::noted(kind, std::panic::Location::caller());
         if self.found.is_none_or(|current| rank(kind) > rank(current)) {
             self.found = Some(kind);
         }
@@ -1546,6 +1555,7 @@ impl Classifier {
 
     /// D191: a prompt that only a temp path raised is held back until the
     /// line is read (`temp`); any other is noted.
+    #[cfg_attr(test, track_caller)]
     fn note_or_hold(&mut self, kind: ProtectedActionKind, temp: bool) {
         match &mut self.temp {
             Some(scope) if temp => scope.hold(kind),
@@ -1558,6 +1568,7 @@ impl Classifier {
         self.temp.is_some() && mktemp::temp_place(word)
     }
 
+    #[cfg_attr(test, track_caller)]
     fn path(&mut self, path: &str) {
         if let Some(kind) = self.homes.classify_resolved(path) {
             self.note(kind);
