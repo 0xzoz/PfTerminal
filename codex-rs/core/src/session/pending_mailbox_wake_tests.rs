@@ -32,21 +32,23 @@ async fn pending_mailbox_wake_checks_idle_before_preparing_a_turn() {
         // Turn preparation first locks session state. Keep it unavailable so one poll proves
         // the busy wake returns before preparation (and therefore before the auth read), while
         // the idle control still reaches preparation. This needs no timeout or native vault.
-        let state = session.state.lock().await;
-        let outcome = tokio::task::unconstrained(
-            session.maybe_start_turn_for_pending_work_with_sub_id("mailbox-wake".to_string()),
-        )
-        .now_or_never();
+        let outcome = {
+            let _state = session.state.lock().await;
+            tokio::task::unconstrained(
+                session.maybe_start_turn_for_pending_work_with_sub_id("mailbox-wake".to_string()),
+            )
+            .now_or_never()
+        };
         assert_eq!(outcome, busy.then_some(()));
-        drop(state);
 
-        let active_turn = session.active_turn.lock().await;
-        match (active_turn.as_ref(), original_turn_state.as_ref()) {
-            (Some(turn), Some(original)) => assert!(Arc::ptr_eq(&turn.turn_state, original)),
-            (None, None) => {}
-            _ => panic!("the wake changed the active turn before preparing a new one"),
+        {
+            let active_turn = session.active_turn.lock().await;
+            match (active_turn.as_ref(), original_turn_state.as_ref()) {
+                (Some(turn), Some(original)) => assert!(Arc::ptr_eq(&turn.turn_state, original)),
+                (None, None) => {}
+                _ => panic!("the wake changed the active turn before preparing a new one"),
+            }
         }
-        drop(active_turn);
         assert_eq!(
             session.input_queue.drain_mailbox_input_items().await,
             (
