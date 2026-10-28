@@ -4595,6 +4595,15 @@ fn d156_git_settings_after_a_split_value_ask() {
         // Review 1: git spelled by text the quote-aware reading cannot see.
         "g=git; $g -c 'user.name=a; b' -c core.pager=sh log",
         "{git,} -c 'user.name=a; b' -c core.pager=sh log",
+        // Review 2: and with the split after the subcommand.
+        "g=git; $g clone file:///tmp/r 'a; b' --upload-pack='touch /tmp/p'",
+        "g=git; $g clone -b 'a; b' --upload-pack=./x URL",
+        "g=git; $g push --push-option 'a; b' --receive-pack=./x origin",
+        "{git,} archive --prefix 'a; b' --exec=./x --remote=r HEAD",
+        "{git-clone,} 'a; b' --upload-pack=./x URL",
+        "g=git; $g clone -b a\\;b --upload-pack=./x URL",
+        "g=git; $g clone -b $'a\\'b;c' --upload-pack=./x URL",
+        "sh -c \"g=git; \\$g clone -b 'a; b' --upload-pack=./x URL\"",
     ] {
         assert_eq!(
             script(command),
@@ -4627,6 +4636,7 @@ fn d156_git_settings_after_a_split_value_ask() {
         "git commit -m 'fix: a | b & c; d'",
         "git -c 'color.ui=a; b' config --get sequence.editor",
         "g=git; $g status",
+        "g=git; $g log --oneline -3 && $g diff --stat",
     ] {
         assert_eq!(script(command), None, "{command}");
     }

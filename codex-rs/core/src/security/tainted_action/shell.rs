@@ -259,6 +259,32 @@ fn computed_transformation(text: &str, after_subscript: bool) -> bool {
 /// `options` array, or `ARGV0` (a zsh started as `csh` or `sh` turns the
 /// option on). Read as written (backslash-newlines joined) and with quotes
 /// and backslashes removed, so nested shells' scripts count. Linear.
+/// D156: whether `text` has `;`, `|`, `&` or a newline inside single or
+/// double quotes or after a backslash, which the lexer (it ignores quotes)
+/// reads as the end of a command. Nested quotes count as quotes, and a
+/// backslash escapes in single quotes too (`$'a\'b;c'`): when unsure, it
+/// is quoted. Linear.
+pub(super) fn quoted_separator(text: &str) -> bool {
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    for ch in text.chars() {
+        work::step();
+        let separator = matches!(ch, ';' | '|' | '&' | '\n');
+        if separator && (single || double || escaped) {
+            return true;
+        }
+        if std::mem::take(&mut escaped) {
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(super) fn glob_substitution(text: &str) -> bool {
     let joined = text.replace("\\\n", "");
     let bare: String = joined
