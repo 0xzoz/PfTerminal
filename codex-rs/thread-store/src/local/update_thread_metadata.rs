@@ -2384,17 +2384,24 @@ mod tests {
             started.elapsed()
         );
         assert!(runtime.state_db_contended());
-        let started = std::time::Instant::now();
-        update(ThreadMetadataPatch {
-            title: Some("titled".to_string()),
-            ..Default::default()
-        })
-        .await
-        .expect("an update put off is not an error");
+        // Known busy: no wait at all. Trying the DB would cost at least
+        // QUICK_BUSY_TIMEOUT on every attempt, so the fastest of three must
+        // beat it; one attempt took 481ms on a loaded Windows nightly runner.
+        let mut fastest = std::time::Duration::MAX;
+        for _ in 0..3 {
+            let started = std::time::Instant::now();
+            update(ThreadMetadataPatch {
+                title: Some("titled".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("an update put off is not an error");
+            fastest = fastest.min(started.elapsed());
+            assert!(runtime.state_db_contended());
+        }
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(300),
-            "waited {:?}",
-            started.elapsed()
+            fastest < codex_state::QUICK_BUSY_TIMEOUT,
+            "fastest of three waited {fastest:?}"
         );
         sqlx::query("ROLLBACK")
             .execute(&mut *lock)
