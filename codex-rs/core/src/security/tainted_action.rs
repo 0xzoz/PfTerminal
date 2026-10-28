@@ -1670,12 +1670,15 @@ impl Classifier {
         // (a quoted blank, `~` or `$`), judged once the line's folders are
         // known.
         let mut splits = Vec::new();
+        // #1449: also whether any is on this line (`x='a b' alias $1`).
+        let mut cut_here = HashSet::new();
         for arg in command {
             work::step();
-            let judgment =
-                loader_variables::scan_split_values(arg, &mut self.cut_values, &mut splits);
+            let judgment = loader_variables::scan_split_values(arg, &mut cut_here, &mut splits);
             self.loader_judgment(&judgment);
         }
+        let split_line = !cut_here.is_empty();
+        self.cut_values.extend(cut_here);
         // #1064: every folder the line is in, up to a limit.
         let outer_visited = std::mem::replace(&mut self.visited, vec![cwd.to_string()]);
         let outer_visited_all = std::mem::replace(&mut self.visited_all, self.unknown_folder == 0);
@@ -1691,7 +1694,7 @@ impl Classifier {
         let mut loops = launched_git::PositionalLoops::default();
         // #1405: a `mapfile` was found, by any spelling.
         let mut mapfile = false;
-        let mut aliases = aliases::Aliases::of(&lexed.commands);
+        let mut aliases = aliases::Aliases::of(&lexed.commands, split_line);
         // #1436: a loop's later passes start where the one before left
         // (`for i in 1 2; do echo x >> .zshrc; cd ~; done`): a loop with a
         // folder change whose pass moves the folder (`Place`) is read again
@@ -2120,6 +2123,7 @@ impl Classifier {
             let eval_unseen = (matches!(name.as_str(), "eval" | "trap")
                 && unseen[index + 1..].iter().any(|unseen| *unseen))
                 || rerun::runs_unseen(name, words, unseen, *index)
+                || rerun::runner_unseen(words, unseen, *index)
                 || rerun::mapfile_callback(simple, words, unseen);
             if self.rebuilt == 0 && (unseen[*index] || inline_unseen || eval_unseen) {
                 // D191: a trap that only removes temp paths.

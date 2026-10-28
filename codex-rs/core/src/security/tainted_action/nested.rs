@@ -31,6 +31,7 @@ use super::rerun;
 use super::sed;
 use super::shadow;
 use super::shell::SHELLS;
+use super::shell::UNSEEN_OUTPUT;
 use super::shell::basename;
 use super::unknown_folder;
 use super::work;
@@ -1478,6 +1479,21 @@ fn runner_scripts(
                 return Vec::new();
             }
             vec![(index, texts[index..].join(" "))]
+        }
+        // #1449: an option's command, given what it runs on: a file it
+        // names, or data on its input (a shell runs either as code).
+        name if rerun::VALUE_RUNNERS.contains(&name) => {
+            rerun::runner_values(texts, at, outbound::MAX_JUDGED_POSITIONS)
+                .into_iter()
+                .map(|(holder, value, runs)| {
+                    let script = match runs {
+                        rerun::Runs::Line => value,
+                        rerun::Runs::Program => format!("{value} {UNSEEN_OUTPUT}"),
+                        rerun::Runs::Filter => format!("{value} < {UNSEEN_OUTPUT}"),
+                    };
+                    (holder, script)
+                })
+                .collect()
         }
         "su" | "runuser" | "flock" | "script" | "env" => {
             let (letter, long) = if wrapper == "env" {

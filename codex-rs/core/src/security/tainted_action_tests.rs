@@ -9336,3 +9336,131 @@ fn issue_1422_checks_are_linear() {
         let _ = classify_fixture(&shell_in(&cwd, &["bash", "-lc", &line]));
     });
 }
+
+
+/// #1449 (and the add-prompt parts of #1064/#1159): commands that run an
+/// option's value (`flock -c`, `su -c`, `script -c` with a command's
+/// output; `rg --pre`, `tar --to-command`/`-I`/`-F`/`--info-script`/
+/// `--checkpoint-action=exec=`/`--rsh-command`, `sort
+/// --compress-program`, `rsync -e`), alias definitions past `eval builtin`
+/// or on a line whose lexing split a quoted assignment, and the files
+/// `gcc -MF` and `rustc --out-dir`/`--emit` write.
+#[cfg(unix)]
+#[test]
+fn issue_1449_runners_aliases_and_output_files_ask() {
+    use ProtectedActionKind::*;
+    let files = [("x.sh", "corbanu vault get k\n"), ("b=bash", "")];
+    // All quiet on main.
+    let cases: &[(&str, ProtectedActionKind)] = &[
+        ("flock /tmp/l -c \"$(cat notes)\"", UnseenCode),
+        ("flock /tmp/l -c `cat notes`", UnseenCode),
+        ("su -c \"$(cat notes)\" bob", UnseenCode),
+        ("script -c \"$(cat notes)\" /dev/null", UnseenCode),
+        ("rg --pre \"$v\" foo", UnseenCode),
+        ("rg --pre ./x.sh foo", Vault),
+        ("rg --pre=./x.sh foo", Vault),
+        ("rg --pre sh foo", UnseenCode),
+        ("rg --pre=bash foo .", UnseenCode),
+        ("tar --to-command=\"$v\" -xf a.tar", UnseenCode),
+        ("tar -xf a.tar --to-command=./x.sh", Vault),
+        ("tar -xf a.tar --to-command=sh", UnseenCode),
+        ("tar -I \"$v\" -cf a.tar d", UnseenCode),
+        ("tar -I ./x.sh -cf a.tar d", Vault),
+        ("tar -Ish -xf a.tar", UnseenCode),
+        ("tar --use-compress-program=\"$v\" -cf a.tar d", UnseenCode),
+        ("tar --use-compress-program=./x.sh -xf a.tar", Vault),
+        ("tar -xf a.tar -F ./x.sh", Vault),
+        ("tar -xf a.tar --info-script=./x.sh", Vault),
+        (
+            "tar -xf a.tar --checkpoint=1 --checkpoint-action=exec=./x.sh",
+            Vault,
+        ),
+        ("tar -xf a.tar --rsh-command=./x.sh", Vault),
+        ("sort --compress-program=\"$v\" f", UnseenCode),
+        ("sort --compress-program=./x.sh f", Vault),
+        ("sort --compress-program sh f", UnseenCode),
+        ("eval builtin alias b?bash", UnseenCode),
+        ("eval command alias b?bash; b x.sh", UnseenCode),
+        ("noglob builtin alias $1", UnseenCode),
+        ("x='a b' alias $1", UnseenCode),
+        ("x='a b' alias \"$@\"", UnseenCode),
+        ("x='a b' builtin alias $1", UnseenCode),
+        ("x=\"a;b\" alias b?bash", UnseenCode),
+        ("x='a|b' alias $1", UnseenCode),
+        ("x=\"a&&b\" alias $1", UnseenCode),
+        ("gcc -MF ~/.zshrc -MD -c x.c", Persistence),
+        ("gcc -MD -MF~/.bashrc -c x.c", Persistence),
+        ("cc -MMD -MF .git/hooks/pre-commit -c x.c", Persistence),
+        ("rustc --out-dir ~/.config/autostart x.rs", Persistence),
+        ("rustc --out-dir=.git/hooks x.rs", Persistence),
+        ("rustc --emit=link=~/.zshrc x.rs", Persistence),
+        ("rustc --emit link=.git/hooks/pre-commit,obj=o.o x.rs", Persistence),
+    ];
+    let mut wrong = Vec::new();
+    for (line, expected) in cases {
+        let found = in_workspace(&files, line);
+        if found != Some(*expected) {
+            wrong.push(format!("{line}: {found:?}"));
+        }
+    }
+    // `rsync` to a host already asks (Disclosure); its `-e` program is
+    // now read too.
+    for line in [
+        "rsync -e ./x.sh a h:b",
+        "rsync -av --rsh=./x.sh a h:b",
+        "rsync -ave ./x.sh a h:b",
+    ] {
+        if in_workspace(&files, line) != Some(Vault) {
+            wrong.push(line.to_string());
+        }
+    }
+    // Ordinary lines stay as they were.
+    for line in [
+        "flock /tmp/l make",
+        "flock -n /tmp/l -c 'make test'",
+        "tar -czf a.tgz d",
+        "tar -xzvf a.tgz -C out",
+        "tar -I zstd -cf a.tar d",
+        "tar --use-compress-program='zstd -19' -cf a.tar d",
+        "tar -xf a.tar --to-command='wc -c'",
+        "sort -u f > out",
+        "sort --compress-program=gzip f",
+        "rg --pre pdftotext foo",
+        "rg -e foo -g '*.rs'",
+        "gcc -MMD -MF build/x.d -c x.c -o build/x.o",
+        "rustc --out-dir target x.rs",
+        "rustc --emit=link,metadata x.rs",
+        "alias gs='git status'",
+        "x='a b' echo alias",
+        "x='a b'; echo \"$x\"",
+    ] {
+        if in_workspace(&files, line).is_some() {
+            wrong.push(format!("quiet: {line}"));
+        }
+    }
+    for line in ["rsync -av -e ssh src/ host:dst/", "rsync -e 'ssh -p 2222' a h:b"] {
+        if in_workspace(&files, line) != Some(Disclosure) {
+            wrong.push(format!("as before: {line}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #1449: the runner and alias checks stay linear.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1449_runner_checks_are_linear() {
+    for (label, unit) in [
+        ("runners", "tar -I zstd -xf a --to-command=wc -F x; "),
+        ("runner words", "flock f su -c x tar -I y rsync -e z "),
+        ("split aliases", "x='a b' alias k=v "),
+        ("outputs", "gcc -MF d -c x.c; rustc --emit=link=a,obj=b --out-dir t x.rs; "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let _ = script(&unit.repeat(40 * scale));
+        });
+    }
+}

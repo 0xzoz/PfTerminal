@@ -21,21 +21,23 @@ const OUTPUT_OPTIONS: &[(&str, &str, char)] = &[
 /// #1159: programs whose output-file options do not group with other
 /// letters: each option word takes the next word (`-o FILE`, `-out FILE`),
 /// a long one its value attached too (`--output=FILE`), and a two-letter
-/// one an attached value (`-oFILE`).
+/// one, or #1449 `-MF`, an attached value (`-oFILE`, `-MFdeps.d`). #1449:
+/// the compilers' `-MF` dependency file, and rustc's `--out-dir` (a folder
+/// it writes files in) and `--emit` (`link=FILE,obj=FILE`).
 const SINGLE_OUTPUT_OPTIONS: &[(&str, &[&str])] = &[
-    ("cc", &["-o", "--output"]),
-    ("gcc", &["-o", "--output"]),
-    ("g++", &["-o", "--output"]),
-    ("c++", &["-o", "--output"]),
-    ("clang", &["-o", "--output"]),
-    ("clang++", &["-o", "--output"]),
-    ("tcc", &["-o"]),
+    ("cc", &["-o", "--output", "-MF"]),
+    ("gcc", &["-o", "--output", "-MF"]),
+    ("g++", &["-o", "--output", "-MF"]),
+    ("c++", &["-o", "--output", "-MF"]),
+    ("clang", &["-o", "--output", "-MF"]),
+    ("clang++", &["-o", "--output", "-MF"]),
+    ("tcc", &["-o", "-MF"]),
     ("ld", &["-o", "--output"]),
     ("ld.lld", &["-o", "--output"]),
     ("ld64.lld", &["-o", "--output"]),
     ("lld", &["-o", "--output"]),
     ("as", &["-o"]),
-    ("rustc", &["-o"]),
+    ("rustc", &["-o", "--out-dir", "--emit"]),
     ("openssl", &["-out", "-keyout"]),
     ("csplit", &["-f", "--prefix"]),
 ];
@@ -153,23 +155,32 @@ fn other_output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
     let mut files = Vec::new();
     for (index, word) in args.iter().enumerate() {
         work::step();
-        let value = if options.contains(&word.as_str()) {
-            args.get(index + 1).cloned()
+        let (option, value) = if options.contains(&word.as_str()) {
+            (word.as_str(), args.get(index + 1).cloned())
         } else if let Some((option, value)) = word.split_once('=')
             && option.starts_with("--")
             && options.contains(&option)
         {
-            Some(value.to_string())
-        } else if let Some(option) = options
-            .iter()
-            .find(|option| option.len() == 2 && word.len() > 2 && word.starts_with(**option))
-        {
-            Some(word[option.len()..].to_string())
+            (option, Some(value.to_string()))
+        } else if let Some(option) = options.iter().find(|option| {
+            (option.len() == 2 || **option == "-MF")
+                && word.len() > option.len()
+                && word.starts_with(**option)
+        }) {
+            (*option, Some(word[option.len()..].to_string()))
         } else {
             continue;
         };
         found = true;
-        files.extend(value);
+        match (option, value) {
+            ("--out-dir", Some(folder)) => files.push(format!("{folder}/")),
+            // `--emit=link=FILE,obj`: the files after `=`.
+            ("--emit", Some(kinds)) => files.extend(kinds.split(',').filter_map(|kind| {
+                work::step();
+                kind.split_once('=').map(|(_, file)| file.to_string())
+            })),
+            (_, value) => files.extend(value),
+        }
     }
     if name == "csplit" {
         let folders: Vec<String> = files.iter().map(|file| prefix_folder(file)).collect();

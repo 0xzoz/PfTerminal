@@ -25,13 +25,21 @@ pub(super) struct Aliases {
     names: HashSet<String>,
     /// A definition the readings cannot name.
     opaque: bool,
+    /// #1449: see [`Self::of`].
+    split: bool,
 }
 
 impl Aliases {
     /// The aliases `commands` (a line's simple commands, as written)
-    /// define, so a use read before its definition counts.
-    pub(super) fn of(commands: &[super::shell::SimpleCommand]) -> Self {
-        let mut aliases = Self::default();
+    /// define, so a use read before its definition counts. `split`: the
+    /// word lexer split a quoted assignment value on the line
+    /// (`loader_variables::scan_split_values`), so any word may be the
+    /// command (`x='a b' alias $1` is `x=a`, `b`, `alias`, `$1`).
+    pub(super) fn of(commands: &[super::shell::SimpleCommand], split: bool) -> Self {
+        let mut aliases = Self {
+            split,
+            ..Self::default()
+        };
         for command in commands {
             work::step();
             aliases.define(&command.words, /*as_written*/ true);
@@ -55,8 +63,10 @@ impl Aliases {
     /// The definitions in one command's `words`: after an `alias` word (or,
     /// as written, a command word holding a value, which may be `alias`:
     /// `$a`, `al$x`), each `name=value` word. Where the definer is the
-    /// command (past `eval`, zsh `noglob`/`nocorrect`/`-` and their
-    /// options, `eval -- alias`), a word before the first definition that
+    /// command (past `eval`, zsh `noglob`/`nocorrect`/`-`, #1449 `builtin`
+    /// and `command`, and their options, `eval -- alias`; #1449: anywhere,
+    /// as written, on a line whose lexing split a quoted assignment), a
+    /// word before the first definition that
     /// may hold one asks: a value or a glob (`alias $1`, `alias "$@"`,
     /// `alias b?bash`), as does `-s` (zsh suffix aliases); so does a name
     /// holding one (`alias b[=]bash`). Words after a definition may be its
@@ -76,8 +86,10 @@ impl Aliases {
                     .iter()
                     .take_while(|word| {
                         work::step();
-                        matches!(word.as_str(), "eval" | "noglob" | "nocorrect" | "-")
-                            || word.starts_with('-')
+                        matches!(
+                            word.as_str(),
+                            "eval" | "noglob" | "nocorrect" | "-" | "builtin" | "command"
+                        ) || word.starts_with('-')
                     })
                     .count()
         });
@@ -100,7 +112,8 @@ impl Aliases {
                 named = false;
                 // A command named by a value defines only `name=value`
                 // words (`$PYTHON "$f"` is not `alias "$f"`).
-                commanding = valued != Some(at) && position == Some(at);
+                commanding = valued != Some(at)
+                    && (position == Some(at) || (as_written && self.split));
                 continue;
             }
             if !defining {
