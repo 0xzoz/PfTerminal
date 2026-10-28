@@ -211,7 +211,7 @@ fn literal_word_ends(command: &[String], words: &[String], windows: bool) -> Opt
                 } else {
                     literal_end = true;
                 }
-            } else if matches!(c, ' ' | '\t' | '\r' | '\n') {
+            } else if matches!(c, ' ' | '\t' | '\n') {
                 if let Some(begin) = start.take() {
                     raw_words.push((&argument[begin..offset], literal_end));
                 }

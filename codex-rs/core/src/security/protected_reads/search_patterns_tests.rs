@@ -91,6 +91,13 @@ fn separator_provenance_survives_empty_quotes_continuations_and_comments() {
 }
 
 #[test]
+fn carriage_returns_stay_in_words_as_shlex_keeps_them() {
+    // Shlex and bash do not split at `\r`; a CRLF script still has patterns.
+    assert_eq!(patterns("grep .env x.log\r"), [".env"]);
+    assert_eq!(patterns("grep 'a|' rg .env\r\n"), ["a|"]);
+}
+
+#[test]
 fn a_pattern_option_gives_the_patterns() {
     assert_eq!(
         patterns("grep -e .env -e .npmrc logs/x.log"),
