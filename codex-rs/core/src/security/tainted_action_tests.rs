@@ -9040,6 +9040,8 @@ fn issue_1436_unseen_folders_ask() {
         // change that may fail.
         "P=../../../../..; cd /home/fixture/w; for i in 1 2 3 4; do cd d; echo x >> $P/.zshrc; done",
         "cd /home/fixture/w; for i in 1 2; do echo x >> .zshrc; cd nope; cd ..; done",
+        // Review 3: a pass from another folder leaves one more.
+        "cd /home/fixture/a/w; for i in 1 2 3; do echo x >> .zshrc; cd nope; cd ..; done",
     ]
     .into_iter()
     .filter(|command| script(command).is_none())

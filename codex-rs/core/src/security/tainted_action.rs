@@ -381,6 +381,8 @@ const MAX_SMALL_VALUE: usize = 64;
 /// #1436: loops one line reads again (`LoopPass`); past them a loop with a
 /// folder change starts in a folder not known.
 const MAX_REPLAYED_LOOPS: usize = 8;
+/// #1436: folders a replayed loop's passes may start from (`LoopPass`).
+const MAX_BRANCH_FOLDERS: usize = 8;
 /// Bytes of command text, and command lines, one classification lexes in
 /// all, nested scripts, decoded payloads and script files included (#1065);
 /// more fail closed.
@@ -1116,9 +1118,14 @@ struct LoopPass {
     counts: (bool, bool),
     /// The folders the line may be in when the pass starts.
     folders: Vec<String>,
-    /// Folders a first pass that came back left the line in besides: one
-    /// more pass is read from each, alone (`cd nope; cd ..`).
+    /// Folders a pass that came back left the line in besides: one more
+    /// pass is read from each, alone (`cd nope; cd ..`), and from those
+    /// they leave in turn, up to `MAX_BRANCH_FOLDERS`.
     branches: Vec<String>,
+    /// The folders passes started from or were queued from.
+    seen: Vec<String>,
+    /// Past `MAX_BRANCH_FOLDERS`: after the loop the folder is not known.
+    overflow: bool,
 }
 
 /// #1436: the folders a reading may be in.
@@ -1723,6 +1730,8 @@ impl Classifier {
                         counts: (changing_loop.back, changing_loop.stack),
                         folders: possible_folders(&folders),
                         branches: Vec::new(),
+                        seen: Vec::new(),
+                        overflow: false,
                     });
                 } else {
                     folders.unseen = true;
@@ -1831,37 +1840,71 @@ impl Classifier {
                 && current.end == index
             {
                 let place = Place::of(&folders, &variables, &current.names, current.counts);
-                let moved = place != current.place;
-                // A pass that comes back may still leave other folders the
-                // line may be in (`cd nope; cd ..`): read again from them,
-                // not into a folder not known.
-                let widened = possible_folders(&folders)
-                    .iter()
-                    .any(|folder| !current.folders.contains(folder));
-                let deeper = !current.climbs
-                    && place.known == current.place.known
-                    && place
-                        .cwd
-                        .strip_prefix(current.place.cwd.as_str())
-                        .is_some_and(|rest| rest.starts_with('/'));
-                if current.round == 1 && moved {
-                    current.first = Some((folders.clone(), variables.clone()));
-                }
-                if current.round == 1 && widened && !moved {
-                    current.first = Some((folders.clone(), variables.clone()));
-                    current.branches = possible_folders(&folders)
-                        .into_iter()
-                        .filter(|folder| !current.folders.contains(folder))
-                        .collect();
-                    // Read in the passes below (round 0 marks them).
-                    current.round = 0;
-                }
-                let next = match current.round {
-                    1 | 2 if moved => Some(current.round + 1),
-                    3 if moved && !deeper => Some(current.round + 1),
-                    _ => None,
-                };
+                let now = possible_folders(&folders);
                 if current.round == 0 {
+                    // A pass from another folder: folders it leaves that no
+                    // pass has started from are read too, up to a limit.
+                    for folder in now {
+                        work::step();
+                        if current.seen.contains(&folder) {
+                            continue;
+                        }
+                        if current.seen.len() < MAX_BRANCH_FOLDERS {
+                            current.branches.push(folder.clone());
+                        } else {
+                            current.overflow = true;
+                        }
+                        current.seen.push(folder);
+                    }
+                } else {
+                    let moved = place != current.place;
+                    // A pass that comes back may still leave other folders
+                    // the line may be in (`cd nope; cd ..`).
+                    let widened = now.iter().any(|folder| !current.folders.contains(folder));
+                    let deeper = !current.climbs
+                        && place.known == current.place.known
+                        && place
+                            .cwd
+                            .strip_prefix(current.place.cwd.as_str())
+                            .is_some_and(|rest| rest.starts_with('/'));
+                    if current.round == 1 && (moved || widened) {
+                        current.first = Some((folders.clone(), variables.clone()));
+                    }
+                    let next = match current.round {
+                        1 | 2 if moved => Some(current.round + 1),
+                        3 if moved && !deeper => Some(current.round + 1),
+                        _ => None,
+                    };
+                    if let Some(round) = next {
+                        folders.unseen |= round == 4;
+                        current.round = round;
+                        current.place = place;
+                        current.folders = now;
+                        cursor = current.start;
+                    } else if current.round < 4 && widened {
+                        // Read once more from each of them, alone (round
+                        // 0 marks these passes).
+                        current.seen = current.folders.clone();
+                        for folder in now {
+                            work::step();
+                            if !current.seen.contains(&folder) {
+                                current.branches.push(folder.clone());
+                                current.seen.push(folder);
+                            }
+                        }
+                        current.round = 0;
+                    } else {
+                        if let Some((first, values)) = current.first.take() {
+                            folders = first;
+                            variables = values;
+                            folders.unseen |= current.round == 4;
+                        }
+                        pass = None;
+                    }
+                }
+                if let Some(current) = &mut pass
+                    && current.round == 0
+                {
                     match (current.branches.pop(), &current.first) {
                         (Some(branch), Some((first, values))) => {
                             folders = first.clone();
@@ -1874,23 +1917,12 @@ impl Classifier {
                             if let Some((first, values)) = current.first.take() {
                                 folders = first;
                                 variables = values;
+                                // Past the limit the line may be anywhere.
+                                folders.unseen |= current.overflow;
                             }
                             pass = None;
                         }
                     }
-                } else if let Some(round) = next {
-                    folders.unseen |= round == 4;
-                    current.round = round;
-                    current.place = place;
-                    current.folders = possible_folders(&folders);
-                    cursor = current.start;
-                } else {
-                    if let Some((first, values)) = current.first.take() {
-                        folders = first;
-                        variables = values;
-                        folders.unseen |= current.round == 4;
-                    }
-                    pass = None;
                 }
             }
         }
