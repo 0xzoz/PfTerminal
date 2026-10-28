@@ -130,10 +130,9 @@ pub(crate) fn compaction_turn_label(sub_id: &str) -> String {
 
 /// A turn label for one realtime call.
 ///
-/// Creating the call is a model request the operator paid for. The realtime
-/// session's own token usage never reaches this client - the protocol this
-/// client parses carries none - so the call is recorded with its tokens
-/// unknown rather than left invisible.
+/// Creating the call is a model request the operator paid for. Its response
+/// carries no usage and the call's sideband reports are not recorded, so the
+/// call is recorded with its tokens unknown rather than left invisible.
 pub(crate) fn realtime_turn_label(sub_id: &str) -> String {
     scoped_turn_label("realtime:", sub_id)
 }
@@ -146,8 +145,8 @@ pub(crate) fn realtime_turn_label(sub_id: &str) -> String {
 pub(crate) const REALTIME_SESSION_LABEL: &str = "realtime:ws:";
 
 /// A turn label for one realtime WebSocket session (#824). The session is
-/// one request, recorded with its tokens unknown: its usage never reaches
-/// this client.
+/// one request, with the tokens its finished responses reported (#889 D223)
+/// and no price.
 pub(crate) fn realtime_session_turn_label(sub_id: &str) -> String {
     scoped_turn_label(REALTIME_SESSION_LABEL, sub_id)
 }
@@ -1360,6 +1359,31 @@ impl Sampling {
         endpoint: &str,
         tier: Option<&str>,
     ) -> anyhow::Result<Attempt> {
+        self.admit_priced(model, endpoint, tier, /*rated*/ true)
+            .await
+    }
+
+    /// Admit a request this sampling's basis covers but no rate prices
+    /// (#889 D223): a realtime session, whose tokens are audio and text at
+    /// realtime rates no catalogue row states. Its record keeps its basis and
+    /// binds no rate, so its reported tokens read "no price", never a figure
+    /// from a text model's rates.
+    pub(crate) async fn admit_without_rates(
+        &self,
+        model: &str,
+        endpoint: &str,
+    ) -> anyhow::Result<Attempt> {
+        self.admit_priced(model, endpoint, /*tier*/ None, /*rated*/ false)
+            .await
+    }
+
+    async fn admit_priced(
+        &self,
+        model: &str,
+        endpoint: &str,
+        tier: Option<&str>,
+        rated: bool,
+    ) -> anyhow::Result<Attempt> {
         self.check()?;
         anyhow::ensure!(
             canonical_route(endpoint) == canonical_route(&self.endpoint),
@@ -1402,6 +1426,16 @@ impl Sampling {
             )
         };
         let mut prices = match self.pricing {
+            // Unrated (`admit_without_rates`): subscription work keeps its
+            // basis with no plan rate; pay per use falls to the basis-only
+            // record below. Local, undeclared and unpriced work bind no rate
+            // either way.
+            Pricing::Plan if !rated => basis_only(Basis::PlanEquivalent)?,
+            Pricing::Anthropic | Pricing::Responses | Pricing::Chat | Pricing::Route(_)
+                if !rated =>
+            {
+                Vec::new()
+            }
             Pricing::Unavailable => Vec::new(),
             // Subscription work stays subscription work with no catalogue
             // figure: a plan record with no rates, never a missing record that

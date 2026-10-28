@@ -3627,7 +3627,7 @@ fn accounting_realtime_session_reads_unknown_not_zero() {
         .collect();
     assert!(
         screen.iter().any(|line| line.as_str()
-            == "Realtime: 1 session; token counts and cost unknown, not zero — a realtime session's usage is not reported to this client."),
+            == "Realtime: 1 session; token counts and cost unknown, not zero — no token usage was recorded for it."),
         "{screen:#?}"
     );
     let (label, index) = pages[0]
@@ -3642,7 +3642,7 @@ fn accounting_realtime_session_reads_unknown_not_zero() {
     let request = &pages[*index].text;
     assert!(
         request.iter().any(|line| line
-            == "Kind: Realtime session — started 1970-01-01T00:00:01.000Z, ended 1970-01-01T00:01:01.000Z; its token counts and cost are unknown, not zero: a realtime session's usage is not reported to this client."),
+            == "Kind: Realtime session — started 1970-01-01T00:00:01.000Z, ended 1970-01-01T00:01:01.000Z; its token counts and cost are unknown, not zero: no token usage was recorded for it."),
         "{request:#?}"
     );
     let attempt = attempt_text(&session);
@@ -3670,6 +3670,110 @@ fn accounting_realtime_session_reads_unknown_not_zero() {
     {
         assert!(!text.contains('$'), "{text}");
     }
+}
+
+/// #889 D223: a recorded realtime session with the tokens its responses
+/// reported (332 input, 214 of them cached, 151 output) and no rate, as the
+/// ledger quotes it: the reported parts priced by nothing.
+fn realtime_reported_quote(started: i64, ended: Option<i64>) -> ObservationQuote {
+    let mut q = realtime_quote(started, ended);
+    q.usage = Usage {
+        input: Some(332),
+        read: Some(214),
+        output: Some(151),
+        total: Some(483),
+        session_ended_at_ms: ended,
+        ..Usage::default()
+    };
+    // Noncached input needs the unreported cache-write count.
+    q.buckets = [
+        BucketQuote::MissingUsage,
+        BucketQuote::MissingRate,
+        BucketQuote::MissingUsage,
+        BucketQuote::MissingRate,
+    ];
+    q
+}
+
+/// #889 D223 (Travis, 2026-10-28): `/cost` shows a realtime session's
+/// reported tokens and says its cost is unknown, not zero - never a dollar
+/// figure, on any page.
+#[test]
+fn accounting_realtime_session_shows_reported_tokens_and_no_cost() {
+    let InspectionDay::Ready(mut view) = packet() else {
+        unreachable!()
+    };
+    let session = realtime_reported_quote(/*started*/ 1_000, Some(61_000));
+    view.requests =
+        std::collections::BTreeMap::from([(session.attempt.request_id, vec![session.clone()])]);
+    view.totals = DayTotals::from_quotes(view.requests.values().flatten()).unwrap();
+    view.own_totals = view.totals.clone();
+    let pages = inspection_pages(Ok(InspectionDay::Ready(view)));
+    let screen: Vec<&str> = pages[0]
+        .text
+        .iter()
+        .map(String::as_str)
+        .take_while(|line| *line != "—— Details ——")
+        .collect();
+    insta::assert_snapshot!(screen.join("\n"), @"
+    This conversation on 1970-01-01 (UTC):
+    • OpenAI · gpt-realtime-1.5 — Pay per use. 1 request, 483 tokens. Estimated cost: no price available.
+    Realtime: 1 session; tokens as the provider reported them at the end of each response; cost unknown, not zero — Corbanu has no realtime prices.
+    No other conversation recorded requests on this day.
+    Next step for requests with no price: check the bill from OpenAI. No published price covers them, so no cost is shown for them here.
+    Costs are estimates from published prices; OpenAI doesn't report its charges — check OpenAI's bill.
+    Select a provider below to see its requests.
+    ");
+    let (_, index) = pages[0]
+        .links
+        .iter()
+        .find(|(label, _)| label.contains("Realtime session"))
+        .expect("a realtime request link");
+    assert!(
+        pages[*index].text.iter().any(|line| line
+            == "Kind: Realtime session — started 1970-01-01T00:00:01.000Z, ended 1970-01-01T00:01:01.000Z; its tokens are those the provider reported at the end of each response (a response cut short by the session's end reports none); its cost is unknown, not zero: Corbanu has no realtime prices."),
+        "{:#?}",
+        pages[*index].text
+    );
+    let attempt = attempt_text(&session);
+    assert!(
+        attempt.iter().any(|line| line
+            == "Token cost: unavailable — no applicable price; recorded usage is not a zero-cost claim."),
+        "{attempt:#?}"
+    );
+    for text in pages
+        .iter()
+        .flat_map(|page| {
+            page.text
+                .iter()
+                .chain(page.links.iter().map(|(label, _)| label))
+        })
+        .chain(attempt.iter())
+    {
+        assert!(!text.contains('$'), "{text}");
+    }
+}
+
+/// #889 D223: with sessions both with and without recorded tokens, the first
+/// screen says how many of each.
+#[test]
+fn accounting_realtime_sessions_with_and_without_tokens_say_which() {
+    let old = realtime_quote(/*started*/ 1_000, Some(2_000));
+    let mut reported = realtime_reported_quote(/*started*/ 3_000, Some(4_000));
+    reported.attempt.attempt_id = Uuid::from_u128(31);
+    reported.attempt.request_id = Uuid::from_u128(32);
+    assert_eq!(
+        realtime_session_line([&old, &reported]).as_deref(),
+        Some(
+            "Realtime: 2 sessions; tokens as the provider reported them at the end of each response for 1, none recorded for 1; cost unknown, not zero — Corbanu has no realtime prices."
+        )
+    );
+    assert_eq!(
+        realtime_session_line([&reported]).as_deref(),
+        Some(
+            "Realtime: 1 session; tokens as the provider reported them at the end of each response; cost unknown, not zero — Corbanu has no realtime prices."
+        )
+    );
 }
 
 /// #824: a session whose end was never recorded (the process stopped
