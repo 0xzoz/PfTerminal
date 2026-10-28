@@ -4604,6 +4604,11 @@ fn d156_git_settings_after_a_split_value_ask() {
         "g=git; $g clone -b a\\;b --upload-pack=./x URL",
         "g=git; $g clone -b $'a\\'b;c' --upload-pack=./x URL",
         "sh -c \"g=git; \\$g clone -b 'a; b' --upload-pack=./x URL\"",
+        // Review 3 (author): other text the lexer misreads in quotes.
+        "g=git; $g clone -b 'a ( b' --upload-pack=./x URL",
+        "g=git; $g clone -b 'a ) b' --upload-pack=./x URL",
+        "g=git; $g clone -b 'a { b' --upload-pack=./x URL",
+        "g=git; $g clone -b 'a } b' --upload-pack=./x URL",
     ] {
         assert_eq!(
             script(command),
