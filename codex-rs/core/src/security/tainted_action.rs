@@ -1670,15 +1670,16 @@ impl Classifier {
         // (a quoted blank, `~` or `$`), judged once the line's folders are
         // known.
         let mut splits = Vec::new();
-        // #1449: also whether any is on this line (`x='a b' alias $1`).
-        let mut cut_here = HashSet::new();
         for arg in command {
             work::step();
-            let judgment = loader_variables::scan_split_values(arg, &mut cut_here, &mut splits);
+            let judgment =
+                loader_variables::scan_split_values(arg, &mut self.cut_values, &mut splits);
             self.loader_judgment(&judgment);
         }
-        let split_line = !cut_here.is_empty();
-        self.cut_values.extend(cut_here);
+        // #1449: `x='a b' alias $1`, which the word lexer splits.
+        let split_line = command
+            .iter()
+            .any(|arg| aliases::quoted_assignment_alias(arg));
         // #1064: every folder the line is in, up to a limit.
         let outer_visited = std::mem::replace(&mut self.visited, vec![cwd.to_string()]);
         let outer_visited_all = std::mem::replace(&mut self.visited_all, self.unknown_folder == 0);

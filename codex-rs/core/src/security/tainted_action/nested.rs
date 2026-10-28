@@ -508,11 +508,20 @@ impl Classifier {
                     if is_watch && std::mem::replace(&mut watched, true) {
                         continue;
                     }
-                    let runs =
-                        runner_scripts(&texts, wrapper, &mut joined_left, &mut found.unreadable);
-                    for (word, script) in runs {
+                    let runs = runner_scripts(
+                        &texts,
+                        wrapper,
+                        last,
+                        &mut joined_left,
+                        &mut found.unreadable,
+                    );
+                    for (word, script, whole) in runs {
                         work::step();
-                        roles[word] = Role::Script;
+                        // #1449: a value in part of a word leaves the word
+                        // read as code too.
+                        if whole {
+                            roles[word] = Role::Script;
+                        }
                         // Input words a launcher adds go to the wrapper's
                         // line (`xargs env -S'git config'`).
                         push_script(found, folders, script, launches[wrapper], unknown);
@@ -1459,9 +1468,10 @@ fn replaced(launch: launched_git::Launch) -> launched_git::Launch {
 fn runner_scripts(
     texts: &[String],
     at: usize,
+    last: usize,
     left: &mut usize,
     cut: &mut bool,
-) -> Vec<(usize, String)> {
+) -> Vec<(usize, String, bool)> {
     let wrapper = name(&texts[at]);
     let args = at + 1..texts.len().min(at + 1 + outbound::MAX_JUDGED_POSITIONS);
     match wrapper.as_str() {
@@ -1478,22 +1488,12 @@ fn runner_scripts(
             if index >= texts.len() {
                 return Vec::new();
             }
-            vec![(index, texts[index..].join(" "))]
+            vec![(index, texts[index..].join(" "), true)]
         }
         // #1449: an option's command, given what it runs on: a file it
         // names, or data on its input (a shell runs either as code).
         name if rerun::VALUE_RUNNERS.contains(&name) => {
-            rerun::runner_values(texts, at, outbound::MAX_JUDGED_POSITIONS)
-                .into_iter()
-                .map(|(holder, value, runs)| {
-                    let script = match runs {
-                        rerun::Runs::Line => value,
-                        rerun::Runs::Program => format!("{value} {UNSEEN_OUTPUT}"),
-                        rerun::Runs::Filter => format!("{value} < {UNSEEN_OUTPUT}"),
-                    };
-                    (holder, script)
-                })
-                .collect()
+            runner_option_scripts(texts, at, texts.len(), cut)
         }
         "su" | "runuser" | "flock" | "script" | "env" => {
             let (letter, long) = if wrapper == "env" {
@@ -1540,10 +1540,56 @@ fn runner_scripts(
                 }
                 scripts.extend(with_later);
             }
+            let mut scripts: Vec<(usize, String, bool)> = scripts
+                .into_iter()
+                .map(|(index, script)| (index, script, true))
+                .collect();
+            // #1449: and the other spellings `rerun::OPERAND_RUNNERS` reads
+            // (`su -s SHELL`, `--session-command`, `--comm=`), up to the
+            // command it runs when it wraps one.
+            if wrapper != "env" {
+                let end = rerun::options_end(texts, at, last);
+                for found in runner_option_scripts(texts, at, end, cut) {
+                    work::step();
+                    if !scripts
+                        .iter()
+                        .any(|(index, script, _)| *index == found.0 && *script == found.1)
+                    {
+                        scripts.push(found);
+                    }
+                }
+            }
             scripts
         }
         _ => Vec::new(),
     }
+}
+
+/// #1449: the option values `rerun::runner_values` finds for the runner
+/// at `at` (options before `end`), as shell lines: a program is given a
+/// file and a filter data, neither of which the classifier sees. Each with
+/// its word and whether the value is all of it (else that word is still
+/// read as code: `tar "-x;…;Igzip"`). More words than are read: `cut`.
+fn runner_option_scripts(
+    texts: &[String],
+    at: usize,
+    end: usize,
+    cut: &mut bool,
+) -> Vec<(usize, String, bool)> {
+    let (values, unread) = rerun::runner_values(texts, at, end, outbound::MAX_JUDGED_POSITIONS);
+    *cut |= unread;
+    values
+        .into_iter()
+        .map(|found| {
+            let whole = texts[found.holder] == found.value;
+            let script = match found.runs {
+                rerun::Runs::Line => found.value,
+                rerun::Runs::Program => format!("{} {UNSEEN_OUTPUT}", found.value),
+                rerun::Runs::Filter => format!("{} < {UNSEEN_OUTPUT}", found.value),
+            };
+            (found.holder, script, whole)
+        })
+        .collect()
 }
 
 #[cfg(test)]

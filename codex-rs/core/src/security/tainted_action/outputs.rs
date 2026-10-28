@@ -155,6 +155,28 @@ fn other_output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
     let mut files = Vec::new();
     for (index, word) in args.iter().enumerate() {
         work::step();
+        // #1449: a compiler's options for its preprocessor or linker
+        // (`-Wp,-MD,FILE`, `-Wl,-o,FILE`).
+        if options.contains(&"-MF")
+            && let Some(passed) = word
+                .strip_prefix("-Wp,")
+                .or_else(|| word.strip_prefix("-Wl,"))
+        {
+            let parts: Vec<&str> = passed.split(',').collect();
+            for (at, part) in parts.iter().enumerate() {
+                work::step();
+                let file = if matches!(*part, "-MD" | "-MMD" | "-MF" | "-o" | "--output") {
+                    parts.get(at + 1).copied()
+                } else {
+                    part.strip_prefix("--output=")
+                };
+                if let Some(file) = file {
+                    found = true;
+                    files.push(file.to_string());
+                }
+            }
+            continue;
+        }
         let (option, value) = if options.contains(&word.as_str()) {
             (word.as_str(), args.get(index + 1).cloned())
         } else if let Some((option, value)) = word.split_once('=')

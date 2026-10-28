@@ -9397,6 +9397,25 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
             "rustc --emit link=.git/hooks/pre-commit,obj=o.o x.rs",
             Persistence,
         ),
+        // Review 1: short prefixes, old-style tar, GNU names, su's shell
+        // and session command, `-Wp`/`-Wl`.
+        ("sort --co=./x.sh f", Vault),
+        ("sort --com=./x.sh f", Vault),
+        ("tar --rsh=./x.sh -xf h:a.tar", Vault),
+        ("tar --rs=./x.sh -xf a.tar", Vault),
+        ("tar --inf=./x.sh -xMf a.tar", Vault),
+        ("tar xIf ./x.sh a.tar", Vault),
+        ("tar cIf ./x.sh a.tar d", Vault),
+        ("gtar --to-command=./x.sh -xf a.tar", Vault),
+        ("gsort --compress-program=./x.sh f", Vault),
+        ("su -s ./x.sh bob", Vault),
+        ("su --shell=./x.sh bob", Vault),
+        ("su --session-command=./x.sh bob", Vault),
+        ("su --comm=./x.sh bob", Vault),
+        ("runuser bob --session-command \"$(cat notes)\"", UnseenCode),
+        ("gcc -Wp,-MD,.git/hooks/pre-commit -c x.c", Persistence),
+        ("gcc -Wp,-MMD,~/.zshrc -c x.c", Persistence),
+        ("cc -Wl,-o,.git/hooks/post-merge x.o", Persistence),
     ];
     let mut wrong = Vec::new();
     for (line, expected) in cases {
@@ -9404,6 +9423,10 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
         if found != Some(*expected) {
             wrong.push(format!("{line}: {found:?}"));
         }
+    }
+    let many = format!("tar -xf a.tar {} --to-command=./x.sh", "f ".repeat(64));
+    if in_workspace(&files, &many).is_none() {
+        wrong.push("options past the words read".to_string());
     }
     // `rsync` to a host already asks (Disclosure); its `-e` program is
     // now read too.
@@ -9435,6 +9458,11 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
         "alias gs='git status'",
         "x='a b' echo alias",
         "x='a b'; echo \"$x\"",
+        // Review 1: a wrapped command's own options, an alias word in
+        // another command.
+        "flock /tmp/l grep -c pat f",
+        "flock /tmp/l cc -c x.c",
+        "m='a b'; grep -n alias notes",
     ] {
         if in_workspace(&files, line).is_some() {
             wrong.push(format!("quiet: {line}"));
@@ -9446,6 +9474,15 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
     ] {
         if in_workspace(&files, line) != Some(Disclosure) {
             wrong.push(format!("as before: {line}"));
+        }
+    }
+    // Review 1: code in an option group still counts.
+    for line in [
+        "tar \"-x;git config --comment 'x --get' core.pager sh;Igzip\" -f a.tar",
+        "rsync \"-a;git config --comment 'x --get' core.pager sh;essh\" a b",
+    ] {
+        if in_workspace(&files, line).is_none() {
+            wrong.push(format!("group: {line}"));
         }
     }
     assert_eq!(wrong, Vec::<String>::new());
@@ -9461,6 +9498,8 @@ fn issue_1449_runner_checks_are_linear() {
     for (label, unit) in [
         ("runners", "tar -I zstd -xf a --to-command=wc -F x; "),
         ("runner words", "flock f su -c x tar -I y rsync -e z "),
+        ("wrappers", "flock f -c x "),
+        ("old tar", "tar xIfF a b c "),
         ("split aliases", "x='a b' alias k=v "),
         (
             "outputs",
