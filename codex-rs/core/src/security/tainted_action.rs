@@ -1237,7 +1237,7 @@ struct Classifier {
     /// the folder `ab`), so a file a word then names may not be the one that
     /// runs: from then on no file is opened.
     backslash: bool,
-    /// #1461: under Windows path rules, whether a line read held `$\\`, as
+    /// #1461: under Windows path rules, whether a line read held `$\`, as
     /// a share does (`\\host\c$\work`, which the lexer reads as
     /// `hostc$work`, see `backslash`).
     share: bool,

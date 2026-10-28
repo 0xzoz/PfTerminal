@@ -7987,6 +7987,7 @@ fn issue_1461_windows_rules_a_cd_to_a_variable_folder_is_unknown() {
         "cd ~$X/.. && echo x >> .zshrc",
         "cd \"${X}\" && echo x >> .zshrc",
         r#"cd '\\localhost\c$\work'; cd "$X" && echo x >> .zshrc"#,
+        r#"cd '\\localhost\c$\work'; cd "/$X" && echo x >> .zshrc"#,
     ]
     .into_iter()
     .filter(|line| bash(line).is_none())
