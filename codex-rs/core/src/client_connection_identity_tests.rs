@@ -423,11 +423,12 @@ async fn configured_header_rotation_reconnects_prewarmed_socket_and_keeps_same_v
 
 /// #1343 case 2: under `broker_model_auth` Core holds only the placeholder key
 /// and the brokered auth attaches no header (the broker adds the credential),
-/// so two different brokered credentials give the same identity. Websockets
-/// are off under the broker (`tests/issue_1343_broker_websocket.rs`), so no
-/// cached socket can be reused across them.
+/// so Core cannot tell two brokered credentials apart. Brokered identities
+/// therefore never match, so no cached socket is reused across them even if
+/// websockets were on (they are off under the broker:
+/// `tests/issue_1343_broker_websocket.rs`).
 #[test]
-fn issue_1343_brokered_credentials_are_invisible_to_the_identity_digest() {
+fn issue_1343_brokered_identities_never_match() {
     struct BrokeredAuth;
     impl AuthProvider for BrokeredAuth {
         fn add_auth_headers(&self, _headers: &mut HeaderMap) {}
@@ -438,17 +439,74 @@ fn issue_1343_brokered_credentials_are_invisible_to_the_identity_digest() {
     let other_account =
         ConnectionIdentity::of(Some(&placeholder), &HeaderMap::new(), &BrokeredAuth);
 
-    assert_eq!(removed_account, other_account);
+    assert_ne!(removed_account, other_account);
+    assert_ne!(
+        removed_account,
+        ConnectionIdentity::of(Some(&placeholder), &HeaderMap::new(), &BrokeredAuth)
+    );
+}
+
+/// #1343: externally supplied auth headers (`CodexAuth::Headers`) carry no
+/// account, user or API key, so the headers themselves are the sign-in.
+#[test]
+fn external_header_sign_in_identity_follows_its_headers() {
+    let sign_in = |value: &'static str| {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static(value));
+        (
+            CodexAuth::Headers(codex_login::AuthHeaders::new(headers.clone())),
+            HeaderAuth(headers),
+        )
+    };
+    let (old_auth, old_api_auth) = sign_in("synthetic-old-user");
+    let (same_auth, same_api_auth) = sign_in("synthetic-old-user");
+    let (new_auth, new_api_auth) = sign_in("synthetic-new-user");
+    let identity = ConnectionIdentity::of(Some(&old_auth), &HeaderMap::new(), &old_api_auth);
+
+    assert_eq!(
+        identity,
+        ConnectionIdentity::of(Some(&same_auth), &HeaderMap::new(), &same_api_auth)
+    );
+    assert_ne!(
+        identity,
+        ConnectionIdentity::of(Some(&new_auth), &HeaderMap::new(), &new_api_auth)
+    );
+}
+
+/// #1343: a sign-in with a semantic identity still follows the configured
+/// provider headers, while a refreshed bearer token keeps the connection.
+#[test]
+fn known_identity_follows_configured_headers_across_bearer_refreshes() {
+    let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+    let old = BearerAuthProvider::new("synthetic-old-token".to_string());
+    let refreshed = BearerAuthProvider::new("synthetic-refreshed-token".to_string());
+    let mut headers = HeaderMap::new();
+    headers.insert("x-tenant", HeaderValue::from_static("synthetic-tenant-one"));
+    let identity = ConnectionIdentity::of(Some(&auth), &headers, &old);
+
+    assert_eq!(
+        identity,
+        ConnectionIdentity::of(Some(&auth), &headers, &refreshed)
+    );
+    headers.insert("x-tenant", HeaderValue::from_static("synthetic-tenant-two"));
+    assert_ne!(
+        identity,
+        ConnectionIdentity::of(Some(&auth), &headers, &refreshed)
+    );
+    headers.remove("x-tenant");
+    assert_ne!(
+        identity,
+        ConnectionIdentity::of(Some(&auth), &headers, &refreshed)
+    );
 }
 
 /// #1343 case 1: a sign-in supplied through configured provider headers
 /// (`http_headers`), not `client_setup.auth`/`api_auth`. The rotated header is
-/// not part of the connection identity, so the cached socket opened with the
-/// old header is reused. This pins that known gap: when #1343 is fixed, the
-/// expected values become `["old-1", "old-2", "new-3"]`, two handshakes (old,
-/// new) and connections `[2, 1]`, as in the bearer test above.
+/// part of the connection identity, so the cached socket opened with the old
+/// header is dropped and the turn reconnects with the new one (#1398 pinned
+/// the gap with `stale-3`, one handshake and connections `[3]`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn issue_1343_header_sign_in_rotation_reuses_the_prewarmed_socket() {
+async fn issue_1343_header_sign_in_rotation_reconnects_the_prewarmed_socket() {
     skip_if_no_network!();
     let server = start_websocket_server(vec![
         vec![
@@ -522,14 +580,17 @@ async fn issue_1343_header_sign_in_rotation_reuses_the_prewarmed_socket() {
             }
         }
     }
-    assert_eq!(completions, vec!["old-1", "old-2", "stale-3"]);
+    assert_eq!(completions, vec!["old-1", "old-2", "new-3"]);
     assert_eq!(
         server
             .handshakes()
             .iter()
             .map(|handshake| handshake.header("x-api-key"))
             .collect::<Vec<_>>(),
-        vec![Some("synthetic-old-key".to_string())]
+        vec![
+            Some("synthetic-old-key".to_string()),
+            Some("synthetic-new-key".to_string()),
+        ]
     );
     assert_eq!(
         server
@@ -537,7 +598,7 @@ async fn issue_1343_header_sign_in_rotation_reuses_the_prewarmed_socket() {
             .iter()
             .map(Vec::len)
             .collect::<Vec<_>>(),
-        vec![3]
+        vec![2, 1]
     );
     server.shutdown().await;
 }

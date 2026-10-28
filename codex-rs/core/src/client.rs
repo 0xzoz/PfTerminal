@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use codex_api::AgentIdentityTelemetry;
@@ -385,8 +386,12 @@ type SharedServerConversationState = Arc<StdMutex<Option<ServerConversationState
 /// account and user, or the API key), as a digest, never the credential. A
 /// session whose sign-in was replaced by another user's or another key never
 /// reuses a connection opened with the old one; a refreshed token of the same
-/// sign-in keeps it. Providers without a `CodexAuth` identity use a digest of
-/// their configured provider headers and resolved API auth headers instead (#1326, #1343).
+/// sign-in keeps it. Sign-ins without an account, user or API key (no
+/// `CodexAuth`, or externally supplied auth headers) use a digest of their
+/// configured provider headers and resolved API auth headers instead; the
+/// others also digest the configured provider headers (#1326, #1343). A
+/// brokered credential is invisible to Core, so brokered identities never
+/// match (#1343).
 #[derive(Clone, PartialEq, Eq)]
 struct ConnectionIdentity([u8; 32]);
 
@@ -413,27 +418,41 @@ impl ConnectionIdentity {
             None => digest.update([0]),
         };
         let mode = auth.map(|auth| format!("{:?}", auth.auth_mode()));
+        let account_id = auth.and_then(CodexAuth::get_account_id);
+        let user_id = auth.and_then(CodexAuth::get_chatgpt_user_id);
+        let api_key = auth.and_then(CodexAuth::api_key);
         field(mode.as_deref());
-        field(auth.and_then(CodexAuth::get_account_id).as_deref());
-        field(auth.and_then(CodexAuth::get_chatgpt_user_id).as_deref());
-        field(auth.and_then(CodexAuth::api_key));
-        if auth.is_none() {
-            // No semantic sign-in identity is available for this provider.
-            // Configured headers can carry the sign-in too. Apply resolved auth
-            // last, matching websocket handshake precedence, then hash bytes
-            // rather than an object's address or Debug output. Keep duplicate-
-            // value order, but ignore insertion order between header names.
-            let mut headers = provider_headers.clone();
+        field(account_id.as_deref());
+        field(user_id.as_deref());
+        field(api_key);
+        if codex_model_provider::model_key_broker_required()
+            || api_key == Some(codex_model_provider::BROKERED_KEY_PLACEHOLDER)
+        {
+            // The broker attaches the credential, so Core cannot tell two
+            // brokered sign-ins apart: never reuse a connection across them.
+            static BROKERED: AtomicU64 = AtomicU64::new(0);
+            digest.update(b"brokered");
+            digest.update(BROKERED.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+        }
+        let mut headers = provider_headers.clone();
+        if account_id.is_none() && user_id.is_none() && api_key.is_none() {
+            // No semantic sign-in identity: the resolved auth headers are the
+            // sign-in. Apply them last, matching websocket handshake
+            // precedence. A semantic identity skips them so that a refreshed
+            // bearer token keeps the connection.
             api_auth.add_auth_headers(&mut headers);
-            let mut fields = headers.iter().collect::<Vec<_>>();
-            fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
-            digest.update(b"api-auth-headers");
-            for (name, value) in fields {
-                digest.update((name.as_str().len() as u64).to_le_bytes());
-                digest.update(name.as_str().as_bytes());
-                digest.update((value.as_bytes().len() as u64).to_le_bytes());
-                digest.update(value.as_bytes());
-            }
+        }
+        // Configured headers can carry the sign-in too. Hash bytes rather than
+        // an object's address or Debug output. Keep duplicate-value order, but
+        // ignore insertion order between header names.
+        let mut fields = headers.iter().collect::<Vec<_>>();
+        fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+        digest.update(b"api-auth-headers");
+        for (name, value) in fields {
+            digest.update((name.as_str().len() as u64).to_le_bytes());
+            digest.update(name.as_str().as_bytes());
+            digest.update((value.as_bytes().len() as u64).to_le_bytes());
+            digest.update(value.as_bytes());
         }
         Self(digest.finalize().into())
     }
