@@ -290,12 +290,13 @@ fn git_certain(script: &str) -> bool {
                         // As D85's `data_only` after the subcommand: no
                         // `--output`; a word that is not data (an expansion
                         // may be `--output=...`) only as the separate value
-                        // of commit's or stash's message; nothing git runs
+                        // of commit's message (not stash's: `stash list`
+                        // and `stash show` take log options); nothing git runs
                         // (`rerun::git_runs_program`), nor grep's pager
                         // (`-O`, also in a bundle such as `-nOsh`, and
                         // `--open-files-in-pager`).
                         let message = |at: usize| {
-                            matches!(subcommand, "commit" | "stash")
+                            subcommand == "commit"
                                 && at > 0
                                 && matches!(rest[at - 1].text.as_str(), "-m" | "--message")
                         };
@@ -724,6 +725,8 @@ fn measuring_harness_runs_on_the_grammar_corpus() {
         "git -C /r log \"$x\"",
         "git -C /r diff $o",
         "git -C /r commit -m x \"$o\"",
+        "git -C /r stash list -m \"$o\"",
+        "git -C /r stash show -m \"$o\"",
     ] {
         assert!(!git_certain(script), "{script}");
     }
@@ -735,6 +738,8 @@ fn measuring_harness_runs_on_the_grammar_corpus() {
         "git -C /r status --upload-pack=./x",
         "git -C /r log \"$x\"",
         "git -C /r diff $o",
+        "git -C /r stash list -m \"$o\"",
+        "git -C /r stash show -m \"$o\"",
         "echo \"${arr[${#arr[@]}-1]}\" /*(e:id:)",
         "echo \"${arr[${#arr[@]}-1]}\" \"${v@P}\"",
     ] {
