@@ -2660,6 +2660,58 @@ fn accounting_inspect_first_screen_names_provider_model_and_billing_type() {
 }
 
 #[test]
+fn accounting_operator_preserves_alias_wire_and_custom_route_identity() {
+    let cases = [
+        ("corbanu-plan", "pfterminal-plan"),
+        ("corbanu-terminal-plan", "pfterminal-plan"),
+        ("corbanu-plan-anthropic", "pfterminal-plan"),
+        ("pfterminal-plan-anthropic", "pfterminal-plan"),
+        ("zai-anthropic", "zai"),
+        ("openrouter-anthropic", "openrouter"),
+        ("baseten-anthropic", "baseten"),
+        ("vercel-anthropic", "vercel"),
+        ("vercel-anthropic-fast", "vercel"),
+        ("pfterminal-plan", "pfterminal-plan"),
+        ("openai", "openai"),
+        ("anthropic", "anthropic"),
+    ];
+    let actual = cases.map(|(route, _)| (route, operator(route)));
+    assert_eq!(actual, cases);
+
+    // Custom IDs remain exact: sharing alias normalization must not start
+    // treating different case, whitespace, or similar names as built-ins.
+    let mut custom = vec![String::new(), "private/自分のモデル".to_string()];
+    for (route, _) in cases {
+        custom.extend([
+            route.to_uppercase(),
+            format!(" {route}"),
+            format!("{route} "),
+            format!("{route}-custom"),
+        ]);
+    }
+    let unchanged = custom.iter().map(String::as_str).collect::<Vec<_>>();
+    let actual = custom
+        .iter()
+        .map(|route| operator(route))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, unchanged);
+}
+
+#[test]
+fn accounting_model_names_resolve_corbanu_alias_routes() {
+    let slug = "corbanu/deepseek-v4.1-flash";
+    let routes = [
+        "pfterminal-plan",
+        "pfterminal-plan-anthropic",
+        "corbanu-plan",
+        "corbanu-terminal-plan",
+        "corbanu-plan-anthropic",
+    ];
+    let actual = routes.map(|route| model_name(route, slug));
+    assert_eq!(actual, ["DeepSeek V4.1 Flash"; 5]);
+}
+
+#[test]
 fn accounting_inspect_plain_wording_counts_attempts_and_names_every_route() {
     let mut first = quote();
     first.all_buckets_priced = None;
@@ -3640,13 +3692,16 @@ fn accounting_realtime_session_without_an_end_says_so() {
         "{kind}"
     );
     // An owner prefix keeps it a realtime session; an ordinary turn and a
-    // WebRTC call (recorded at its creation, with no session end) are not.
+    // WebRTC call are not. A WebRTC call is recorded at its creation; the end
+    // it may carry (#955) is its client control channel's, not the media
+    // call's, so it is not shown as a session end (#1000).
     let mut side = session.clone();
     side.attempt.turn = format!("side:realtime:ws:{}", Uuid::from_u128(24));
     assert!(realtime_session(&[&side]));
     assert!(!realtime_session(&[&quote()]));
     let mut call = session;
     call.attempt.turn = format!("realtime:{}", Uuid::from_u128(25));
+    call.usage.session_ended_at_ms = Some(61_000);
     assert!(!realtime_session(&[&call]));
     assert!(
         !attempt_text(&call)
