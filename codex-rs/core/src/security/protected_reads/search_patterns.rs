@@ -20,6 +20,8 @@ const PROGRAM_BEFORE: [&str; 14] = [
     "if", "elif", "while", "until", "then", "do", "else", "{", "sudo", "env", "time", "nohup",
     "command", "exec",
 ];
+/// Prefixes whose next word is always the program, never an assignment.
+const NO_ASSIGNMENTS_AFTER: [&str; 3] = ["nohup", "command", "exec"];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Search {
@@ -333,8 +335,11 @@ fn program_position(lines: &Words<'_>, mut index: usize) -> bool {
     while index > 0
         && !lines.starts[index]
         && !lines.ends(index - 1)
-        && (PROGRAM_BEFORE.contains(&words[index - 1].as_str())
-            || assignment_word(&words[index - 1]))
+        && (assignment_word(&words[index - 1])
+            || PROGRAM_BEFORE.contains(&words[index - 1].as_str())
+                // `nohup X=1 grep` runs a program named `X=1`.
+                && !(assignment_word(&words[index])
+                    && NO_ASSIGNMENTS_AFTER.contains(&words[index - 1].as_str())))
     {
         index -= 1;
     }

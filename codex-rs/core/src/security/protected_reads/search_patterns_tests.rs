@@ -31,6 +31,8 @@ fn leading_assignments_before_searches_are_program_prefixes() {
         "LC_ALL=C git grep .env -- logs",
         "env LC_ALL=C grep .env logs",
         "LC_ALL=C command grep .env logs",
+        "sudo LC_ALL=C grep .env logs",
+        "time LC_ALL=C grep .env logs",
     ] {
         assert_eq!(patterns(script), [".env"], "{script}");
     }
@@ -48,6 +50,10 @@ fn assignment_like_arguments_do_not_start_searches() {
         "./MODE=C grep .env logs",
         "MODE[0]=C grep .env logs",
         "MODE+=C grep .env logs",
+        // These prefixes run the next word as the program: `X=1` here.
+        "nohup X=1 grep .env logs",
+        "command X=1 grep .env logs",
+        "exec X=1 grep .env logs",
     ] {
         assert_eq!(patterns(script), Vec::<String>::new(), "{script}");
     }
