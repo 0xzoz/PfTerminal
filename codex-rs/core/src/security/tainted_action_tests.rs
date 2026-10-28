@@ -7975,18 +7975,38 @@ fn issue_1410_a_cd_to_an_unseen_folder_is_unknown() {
         "pushd \"$X\" && echo x >> .zshrc",
         "cd \"$X\"; cd sub && echo x >> .zshrc",
         "cd \"$REPO\" && make > log",
+        // Review 1.
+        "Y=$ZDOTDIR; cd \"$Y\" && echo x >> .zshrc",
+        "export Y=\"$ZDOTDIR\"; cd \"$Y\" && git checkout -- .zshrc",
+        "Y=\"$HOME$Z\"; cd \"$Y\" && echo x >> .zshrc",
+        ": \"$(cd \"$ZDOTDIR\" && echo x >> .zshrc)\"",
+        "x=$(cd \"$(cat f)\" && git reset --hard)",
+        "x=`cd $ZDOTDIR && echo x >> .zshrc`",
+        "cat <(cd \"$ZDOTDIR\" && echo x >> .zshrc)",
+        "cd $1 && echo x >> .zshrc",
+        "cd $@ && echo x >> .zshrc",
+        "cd a \"$X\" && echo x >> .zshrc",
+        "chdir \"$X\" && echo x >> .zshrc",
+        "chdir ~ && echo x >> .zshrc",
+        "cd -- \"$X\" && echo x >> .zshrc",
+        "cd -P \"$X\" && echo x >> .zshrc",
+        "builtin cd \"$X\" && echo x >> .zshrc",
+        "(cd \"$X\" && echo x >> .zshrc)",
     ]
     .into_iter()
     .filter(|command| script(command).is_none())
     .collect::<Vec<_>>();
     assert_eq!(quiet, Vec::<&str>::new());
     // Already asked: git's own `-C` (or work tree) the classifier cannot
-    // see; a nested script's folder under `env -C`, even a fixed one (it
-    // errs on the safe side).
+    // see; a home the line may still be in (review 1: the change keeps the
+    // other folders); a nested script's folder under `env -C`, even a fixed
+    // one (a known extra prompt).
     for command in [
         "git -C \"/$(cat f)\" pull",
         "git -C \"$ZDOTDIR\" checkout -- .zshrc",
         "git --work-tree=\"$X\" checkout -- .zshrc",
+        "cd /home/fixture; cd \"$X\"; git -C /tmp pull",
+        "X=ZDOTDIR; cd \"${!X}\" && echo x >> .zshrc",
         "env -C /work sh -c 'git pull'",
     ] {
         assert!(script(command).is_some(), "{command}");
@@ -8002,6 +8022,7 @@ fn issue_1410_a_cd_to_an_unseen_folder_is_unknown() {
         "cd \"$(pwd)\" && echo x >> .zshrc",
         // A substitution's `cd` does not move the line.
         "DIR=$(cd \"$X\" && pwd); make > log",
+        "echo \"$(cd \"$X\" && pwd)\" > log",
     ] {
         assert_eq!(script(command), None, "{command}");
     }

@@ -219,6 +219,8 @@ impl Classifier {
             } else {
                 certain_cd::Aside::default()
             },
+            unseen: false,
+            unseen_in_substitution: false,
         };
         let mut found = Found {
             braces: command.iter().any(|arg| arg.contains('{')),
@@ -686,6 +688,8 @@ impl Classifier {
                     others: folders.others.clone(),
                     lost: folders.lost,
                     aside: folders.aside.inner(),
+                    unseen: folders.unseen,
+                    unseen_in_substitution: folders.unseen_in_substitution,
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;

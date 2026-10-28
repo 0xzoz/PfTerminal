@@ -1115,6 +1115,12 @@ struct Folders {
     lost: bool,
     /// D194: folders set aside by a `cd` whose failure stops what follows.
     aside: certain_cd::Aside,
+    /// #1410: a change went to a folder this reading cannot see (`cd
+    /// "$X"`): a file named relative to the folder may be any file.
+    unseen: bool,
+    /// #1410: the same, by a change in a substitution: until the command
+    /// it is part of.
+    unseen_in_substitution: bool,
 }
 
 struct Classifier {
@@ -1535,6 +1541,8 @@ impl Classifier {
             } else {
                 certain_cd::Aside::default()
             },
+            unseen: false,
+            unseen_in_substitution: false,
         };
         let mut variables: HashMap<String, String> = HashMap::new();
         for (name, value) in [
@@ -1622,6 +1630,10 @@ impl Classifier {
             lexed_seds += sed::positions(&words).len();
             lexed_shells += nested::shell_commands(&words);
             let feeds_pipe = pipe_sources.contains(&index);
+            // #1410: a substitution's changes end with it.
+            if !simple.substituted {
+                folders.unseen_in_substitution = false;
+            }
             // D194: where a certain `cd` stops being certain.
             let certain = certain_cd::before(
                 &mut folders,
@@ -1648,7 +1660,7 @@ impl Classifier {
                 certain,
             );
             // #1309: past its possible folders the line may be anywhere.
-            if folders.lost || self.unknown_folder > 0 {
+            if folders.lost || folders.unseen || self.unknown_folder > 0 {
                 self.visited_all = false;
             }
             for folder in std::iter::once(&folders.cwd).chain(&folders.others) {
@@ -1862,26 +1874,18 @@ impl Classifier {
                 self.follow_change(name, args, folders, variables, unknown, certain);
                 // #1410: nor a target it cannot see (a variable never set
                 // in the action, a command's output: `cd "$ZDOTDIR"`, `cd
-                // "$(cat f)"`), which may be any folder. Not in a
-                // substitution, which does not move the line, nor under
-                // Windows path rules (#1261: a share's `c$` may read as a
-                // variable there).
-                if matches!(name.as_str(), "cd" | "pushd")
-                    && !simple.substituted
-                    && !self.homes.windows_paths()
-                    && args
-                        .iter()
-                        .position(|word| !word.starts_with('-') || word == "-")
-                        .is_some_and(|at| {
-                            let target = &args[at];
-                            unseen.get(index + 1 + at) == Some(&true)
-                                && (self.homes.resolve(target, "").contains('$')
-                                    || outputs::unseen_place(target))
-                        })
+                // "$(cat f)"`), which may be any folder; nor zsh `chdir`,
+                // which it does not follow. In a substitution, only for the
+                // commands of that substitution.
+                if name == "chdir"
+                    || (matches!(name.as_str(), "cd" | "pushd")
+                        && args.iter().any(|word| self.unseen_value(word)))
                 {
-                    folders.unchecked = true;
-                    folders.lost = true;
-                    folders.others.clear();
+                    if simple.substituted {
+                        folders.unseen_in_substitution = true;
+                    } else {
+                        folders.unseen = true;
+                    }
                 }
             }
         }
@@ -2475,8 +2479,22 @@ impl Classifier {
     /// #1283: in a folder the classifier cannot know, a file named relative
     /// to it (`.zshenv`, `../x`, `$d/x`) may be any file.
     /// #1309: so too past `MAX_POSSIBLE_FOLDERS`.
+    /// #1410: so too after a change to a folder it cannot see.
     fn unknown_place(&self, folders: &Folders, word: &str) -> bool {
-        (self.unknown_folder > 0 || folders.lost) && self.relative_place(word)
+        (self.unknown_folder > 0
+            || folders.lost
+            || folders.unseen
+            || folders.unseen_in_substitution)
+            && self.relative_place(word)
+    }
+
+    /// #1410: whether a word holds a value this reading cannot see: a
+    /// variable it does not know (`$ZDOTDIR`, `$1`) or a command's output.
+    /// Under Windows path rules only output (#1261: a share's `c$` may
+    /// read as a variable there).
+    fn unseen_value(&self, word: &str) -> bool {
+        outputs::unseen_place(word)
+            || (!self.homes.windows_paths() && self.homes.resolve(word, "").contains('$'))
     }
 
     /// Whether `word` names a file relative to the folder it is used in.
