@@ -1190,7 +1190,9 @@ impl Session {
             // The turn did not record its tool outputs in time. Once it has stopped,
             // record each pending call's abort output, as the turn would have (#1467).
             // Joining waits only for the turn's current poll to return, so the turn
-            // cannot record an output after the check below.
+            // cannot record an output after the check below. The join is skipped only
+            // when the turn task aborts itself; aborts from tasks the turn spawned must
+            // run in a detached task (as guardian's does), or the join cancels them.
             if tokio::task::try_id() != Some(task.handle.abort_handle().id()) {
                 let _ = (&mut task.handle).await;
             }
