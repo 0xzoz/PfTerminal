@@ -69,23 +69,22 @@ pub(super) const CHANGERS: &[&str] = &["cd", "pushd", "popd", "chdir"];
 /// underscores removed (zsh option spelling).
 const SEARCHES: &[&str] = &["cdpath", "cdablevars", "oldpwd", "autocd"];
 
-/// sudo's short options that take no value.
-const SUDO_LETTERS: &str = "AbBEeHiKklnNPSsVv";
+/// sudo's short options that take no value and run nothing else (not
+/// `-A`, `-e`, `-s`: an askpass helper, an editor, `$SHELL`) nor move the
+/// command (`-i`: to the target user's home).
+const SUDO_LETTERS: &str = "bBEHkKlnNPSVv";
 
 /// sudo's long options that take no value (`--preserve-env` may have one
 /// attached).
 const SUDO_LONG: &[&str] = &[
-    "askpass",
     "background",
     "bell",
-    "login",
     "non-interactive",
     "preserve-env",
     "preserve-groups",
     "remove-timestamp",
     "reset-timestamp",
     "set-home",
-    "shell",
     "stdin",
 ];
 
@@ -119,15 +118,35 @@ const SUDO_REDEFINERS: &[&str] = &[
     "eval",
     "bash_env",
     "env",
+    "zdotdir",
+    "rcfile",
+    "init",
     "sal",
     "nal",
 ];
 
-/// D217: whether `text`, any text the action holds or reads, may make
-/// `sudo` other than sudo (see [`SUDO_REDEFINERS`]), or imports a function
-/// (`BASH_FUNC_sudo%%`), or sources a file (`. ./f`).
+/// D217: the only characters a text may hold for `sudo` to be read as
+/// sudo: none that the shell expands or removes (quotes, backslashes, `$`,
+/// `~`, patterns, braces, `=word` aside), groups, redirections or comments,
+/// so the words judged are the words that run and the names
+/// [`SUDO_REDEFINERS`] lists cannot be spelled another way.
+fn plain_for_sudo(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            ' ' | '\t' | '\n' | '-' | '_' | '.' | '/' | '=' | ';' | '&' | '|'
+        )
+}
+
+/// D217: whether `text`, a text the action holds or reads, may make `sudo`
+/// other than sudo (see [`SUDO_REDEFINERS`]), imports a function
+/// (`BASH_FUNC_sudo%%`) or sources a file (`. ./f`), or is not plain
+/// ([`plain_for_sudo`]).
 pub(super) fn may_redefine_sudo(text: &str) -> bool {
-    defines(text)
+    !text.chars().all(|ch| {
+        work::step();
+        plain_for_sudo(ch)
+    }) || defines(text)
         || tokens(text).any(|token| {
             work::step();
             let token = token.to_ascii_lowercase();
@@ -146,10 +165,11 @@ pub(super) fn may_redefine_sudo(text: &str) -> bool {
 
 /// D217 (#1403): the positions of `words` that are sudo's own `-C N`
 /// (`-C N`, `-CN`, `-nC N`, N a number): it closes file descriptors from N
-/// and names no folder. Only sudo as the command's first program, by a bare
-/// `sudo` or one of [`SUDO_PATHS`], counts, and only options before it that
-/// take no value: any other word ends them, so any other `-C` still reads
-/// as a folder. `redefined`: the action may make `sudo` other than sudo
+/// and names no folder. Only sudo as the command's first word (no
+/// assignment before it), by a bare `sudo` or one of [`SUDO_PATHS`],
+/// counts, and only options before it that take no value
+/// ([`SUDO_LETTERS`], [`SUDO_LONG`]): any other word ends them, so any
+/// other `-C` still reads as a folder. `redefined`: the action may make `sudo` other than sudo
 /// ([`may_redefine_sudo`]), or Windows path rules apply: none counts.
 /// Sorted.
 pub(super) fn sudo_close_from(words: &[String], redefined: bool) -> Vec<usize> {
@@ -157,15 +177,14 @@ pub(super) fn sudo_close_from(words: &[String], redefined: bool) -> Vec<usize> {
     if redefined {
         return closes;
     }
-    let Some(&at) = indirect::programs(words).first() else {
+    let Some(word) = words.first() else {
         return closes;
     };
-    let word = words[at].as_str();
-    if !(word == "sudo" || SUDO_PATHS.contains(&word)) {
+    if !(word == "sudo" || SUDO_PATHS.contains(&word.as_str())) {
         return closes;
     }
     let number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
-    let mut index = at + 1;
+    let mut index = 1;
     while let Some(word) = words.get(index) {
         work::step();
         if let Some(long) = word.strip_prefix("--") {

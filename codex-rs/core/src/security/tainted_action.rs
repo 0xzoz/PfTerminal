@@ -1294,9 +1294,12 @@ struct Classifier {
     launched: launched_git::Launch,
     /// #1065: bytes of variable values left to substitute.
     substitution_budget: Budget,
-    /// D217: a text read so far may make `sudo` other than sudo
-    /// ([`unknown_folder::may_redefine_sudo`]), so its `-C` reads as a
-    /// folder again.
+    /// D217: the text being read, or one it is read in, may make `sudo`
+    /// other than sudo ([`unknown_folder::may_redefine_sudo`]), so its `-C`
+    /// reads as a folder again. A text run in a child shell cannot change
+    /// what `sudo` is in the line that runs it, and every way the line
+    /// itself may load code (`.`, `source`, `eval`, `BASH_ENV`, ...) is in
+    /// its own text.
     sudo_redefined: bool,
     /// #1065: bytes of command text, and command lines, lexed so far.
     classified_bytes: usize,
@@ -1602,6 +1605,7 @@ impl Classifier {
         if self.homes.is_windows_view() {
             self.windows_text(command, cwd, depth);
         }
+        let outer_sudo_redefined = self.sudo_redefined;
         self.sudo_redefined |= command
             .iter()
             .any(|part| unknown_folder::may_redefine_sudo(part));
@@ -2020,6 +2024,7 @@ impl Classifier {
         // #885: nested shells' scripts and sed programs, read with quotes.
         self.quoted_pass(command, cwd, depth, (lexed_seds, lexed_shells));
         self.sed_scope = outer_scope;
+        self.sudo_redefined = outer_sudo_redefined;
         self.visited = outer_visited;
         self.visited_all = outer_visited_all;
     }

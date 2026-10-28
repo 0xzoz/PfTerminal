@@ -6462,7 +6462,6 @@ fn d217_sudo_close_from_names_no_folder() {
         "sudo -C 3 -C 4 ./x",
         "sudo --non-interactive -C 3 ./x",
         "/usr/bin/sudo -C 3 ./x",
-        "X=1 sudo -C 3 ./x",
         "sudo --close-from=3 ./x",
         "sudo -C 3 bash x",
         "sudo -C 3 -- ./x",
@@ -6537,6 +6536,26 @@ fn d217_sudo_close_from_names_no_folder() {
         "env 'BASH_FUNC_sudo%%=() { env \"$@\"; }' bash -c 'sudo -C 3 ./run.sh'",
         "/tmp/w/sudo -C 3 ./run.sh",
         "./bin/sudo -C 3 ./run.sh",
+        // Review 2: names spelled another way, a definition read after the
+        // command in a loop, words before sudo, substituted words, and
+        // options that run something else or move the command.
+        r"ha\sh -p /usr/bin/e\nv sudo; sudo -C 3 ./run.sh",
+        "h''ash -p /usr/bin/env sudo; sudo -C 3 ./run.sh",
+        "a=ha; b=sh; $a$b -p /usr/bin/env sudo; sudo -C 3 ./run.sh",
+        "touch hash; ha?h -p /usr/bin/env sudo; sudo -C 3 ./run.sh",
+        "'.' ./defs.sh; sudo -C 3 ./run.sh",
+        r"\. ./defs.sh; sudo -C 3 ./run.sh",
+        "for i in 1 2; do sudo -C 3 ./run.sh; '.' ./defs.sh; done",
+        "for i in 1 2; do sudo -C 3 ./run.sh; . ./defs.sh; done",
+        "=make sudo -C 3 ./run.sh",
+        "./m=k sudo -C 3 ./run.sh",
+        "X=1 sudo -C 3 ./run.sh",
+        "O=make; false && O=-n; sudo $O -C 3 ./run.sh",
+        "sudo -i -C 3 ./run.sh",
+        "sudo -s -C 3 ./run.sh",
+        "sudo -A -C 3 ./run.sh",
+        "sudo -e -C 3 ./run.sh",
+        "sudo --login -C 3 ./run.sh",
     ] {
         if in_workspace(&numbered, line).is_none() {
             wrong.push(line);
@@ -6573,6 +6592,10 @@ fn d217_sudo_close_from_names_no_folder() {
         ("env sudo -C 3 ./x", vec![]),
         ("./sudo -C 3 ./x", vec![]),
         ("/tmp/sudo -C 3 ./x", vec![]),
+        ("X=1 sudo -C 3 ./x", vec![]),
+        ("sudo -i -C 3 ./x", vec![]),
+        ("sudo -s -C 3 ./x", vec![]),
+        ("sudo --login -C 3 ./x", vec![]),
     ] {
         assert_eq!(
             unknown_folder::sudo_close_from(&words(line), false),
@@ -6600,6 +6623,13 @@ fn d217_sudo_close_from_names_no_folder() {
         "BASH_FUNC_sudo%%=x",
         ". ./defs.sh",
         "cd x;. f",
+        "h''ash -p /usr/bin/env sudo",
+        r"ha\sh -p /usr/bin/env sudo",
+        "$a$b -p /usr/bin/env sudo",
+        "ha?h -p /usr/bin/env sudo",
+        "ZDOTDIR=. zsh",
+        "sudo -C 3 ./x >log",
+        "sudo -C 3 ~/x",
     ] {
         assert!(unknown_folder::may_redefine_sudo(text), "{text}");
     }
