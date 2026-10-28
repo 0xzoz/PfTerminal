@@ -16,6 +16,7 @@ use super::GitConfigWrites;
 use super::MAX_FOLDER_BYTES;
 use super::ProtectedActionKind;
 use super::WRITERS;
+use super::certain_cd;
 use super::git_helpers;
 use super::indirect;
 use super::invocation;
@@ -26,9 +27,11 @@ use super::outputs;
 use super::quoted;
 use super::quoted::Command;
 use super::quoted::Word;
+use super::rerun;
 use super::sed;
 use super::shadow;
 use super::shell::SHELLS;
+use super::shell::UNSEEN_OUTPUT;
 use super::shell::basename;
 use super::unknown_folder;
 use super::work;
@@ -124,6 +127,9 @@ struct Sed {
     /// it followed did not happen: without its program file there, sed
     /// fails.
     other_folder: bool,
+    /// #1436: the reading cannot know the folder it runs in, so a program
+    /// file named relative to it may be another.
+    unknown: bool,
 }
 
 /// What quoted text is to the command that gets it.
@@ -213,6 +219,15 @@ impl Classifier {
             unchecked: false,
             others: Vec::new(),
             lost: false,
+            aside: if depth == 0 {
+                certain_cd::Aside::for_line(command)
+            } else {
+                certain_cd::Aside::default()
+            },
+            unseen: false,
+            unseen_in_substitution: false,
+            searched: false,
+            back_unsure: false,
         };
         let mut found = Found {
             braces: command.iter().any(|arg| arg.contains('{')),
@@ -286,9 +301,18 @@ impl Classifier {
             self.unknown_folder -= usize::from(unknown);
             self.launched = outer;
         }
+        // Shared targets are the same for every sed in this reading. If
+        // present, they make `elsewhere` true, so judging a sed cannot reach
+        // `self.script` and add a new executed file. If absent, this is false
+        // regardless of later scripts. Judge them once, without copying their
+        // potentially large names for every sed (#1132).
+        let shared_may_run = found
+            .shared_targets
+            .iter()
+            .any(|target| self.may_run(target.as_deref()));
         for sed in std::mem::take(&mut found.seds) {
             work::step();
-            self.judge_sed(sed, &found, depth);
+            self.judge_sed(sed, &found, depth, shared_may_run);
         }
         // A command the word lexer finds that this reading does not
         // (spelled through a variable, braces or `$IFS`) fails closed.
@@ -315,12 +339,33 @@ impl Classifier {
                 return;
             }
             let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
+            // D194: where a certain `cd` stops being certain.
+            let certain = certain_cd::before(
+                folders,
+                if command.substituted {
+                    certain_cd::Joint::Other
+                } else {
+                    command.after
+                },
+                &texts,
+                !command.writes_to.is_empty()
+                    || command.writes_descriptor
+                    || !command.input.is_empty()
+                    || !command.other_text.is_empty(),
+            );
             // #1309: a later iteration of a loop starts where the one
             // before it left.
             found.deferred |= unknown_folder::starts_loop(&texts);
             let command_at = indirect::command_word(&texts);
             // A substitution's `cd` does not move this line.
             if !command.substituted
+                && let Some((index, name)) = &command_at
+                && unknown_folder::external_change(&texts, *index, name)
+            {
+                // #1403: `./cd sub` runs that file: the folder is unknown.
+                // #1422: so do `CD sub` and `env cd sub`.
+                folders.unchecked = true;
+            } else if !command.substituted
                 && let Some((index, name)) = &command_at
             {
                 let unknown = folders.unchecked;
@@ -330,12 +375,16 @@ impl Classifier {
                     folders,
                     &mut HashMap::new(),
                     unknown,
+                    certain,
                 );
                 // #1283: `cd "$d"` goes where this reading cannot follow.
+                // #1436: as written, homes expanded: path cleanup would
+                // drop `$X` from `$X/..` (and a command's output).
                 folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
                     && texts[index + 1..].iter().any(|text| {
                         work::step();
-                        self.homes.resolve(text, "").contains(['$', '`'])
+                        let text = self.homes.expand_homes(text);
+                        text.contains(['$', '`']) || outputs::unseen_place(&text)
                     });
             }
             // #1309: nor where `CDPATH`, `cdable_vars`, `OLDPWD`, a
@@ -395,7 +444,7 @@ impl Classifier {
             // (after `cd "$d"`, or a wrapper's: `env -C "$d" sh -c`).
             // #1309: in any of a wrapper's spellings (`env -C"$d"`, `sudo
             // -D`, `nsenter --wd=`, `find -execdir`).
-            let elsewhere = unknown_folder::runs_elsewhere(&texts);
+            let elsewhere = unknown_folder::runs_elsewhere(&texts, self.sudo_unsure());
             let unknown = folders.unchecked || elsewhere;
             for (word, script) in replaced_shell_scripts(&texts, &launches, &mut found.unreadable) {
                 work::step();
@@ -437,6 +486,9 @@ impl Classifier {
             let mut wrappers_checked = 0;
             let mut joined_left = MAX_JOINED_BYTES;
             let mut runners = 0;
+            // #1449: one runner's options are read to the end of the
+            // command; any other's up to `MAX_JUDGED_POSITIONS` words.
+            let mut read_whole = true;
             let mut watched = false;
             let mut sed_command = false;
             for start in starts {
@@ -459,11 +511,21 @@ impl Classifier {
                     if is_watch && std::mem::replace(&mut watched, true) {
                         continue;
                     }
-                    let runs =
-                        runner_scripts(&texts, wrapper, &mut joined_left, &mut found.unreadable);
-                    for (word, script) in runs {
+                    let runs = runner_scripts(
+                        &texts,
+                        wrapper,
+                        last,
+                        &mut read_whole,
+                        &mut joined_left,
+                        &mut found.unreadable,
+                    );
+                    for (word, script, whole) in runs {
                         work::step();
-                        roles[word] = Role::Script;
+                        // #1449: `rerun::OPERAND_RUNNERS` values stay read
+                        // as code too.
+                        if whole {
+                            roles[word] = Role::Script;
+                        }
                         // Input words a launcher adds go to the wrapper's
                         // line (`xargs env -S'git config'`).
                         push_script(found, folders, script, launches[wrapper], unknown);
@@ -563,6 +625,18 @@ impl Classifier {
                     }
                     continue;
                 }
+                // #1422: `compgen -C cmd` runs `cmd` as shell code.
+                if resolved_name == "compgen" {
+                    match rerun::compgen_commands(command.words.get(at + 1..).unwrap_or_default()) {
+                        Some(codes) => {
+                            for code in codes {
+                                work::step();
+                                push_script(found, folders, code, replaced(launches[at]), unknown);
+                            }
+                        }
+                        None => found.unreadable = true,
+                    }
+                }
                 let shell = SHELLS.contains(&resolved_name.as_str());
                 let code = invocation::parse(&resolved_name, &texts[at + 1..])
                     .map(|invocation| invocation.code);
@@ -655,6 +729,11 @@ impl Classifier {
                     unchecked: folders.unchecked,
                     others: folders.others.clone(),
                     lost: folders.lost,
+                    aside: folders.aside.inner(),
+                    unseen: folders.unseen,
+                    unseen_in_substitution: folders.unseen_in_substitution,
+                    searched: folders.searched,
+                    back_unsure: folders.back_unsure,
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;
@@ -683,6 +762,7 @@ impl Classifier {
                 found.unreadable |= counted.unreadable || inner.unfollowed;
             }
         }
+        certain_cd::finish(folders);
     }
 
     /// #1283: the git checks of `simple_command` on the words as the shell
@@ -743,13 +823,22 @@ impl Classifier {
         const MAX_BASES: usize = 8;
         let mut bases = vec![cwd.to_string()];
         let mut previous: Option<&str> = None;
-        for word in words {
+        // D217: sudo's `-C N` names no folder.
+        let closes = unknown_folder::sudo_close_from(words, self.sudo_unsure());
+        for (at, word) in words.iter().enumerate() {
             work::step();
             let value = match previous {
-                Some(flag) if super::FOLDER_FLAGS.contains(&flag) => Some(word.as_str()),
+                Some(flag)
+                    if super::FOLDER_FLAGS.contains(&flag)
+                        && !(at > 0 && closes.binary_search(&(at - 1)).is_ok()) =>
+                {
+                    Some(word.as_str())
+                }
                 _ => word
                     .split_once('=')
-                    .filter(|(flag, _)| super::FOLDER_FLAGS.contains(flag))
+                    .filter(|(flag, _)| {
+                        super::FOLDER_FLAGS.contains(flag) && closes.binary_search(&at).is_err()
+                    })
                     .map(|(_, value)| value),
             };
             previous = Some(word);
@@ -783,7 +872,7 @@ impl Classifier {
     /// classifier cannot read, or that saves what it outputs to a file the
     /// line runs is code the host cannot read; an in-place edit that only
     /// keeps, drops or adds lines has the text it adds judged instead.
-    fn judge_sed(&mut self, sed: Sed, line: &Found, depth: usize) {
+    fn judge_sed(&mut self, sed: Sed, line: &Found, depth: usize, shared_may_run: bool) {
         // #1240: judged once, by the first judgment (it reads program
         // files; the Windows view does not open files).
         if self.homes.is_windows_view() {
@@ -818,6 +907,10 @@ impl Classifier {
                         .as_deref()
                         .is_none_or(|written| name(written) == name(&file.text))
                 });
+            // #1436: the file here is still read.
+            if sed.unknown && self.relative_place(&file.text) {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
             let path = self.homes.resolve(&file.text, &sed.cwd);
             match (rewritten, self.read_file(&path, &file.text, &sed.cwd)) {
                 (false, FileText::Text(text)) => chunks.push(text),
@@ -838,7 +931,6 @@ impl Classifier {
             return;
         }
         let mut targets = sed.saved_to.clone();
-        targets.extend(line.shared_targets.iter().cloned());
         targets.extend(readings.iter().flat_map(|reading| {
             reading
                 .writes
@@ -850,7 +942,7 @@ impl Classifier {
         if sed.substituted && line.other_writes {
             targets.push(None);
         }
-        let elsewhere = !targets.is_empty();
+        let elsewhere = !targets.is_empty() || !line.shared_targets.is_empty();
         if !elsewhere && !call.in_place {
             return;
         }
@@ -861,7 +953,7 @@ impl Classifier {
         if call.in_place {
             targets.extend(call.operands.iter().map(|word| target(known(word))));
         }
-        if !targets.iter().any(|target| self.may_run(target.as_deref())) {
+        if !shared_may_run && !targets.iter().any(|target| self.may_run(target.as_deref())) {
             return;
         }
         if elsewhere || !readings.iter().all(|reading| reading.keeps_lines) {
@@ -885,7 +977,8 @@ impl Classifier {
     /// subshell or in a background job. Those are the folders before it and
     /// its target from each of them; past `MAX_POSSIBLE_FOLDERS`, or one
     /// too long, the folder is unknown. `unknown`: the reading already
-    /// cannot know its folder.
+    /// cannot know its folder. `certain` (D194): what follows runs only
+    /// where the change happened, so the folders before it are set aside.
     pub(super) fn follow_change(
         &self,
         name: &str,
@@ -893,6 +986,7 @@ impl Classifier {
         folders: &mut Folders,
         variables: &mut HashMap<String, String>,
         unknown: bool,
+        certain: bool,
     ) {
         let before = folders.cwd.clone();
         if !self.change_folder(name, args, folders, variables) {
@@ -921,23 +1015,19 @@ impl Classifier {
                 None => folders.cwd.clone(),
             });
         }
-        possible.extend(reached);
+        if certain {
+            // D194: what follows runs only where the change happened.
+            certain_cd::set_aside(folders, std::mem::replace(&mut possible, reached));
+        } else {
+            possible.extend(reached);
+        }
         for folder in possible {
             work::step();
             if folder != folders.cwd && !folders.others.contains(&folder) {
                 folders.others.push(folder);
             }
         }
-        if folders.others.len() >= MAX_POSSIBLE_FOLDERS
-            || folders
-                .others
-                .iter()
-                .any(|folder| folder.len() > MAX_FOLDER_BYTES)
-        {
-            folders.unchecked = true;
-            folders.lost = true;
-            folders.others.clear();
-        }
+        too_many(folders);
     }
 
     /// #1309: the folders a command's relative words resolve against from
@@ -986,6 +1076,21 @@ impl Classifier {
                 self.ran.iter().any(|ran| name(ran) == target)
             }
         }
+    }
+}
+
+/// #1309: past `MAX_POSSIBLE_FOLDERS`, or with one too long, the folder
+/// is unknown.
+pub(super) fn too_many(folders: &mut Folders) {
+    if folders.others.len() >= MAX_POSSIBLE_FOLDERS
+        || folders
+            .others
+            .iter()
+            .any(|folder| folder.len() > MAX_FOLDER_BYTES)
+    {
+        folders.unchecked = true;
+        folders.lost = true;
+        folders.others.clear();
     }
 }
 
@@ -1056,6 +1161,7 @@ fn collect_seds(
                     fed,
                     replaced,
                     other_folder,
+                    unknown: folders.unchecked || folders.unseen || folders.lost,
                 });
             }
         }
@@ -1375,9 +1481,11 @@ fn replaced(launch: launched_git::Launch) -> launched_git::Launch {
 fn runner_scripts(
     texts: &[String],
     at: usize,
+    last: usize,
+    whole: &mut bool,
     left: &mut usize,
     cut: &mut bool,
-) -> Vec<(usize, String)> {
+) -> Vec<(usize, String, bool)> {
     let wrapper = name(&texts[at]);
     let args = at + 1..texts.len().min(at + 1 + outbound::MAX_JUDGED_POSITIONS);
     match wrapper.as_str() {
@@ -1394,7 +1502,13 @@ fn runner_scripts(
             if index >= texts.len() {
                 return Vec::new();
             }
-            vec![(index, texts[index..].join(" "))]
+            vec![(index, texts[index..].join(" "), true)]
+        }
+        // #1449: an option's command, given what it runs on: a file it
+        // names, or data on its input (a shell runs either as code).
+        name if rerun::VALUE_RUNNERS.contains(&name) => {
+            let limit = rerun::limit_for(at, last, at == last && std::mem::take(whole));
+            runner_option_scripts(texts, at, texts.len(), limit, cut)
         }
         "su" | "runuser" | "flock" | "script" | "env" => {
             let (letter, long) = if wrapper == "env" {
@@ -1441,10 +1555,58 @@ fn runner_scripts(
                 }
                 scripts.extend(with_later);
             }
+            let mut scripts: Vec<(usize, String, bool)> = scripts
+                .into_iter()
+                .map(|(index, script)| (index, script, true))
+                .collect();
+            // #1449: and the other spellings `rerun::OPERAND_RUNNERS` reads
+            // (`su -s SHELL`, `--session-command`, `--comm=`), up to the
+            // command it runs when it wraps one.
+            if wrapper != "env" {
+                let end = rerun::options_end(texts, at, last);
+                let limit = rerun::limit_for(at, last, at == last && std::mem::take(whole));
+                for found in runner_option_scripts(texts, at, end, limit, cut) {
+                    work::step();
+                    if !scripts
+                        .iter()
+                        .any(|(index, script, _)| *index == found.0 && *script == found.1)
+                    {
+                        scripts.push(found);
+                    }
+                }
+            }
             scripts
         }
         _ => Vec::new(),
     }
+}
+
+/// #1449: the option values `rerun::runner_values` finds for the runner
+/// at `at` (options before `end`, `limit` words read), as shell lines: a
+/// program is given a file and a filter data, neither of which the
+/// classifier sees. Each with its word, which stays read as code too (its
+/// commands count as main counts them; `tar "-x;…;Igzip"`). More words
+/// than are read: `cut`.
+fn runner_option_scripts(
+    texts: &[String],
+    at: usize,
+    end: usize,
+    limit: usize,
+    cut: &mut bool,
+) -> Vec<(usize, String, bool)> {
+    let (values, unread) = rerun::runner_values(texts, at, end, limit);
+    *cut |= unread;
+    values
+        .into_iter()
+        .map(|found| {
+            let script = match found.runs {
+                rerun::Runs::Line => found.value,
+                rerun::Runs::Program => format!("{} {UNSEEN_OUTPUT}", found.value),
+                rerun::Runs::Filter => format!("{} < {UNSEEN_OUTPUT}", found.value),
+            };
+            (found.holder, script, /*script role*/ false)
+        })
+        .collect()
 }
 
 #[cfg(test)]

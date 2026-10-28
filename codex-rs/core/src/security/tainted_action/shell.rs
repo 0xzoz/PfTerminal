@@ -5,6 +5,8 @@
 //! split into commands too. Command boundaries, pipes and substitutions are
 //! kept so wrappers, pipelines and code fed to an interpreter can be followed.
 
+use super::certain_cd;
+use super::certain_cd::Joint;
 use super::work;
 
 /// Shells whose `-c` argument is its own command line.
@@ -68,10 +70,15 @@ pub(super) struct SimpleCommand {
     /// made by a brace expansion or `$IFS`, or holding a substitution's
     /// spliced output (`{git,config}`, `git${IFS}config`, `$(echo git)`).
     pub(super) hidden: Vec<usize>,
+    /// #1064: it is the text of an arithmetic expansion (`$((i + 1))`),
+    /// which runs no command.
+    pub(super) arithmetic: bool,
     /// #989: indexes of the words holding a parameter expansion the lexer
     /// misreads (`${c:-eval}`, `${!c}`, `${c}al`, `"$c"al`, zsh `$c:t`): it
     /// drops braces and quotes, so the substituted word is not its value.
     pub(super) operated: Vec<usize>,
+    /// D194: what joins it to the command before it.
+    pub(super) after: Joint,
 }
 
 /// Lexed simple commands, in the order they finish (a substitution comes
@@ -101,7 +108,10 @@ pub(super) fn basename(word: &str) -> &str {
 
 /// Simple commands of the argv and of any script inside it (`bash -lc "..."`).
 pub(super) fn simple_commands(command: &[String]) -> Lexed {
-    let mut lexer = Lexer::default();
+    let mut lexer = Lexer {
+        joint: Some(Joint::Start),
+        ..Lexer::default()
+    };
     let mut incomplete = false;
     let mut previous: Option<&str> = None;
     for arg in command {
@@ -118,6 +128,7 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
             })
         {
             lexer.start(Start::Plain);
+            lexer.joint = Some(Joint::Start);
         }
         previous = Some(arg.as_str());
         let (expanded, complete) = expand_braces(&replace_ifs(arg));
@@ -144,7 +155,11 @@ pub(super) fn simple_commands(command: &[String]) -> Lexed {
 /// #1064: also a transformation whose operator is not one of the letters
 /// that only quote or describe the value (`${v@$p}`, `${!r@${p^}}`): it may
 /// be `P` when it runs.
-pub(super) fn prompt_expansion(text: &str) -> bool {
+///
+/// #1064: `foreign`: the line may run code of another language, which can
+/// build shell text at run time (`chr(64)`); there an uncertain subscript
+/// counts on any line holding an `@`, as before.
+pub(super) fn prompt_expansion(text: &str, foreign: bool) -> bool {
     if !text.contains('@') {
         return false;
     }
@@ -153,10 +168,29 @@ pub(super) fn prompt_expansion(text: &str) -> bool {
         .chars()
         .filter(|ch| !matches!(ch, '\'' | '"' | '\\'))
         .collect();
+    // #1064: a subscript whose end is uncertain counts only where some
+    // subscript's end is followed by an operator (in either reading), or
+    // where other code may build one.
+    let after_subscript = foreign
+        || [joined.as_str(), bare.as_str()]
+            .iter()
+            .any(|text| operator_after_subscript(text));
     [joined.as_str(), bare.as_str()].iter().any(|text| {
         text.match_indices("@P").any(|(at, _)| {
             !text[at + 2..].starts_with(|ch: char| ch.is_ascii_alphanumeric() || ch == '_')
-        }) || computed_transformation(text)
+        }) || computed_transformation(text, after_subscript)
+    })
+}
+
+/// #1064: whether text holds `]@` followed by anything but one of the
+/// letters that only quote or describe a value (`${a[$(f)]@$p}`, but not
+/// `${a[@]}`, `"$@"` or `${a[i]@Q}`). The `]` that ends a subscript is
+/// written right before a transformation's `@` (backslash-newlines joined,
+/// or with quotes and backslashes removed). Linear.
+fn operator_after_subscript(text: &str) -> bool {
+    text.match_indices("]@").any(|(at, _)| {
+        work::step();
+        !text[at + 2..].starts_with(|ch: char| "QEAKakUuL".contains(ch))
     })
 }
 
@@ -164,7 +198,10 @@ pub(super) fn prompt_expansion(text: &str) -> bool {
 /// before it and a subscript after it) whose `op` is not one of `QEAKakUuL`
 /// (`${!prefix@}` lists names). A subscript is read at most 64 bytes; one
 /// not closed by then counts. Linear.
-fn computed_transformation(text: &str) -> bool {
+///
+/// #1064: such a subscript counts only when `after_subscript` (see
+/// [`operator_after_subscript`]), so `"${a[${#a[@]}-1]}"` does not.
+fn computed_transformation(text: &str, after_subscript: bool) -> bool {
     text.match_indices("${").any(|(at, _)| {
         work::step();
         let mut rest = &text[at + "${".len()..];
@@ -198,12 +235,12 @@ fn computed_transformation(text: &str) -> bool {
                             break;
                         }
                     }
-                    b'\'' | b'"' | b'\\' | b'`' | b'(' | b'{' => return true,
+                    b'\'' | b'"' | b'\\' | b'`' | b'(' | b'{' => return after_subscript,
                     _ => {}
                 }
             }
             let Some(close) = close else {
-                return true;
+                return after_subscript;
             };
             rest = &rest[close + 1..];
         }
@@ -264,7 +301,7 @@ fn reparses(text: &str) -> bool {
 /// `${(P)n::=on}`: a `${(` flag group with any later `P` and `=` may
 /// assign the variable a value names (`options` included). Linear.
 fn assigns_named(text: &str) -> bool {
-    let (Some(flag), Some(assign)) = (text.rfind('P'), text.rfind('=')) else {
+    let (Some(flag), Some(assign)) = (work::rfind(text, "P"), work::rfind(text, "=")) else {
         return false;
     };
     text.find("${(").is_some_and(|at| flag > at && assign > at)
@@ -275,7 +312,7 @@ fn assigns_named(text: &str) -> bool {
 /// delimiter (`${(s:,:~pj:$x:)a}`, `${(@)=~x}`), so a later home folder
 /// (`${(f)x} ~/dir`) counts too. Linear.
 fn substitutes_globs(text: &str) -> bool {
-    let Some(last) = text.rfind('~') else {
+    let Some(last) = work::rfind(text, "~") else {
         return false;
     };
     text.match_indices('$').any(|(at, _)| {
@@ -436,7 +473,7 @@ fn expand_braces(text: &str) -> (String, bool) {
 /// The alternatives of the first innermost `{a,b}` group, if any.
 fn brace_alternatives(word: &str) -> Option<Vec<String>> {
     let close = word.find('}')?;
-    let open = word[..close].rfind('{')?;
+    let open = work::rfind(&word[..close], "{")?;
     let inner = &word[open + 1..close];
     if !inner.contains(',') {
         return None;
@@ -520,9 +557,21 @@ struct Lexer {
     too_deep: bool,
     /// Open substitutions that are not past `MAX_SUBSTITUTION_DEPTH`.
     real_open: usize,
+    /// D194: the operators since the last word (`None`: a word).
+    joint: Option<Joint>,
 }
 
 impl Lexer {
+    /// D194: the operator at `chars[index]`.
+    fn operator(&mut self, chars: &[char], index: usize) {
+        let previous = index.checked_sub(1).map(|at| chars[at]);
+        if let Some(op) =
+            certain_cd::operator(previous, chars[index], chars.get(index + 1).copied())
+        {
+            self.joint = Some(Joint::then(self.joint, op));
+        }
+    }
+
     fn flush(&mut self) {
         if !self.word.is_empty() {
             let index = Some(self.current.words.len());
@@ -542,6 +591,10 @@ impl Lexer {
                 self.current.operated.push(self.current.words.len());
             }
             let word = std::mem::take(&mut self.word);
+            let joint = self.joint.take();
+            if self.current.words.is_empty() {
+                self.current.after = joint.unwrap_or_default();
+            }
             self.current.words.push(word);
         }
     }
@@ -609,6 +662,7 @@ impl Lexer {
             None
         };
         self.start(Start::Plain);
+        self.joint = Some(Joint::Other);
         self.open_group(Group::Bracket, piped);
         if self.current.pipe_from.is_none() {
             self.current.pipe_from = self.group_pipe();
@@ -617,6 +671,7 @@ impl Lexer {
 
     fn close_bracket(&mut self) {
         self.start(Start::Plain);
+        self.joint = Some(Joint::Other);
         self.close_group(Group::Bracket);
         self.current.pipe_from = self.group_pipe();
     }
@@ -655,6 +710,7 @@ impl Lexer {
             arithmetic,
             skip,
         });
+        self.joint = Some(Joint::Other);
     }
 
     /// Close the innermost substitution and continue the command it
@@ -666,6 +722,8 @@ impl Lexer {
         let Some(open) = self.open.pop() else {
             return;
         };
+        // Back in the command it interrupted.
+        self.joint = None;
         if open.skip {
             // The command it interrupted continues; what it printed is
             // unseen.
@@ -723,6 +781,10 @@ impl Lexer {
             self.looked_up |= spliced.is_some()
                 && !matches!(top.as_slice(), [only] if fact_output(&self.done[*only]));
             let unseen = if open.arithmetic && arithmetic_close {
+                for index in open.first..self.done.len() {
+                    work::step();
+                    self.done[index].arithmetic = true;
+                }
                 ARITHMETIC_OUTPUT
             } else {
                 UNSEEN_OUTPUT
@@ -812,6 +874,7 @@ impl Lexer {
                 '<' if next == Some('<') => {
                     // A here-document: its text follows in the script.
                     self.flush();
+                    self.joint = Some(Joint::Other);
                     index += 2;
                     continue;
                 }
@@ -850,8 +913,12 @@ impl Lexer {
                 '|' => {
                     let pipe = next != Some('|') && (index == 0 || chars[index - 1] != '|');
                     self.start(if pipe { Start::Piped } else { Start::Plain });
+                    self.operator(&chars, index);
                 }
-                ';' | '&' | '\n' => self.start(Start::Plain),
+                ';' | '&' | '\n' => {
+                    self.start(Start::Plain);
+                    self.operator(&chars, index);
+                }
                 ch if ch.is_whitespace() || matches!(ch, '<' | '>' | ',') => self.flush(),
                 ch => self.word.push(literal_char(ch)),
             }

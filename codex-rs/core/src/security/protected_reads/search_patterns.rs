@@ -16,9 +16,12 @@ use std::collections::HashSet;
 const SEPARATORS: [&str; 9] = ["|", "||", "&&", ";", "&", "|&", "(", ")", "!"];
 
 /// Words after which the next word is a program.
-const PROGRAM_BEFORE: [&str; 10] = [
-    "then", "do", "else", "{", "sudo", "env", "time", "nohup", "command", "exec",
+const PROGRAM_BEFORE: [&str; 14] = [
+    "if", "elif", "while", "until", "then", "do", "else", "{", "sudo", "env", "time", "nohup",
+    "command", "exec",
 ];
+/// Prefixes whose next word is always the program, never an assignment.
+const NO_ASSIGNMENTS_AFTER: [&str; 3] = ["nohup", "command", "exec"];
 
 #[derive(Clone, Copy, PartialEq)]
 enum Search {
@@ -75,8 +78,9 @@ impl Search {
             "--directories",
             "--binary-files",
         ];
-        const RIPGREP: [&str; 15] = [
+        const RIPGREP: [&str; 16] = [
             "--file",
+            "--hostname-bin",
             "--pre",
             "--pre-glob",
             "--ignore-file",
@@ -93,7 +97,13 @@ impl Search {
             "--sortr",
         ];
         let any = match self {
-            Self::Grep => GREP.contains(&option),
+            Self::Grep => {
+                GREP.contains(&option)
+                    // GNU grep accepts unambiguous long-option prefixes.
+                    // `--exclude-f` distinguishes this path-valued option
+                    // from `--exclude` and `--exclude-dir`.
+                    || (option.starts_with("--exclude-f") && "--exclude-from".starts_with(option))
+            }
             Self::Ripgrep => RIPGREP.contains(&option),
         };
         if NUMBER.contains(&option) || (self == Self::Ripgrep && option == "--context") {
@@ -135,9 +145,13 @@ pub(super) fn search_pattern_indices(
     let Some(starts) = line_starts(command, words, windows) else {
         return patterns;
     };
+    let Some(literal_ends) = literal_word_ends(command, words, windows) else {
+        return patterns;
+    };
     let words = Words {
         words,
         starts: &starts,
+        literal_ends: &literal_ends,
     };
     let mut index = 0;
     while index < words.words.len() {
@@ -158,15 +172,87 @@ pub(super) fn search_pattern_indices(
 struct Words<'a> {
     words: &'a [String],
     starts: &'a [bool],
+    literal_ends: &'a [bool],
 }
 
 impl Words<'_> {
     /// Whether the command `words[index]` is in ends with it (`x;`, the
     /// last word of a line).
     fn ends(&self, index: usize) -> bool {
-        self.words[index].ends_with([';', '|', '&'])
+        (!self.literal_ends[index] && self.words[index].ends_with([';', '|', '&']))
             || self.starts.get(index + 1).copied().unwrap_or(true)
     }
+
+    fn separator(&self, index: usize) -> bool {
+        !self.literal_ends[index] && SEPARATORS.contains(&self.words[index].as_str())
+    }
+}
+
+/// Whether each word's last character was quoted or escaped. Shlex removes
+/// this distinction: `grep 'a|' rg .env` must not start another search at `rg`.
+/// Keep its tokenization authoritative; unclear or mismatching words bail out.
+fn literal_word_ends(command: &[String], words: &[String], windows: bool) -> Option<Vec<bool>> {
+    let posix = !windows
+        || command
+            .first()
+            .is_some_and(|program| super::posix_shell(program));
+    if !posix {
+        return Some(vec![false; words.len()]);
+    }
+    let mut joined = Vec::with_capacity(words.len());
+    let mut literal_ends = Vec::with_capacity(words.len());
+    for argument in command {
+        let mut raw_words = Vec::new();
+        let (mut start, mut quote, mut escaped, mut comment) = (None, None, false, false);
+        let mut literal_end = false;
+        for (offset, c) in argument.char_indices() {
+            if comment {
+                comment = c != '\n';
+            } else if escaped {
+                if c != '\n' {
+                    literal_end = true;
+                }
+                escaped = false;
+            } else if let Some(open) = quote {
+                if c == open {
+                    quote = None;
+                } else if c == '\\' && open == '"' {
+                    escaped = true;
+                } else {
+                    literal_end = true;
+                }
+            } else if matches!(c, ' ' | '\t' | '\n') {
+                if let Some(begin) = start.take() {
+                    raw_words.push((&argument[begin..offset], literal_end));
+                }
+            } else if c == '#' && start.is_none() {
+                comment = true;
+            } else {
+                start.get_or_insert(offset);
+                match c {
+                    '\'' | '"' => quote = Some(c),
+                    '\\' => escaped = true,
+                    _ => literal_end = false,
+                }
+            }
+        }
+        if quote.is_some() || escaped {
+            return None;
+        }
+        if let Some(begin) = start {
+            raw_words.push((&argument[begin..], literal_end));
+        }
+        for (raw, literal_end) in raw_words {
+            let parsed = super::argument_words(raw, /*posix*/ true);
+            if parsed.len() > 1 {
+                return None;
+            }
+            // A standalone backslash-newline produces no word.
+            literal_ends.extend(std::iter::repeat_n(literal_end, parsed.len()));
+            joined.extend(parsed);
+        }
+    }
+    (joined == words).then_some(literal_ends)
 }
 
 /// For each of `words`, whether it starts a new line of the script it is
@@ -244,9 +330,17 @@ fn unquoted_lines(script: &str) -> Vec<&str> {
 /// Whether `words[index]` is where a program is named.
 fn program_position(lines: &Words<'_>, mut index: usize) -> bool {
     let words = lines.words;
-    // `sudo grep`, `then grep`: where the word before is itself a program
-    // or a keyword (not `cat do grep .env`).
-    while index > 0 && !lines.starts[index] && PROGRAM_BEFORE.contains(&words[index - 1].as_str()) {
+    // Prefixes must themselves start a command: `LC_ALL=C grep` and
+    // `sudo grep`, but not `cat LC_ALL=C grep` or `cat do grep`.
+    while index > 0
+        && !lines.starts[index]
+        && !lines.ends(index - 1)
+        && (assignment_word(&words[index - 1])
+            || PROGRAM_BEFORE.contains(&words[index - 1].as_str())
+                // `nohup X=1 grep` runs a program named `X=1`.
+                && !(assignment_word(&words[index])
+                    && NO_ASSIGNMENTS_AFTER.contains(&words[index - 1].as_str())))
+    {
         index -= 1;
     }
     if lines.starts[index] {
@@ -255,7 +349,7 @@ fn program_position(lines: &Words<'_>, mut index: usize) -> bool {
     let Some(previous) = index.checked_sub(1).map(|index| words[index].as_str()) else {
         return true;
     };
-    if SEPARATORS.contains(&previous) || previous.ends_with([';', '|', '&']) {
+    if lines.separator(index - 1) || lines.ends(index - 1) {
         return true;
     }
     // `bash -c 'grep …'`, `sh -lc …`: the script's first word.
@@ -265,6 +359,18 @@ fn program_position(lines: &Words<'_>, mut index: usize) -> bool {
         && index
             .checked_sub(2)
             .is_some_and(|index| super::posix_shell(&words[index]))
+}
+
+/// A shell assignment has a variable name before its first `=`. Paths,
+/// options, array subscripts and other expressions do not count as names.
+fn assignment_word(word: &str) -> bool {
+    let Some((name, _value)) = word.split_once('=') else {
+        return false;
+    };
+    let mut name = name.bytes();
+    name.next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == b'_')
+        && name.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
 /// The search `words[index]` starts, and the index of its first argument.
@@ -302,7 +408,7 @@ fn mark_patterns(
         |index: usize, value: Value| !lines.ends(index) && takes_next(value, words.get(index + 1));
     while index < words.len() {
         let word = words[index].as_str();
-        if SEPARATORS.contains(&word) {
+        if lines.separator(index) {
             break;
         }
         if word.contains("<(") || word.contains(">(") {
