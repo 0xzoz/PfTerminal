@@ -217,3 +217,92 @@ fn issue_650_other_worktrees_folders_are_protected() {
         vec![common.join("worktrees")]
     );
 }
+
+/// #675: the other linked worktrees' own `.git` files, as their admin
+/// folders' `gitdir` names them (absolute, or relative to the admin folder),
+/// are protected too, from a linked worktree and from the main one. A
+/// `gitdir` naming a folder, another file name or nothing there adds
+/// nothing, and one that is a FIFO or too long is not read (or waited on).
+#[test]
+fn issue_675_other_worktrees_dot_git_files_are_protected() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = abs(&dir.path().canonicalize().unwrap());
+    let common = base.join("main/.git");
+    let gitdirs = [
+        ("w", format!("{}\n", base.join("w/.git").display())),
+        ("other", format!("{}\n", base.join("other/.git").display())),
+        ("relative", "../../../../relative/.git\n".to_string()),
+        ("folder", format!("{}\n", common.display())),
+        (
+            "renamed",
+            format!("{}\n", base.join("renamed/git").display()),
+        ),
+        ("gone", format!("{}\n", base.join("gone/.git").display())),
+        (
+            "long",
+            format!("{}{}\n", "/".repeat(5000), base.join("long/.git").display()),
+        ),
+    ];
+    for (name, gitdir) in &gitdirs {
+        let admin = common.join("worktrees").join(name);
+        std::fs::create_dir_all(admin.as_path()).unwrap();
+        std::fs::write(admin.join("commondir").as_path(), "../..\n").unwrap();
+        std::fs::write(admin.join("gitdir").as_path(), gitdir).unwrap();
+        std::fs::create_dir_all(base.join(name).as_path()).unwrap();
+        let file = if *name == "renamed" { "git" } else { ".git" };
+        if *name != "gone" {
+            std::fs::write(
+                base.join(name).join(file).as_path(),
+                format!("gitdir: {}\n", admin.display()),
+            )
+            .unwrap();
+        }
+    }
+    let fifo = common.join("worktrees/fifo");
+    std::fs::create_dir_all(fifo.as_path()).unwrap();
+    let fifo_gitdir =
+        std::ffi::CString::new(fifo.join("gitdir").to_string_lossy().as_bytes()).unwrap();
+    // SAFETY: a NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(fifo_gitdir.as_ptr(), 0o600) }, 0);
+
+    let protected = [base.join("other/.git"), base.join("relative/.git")];
+    let unprotected = [
+        base.join("renamed/git"),
+        base.join("gone/.git"),
+        base.join("long/.git"),
+        common.clone(),
+    ];
+    for root in [base.join("w"), base.join("main")] {
+        let paths = git_persistence_paths(&root, /*user_home*/ None);
+        for path in &protected {
+            assert!(paths.contains(path), "{}: {paths:?}", path.display());
+        }
+        for path in &unprotected {
+            assert!(!paths.contains(path), "{}: {paths:?}", path.display());
+        }
+    }
+
+    // A relative `gitdir` is relative to the admin folder's real location,
+    // also when the repository folder is reached through a link elsewhere.
+    std::fs::create_dir_all(base.join("deep").as_path()).unwrap();
+    std::os::unix::fs::symlink(
+        base.join("main").as_path(),
+        base.join("deep/alias").as_path(),
+    )
+    .unwrap();
+    let paths = worktree_admin_paths(&base.join("deep/alias/.git"));
+    assert!(paths.contains(&base.join("relative/.git")), "{paths:?}");
+
+    // Past the limit: `worktrees` whole, and the `.git` files found so far
+    // (which ones depends on the listing order).
+    for n in 0..=MAX_MODULE_DIRS {
+        std::fs::create_dir_all(common.join(format!("worktrees/f{n}")).as_path()).unwrap();
+    }
+    let paths = worktree_admin_paths(&common);
+    assert_eq!(paths.first(), Some(&common.join("worktrees")));
+    let found = [&protected[..], &[base.join("w/.git")]].concat();
+    assert!(
+        paths[1..].iter().all(|path| found.contains(path)),
+        "{paths:?}"
+    );
+}

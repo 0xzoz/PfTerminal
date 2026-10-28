@@ -1487,4 +1487,35 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn abort_message_reports_wall_time_for_shell_tools() {
+        let call = |tool_name| ToolCall {
+            tool_name,
+            call_id: "call-1".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            encrypted_function_args: None,
+        };
+        let secs = 1.5;
+
+        for name in ["shell_command", "unified_exec"] {
+            assert_eq!(
+                "Wall time: 1.5 seconds\naborted by user",
+                ToolCallRuntime::abort_message(&call(codex_tools::ToolName::plain(name)), secs)
+            );
+        }
+        assert_eq!(
+            "aborted by user after 1.5s",
+            ToolCallRuntime::abort_message(
+                &call(codex_tools::ToolName::namespaced("mcp", "shell_command")),
+                secs
+            )
+        );
+        assert_eq!(
+            "aborted by user after 1.5s",
+            ToolCallRuntime::abort_message(&call(codex_tools::ToolName::plain("other")), secs)
+        );
+    }
 }

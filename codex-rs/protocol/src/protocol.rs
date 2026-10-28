@@ -396,6 +396,23 @@ pub struct RealtimeResponseCreated {
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub struct RealtimeResponseDone {
     pub response_id: Option<String>,
+    /// The token counts the provider reported for this response (#889 D223).
+    /// `None` when it reported none or reported them in a form that is not
+    /// exact nonnegative integers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub usage: Option<RealtimeResponseUsage>,
+}
+
+/// The token counts a realtime `response.done` reported, as the provider
+/// stated them. Each count is `None` when the provider did not state it.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct RealtimeResponseUsage {
+    pub input_tokens: Option<u64>,
+    /// The part of `input_tokens` served from the prompt cache.
+    pub cached_input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -6514,6 +6531,7 @@ mod tests {
             file_system_sandbox_policy: Some(FileSystemSandboxPolicy::restricted(vec![
                 FileSystemSandboxEntry {
                     path: FileSystemPath::GlobPattern {
+                        scan: None,
                         pattern: "/tmp/private/**/*.txt".to_string(),
                     },
                     access: FileSystemAccessMode::Deny,
