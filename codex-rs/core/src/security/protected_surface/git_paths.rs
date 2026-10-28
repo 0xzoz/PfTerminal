@@ -142,9 +142,12 @@ fn repository_paths(
 /// (`<git_dir>/worktrees/<name>`), also the other worktrees': with one's
 /// `commondir` or `config.worktree` rewritten, the person's later git runs
 /// in that worktree would read a planted config (which can run code); and
-/// its `gitdir` (where git finds the worktree). On Linux a missing
-/// `commondir` or `gitdir` is left out. Past the limit, or when the folder
-/// cannot be read, `worktrees` as a whole (fail closed).
+/// its `gitdir` (where git finds the worktree). #675: also the other
+/// worktree's own `.git` file that `gitdir` names, in its work tree:
+/// rewritten to `gitdir: <planted>`, git runs there would read a planted
+/// config too. On Linux a missing `commondir` or `gitdir` is left out, and
+/// a `.git` file only while it exists (as a regular file). Past the limit,
+/// or when the folder cannot be read, `worktrees` as a whole (fail closed).
 fn worktree_admin_paths(git_dir: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
     let worktrees = git_dir.join("worktrees");
     let closed = || vec![worktrees.clone()];
@@ -178,8 +181,64 @@ fn worktree_admin_paths(git_dir: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
                 paths.push(path);
             }
         }
+        paths.extend(linked_dot_git(&admin));
     }
     paths
+}
+
+/// Longest `gitdir` file read (git writes one path and a newline).
+const MAX_GITDIR_BYTES: u64 = 4096;
+
+/// #675: the `.git` file of the linked worktree whose admin folder is
+/// `admin`, as its `gitdir` names it (relative to `admin` when relative),
+/// when that is an existing regular file named `.git` (or, outside Linux,
+/// may be one: it cannot be checked). Nothing when `gitdir` cannot be read
+/// as a small regular file, or names something else (a folder, such as a
+/// repository's own `.git`, stays writable).
+fn linked_dot_git(admin: &AbsolutePathBuf) -> Option<AbsolutePathBuf> {
+    let text = read_small_regular(&admin.join("gitdir"))?;
+    let named = text.lines().next()?.trim();
+    if named.is_empty() {
+        return None;
+    }
+    let dot_git = AbsolutePathBuf::resolve_path_against_base(named, admin.as_path());
+    if dot_git.as_path().file_name() != Some(std::ffi::OsStr::new(".git")) {
+        return None;
+    }
+    match std::fs::symlink_metadata(dot_git.as_path()) {
+        Ok(meta) if meta.is_file() => Some(dot_git),
+        Ok(_) => None,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+        // Unreadable (it may be one): kept, except where Linux would put a
+        // placeholder over whatever it is.
+        Err(_) => (!cfg!(target_os = "linux")).then_some(dot_git),
+    }
+}
+
+/// The text of the small regular file at `path`, read without blocking on
+/// a FIFO or device swapped in; `None` when it is anything else or longer
+/// than [`MAX_GITDIR_BYTES`].
+fn read_small_regular(path: &AbsolutePathBuf) -> Option<String> {
+    use std::io::Read;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::custom_flags(
+        &mut options,
+        libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC,
+    );
+    #[cfg(not(unix))]
+    if !std::fs::symlink_metadata(path.as_path()).is_ok_and(|meta| meta.is_file()) {
+        return None;
+    }
+    let file = options.open(path.as_path()).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() || meta.len() > MAX_GITDIR_BYTES {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_GITDIR_BYTES).read_to_end(&mut bytes).ok()?;
+    String::from_utf8(bytes).ok()
 }
 
 /// The hooks folder `config` names, when it should be protected (on Linux
