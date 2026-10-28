@@ -35,6 +35,69 @@ fn the_first_operand_of_a_search_is_its_pattern() {
 }
 
 #[test]
+fn quoted_or_escaped_suffixes_do_not_start_searches() {
+    for (script, pattern) in [
+        ("grep 'a|' rg .env", "a|"),
+        ("grep \"a|\" grep .env", "a|"),
+        ("grep a\\| egrep .env", "a|"),
+        ("grep 'a;' fgrep .env", "a;"),
+        ("grep \"a&\" rg .env", "a&"),
+        ("grep a\\& rg .env", "a&"),
+    ] {
+        assert_eq!(patterns(script), [pattern], "{script}");
+    }
+}
+
+#[test]
+fn literal_separator_words_are_patterns_and_option_values() {
+    for (script, pattern) in [
+        ("grep '|' rg .env", "|"),
+        ("grep ';' rg .env", ";"),
+        ("grep '(' rg .env", "("),
+        ("grep ')' rg .env", ")"),
+        ("grep '!' rg .env", "!"),
+        ("grep -e '|' rg .env", "|"),
+        ("grep --regexp='a|' rg .env", "--regexp=a|"),
+        ("rg --glob 'a|' token .env", "token"),
+    ] {
+        assert_eq!(patterns(script), [pattern], "{script}");
+    }
+    assert_eq!(patterns("grep -f 'a|' rg .env"), Vec::<String>::new());
+}
+
+#[test]
+fn real_separators_after_quoted_patterns_still_end_searches() {
+    for script in [
+        "grep 'a|' logs; rg .env logs",
+        "grep 'a'| rg .env logs",
+        "grep 'a|' logs && rg .env logs",
+        "grep 'a|' logs\ngrep .env logs",
+    ] {
+        assert_eq!(patterns(script), ["a|", ".env"], "{script}");
+    }
+    for script in ["grep 'a|'; rg .env logs", "grep a\\|; rg .env logs"] {
+        assert_eq!(patterns(script), ["a|;", ".env"], "{script}");
+    }
+}
+
+#[test]
+fn separator_provenance_survives_empty_quotes_continuations_and_comments() {
+    for script in ["grep 'a|'\"\" rg .env", "grep a\\\n\\| rg .env"] {
+        assert_eq!(patterns(script), ["a|"], "{script}");
+    }
+    assert_eq!(patterns("grep 'a|b' .env"), ["a|b"]);
+    assert_eq!(patterns("grep 'a\nb|' rg .env"), ["a\nb|"]);
+    assert_eq!(patterns("# don't split '|\ngrep .env logs"), [".env"]);
+}
+
+#[test]
+fn carriage_returns_stay_in_words_as_shlex_keeps_them() {
+    // Shlex and bash do not split at `\r`; a CRLF script still has patterns.
+    assert_eq!(patterns("grep .env x.log\r"), [".env"]);
+    assert_eq!(patterns("grep 'a|' rg .env\r\n"), ["a|"]);
+}
+
+#[test]
 fn a_pattern_option_gives_the_patterns() {
     assert_eq!(
         patterns("grep -e .env -e .npmrc logs/x.log"),
@@ -102,6 +165,59 @@ fn a_search_ends_with_its_command() {
     assert_eq!(patterns("grep \\\n  -e .env logs/"), [".env"]);
     // A comment's quote does not hide the next line.
     assert_eq!(patterns("# don't\ngrep .env x.log"), [".env"]);
+}
+
+#[test]
+fn hostname_program_paths_are_not_search_patterns() {
+    for script in [
+        "rg --hostname-bin .env token .npmrc",
+        "rg --hostname-bin=.env token .npmrc",
+        "rg --hostname-bin .env --hostname-bin .npmrc token .profile",
+        "rg --hostname-bin .env -- token .npmrc",
+        "rg --hostname-bin .env -e token .npmrc",
+    ] {
+        assert_eq!(patterns(script), ["token"], "{script}");
+    }
+    assert_eq!(patterns("rg --hostname-bin hostname .env logs"), [".env"]);
+}
+
+#[test]
+fn exclude_from_abbreviations_keep_the_file_out_of_search_patterns() {
+    for option in [
+        "--exclude-f",
+        "--exclude-fr",
+        "--exclude-fro",
+        "--exclude-from",
+    ] {
+        for script in [
+            format!("grep {option} .env token .npmrc"),
+            format!("grep {option}=.env token .npmrc"),
+            format!("grep {option} .env -e token .npmrc"),
+        ] {
+            assert_eq!(patterns(&script), ["token"], "{script}");
+        }
+    }
+    assert_eq!(patterns("grep --exclude-fr excludes .env logs"), [".env"]);
+}
+
+#[test]
+fn path_option_recognition_respects_dialect_and_command_boundaries() {
+    for script in [
+        "grep --hostname-bin .env token logs",
+        "rg --exclude-fr .env token logs",
+        "grep --exclude- .env token logs",
+        "grep --exclude-from-extra .env token logs",
+    ] {
+        assert_eq!(patterns(script), [".env"], "{script}");
+    }
+    for script in [
+        "rg --hostname-bin .env; cat .npmrc",
+        "grep --exclude-fr .env; cat .npmrc",
+        "rg --hostname-bin\ncat .env",
+        "grep --exclude-fr\ncat .env",
+    ] {
+        assert_eq!(patterns(script), Vec::<String>::new(), "{script}");
+    }
 }
 
 /// Where the operands are unclear, nothing is marked.
