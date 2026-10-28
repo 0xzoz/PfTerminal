@@ -150,3 +150,14 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   repository works as before. `git worktree repair` of another worktree now
   fails for agent commands as well, as `git worktree move` and `remove` already
   did. Permissive is unchanged.
+
+## GLM 5.2 on Z.AI and Ambient: "medium" now runs as Standard
+
+- **A GLM 5.2 session set to `medium` now runs at Standard, as its label
+  says** (#1266, #1270, thanks to @citadelculture). On the Z.AI `glm-5.2` and
+  Ambient `z-ai/glm-5.2` routes, an explicit `model_reasoning_effort =
+  "medium"` (the catalogue's **Standard**, chosen in Spawn or set in config)
+  used to be rewritten to `xhigh` when the config loaded or a session resumed,
+  so it quietly ran as Deep. It now stays Standard, including for saved
+  sessions you resume. Deep and an unset effort behave as before. The Corbanu
+  Plan route for GLM 5.2 still maps `medium` to `xhigh` (#1476).
