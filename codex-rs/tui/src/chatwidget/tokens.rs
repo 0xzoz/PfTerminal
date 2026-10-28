@@ -1424,6 +1424,13 @@ fn inspection_pages_for(
     }
     // Plain first screen: the total stays first, then one line per provider
     // and model, then the auditing detail below a divider.
+    let gap_line = ready.recording_gap.then(|| {
+        recording_gap_line(if period.is_some() {
+            "this period"
+        } else {
+            "this day"
+        })
+    });
     let heading = period.map_or_else(
         || day_heading(ready.utc_day, Utc::now().timestamp() / 86_400),
         |period| format!("This conversation, {period} (UTC):"),
@@ -1458,6 +1465,10 @@ fn inspection_pages_for(
         next_step,
     );
     pages[0].text.splice(0..0, overview);
+    // #314 (D228): right under the heading, before any figure it qualifies.
+    if let Some(line) = gap_line {
+        pages[0].text.insert(1, line);
+    }
     // Provider/model groups first, then each request, then the auditing
     // groups (own/descendant attempts, attribution, unknown parents).
     let mut links = std::mem::take(&mut pages[0].links);
@@ -2506,6 +2517,15 @@ fn route_line(quotes: &[&ObservationQuote], named: bool) -> String {
         }
         Err(_) => format!("• {route} — cost unavailable."),
     }
+}
+
+/// #314 (D228): said when accounting failed to record at least one request of
+/// this conversation on the day (or on a day of the period) shown, so its
+/// totals never read as complete. Missing work is never free work.
+fn recording_gap_line(span: &str) -> String {
+    format!(
+        "Totals for {span} may be incomplete: Corbanu failed to record at least one request of this conversation or its subagents, which may still have been billed. The cause is in Corbanu's accounting log; check your provider's bill."
+    )
 }
 
 /// The first screen: one line per provider and model, stating how it is paid

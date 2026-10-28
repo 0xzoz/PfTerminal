@@ -309,6 +309,7 @@ fn packet() -> InspectionDay {
         requests: std::collections::BTreeMap::from([(q.attempt.request_id, vec![q])]),
         other_conversations: Some(Default::default()),
         empty_day: None,
+        recording_gap: false,
     })
 }
 
@@ -365,6 +366,93 @@ fn accounting_inspect_range_partial_no_amount_and_explicit_coverage() {
     Range total unavailable — partial or unavailable buckets excluded; no partial total.
     Effective coverage (requested ∩ aggregate retention ∩ snapshot) for [1970-01-01T00:00:00.000Z, 1970-01-01T01:00:00.000Z): [1970-01-01T00:00:00.001Z, 1970-01-01T01:00:00.000Z)
     ");
+}
+
+/// #314 (D228, Travis 2026-10-28): a day on which accounting failed to record
+/// a request of this conversation says its totals may be incomplete, right
+/// under the heading, so the requests it did record never read as the whole
+/// day. Missing data never looks like free work.
+#[test]
+fn accounting_recording_gap_says_the_day_may_be_incomplete() {
+    let InspectionDay::Ready(mut view) = packet() else {
+        unreachable!()
+    };
+    let complete = inspection_pages(Ok(packet()));
+    assert!(
+        !complete[0]
+            .text
+            .iter()
+            .any(|line| line.contains("may be incomplete")),
+        "{:#?}",
+        complete[0].text
+    );
+    view.recording_gap = true;
+    let pages = inspection_pages(Ok(InspectionDay::Ready(view)));
+    let screen: Vec<&str> = pages[0]
+        .text
+        .iter()
+        .map(String::as_str)
+        .take_while(|line| *line != "—— Details ——")
+        .collect();
+    insta::assert_snapshot!(screen.join("\n"), @"
+    This conversation on 1970-01-01 (UTC):
+    Totals for this day may be incomplete: Corbanu failed to record at least one request of this conversation or its subagents, which may still have been billed. The cause is in Corbanu's accounting log; check your provider's bill.
+    • synthetic · synthetic-model — Pay per use. 1 request, 140 tokens. Estimated cost: at least $0.000180 (1 attempt had no price).
+    No other conversation recorded requests on this day.
+    Next step for requests priced only in part: check the bill from synthetic. Some of their tokens have no published price, so the estimate is only a lower bound.
+    Costs are estimates from published prices; synthetic doesn't report its charges — check synthetic's bill.
+    Select a provider below to see its requests.
+    ");
+}
+
+/// #314 (D228): an empty day with a gap says both that nothing was recorded
+/// and that this is not a complete account.
+#[test]
+fn accounting_recording_gap_on_an_empty_day() {
+    let InspectionDay::Ready(mut view) = packet() else {
+        unreachable!()
+    };
+    view.requests.clear();
+    view.totals = DayTotals::default();
+    view.own_totals = DayTotals::default();
+    view.empty_day = Some(codex_state::accounting::EmptyDay::NotRecorded);
+    view.recording_gap = true;
+    let pages = inspection_pages(Ok(InspectionDay::Ready(view)));
+    assert!(
+        pages[0].text[1].starts_with("Totals for this day may be incomplete:"),
+        "{:#?}",
+        pages[0].text
+    );
+}
+
+/// #314 (D228): a range with a gap day says so on its overview, and the
+/// bucket's own page says it for its period.
+#[test]
+fn accounting_recording_gap_in_a_range() {
+    let InspectionDay::Ready(mut view) = packet() else {
+        unreachable!()
+    };
+    view.recording_gap = true;
+    view.read_at_ms = view.coverage.completed_as_of_ms;
+    let pages = inspection_pages(Ok(range_packet(
+        /*partial*/ false,
+        InspectionDay::Ready(view),
+    )));
+    assert!(
+        pages[0]
+            .text
+            .iter()
+            .any(|line| line.starts_with("Totals for this range may be incomplete:")),
+        "{:#?}",
+        pages[0].text
+    );
+    let texts: Vec<&Vec<String>> = pages.iter().map(|page| &page.text).collect();
+    assert!(
+        texts[1..].iter().any(|text| text
+            .iter()
+            .any(|line| line.starts_with("Totals for this period may be incomplete:"))),
+        "{texts:#?}"
+    );
 }
 
 /// A week read on its third day: day 0 recorded up to the checkpoint, the

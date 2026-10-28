@@ -57,6 +57,16 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   no rate is applied even when the session's model has a catalogue price.
   Sessions recorded earlier, and WebRTC calls, still show their tokens as
   unknown (#889, D223).
+- **A day with an unrecorded request says its totals may be incomplete.**
+  When accounting fails to record a request (the turn already warns, for
+  example with a clock far behind the ledger), Corbanu now keeps a small
+  marker for that conversation and the UTC days the request could have been
+  sent on, and `/cost` for such a day says "Totals for this day may be
+  incomplete" under its heading (a range or period that includes it says so
+  too). A home's ledger moves to format 7 the first time this happens, so
+  older builds then treat it as written by a newer build and leave
+  collection off. A home with no ledger yet gets none: its `/cost` already
+  shows as unavailable (#314, D228).
 
 ## `/security` wording
 
