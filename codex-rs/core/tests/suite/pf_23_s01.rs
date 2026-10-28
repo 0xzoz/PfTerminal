@@ -2556,6 +2556,123 @@ async fn issue_598_an_approved_command_cannot_move_the_corbanu_home() -> anyhow:
     Ok(())
 }
 
+/// #1472: a Corbanu home reached through ordinary folders inside the
+/// command's writable root (`<cwd>/aa/home`, spelled by its real location or
+/// through a link outside the root) cannot be replaced by moving a folder
+/// above it aside (`mv aa aa.old`) and rebuilding the path with a planted
+/// home: #592/#617 pin the home and every folder above it inside the root.
+/// The profile writes only the current folder (as Aggressive's), or
+/// everything (full access). Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_1472_a_home_below_the_working_folder_cannot_be_moved_aside() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemAccessMode;
+    use codex_protocol::permissions::FileSystemPath;
+    use codex_protocol::permissions::FileSystemSandboxEntry;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::FileSystemSpecialPath;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    // Every name is built at run time (the command-text net cannot see it).
+    // The first move runs in a new user and mount namespace, where the pins
+    // are copies (when the system lets the command create one).
+    let command = "p=\"$(printf 'a%s' a)\"; h=\"$(printf 'ho%s' me)\"; \
+                   unshare -rm mv \"$p\" \"$p.ns\"; echo unshare=$?; \
+                   mv \"$p\" \"$p.old\"; echo mvaa=$?; \
+                   mv \"$p/$h\" \"$p/$h.old\"; echo mvhome=$?; \
+                   mkdir -p \"$p/$h\" && echo planted > \"$p/$h/AGENTS.md\"; echo ran-1472";
+    let mut wrong = Vec::new();
+    for (level, full_access, through_link) in [
+        (SecurityLevel::Moderate, false, false),
+        (SecurityLevel::Moderate, false, true),
+        (SecurityLevel::Moderate, true, false),
+        (SecurityLevel::Aggressive, false, false),
+        (SecurityLevel::Aggressive, false, true),
+        (SecurityLevel::Permissive, false, false),
+        (SecurityLevel::Permissive, false, true),
+    ] {
+        let temp = TempDir::new()?;
+        let base = temp.path().canonicalize()?;
+        let cwd = base.join("ws");
+        let real = cwd.join("aa/home");
+        std::fs::create_dir_all(&real)?;
+        std::fs::write(real.join("AGENTS.md"), "original\n")?;
+        std::fs::write(real.join("auth.json"), CANARY)?;
+        // The link lies outside the writable root, as `~/.corbanu` would.
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&real, &link)?;
+        let spelled =
+            AbsolutePathBuf::from_absolute_path(if through_link { &link } else { &real })?;
+        let cwd_abs = AbsolutePathBuf::from_absolute_path(&cwd)?;
+        let (test, captured) = start_turn_in(
+            /*home*/ None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-1472", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.codex_home = spelled.clone();
+                config.cwd = cwd_abs.clone();
+                let profile = if full_access {
+                    PermissionProfile::Disabled
+                } else {
+                    PermissionProfile::from_runtime_permissions(
+                        &FileSystemSandboxPolicy::restricted(vec![
+                            FileSystemSandboxEntry::new(
+                                FileSystemPath::Special {
+                                    value: FileSystemSpecialPath::Root,
+                                },
+                                FileSystemAccessMode::Read,
+                            ),
+                            FileSystemSandboxEntry::new(
+                                FileSystemPath::Path {
+                                    path: cwd_abs.clone(),
+                                },
+                                FileSystemAccessMode::Write,
+                            ),
+                        ]),
+                        NetworkSandboxPolicy::Restricted,
+                    )
+                };
+                config
+                    .permissions
+                    .set_permission_profile(profile)
+                    .expect("profile");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-1472");
+        drop(test);
+        let open = level == SecurityLevel::Permissive;
+        let moved = ["aa.old", "aa.ns", "aa/home.old"]
+            .iter()
+            .any(|name| cwd.join(name).exists());
+        let planted =
+            std::fs::read_to_string(real.join("AGENTS.md")).unwrap_or_default() == "planted\n";
+        if !output.contains("ran-1472")
+            || moved != open
+            || planted != open
+            || ["unshare=0", "mvaa=0", "mvhome=0"]
+                .iter()
+                .any(|status| output.contains(status))
+                != open
+        {
+            wrong.push(format!(
+                "{level:?} full_access={full_access} link={through_link}: moved={moved} \
+                 planted={planted}: {output}"
+            ));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// #583: under a protected level with full access, a command cannot create a
 /// missing Corbanu-home entry that Corbanu reads later: exec-policy
 /// `rules/x.rules` (which would approve commands in later sessions) or any
