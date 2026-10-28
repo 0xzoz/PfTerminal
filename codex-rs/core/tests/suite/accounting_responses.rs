@@ -957,10 +957,9 @@ async fn accounting_unrecorded_turn_marks_its_day_incomplete() -> anyhow::Result
     let db = test.codex.state_db().unwrap();
     wait_attempts(&db, /*count*/ 1).await?;
     let owner = test.session_configured.thread_id;
-    let today = chrono::Utc::now().timestamp_millis() / 86_400_000;
     let day = |db: std::sync::Arc<codex_state::StateRuntime>| async move {
         let now = chrono::Utc::now().timestamp_millis();
-        match AccountingStore::inspect_day(&db, owner, today, now).await? {
+        match AccountingStore::inspect_day(&db, owner, now / 86_400_000, now).await? {
             InspectionDay::Ready(view) => anyhow::Ok(view),
             other => anyhow::bail!("{other:?}"),
         }
@@ -989,7 +988,15 @@ async fn accounting_unrecorded_turn_marks_its_day_incomplete() -> anyhow::Result
         sqlx::query_as("SELECT thread_id, utc_day FROM draft_accounting_gap_days")
             .fetch_all(&mut conn)
             .await?;
-    assert_eq!(marked, vec![(owner.to_string(), today)]);
+    // The days the turn ran on (one, unless it crossed midnight UTC).
+    let today = chrono::Utc::now().timestamp_millis() / 86_400_000;
+    assert!(
+        marked
+            .iter()
+            .all(|(thread, _)| *thread == owner.to_string())
+            && marked.iter().any(|(_, day)| *day == today),
+        "{marked:?}"
+    );
     sqlx::Connection::close(conn).await?;
     let view = day(db.clone()).await?;
     assert_eq!(view.totals.attempts, 1);

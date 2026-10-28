@@ -86,8 +86,9 @@ pub struct Inspection {
 
 /// A day on which neither the conversation nor a resolved subagent has a
 /// recorded attempt. Only `BeforeConversation` says there were no requests:
-/// the ledger keeps no record of when a writer ran or which writes failed
-/// (#314), so an empty day inside the ledger's life proves nothing.
+/// the ledger keeps no record of when a writer ran, and marks only the writes
+/// known to have failed (#314), so an empty day inside the ledger's life
+/// proves nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EmptyDay {
     /// Proven: the whole UTC day ends before the conversation started, and no
@@ -448,23 +449,26 @@ impl<'a> AccountingStore<'a> {
         }
     }
 
-    /// Refuse a ledger written in a newer format (`NewerLedgerFormat`); a
-    /// missing ledger or one this build can read is fine. Read-only and cheap:
-    /// it reads the applied migrations only.
     /// #314 (D228): durably mark that accounting failed to record at least one
-    /// of `owner`'s model requests on the UTC day containing `at_ms`, so
-    /// `/cost` says that day's totals may be incomplete. Upgrades the ledger
-    /// to format 7 in the same transaction; it runs no retention or clock
-    /// check, since the failure it marks may be one (a clock far behind the
-    /// ledger). Marking a day twice is one marker. A home with no ledger is
-    /// left without one: its `/cost` already reads unavailable, never
-    /// complete, and an unrecorded request does not install a ledger.
+    /// of `owner`'s model requests sent between `from_ms` and `to_ms` (UTC
+    /// ms, either order), so `/cost` says those days' totals may be
+    /// incomplete. Every UTC day of the span is marked (the last 31 and the
+    /// first, for a span longer than that), and, when the clock reads behind
+    /// the ledger's checkpoint, the checkpoint's day too: the true time is at
+    /// least that, so a far-behind clock cannot leave the real day reading
+    /// complete. Upgrades the ledger to format 7 in the same transaction; it
+    /// runs no retention or clock check, since the failure it marks may be
+    /// one. Marking a day twice is one marker. A home with no ledger is left
+    /// without one: its `/cost` already reads unavailable, never complete,
+    /// and an unrecorded request does not install a ledger.
     pub async fn record_gap(
         runtime: &StateRuntime,
         owner: ThreadId,
-        at_ms: i64,
+        from_ms: i64,
+        to_ms: i64,
     ) -> anyhow::Result<()> {
-        ensure!(at_ms >= 0, "negative gap time");
+        let (from_ms, to_ms) = (from_ms.min(to_ms), from_ms.max(to_ms));
+        ensure!(from_ms >= 0, "negative gap time");
         let mut tx = crate::runtime::db_lock::begin_immediate(&runtime.pool).await?;
         let result = async {
             if !ledger_exists(&mut tx).await? {
@@ -472,7 +476,14 @@ impl<'a> AccountingStore<'a> {
             }
             validate_on_connection(&mut tx).await?;
             require_format_on_connection(&mut tx, super::gap_days::FORMAT).await?;
-            super::gap_days::mark_on_connection(&mut tx, owner, at_ms).await
+            let checkpoint = match super::retention_fixture_on_connection(&mut tx).await? {
+                super::RetentionFixture::Active(checkpoint) => Some(checkpoint),
+                super::RetentionFixture::Staging | super::RetentionFixture::Absent => None,
+            };
+            for day in super::gap_days::days(from_ms, to_ms, checkpoint) {
+                super::gap_days::mark_on_connection(&mut tx, owner, day).await?;
+            }
+            Ok(())
         }
         .await;
         match result {
@@ -485,6 +496,9 @@ impl<'a> AccountingStore<'a> {
         Ok(())
     }
 
+    /// Refuse a ledger written in a newer format (`NewerLedgerFormat`); a
+    /// missing ledger or one this build can read is fine. Read-only and cheap:
+    /// it reads the applied migrations only.
     pub async fn check_format(runtime: &StateRuntime) -> anyhow::Result<()> {
         let mut conn = runtime.pool.acquire().await?;
         if !ledger_exists(&mut conn).await? {

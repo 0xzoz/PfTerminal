@@ -24,20 +24,37 @@ pub(in crate::runtime) async fn installed(conn: &mut SqliteConnection) -> anyhow
     .await?)
 }
 
-/// Mark `owner`'s UTC day containing `at_ms`. The caller holds the write
-/// transaction and has upgraded the ledger to `FORMAT`. Marking a day twice
-/// is one marker.
+/// The most days one span marks besides its first.
+const SPAN_DAYS: i64 = 31;
+
+/// The UTC days a gap between `from_ms` and `to_ms` (ordered, nonnegative)
+/// marks: the first, up to the last `SPAN_DAYS` through the last, and the
+/// checkpoint's day when the clock read behind it.
+pub(in crate::runtime) fn days(from_ms: i64, to_ms: i64, checkpoint: Option<i64>) -> Vec<i64> {
+    let (first, last) = (from_ms.div_euclid(DAY_MS), to_ms.div_euclid(DAY_MS));
+    let mut days = vec![first];
+    days.extend(first.max(last - SPAN_DAYS)..=last);
+    if let Some(checkpoint) = checkpoint.filter(|checkpoint| *checkpoint > to_ms) {
+        days.push(checkpoint.div_euclid(DAY_MS));
+    }
+    days.sort_unstable();
+    days.dedup();
+    days
+}
+
+/// Mark `owner`'s UTC `day`. The caller holds the write transaction and has
+/// upgraded the ledger to `FORMAT`. Marking a day twice is one marker.
 pub(in crate::runtime) async fn mark_on_connection(
     conn: &mut SqliteConnection,
     owner: ThreadId,
-    at_ms: i64,
+    day: i64,
 ) -> anyhow::Result<()> {
-    ensure!(at_ms >= 0, "negative gap time");
+    ensure!(day >= 0, "negative gap day");
     sqlx::query(
         "INSERT INTO draft_accounting_gap_days VALUES (?, ?) ON CONFLICT(thread_id, utc_day) DO NOTHING",
     )
     .bind(owner.to_string())
-    .bind(at_ms.div_euclid(DAY_MS))
+    .bind(day)
     .execute(conn)
     .await?;
     Ok(())
@@ -73,4 +90,36 @@ pub(in crate::runtime) async fn expire(
             .await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DAY_MS;
+    use super::days;
+    use pretty_assertions::assert_eq;
+
+    /// #314 (D228): a gap marks every day its span covers (the first and the
+    /// last 31 of a longer one), and the checkpoint's day when the clock read
+    /// behind it.
+    #[test]
+    fn a_gap_marks_the_days_of_its_span() {
+        assert_eq!(
+            days(
+                /*from_ms*/ 5, /*to_ms*/ 5, /*checkpoint*/ None
+            ),
+            vec![0]
+        );
+        assert_eq!(
+            days(DAY_MS - 1, 3 * DAY_MS, /*checkpoint*/ None),
+            vec![0, 1, 2, 3]
+        );
+        let long = days(/*from_ms*/ 0, 100 * DAY_MS, /*checkpoint*/ None);
+        assert_eq!(long.first(), Some(&0));
+        assert_eq!(long[1..], (69..=100).collect::<Vec<_>>());
+        assert_eq!(
+            days(/*from_ms*/ 0, /*to_ms*/ 0, Some(9 * DAY_MS)),
+            vec![0, 9]
+        );
+        assert_eq!(days(9 * DAY_MS, 9 * DAY_MS, Some(0)), vec![9]);
+    }
 }

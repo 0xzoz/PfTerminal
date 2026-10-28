@@ -148,7 +148,7 @@ async fn a_recording_gap_is_evidence_of_the_start() -> anyhow::Result<()> {
         empty(&runtime, owner, /*day*/ 298, NOW).await?,
         before(/*started_day*/ 300)
     );
-    AccountingStore::record_gap(&runtime, owner, 299 * DAY + 1).await?;
+    AccountingStore::record_gap(&runtime, owner, 299 * DAY + 1, 299 * DAY + 1).await?;
     assert_eq!(
         empty(&runtime, owner, /*day*/ 298, NOW).await?,
         before(/*started_day*/ 299)

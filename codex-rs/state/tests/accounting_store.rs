@@ -2098,19 +2098,28 @@ async fn a_recording_gap_marks_its_day_through_format_7() -> anyhow::Result<()> 
     // A ledger before format 7 holds no marker, and reads as before.
     assert!(!gap(ok.thread_id, 0).await?);
 
-    AccountingStore::record_gap(&runtime, ok.thread_id, /*at_ms*/ DAY + 5).await?;
+    AccountingStore::record_gap(
+        &runtime,
+        ok.thread_id,
+        /*from_ms*/ DAY + 5,
+        /*to_ms*/ DAY + 5,
+    )
+    .await?;
     let (after, unchanged) = state(runtime.clone()).await?;
     assert_eq!(after, vec![1, 2, 3, 4, 5, 6, 7]);
     assert_eq!(unchanged, records);
     assert!(gap(ok.thread_id, 1).await?, "the marked day");
     assert!(!gap(ok.thread_id, 0).await?, "another day");
-    // Twice is one marker.
-    AccountingStore::record_gap(&runtime, ok.thread_id, DAY + 9).await?;
+    // The clock read behind the ledger's checkpoint (day 2): the true time is
+    // at least the checkpoint, so its day is marked too.
+    assert!(gap(ok.thread_id, 2).await?, "the checkpoint's day");
+    // Twice is one marker per day.
+    AccountingStore::record_gap(&runtime, ok.thread_id, DAY + 9, DAY + 9).await?;
     let mut conn = connection(&runtime).await?;
     let markers: i64 = sqlx::query_scalar("SELECT count(*) FROM draft_accounting_gap_days")
         .fetch_one(&mut conn)
         .await?;
-    assert_eq!(markers, 1);
+    assert_eq!(markers, 2);
     conn.close().await?;
 
     // A subagent's gap is its parent's; an unrelated conversation's is not.
@@ -2126,8 +2135,8 @@ async fn a_recording_gap_marks_its_day_through_format_7() -> anyhow::Result<()> 
             codex_state::DirectionalThreadSpawnEdgeStatus::Open,
         )
         .await?;
-    AccountingStore::record_gap(&runtime, child, /*at_ms*/ 0).await?;
-    AccountingStore::record_gap(&runtime, other, /*at_ms*/ 0).await?;
+    AccountingStore::record_gap(&runtime, child, /*from_ms*/ 0, /*to_ms*/ 0).await?;
+    AccountingStore::record_gap(&runtime, other, /*from_ms*/ 0, /*to_ms*/ 0).await?;
     assert!(gap(ok.thread_id, 0).await?, "the subagent's day");
     assert!(!gap(other, 1).await?, "not another conversation's day");
 
@@ -2135,8 +2144,8 @@ async fn a_recording_gap_marks_its_day_through_format_7() -> anyhow::Result<()> 
     // deletion's maintenance, at today's time, expires the 1970 markers with
     // their days' totals.
     let today = chrono::Utc::now().timestamp_millis();
-    AccountingStore::record_gap(&runtime, ok.thread_id, today).await?;
-    AccountingStore::record_gap(&runtime, other, today).await?;
+    AccountingStore::record_gap(&runtime, ok.thread_id, today, today).await?;
+    AccountingStore::record_gap(&runtime, other, today, today).await?;
     assert_eq!(runtime.delete_thread(other).await?, 1);
     let mut conn = connection(&runtime).await?;
     let left: Vec<(String, i64)> =
@@ -2146,9 +2155,14 @@ async fn a_recording_gap_marks_its_day_through_format_7() -> anyhow::Result<()> 
     assert_eq!(left, vec![(ok.thread_id.to_string(), today / DAY)]);
     conn.close().await?;
     assert!(
-        AccountingStore::record_gap(&runtime, ok.thread_id, /*at_ms*/ -1)
-            .await
-            .is_err()
+        AccountingStore::record_gap(
+            &runtime,
+            ok.thread_id,
+            /*from_ms*/ -1,
+            /*to_ms*/ -1
+        )
+        .await
+        .is_err()
     );
     runtime.close().await;
     Ok(())
@@ -2171,7 +2185,7 @@ async fn a_recording_gap_never_installs_a_ledger() -> anyhow::Result<()> {
         read(runtime.clone()).await?,
         InspectionDay::Absent
     ));
-    AccountingStore::record_gap(&runtime, owner, /*at_ms*/ 0).await?;
+    AccountingStore::record_gap(&runtime, owner, /*from_ms*/ 0, /*to_ms*/ 0).await?;
     assert!(matches!(
         read(runtime.clone()).await?,
         InspectionDay::Absent
@@ -2189,7 +2203,7 @@ async fn a_recording_gap_never_installs_a_ledger() -> anyhow::Result<()> {
         .admit(owner, &a, &[snapshot()?], /*as_of*/ 1)
         .await?;
     assert!(!ready(read(runtime.clone()).await?).recording_gap);
-    AccountingStore::record_gap(&runtime, owner, /*at_ms*/ 0).await?;
+    AccountingStore::record_gap(&runtime, owner, /*from_ms*/ 0, /*to_ms*/ 0).await?;
     let view = ready(read(runtime.clone()).await?);
     assert!(view.recording_gap);
     assert_eq!(view.totals.attempts, 1);
