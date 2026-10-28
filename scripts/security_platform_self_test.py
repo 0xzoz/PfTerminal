@@ -50,7 +50,8 @@ def warm_windows_boot_query() -> None:
             timeout=WARM_UP_TIMEOUT_SECONDS,
             check=False,
         )
-    except (AttributeError, OSError, subprocess.TimeoutExpired):
+    except Exception:
+        # Advisory only: any failure is left to the probe's own timed query.
         pass
 
 

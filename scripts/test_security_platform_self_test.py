@@ -247,14 +247,33 @@ class SecurityPlatformSelfTestTests(unittest.TestCase):
                     report.assert_called_once_with("self-test")
 
     def test_warm_up_starts_no_process_off_windows(self):
+        kernel = mock.Mock()
         for os_name in ("linux", "macos", "unknown"):
             with self.subTest(os=os_name):
                 with (
                     mock.patch.object(probe, "target_os", return_value=os_name),
+                    mock.patch.object(
+                        probe.ctypes,
+                        "windll",
+                        types.SimpleNamespace(kernel32=kernel),
+                        create=True,
+                    ),
                     mock.patch.object(probe.subprocess, "run") as query,
                 ):
                     REAL_WARM_UP()
                     query.assert_not_called()
+        kernel.GetWindowsDirectoryW.assert_not_called()
+
+    def test_unexpected_warm_up_error_is_ignored(self):
+        with (
+            mock.patch.object(probe, "target_os", return_value="windows"),
+            mock.patch.object(
+                probe.ctypes, "create_unicode_buffer", side_effect=ValueError
+            ),
+            mock.patch.object(probe.subprocess, "run") as query,
+        ):
+            self.assertIsNone(REAL_WARM_UP())
+            query.assert_not_called()
 
 
 if __name__ == "__main__":
