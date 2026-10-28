@@ -288,18 +288,28 @@ fn git_certain(script: &str) -> bool {
                             .map(|word| word.text.clone())
                             .collect();
                         // As D85's `data_only` after the subcommand: no
-                        // `--output`, no word bash may expand into one; and
-                        // nothing git runs (`rerun::git_runs_program`), nor
-                        // grep's pager (`-O`, `--open-files-in-pager`).
+                        // `--output`; a word that is not data (an expansion
+                        // may be `--output=...`) only as the separate value
+                        // of commit's or stash's message; nothing git runs
+                        // (`rerun::git_runs_program`), nor grep's pager
+                        // (`-O`, also in a bundle such as `-nOsh`, and
+                        // `--open-files-in-pager`).
+                        let message = |at: usize| {
+                            matches!(subcommand, "commit" | "stash")
+                                && at > 0
+                                && matches!(rest[at - 1].text.as_str(), "-m" | "--message")
+                        };
                         return !command.substituted
                             && (GIT_DATA_ONLY.contains(&subcommand) || subcommand == "grep")
                             && !rerun::git_runs_program(&texts, None)
-                            && !rest.iter().any(|word| {
+                            && !rest.iter().enumerate().any(|(at, word)| {
                                 word.text.starts_with("--output")
-                                    || (!word.data && word.text.contains(['{', '*', '?', '[']))
+                                    || (!word.data && !message(at))
                                     || (subcommand == "grep"
-                                        && (word.text.starts_with("-O")
-                                            || word.text.starts_with("--op")))
+                                        && (word.text.starts_with("--op")
+                                            || (word.text.starts_with('-')
+                                                && !word.text.starts_with("--")
+                                                && word.text.contains('O'))))
                             });
                     }
                 }
@@ -710,13 +720,21 @@ fn measuring_harness_runs_on_the_grammar_corpus() {
         "git -C /r log --output=x.zsh",
         "git -C /r log '--format=[%h]' {--output=x,}",
         "git -C /r status --upload-pack=./x",
+        "git -C /r grep -nOsh x",
+        "git -C /r log \"$x\"",
+        "git -C /r diff $o",
+        "git -C /r commit -m x \"$o\"",
     ] {
         assert!(!git_certain(script), "{script}");
     }
+    // The message's own expansion (D104) is what W3 lifts.
+    assert_eq!(known("git -C /r commit -m \"$msg\""), [0, 0, 0, 0, 1, 0]);
     // Not removed: prompts W3 and W4 must keep.
     for script in [
         "git -C /r log '--format=[%h]' {--output=x,}",
         "git -C /r status --upload-pack=./x",
+        "git -C /r log \"$x\"",
+        "git -C /r diff $o",
         "echo \"${arr[${#arr[@]}-1]}\" /*(e:id:)",
         "echo \"${arr[${#arr[@]}-1]}\" \"${v@P}\"",
     ] {
