@@ -1707,9 +1707,9 @@ impl ModelClient {
         ));
         let api_provider = api_provider_override.unwrap_or(client_setup.api_provider);
         // Creating the call is a model request the operator paid for, so it is
-        // recorded. Its response carries no usage - the realtime protocol this
-        // client parses carries none anywhere - so the attempt lands with its
-        // tokens unknown, which is what the provider actually said.
+        // recorded. Its response carries no usage, and the call's sideband
+        // reports are not recorded (#889 D223 covers WebSocket sessions), so
+        // the attempt lands with its tokens unknown.
         //
         // The route is read from the API client rather than restated: call
         // creation picks its path from the session's parser and appends the
@@ -1768,10 +1768,11 @@ impl ModelClient {
     }
 
     /// #824: record a realtime WebSocket session that has just opened under
-    /// `base_url` as one request. A session is billed but this client never
-    /// sees its token usage, so the record states the route, model, provider
-    /// and start time now, the end time when the session closes
-    /// (`RealtimeSessionRecord::end`), and no token counts. `credential` is
+    /// `base_url` as one request. The record states the route, model,
+    /// provider and start time now, the tokens each finished response reports
+    /// (#889 D223, `RealtimeSessionRecord::observe_response`), the end time
+    /// when the session closes (`RealtimeSessionRecord::end`), and no price.
+    /// `credential` is
     /// the API key the session sends. `None` leaves the session unrecorded; it
     /// is never refused.
     pub(crate) async fn begin_realtime_session_record(
