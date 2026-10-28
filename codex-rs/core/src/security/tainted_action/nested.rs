@@ -221,6 +221,7 @@ impl Classifier {
             },
             unseen: false,
             unseen_in_substitution: false,
+            searched: false,
         };
         let mut found = Found {
             braces: command.iter().any(|arg| arg.contains('{')),
@@ -370,10 +371,13 @@ impl Classifier {
                     certain,
                 );
                 // #1283: `cd "$d"` goes where this reading cannot follow.
+                // #1436: as written, homes expanded: path cleanup would
+                // drop `$X` from `$X/..` (and a command's output).
                 folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
                     && texts[index + 1..].iter().any(|text| {
                         work::step();
-                        self.homes.resolve(text, "").contains(['$', '`'])
+                        let text = self.homes.expand_homes(text);
+                        text.contains(['$', '`']) || outputs::unseen_place(&text)
                     });
             }
             // #1309: nor where `CDPATH`, `cdable_vars`, `OLDPWD`, a
@@ -696,6 +700,7 @@ impl Classifier {
                     aside: folders.aside.inner(),
                     unseen: folders.unseen,
                     unseen_in_substitution: folders.unseen_in_substitution,
+                    searched: folders.searched,
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;

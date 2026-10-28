@@ -4,6 +4,8 @@
 //! ask (`Classifier::unknown_place`).
 
 use super::FOLDER_FLAGS;
+use super::indirect;
+use super::shell::SimpleCommand;
 use super::shell::basename;
 use super::work;
 
@@ -144,6 +146,52 @@ pub(super) fn starts_loop(texts: &[String]) -> bool {
         work::step();
         LOOPS.contains(&text.as_str())
     })
+}
+
+/// #1436: the outermost loops of `commands` (their first and last command)
+/// that hold a folder change (`cd`, `eval 'cd ~'`, `source f`). A loop
+/// starts at a command whose first word, past keywords (`do for`), is a
+/// loop keyword, and ends at a `done`; one left open ends with the text.
+pub(super) fn changing_loops(commands: &[SimpleCommand]) -> Vec<(usize, usize)> {
+    let mut found = Vec::new();
+    let mut open = 0usize;
+    let mut start = 0;
+    let mut changes = false;
+    for (at, command) in commands.iter().enumerate() {
+        work::step();
+        let words = &command.words;
+        let first = words.iter().find(|word| {
+            work::step();
+            !matches!(
+                word.as_str(),
+                "do" | "then" | "else" | "elif" | "if" | "!" | "{" | "time"
+            )
+        });
+        if first.is_some_and(|word| LOOPS.contains(&word.as_str())) {
+            if open == 0 {
+                start = at;
+                changes = false;
+            }
+            open += 1;
+        }
+        if open > 0
+            && !changes
+            && let Some((index, name)) = indirect::command_word(words)
+        {
+            changes =
+                CHANGERS.contains(&name.as_str()) || carries_change(&name, &words[index + 1..]);
+        }
+        if open > 0 && words.first().is_some_and(|word| word == "done") {
+            open -= 1;
+            if open == 0 && changes {
+                found.push((start, at));
+            }
+        }
+    }
+    if open > 0 && changes {
+        found.push((start, commands.len() - 1));
+    }
+    found
 }
 
 /// Whether `text` names something that changes where `cd` goes.

@@ -378,6 +378,9 @@ const MAX_SCRIPT_FILES: usize = 16;
 /// judged once on its own.
 const MAX_SUBSTITUTED_BYTES: usize = 1024 * 1024;
 const MAX_SMALL_VALUE: usize = 64;
+/// #1436: loops one line reads again (`LoopPass`); past them a loop with a
+/// folder change starts in a folder not known.
+const MAX_REPLAYED_LOOPS: usize = 8;
 /// Bytes of command text, and command lines, one classification lexes in
 /// all, nested scripts, decoded payloads and script files included (#1065);
 /// more fail closed.
@@ -565,6 +568,7 @@ impl Classifier {
             written: Vec::new(),
             nested_scripts: 0,
             unknown_folder: 0,
+            unseen_folder: false,
             launched: launched_git::Launch::default(),
             substitution_budget: Budget {
                 left: MAX_SUBSTITUTED_BYTES,
@@ -1094,8 +1098,42 @@ struct Budget {
     small_left: usize,
 }
 
+/// #1436: a loop with a folder change, being read: its first and last
+/// command, the pass (1 to 4), where the pass started, and the state
+/// after the first pass, which the line goes on from.
+struct LoopPass {
+    start: usize,
+    end: usize,
+    round: u8,
+    place: Place,
+    first: Option<(Folders, HashMap<String, String>)>,
+}
+
+/// #1436: where a reading is: the folder it follows, and whether it
+/// knows it.
+#[derive(PartialEq, Eq)]
+struct Place {
+    cwd: String,
+    known: (bool, bool, bool, bool),
+}
+
+impl Place {
+    fn of(folders: &Folders) -> Self {
+        Self {
+            cwd: folders.cwd.clone(),
+            known: (
+                folders.unfollowed,
+                folders.lost,
+                folders.unseen,
+                folders.searched,
+            ),
+        }
+    }
+}
+
 /// Where the shell is while it runs a script: the folder, the previous one
 /// (`cd -`) and the `pushd` stack.
+#[derive(Clone)]
 struct Folders {
     cwd: String,
     previous: String,
@@ -1121,6 +1159,9 @@ struct Folders {
     /// #1410: the same, by a change in a substitution: until the command
     /// it is part of.
     unseen_in_substitution: bool,
+    /// #1436: a name that changes where `cd` goes was set or named
+    /// (`CDPATH`, `OLDPWD`, `cdable_vars`): a later change may go anywhere.
+    searched: bool,
 }
 
 struct Classifier {
@@ -1181,6 +1222,9 @@ struct Classifier {
     /// #1283: inside a nested script whose folder the quote-aware reading
     /// cannot know (run after `cd "$d"`, or by `env -C`).
     unknown_folder: usize,
+    /// #1436: the command being judged runs in a folder the word reading
+    /// cannot see, so a script named relative to it may be any file.
+    unseen_folder: bool,
     /// #1268: inside a script a launcher runs with its input added after
     /// it (`xargs env -S'git config'`) or put into its text (`xargs -I% sh
     /// -c 'git config %'`, where any word may be input).
@@ -1543,6 +1587,7 @@ impl Classifier {
             },
             unseen: false,
             unseen_in_substitution: false,
+            searched: false,
         };
         let mut variables: HashMap<String, String> = HashMap::new();
         for (name, value) in [
@@ -1583,8 +1628,42 @@ impl Classifier {
         let mut loops = launched_git::PositionalLoops::default();
         // #1405: a `mapfile` was found, by any spelling.
         let mut mapfile = false;
-        for (index, simple) in lexed.commands.iter().enumerate() {
+        // #1436: a loop's later passes start where the one before left
+        // (`for i in 1 2; do echo x >> .zshrc; cd ~; done`): a loop with a
+        // folder change whose pass moves the folder is read again from
+        // there, up to three passes, each from the folder the one before
+        // ends in. If it still moves, other than deeper (`cd sub`), it is
+        // read once more in a folder not known. After it the reading goes
+        // on from the first pass, as before, the folder unknown if it kept
+        // moving. Past `MAX_REPLAYED_LOOPS` such a loop starts in a folder
+        // not known.
+        let mut changing = unknown_folder::changing_loops(&lexed.commands).into_iter();
+        let mut next_loop = changing.next();
+        let mut replayed = 0;
+        let mut pass: Option<LoopPass> = None;
+        let mut cursor = 0;
+        while let Some(simple) = lexed.commands.get(cursor) {
             work::step();
+            let index = cursor;
+            cursor += 1;
+            if pass.is_none()
+                && let Some((start, end)) = next_loop
+                && start == index
+            {
+                next_loop = changing.next();
+                if replayed < MAX_REPLAYED_LOOPS {
+                    replayed += 1;
+                    pass = Some(LoopPass {
+                        start,
+                        end,
+                        round: 1,
+                        place: Place::of(&folders),
+                        first: None,
+                    });
+                } else {
+                    folders.unseen = true;
+                }
+            }
             let (words, unseen, skipped) =
                 substitute(simple, &variables, &mut self.substitution_budget);
             mapfile = mapfile || rerun::names_mapfile(&words);
@@ -1672,6 +1751,42 @@ impl Classifier {
                     self.visited_all = false;
                 } else {
                     self.visited.push(folder.clone());
+                }
+            }
+            // #1436: the end of a loop being read again.
+            if let Some(current) = &mut pass
+                && current.end == index
+            {
+                let place = Place::of(&folders);
+                let moved = place != current.place;
+                let deeper = place.known == current.place.known
+                    && place
+                        .cwd
+                        .strip_prefix(current.place.cwd.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'));
+                if current.round == 1 && moved {
+                    current.first = Some((folders.clone(), variables.clone()));
+                }
+                let next = match current.round {
+                    1 | 2 if moved => Some(current.round + 1),
+                    3 if moved && !deeper => Some(4),
+                    _ => None,
+                };
+                if let Some(round) = next {
+                    // A later pass is read along the folder the reading
+                    // follows; the others stay the first pass's.
+                    folders.others.clear();
+                    folders.unseen |= round == 4;
+                    current.round = round;
+                    current.place = place;
+                    cursor = current.start;
+                } else {
+                    if let Some((first, values)) = current.first.take() {
+                        folders = first;
+                        variables = values;
+                        folders.unseen |= current.round == 4;
+                    }
+                    pass = None;
                 }
             }
         }
@@ -1829,6 +1944,8 @@ impl Classifier {
         if self.rebuilt == 0 && indirect::misread_command(simple, words) {
             self.note(ProtectedActionKind::UnseenCode);
         }
+        // #1436: as the quote-aware reading reads them.
+        folders.searched |= words.iter().any(|word| unknown_folder::searches(word));
         if let Some((index, name)) = &command {
             let args = &words[index + 1..];
             // Code named by a variable or substitution the classifier cannot
@@ -1875,15 +1992,23 @@ impl Classifier {
                 // #1309: this reading knows the words of `cd "$d"`; it loses
                 // its folder only past the possible folders.
                 let unknown = folders.lost;
+                let changes = matches!(name.as_str(), "cd" | "pushd");
+                // #1436: `cd -` before any change goes to the `OLDPWD` the
+                // action started with.
+                let back =
+                    changes && folders.previous == folders.cwd && args.iter().any(|arg| arg == "-");
                 self.follow_change(name, args, folders, variables, unknown, certain);
                 // #1410: nor a target it cannot see (a variable never set
                 // in the action, a command's output: `cd "$ZDOTDIR"`, `cd
                 // "$(cat f)"`), which may be any folder; nor zsh `chdir`,
                 // which it does not follow. In a substitution, only for the
-                // commands of that substitution.
+                // commands of that substitution. #1436: nor one a search
+                // name may send anywhere (`CDPATH="$X" cd sub`, `cd -`).
                 if name == "chdir"
-                    || (matches!(name.as_str(), "cd" | "pushd")
-                        && args.iter().any(|word| self.unseen_value(word)))
+                    || (changes
+                        && (back
+                            || folders.searched
+                            || args.iter().any(|word| self.unseen_value(word))))
                 {
                     if simple.substituted {
                         folders.unseen_in_substitution = true;
@@ -2211,8 +2336,18 @@ impl Classifier {
                 }
             }
         }
+        // #1436: a script named relative to a folder this reading cannot
+        // see may be any file (`cd "$X" && sh ./run.sh`), also in a script
+        // run there.
+        let outer = self.unseen_folder;
+        self.unseen_folder = outer
+            || folders.unseen
+            || folders.unseen_in_substitution
+            || folders.lost
+            || self.unknown_folder > 0;
         self.scripts_of(simple, words, unseen, command.as_ref(), &cwd, depth);
         self.path_programs(words, command.as_ref(), &cwd, depth);
+        self.unseen_folder = outer;
     }
 
     /// A program named by a path (`./python3`, `./env`, `/usr/bin/env`) is
@@ -2283,9 +2418,10 @@ impl Classifier {
     /// (`env -C sub bash run.sh`, `sudo -D sub ./run.sh`): which file runs
     /// is not known, so it asks.
     /// `from`: `unknown_folder::elsewhere_at` of the command's words.
+    /// #1436: also any such file in a folder the word reading cannot see.
     fn runs_elsewhere(&mut self, from: Option<usize>, at: usize, file: &str) -> bool {
         let elsewhere = !self.homes.windows_paths()
-            && from.is_some_and(|from| from < at)
+            && (self.unseen_folder || from.is_some_and(|from| from < at))
             && (file.contains("..")
                 || self.homes.resolve(file, "/a") != self.homes.resolve(file, "/b"));
         if elsewhere {
@@ -2433,7 +2569,10 @@ impl Classifier {
                 }
             }
             Code::Stdin => {
-                if let Some(at) = simple.stdin_from {
+                // #1436: the file the shell opens, in its folder.
+                if let Some(at) = simple.stdin_from
+                    && !self.runs_elsewhere(None, at, &words[at])
+                {
                     self.required_script(&words[at], cwd, depth, shell);
                 }
                 if simple.here_string.is_some_and(|at| unseen[at]) {
