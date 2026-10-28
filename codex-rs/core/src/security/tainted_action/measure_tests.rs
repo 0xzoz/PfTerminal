@@ -302,7 +302,7 @@ fn git_certain(script: &str) -> bool {
                         };
                         return !command.substituted
                             && (GIT_DATA_ONLY.contains(&subcommand) || subcommand == "grep")
-                            && !rerun::git_runs_program(&texts, None)
+                            && !rerun::git_runs_program(&texts, /*subcommand*/ None)
                             && !rest.iter().enumerate().any(|(at, word)| {
                                 word.text.starts_with("--output")
                                     || (!word.data && !message(at))
@@ -402,7 +402,7 @@ impl Families {
             let mut sites = BTreeSet::new();
             for line in lines {
                 for shell in ["/bin/bash", "/bin/zsh"] {
-                    let judgment = judge(homes, shell, line, &fixture("/"), false);
+                    let judgment = judge(homes, shell, line, &fixture("/"), /*forced*/ false);
                     assert!(judgment.found.is_some(), "calibration line asks: {line}");
                     sites.extend(judgment.sites);
                 }
@@ -497,10 +497,18 @@ fn measure_line(
         .or_default() += 1;
     let subscripts = simple_subscripts(script);
     let applies = [
-        proves_data(script, false, false),
-        proves_data(script, true, false),
-        proves_data(script, false, true),
-        proves_data(script, true, true),
+        proves_data(
+            script, /*leading_cd*/ false, /*fd_redirections*/ false,
+        ),
+        proves_data(
+            script, /*leading_cd*/ true, /*fd_redirections*/ false,
+        ),
+        proves_data(
+            script, /*leading_cd*/ false, /*fd_redirections*/ true,
+        ),
+        proves_data(
+            script, /*leading_cd*/ true, /*fd_redirections*/ true,
+        ),
         git_certain(script),
         subscripts.is_some(),
     ];
@@ -519,7 +527,7 @@ fn measure_line(
     );
     for shell_path in ["/bin/zsh", "/bin/bash"] {
         let shell = stats.shells.entry(shell_path).or_default();
-        let judgment = judge(homes, shell_path, script, cwd, false);
+        let judgment = judge(homes, shell_path, script, cwd, /*forced*/ false);
         let Some(kind) = judgment.found else {
             continue;
         };
@@ -528,7 +536,9 @@ fn measure_line(
         for site in &judgment.sites {
             *shell.sites.entry(site.clone()).or_default() += 1;
         }
-        let zsh_only = judge(homes, shell_path, script, cwd, true).found.is_none();
+        let zsh_only = judge(homes, shell_path, script, cwd, /*forced*/ true)
+            .found
+            .is_none();
         shell.zsh_only += usize::from(zsh_only);
         let only = |family: &BTreeSet<String>| judgment.sites.is_subset(family);
         let removes = [
@@ -538,7 +548,7 @@ fn measure_line(
             applies[3] && zsh_only,
             applies[4] && only(&families.git_options),
             subscripts.as_deref().is_some_and(|rewritten| {
-                judge(homes, shell_path, rewritten, cwd, false)
+                judge(homes, shell_path, rewritten, cwd, /*forced*/ false)
                     .found
                     .is_none()
             }),
@@ -688,18 +698,22 @@ fn measuring_harness_runs_on_the_grammar_corpus() {
         .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
         .map(|line| (decode(line), fixture("/work")))
         .collect();
-    let stats = measure(&homes, &lines, 2);
+    let stats = measure(&homes, &lines, /*threads*/ 2);
     assert_eq!(stats.lines, lines.len());
     assert_eq!((stats.panics, stats.replica_differs), (0, 0));
 
     let known = |script: &str| {
         let lines = [(script.to_string(), fixture("/work"))];
-        let stats = measure(&homes, &lines, 1);
+        let stats = measure(&homes, &lines, /*threads*/ 1);
         stats.shells["/bin/zsh"].removes
     };
     // Phase 3 already lifts a plain line, and quoted `(e)` is no qualifier
     // anyway: zsh does not ask.
-    assert!(proves_data("git commit -m \"fix(e): b\"", false, false));
+    assert!(proves_data(
+        "git commit -m \"fix(e): b\"",
+        /*leading_cd*/ false,
+        /*fd_redirections*/ false
+    ));
     assert_eq!(known("cd /r && git commit -m \"fix(e): b\""), [0; 6]);
     // W1 and W1+W2 remove a leading `cd`'s zsh-only prompt; W2 alone does not.
     assert_eq!(known("cd /r && grep -n \"fn a(\" x.rs"), [0, 1, 0, 1, 0, 0]);
@@ -743,7 +757,14 @@ fn measuring_harness_runs_on_the_grammar_corpus() {
         "echo \"${arr[${#arr[@]}-1]}\" /*(e:id:)",
         "echo \"${arr[${#arr[@]}-1]}\" \"${v@P}\"",
     ] {
-        let asks = judge(&homes, "/bin/zsh", script, &fixture("/work"), false).found;
+        let asks = judge(
+            &homes,
+            "/bin/zsh",
+            script,
+            &fixture("/work"),
+            /*forced*/ false,
+        )
+        .found;
         assert!(asks.is_some(), "{script}");
         assert_eq!(known(script), [0; 6], "{script}");
     }
@@ -754,7 +775,12 @@ fn measuring_harness_runs_on_the_grammar_corpus() {
         "cd /r && git commit -m \"fix(a): $b\"",
         "cd '/r(e:id:)' && git status",
     ] {
-        assert!(!proves_data(script, true, true), "{script}");
+        assert!(
+            !proves_data(
+                script, /*leading_cd*/ true, /*fd_redirections*/ true
+            ),
+            "{script}"
+        );
     }
     assert_eq!(
         without_fd_redirections("a 2>&1 | b >/dev/null; c '2>&1' 3>/dev/null"),
