@@ -27,6 +27,7 @@ use crate::security::tainted_action::judged_avoiding;
 use crate::security::tainted_action::named_shell;
 use crate::security::tainted_action::paths::Homes;
 use crate::security::tainted_action::quoted;
+use crate::security::tainted_action::rerun;
 use crate::security::tainted_action::shadow;
 use crate::security::tainted_action::shadow::Comparison;
 use crate::tools::sandboxing::ApprovalAction;
@@ -88,7 +89,7 @@ struct MeasureHomes {
 impl MeasureHomes {
     fn from_env() -> Self {
         let path = |name: &str, default: &str| {
-            PathBuf::from(std::env::var(name).unwrap_or_else(|_| default.to_string()))
+            std::env::var(name).map_or_else(|_| fixture(default), PathBuf::from)
         };
         Self {
             codex_home: path("CORBANU_CLASSIFIER_HOME", "/home/fixture/.corbanu"),
@@ -101,9 +102,18 @@ impl MeasureHomes {
     }
 }
 
+/// A POSIX fixture path; on Windows on drive `C:` (as `tainted_action_tests`).
+fn fixture(path: &str) -> PathBuf {
+    if cfg!(windows) && !Path::new(path).is_absolute() {
+        PathBuf::from(format!("C:{}", path.replace('/', "\\")))
+    } else {
+        PathBuf::from(path)
+    }
+}
+
 fn action(shell: &str, script: &str, cwd: &Path) -> ApprovalAction {
     let cwd = AbsolutePathBuf::from_absolute_path_checked(cwd)
-        .or_else(|_| AbsolutePathBuf::from_absolute_path_checked("/"))
+        .or_else(|_| AbsolutePathBuf::from_absolute_path_checked(fixture("/")))
         .expect("absolute");
     ApprovalAction::Shell {
         id: "measure".into(),
@@ -272,8 +282,25 @@ fn git_certain(script: &str) -> bool {
                         }
                     }
                     subcommand => {
+                        let rest = words.as_slice();
+                        let texts: Vec<String> = command.words[1..]
+                            .iter()
+                            .map(|word| word.text.clone())
+                            .collect();
+                        // As D85's `data_only` after the subcommand: no
+                        // `--output`, no word bash may expand into one; and
+                        // nothing git runs (`rerun::git_runs_program`), nor
+                        // grep's pager (`-O`, `--open-files-in-pager`).
                         return !command.substituted
-                            && (GIT_DATA_ONLY.contains(&subcommand) || subcommand == "grep");
+                            && (GIT_DATA_ONLY.contains(&subcommand) || subcommand == "grep")
+                            && !rerun::git_runs_program(&texts, None)
+                            && !rest.iter().any(|word| {
+                                word.text.starts_with("--output")
+                                    || (!word.data && word.text.contains(['{', '*', '?', '[']))
+                                    || (subcommand == "grep"
+                                        && (word.text.starts_with("-O")
+                                            || word.text.starts_with("--op")))
+                            });
                     }
                 }
             }
@@ -283,11 +310,15 @@ fn git_certain(script: &str) -> bool {
 
 /// W4: the line has a subscript beyond a plain index (`${a[${#a[@]}-1]}`)
 /// and every subscript is made only of `${#name[@]}`, integers, `+`, `-`,
-/// or is `@`/`*`.
-fn simple_subscripts(script: &str) -> bool {
+/// or is `@`/`*`. Returns the line with each such subscript made a plain
+/// `0`, which the classifier then judges: W4 removes a prompt only when
+/// that line does not ask.
+fn simple_subscripts(script: &str) -> Option<String> {
     let mut complex = false;
+    let mut rewritten = String::with_capacity(script.len());
     let mut rest = script;
     while let Some(start) = rest.find("${") {
+        rewritten.push_str(&rest[..start + 2]);
         rest = &rest[start + 2..];
         let name_len = rest
             .chars()
@@ -299,7 +330,7 @@ fn simple_subscripts(script: &str) -> bool {
         let inner = &rest[name_len + 1..];
         // The subscript ends at the `]` that closes it (nested `[@]` too).
         let mut depth = 0usize;
-        let Some(end) = inner.char_indices().find_map(|(at, ch)| match ch {
+        let end = inner.char_indices().find_map(|(at, ch)| match ch {
             '[' => {
                 depth += 1;
                 None
@@ -310,9 +341,7 @@ fn simple_subscripts(script: &str) -> bool {
                 None
             }
             _ => None,
-        }) else {
-            return false;
-        };
+        })?;
         let subscript = &inner[..end];
         if matches!(subscript, "@" | "*") || subscript.chars().all(|ch| ch.is_ascii_digit()) {
             continue;
@@ -332,12 +361,15 @@ fn simple_subscripts(script: &str) -> bool {
                     })
         });
         if !simple {
-            return false;
+            return None;
         }
         complex = true;
+        rewritten.push_str(&rest[..name_len + 1]);
+        rewritten.push('0');
         rest = &inner[end..];
     }
-    complex
+    rewritten.push_str(rest);
+    complex.then_some(rewritten)
 }
 
 /// The lines p2's static scan counted as able to hit a zsh-only check.
@@ -351,7 +383,6 @@ fn may_hit_zsh_check(script: &str) -> bool {
 /// to ask for that reason (so the harness follows the code as it changes).
 struct Families {
     git_options: BTreeSet<String>,
-    subscripts: BTreeSet<String>,
 }
 
 impl Families {
@@ -360,7 +391,7 @@ impl Families {
             let mut sites = BTreeSet::new();
             for line in lines {
                 for shell in ["/bin/bash", "/bin/zsh"] {
-                    let judgment = judge(homes, shell, line, Path::new("/"), false);
+                    let judgment = judge(homes, shell, line, &fixture("/"), false);
                     assert!(judgment.found.is_some(), "calibration line asks: {line}");
                     sites.extend(judgment.sites);
                 }
@@ -374,8 +405,6 @@ impl Families {
                 "git -C /r commit -m \"$msg\"",
                 "git grep -e config -e x",
             ]),
-            // D230.
-            subscripts: sites(&["echo \"${arr[${#arr[@]}-1]}\""]),
         }
     }
 }
@@ -388,10 +417,7 @@ struct Shell {
     zsh_only: usize,
     /// Lines each site noted a finding on, among lines that ask.
     sites: BTreeMap<String, usize>,
-    /// Per candidate: lines it applies to, those among zsh-check lines,
-    /// and prompts it would have removed.
-    applies: [usize; CANDIDATES.len()],
-    applies_zsh_lines: [usize; CANDIDATES.len()],
+    /// Per candidate: prompts it would have removed.
     removes: [usize; CANDIDATES.len()],
     removes_any: usize,
 }
@@ -403,6 +429,10 @@ struct Stats {
     panics: usize,
     /// Lines where phase 3's replica here and the product's disagree.
     replica_differs: usize,
+    /// Per candidate (whatever the shell): lines it applies to, and those
+    /// among the lines that may hit a zsh-only check.
+    applies: [usize; CANDIDATES.len()],
+    applies_zsh_lines: [usize; CANDIDATES.len()],
     comparisons: BTreeMap<String, usize>,
     shells: BTreeMap<&'static str, Shell>,
 }
@@ -413,6 +443,10 @@ impl Stats {
         self.may_hit_zsh_check += other.may_hit_zsh_check;
         self.panics += other.panics;
         self.replica_differs += other.replica_differs;
+        for at in 0..CANDIDATES.len() {
+            self.applies[at] += other.applies[at];
+            self.applies_zsh_lines[at] += other.applies_zsh_lines[at];
+        }
         add_counts(&mut self.comparisons, other.comparisons);
         for (name, shell) in other.shells {
             let into = self.shells.entry(name).or_default();
@@ -421,10 +455,8 @@ impl Stats {
             into.removes_any += shell.removes_any;
             add_counts(&mut into.by_kind, shell.by_kind);
             add_counts(&mut into.sites, shell.sites);
-            for at in 0..CANDIDATES.len() {
-                into.applies[at] += shell.applies[at];
-                into.applies_zsh_lines[at] += shell.applies_zsh_lines[at];
-                into.removes[at] += shell.removes[at];
+            for (count, removes) in into.removes.iter_mut().zip(shell.removes) {
+                *count += removes;
             }
         }
     }
@@ -452,14 +484,19 @@ fn measure_line(
         .comparisons
         .entry(format!("{comparison:?}"))
         .or_default() += 1;
+    let subscripts = simple_subscripts(script);
     let applies = [
         proves_data(script, false, false),
         proves_data(script, true, false),
         proves_data(script, false, true),
         proves_data(script, true, true),
         git_certain(script),
-        simple_subscripts(script),
+        subscripts.is_some(),
     ];
+    for (at, applies) in applies.iter().enumerate() {
+        stats.applies[at] += usize::from(*applies);
+        stats.applies_zsh_lines[at] += usize::from(*applies && zsh_lines);
+    }
     // Phase 3's predicate here must match the product's.
     stats.replica_differs += usize::from(
         applies[0]
@@ -472,10 +509,6 @@ fn measure_line(
     for shell_path in ["/bin/zsh", "/bin/bash"] {
         let shell = stats.shells.entry(shell_path).or_default();
         let judgment = judge(homes, shell_path, script, cwd, false);
-        for (at, applies) in applies.iter().enumerate() {
-            shell.applies[at] += usize::from(*applies);
-            shell.applies_zsh_lines[at] += usize::from(*applies && zsh_lines);
-        }
         let Some(kind) = judgment.found else {
             continue;
         };
@@ -493,7 +526,11 @@ fn measure_line(
             applies[2] && zsh_only,
             applies[3] && zsh_only,
             applies[4] && only(&families.git_options),
-            applies[5] && only(&families.subscripts),
+            subscripts.as_deref().is_some_and(|rewritten| {
+                judge(homes, shell_path, rewritten, cwd, false)
+                    .found
+                    .is_none()
+            }),
         ];
         for (count, removes) in shell.removes.iter_mut().zip(removes) {
             *count += usize::from(removes);
@@ -519,7 +556,7 @@ fn parse_line(line: &str) -> Option<(String, PathBuf)> {
 }
 
 /// Measure `lines` on `threads` threads; a line whose judgment panics is
-/// counted, not reported.
+/// counted (the ignored test also silences the panic hook).
 fn measure(homes: &MeasureHomes, lines: &[(String, PathBuf)], threads: usize) -> Stats {
     let families = Families::calibrate(homes);
     let chunk = lines.len().div_ceil(threads.max(1)).max(1);
@@ -556,32 +593,39 @@ fn measure(homes: &MeasureHomes, lines: &[(String, PathBuf)], threads: usize) ->
     stats
 }
 
-fn report(stats: &Stats, families: &Families) -> String {
+fn report(stats: &Stats, families: &Families, skipped: usize) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "lines {} (may hit a zsh-only check, by p2's scan: {}); panics {}; phase 3 replica differs {}",
+        "lines {} (unreadable corpus lines skipped: {skipped}; may hit a zsh-only check, by \
+         p2's scan: {}); panics {}; phase 3 replica differs {}",
         stats.lines, stats.may_hit_zsh_check, stats.panics, stats.replica_differs
     );
+    let _ = writeln!(
+        out,
+        "POSIX view only (not the extra Windows judgment). W1/W2: removes a zsh-only prompt. \
+         W3: every site that noted a finding is in the calibrated git family {:?} (shared \
+         sites make this an upper bound). W4: the line with those subscripts made `0` does \
+         not ask.",
+        families.git_options
+    );
     let _ = writeln!(out, "top-level comparison: {:?}", stats.comparisons);
-    let _ = writeln!(out, "W3 sites: {:?}", families.git_options);
-    let _ = writeln!(out, "W4 sites: {:?}", families.subscripts);
+    let _ = writeln!(out, "candidate: applies (of zsh-check lines)");
+    for (at, candidate) in CANDIDATES.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "  {candidate}: {} ({})",
+            stats.applies[at], stats.applies_zsh_lines[at]
+        );
+    }
     for (name, shell) in &stats.shells {
         let _ = writeln!(
             out,
             "\n{name} -lc: asks {} ({:?}); zsh-only prompts {}; removed by any candidate {}",
             shell.asks, shell.by_kind, shell.zsh_only, shell.removes_any
         );
-        let _ = writeln!(
-            out,
-            "  candidate: applies (of zsh-check lines) / prompts removed"
-        );
         for (at, candidate) in CANDIDATES.iter().enumerate() {
-            let _ = writeln!(
-                out,
-                "  {candidate}: {} ({}) / {}",
-                shell.applies[at], shell.applies_zsh_lines[at], shell.removes[at]
-            );
+            let _ = writeln!(out, "  {candidate}: removes {}", shell.removes[at]);
         }
         let mut sites: Vec<_> = shell.sites.iter().collect();
         sites.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
@@ -625,20 +669,20 @@ fn decode(line: &str) -> String {
 #[test]
 fn measuring_harness_runs_on_the_grammar_corpus() {
     let homes = MeasureHomes {
-        codex_home: PathBuf::from("/home/fixture/.corbanu"),
-        user_home: PathBuf::from("/home/fixture"),
+        codex_home: fixture("/home/fixture/.corbanu"),
+        user_home: fixture("/home/fixture"),
     };
     let lines: Vec<(String, PathBuf)> = include_str!("grammar_corpus.txt")
         .lines()
         .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
-        .map(|line| (decode(line), PathBuf::from("/work")))
+        .map(|line| (decode(line), fixture("/work")))
         .collect();
     let stats = measure(&homes, &lines, 2);
     assert_eq!(stats.lines, lines.len());
     assert_eq!((stats.panics, stats.replica_differs), (0, 0));
 
     let known = |script: &str| {
-        let lines = [(script.to_string(), PathBuf::from("/work"))];
+        let lines = [(script.to_string(), fixture("/work"))];
         let stats = measure(&homes, &lines, 1);
         stats.shells["/bin/zsh"].removes
     };
@@ -658,6 +702,28 @@ fn measuring_harness_runs_on_the_grammar_corpus() {
     assert_eq!(known("git -C /r log --format='[%h]'"), [0, 0, 0, 0, 1, 0]);
     // W4: D230's shape.
     assert_eq!(known("echo \"${arr[${#arr[@]}-1]}\""), [0, 0, 0, 0, 0, 1]);
+    // W3 does not apply where git may run a program or write a file: a
+    // pager git grep runs, an output file, a word that may expand to one.
+    for script in [
+        "git -C /r grep -O sh x",
+        "git -C /r grep --open-files-in-pager=sh x",
+        "git -C /r log --output=x.zsh",
+        "git -C /r log '--format=[%h]' {--output=x,}",
+        "git -C /r status --upload-pack=./x",
+    ] {
+        assert!(!git_certain(script), "{script}");
+    }
+    // Not removed: prompts W3 and W4 must keep.
+    for script in [
+        "git -C /r log '--format=[%h]' {--output=x,}",
+        "git -C /r status --upload-pack=./x",
+        "echo \"${arr[${#arr[@]}-1]}\" /*(e:id:)",
+        "echo \"${arr[${#arr[@]}-1]}\" \"${v@P}\"",
+    ] {
+        let asks = judge(&homes, "/bin/zsh", script, &fixture("/work"), false).found;
+        assert!(asks.is_some(), "{script}");
+        assert_eq!(known(script), [0; 6], "{script}");
+    }
     // Not widened: a relative `cd`, a second `cd`, an expansion.
     for script in [
         "cd r && git commit -m \"fix(a): b\"",
@@ -672,11 +738,17 @@ fn measuring_harness_runs_on_the_grammar_corpus() {
         Some("a  | b ; c '2>&1' ".to_string())
     );
     assert_eq!(without_fd_redirections("a 2>&1x"), None);
-    assert!(!simple_subscripts("echo \"${arr[i+1]}\""));
-    assert!(!simple_subscripts("echo \"${arr[1]}\""));
+    assert_eq!(simple_subscripts("echo \"${arr[i+1]}\""), None);
+    assert_eq!(simple_subscripts("echo \"${arr[1]}\""), None);
+    assert_eq!(
+        simple_subscripts("echo \"${a[${#a[@]}-1]}\" ${b[2]} ${c[1+${#c[@]}]}x"),
+        Some("echo \"${a[0]}\" ${b[2]} ${c[0]}x".to_string())
+    );
 }
 
-/// The measurement over a local corpus (see the module docs).
+/// The measurement over a local corpus (see the module docs). A line whose
+/// judgment panics is counted; the panic hook is silenced meanwhile, since
+/// some panic messages quote the text involved.
 #[test]
 #[ignore = "measures a local corpus named by CORBANU_CLASSIFIER_CORPUS"]
 fn measure_classifier_corpus() {
@@ -684,14 +756,19 @@ fn measure_classifier_corpus() {
         return;
     };
     let text = std::fs::read_to_string(&corpus).expect("corpus");
-    let lines: Vec<(String, PathBuf)> = text.lines().filter_map(parse_line).collect();
+    let parsed: Vec<Option<(String, PathBuf)>> = text.lines().map(parse_line).collect();
+    let skipped = parsed.iter().filter(|line| line.is_none()).count();
+    let lines: Vec<(String, PathBuf)> = parsed.into_iter().flatten().collect();
     let homes = MeasureHomes::from_env();
     let threads = std::env::var("CORBANU_CLASSIFIER_THREADS")
         .ok()
         .and_then(|threads| threads.parse().ok())
         .unwrap_or(4);
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
     let stats = measure(&homes, &lines, threads);
-    let report = report(&stats, &Families::calibrate(&homes));
+    std::panic::set_hook(hook);
+    let report = report(&stats, &Families::calibrate(&homes), skipped);
     #[expect(clippy::print_stdout, reason = "the report is the harness's output")]
     {
         println!("{report}");
