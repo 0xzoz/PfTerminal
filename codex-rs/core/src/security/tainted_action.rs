@@ -1649,16 +1649,10 @@ impl Classifier {
                     || simple.here_string.is_some()
                     || !simple.writes_to.is_empty(),
             );
-            // #1422: a command named by an alias the line defined is also
-            // judged as the text it stands for (`alias b=bash` then `b
-            // run.sh`); a folder change in it is not followed.
-            if let Some(expansion) = aliases.read(&words) {
-                if expansion.too_long {
-                    self.note(ProtectedActionKind::UnseenCode);
-                } else {
-                    self.script(&expansion.text, &folders.cwd, depth + 1);
-                }
-                folders.unfollowed |= expansion.changes_folder;
+            // #1422: an alias the line defined runs text neither reading
+            // reads as the shell does (`alias b=bash` then `b run.sh`).
+            if aliases.read(&words) {
+                self.note(ProtectedActionKind::UnseenCode);
             }
             self.simple_command(
                 simple,

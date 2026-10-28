@@ -9014,6 +9014,7 @@ fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
         "{,mapfile} -d ';' -C eval -c 1 a < notes",
         "{,readarray} -d '|' -C eval a < notes",
         "{mapfile,-C} -d ';' eval -c 1 a < notes",
+        "mapfile -d ';' -c 1 {-C,eval} a < notes",
         // Aliases.
         "shopt -s expand_aliases; alias m=mapfile\nm -C eval a < notes",
         "shopt -s expand_aliases; alias e=eval\ne \"$1\"",
@@ -9021,6 +9022,16 @@ fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
         "shopt -s expand_aliases; alias b=bash\nb evil.sh",
         "shopt -s expand_aliases; alias a=b b=bash\na evil.sh",
         "bash -c 'shopt -s expand_aliases; alias b=bash\nb evil.sh'",
+        // Review 1: uses the readings would misread, and definitions.
+        "shopt -s expand_aliases; alias m=mapfile\nm -d ';' -c 1 -C eval a < notes",
+        "shopt -s expand_aliases; alias c=compgen\nc -W 'x;y' -C '. ./evil.sh' w",
+        "shopt -s expand_aliases; alias e='true;eval'\ne \"$1\"",
+        "shopt -s expand_aliases; alias b='env X=1 bash'\nb evil.sh",
+        "shopt -s expand_aliases; x='a b' alias e=eval\ne \"$1\"",
+        "shopt -s expand_aliases; eval 'alias e=eval'\ne \"$1\"",
+        "shopt -s expand_aliases; BASH_ALIASES[e]=eval\ne \"$1\"",
+        "shopt -s expand_aliases; BASH_ALIASES=([e]=eval)\ne \"$1\"",
+        "shopt -s expand_aliases; alias b=bash\neval 'b evil.sh'",
         // `compgen -C` runs its command.
         "compgen -C 'bash evil.sh' x",
         "compgen -A file -C 'bash evil.sh' x",
@@ -9044,9 +9055,14 @@ fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
     }
     // An alias that changes the folder is not followed either.
     let moved = [("run.sh", "true\n"), ("sub/run.sh", evil)];
-    let line = "shopt -s expand_aliases; alias c=cd\nc sub; bash run.sh";
-    if in_workspace(&moved, line).is_none() {
-        wrong.push(line);
+    for line in [
+        "shopt -s expand_aliases; alias c=cd\nc sub; bash run.sh",
+        "shopt -s expand_aliases; alias c=command\nc cd sub; bash run.sh",
+        "shopt -s expand_aliases; alias c=\nc cd sub; bash run.sh",
+    ] {
+        if in_workspace(&moved, line).is_none() {
+            wrong.push(line);
+        }
     }
     assert_eq!(wrong, Vec::<&str>::new());
     // Ordinary lines stay quiet.
@@ -9061,10 +9077,7 @@ fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
         "builtin cd sub; bash run.sh",
         "command cd sub; bash run.sh",
         "time cd sub; bash run.sh",
-        "alias ll='ls -l'\nll",
         "alias ll='ls -l'; ls",
-        "shopt -s expand_aliases; alias g=git\ng status",
-        "shopt -s expand_aliases; alias b=bash\nb run.sh",
         "compgen -c git",
         "compgen -W 'a b' -- a",
         "compgen -W '-C x' -- a",
@@ -9074,14 +9087,18 @@ fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
         "echo mapfile; cat notes",
         "printf '%s\\n' readarray",
         "python3 tool.py",
-        "bash --rcfile missing.rc -c 'ls'",
-        "bash --init-file missing.rc -c 'ls'",
         "bash --rcfile=missing.rc run.sh",
+        "bash --init-file missing.rc run.sh",
+        "bash --rcfile missing.rc -l run.sh",
     ] {
         assert_eq!(in_workspace(&quiet, line), None, "{line}");
     }
-    // A start-up file an interactive shell reads is still judged.
+    // A start-up file an interactive shell reads is still judged, as is
+    // one for `-c` (review 1: bash reads it under sshd).
     for line in [
+        "bash --rcfile missing.rc -c 'ls'",
+        "bash --init-file missing.rc -c 'ls'",
+        "bash --rcfile missing.rc -i run.sh",
         "bash --rcfile missing.rc -ic 'ls'",
         "bash --rcfile missing.rc -c -i 'ls'",
         "bash --rcfile missing.rc",

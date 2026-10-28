@@ -36,11 +36,11 @@ pub(super) struct Invocation<'a> {
 pub(super) fn parse<'a>(name: &str, args: &'a [String]) -> Option<Invocation<'a>> {
     let mut start_up = Vec::new();
     let mut invocation = parse_options(name, args, &mut start_up)?;
-    // #1422: a shell reads `--rcfile`/`--init-file` only when interactive:
-    // with `-i`, or reading commands from its input, which may be a
-    // terminal. Any `i` letter in an option word counts, wherever it is
-    // (`bash -c -i 'x'` is interactive).
-    if !start_up.is_empty() && (invocation.code == Code::Stdin || interactive(args)) {
+    // #1422: a shell running a script file reads `--rcfile`/`--init-file`
+    // only when interactive (`-i`). Any `i` letter in an option word
+    // counts, wherever it is. With `-c`, bash also reads it when it seems
+    // to run under sshd, and from its input it may be interactive.
+    if !start_up.is_empty() && (!matches!(invocation.code, Code::File(_)) || interactive(args)) {
         invocation.preloads.extend(start_up);
     }
     Some(invocation)
@@ -267,8 +267,9 @@ impl Family {
                 "command" if self == Self::Shell => Opt::Inline,
                 // #1405: an interactive shell sources its start-up file
                 // first (`bash --rcfile f -i`, yash `--profile=f -l`).
-                // #1422: only when interactive, as written (bash's
-                // spellings): before #1405 they were values, not judged.
+                // #1422: for a script file, only when interactive; as
+                // written (bash's spellings). Before #1405 they were values,
+                // not judged.
                 "rcfile" | "init-file" if self == Self::Shell => {
                     attached.map_or(Opt::StartUp, Opt::StartUpAttached)
                 }
@@ -350,7 +351,7 @@ fn normalized(key: &str) -> String {
 }
 
 /// #1422: whether a shell invoked with `args` may be interactive: an option
-/// word with an `i` letter (`-i`, `-ic`, `-c -i`, `-rcfile`), or a long one
+/// word with an `i` letter (`-i`, `-il`, `-rcfile`), or a long one
 /// yash may read as `--interactive` (`--in`). Read loosely, so a start-up
 /// file is judged: any word counts, operands too.
 fn interactive(args: &[String]) -> bool {

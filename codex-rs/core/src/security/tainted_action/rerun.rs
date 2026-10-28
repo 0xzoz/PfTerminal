@@ -215,7 +215,7 @@ pub(super) fn quoted_mapfile_callback(text: &str, strict: bool) -> bool {
             command
                 .words
                 .get(at)
-                .is_some_and(|word| word.text.contains('{') && word.text.contains([',', '.']))
+                .is_some_and(|word| brace_expression(&word.text))
         };
         let dynamic = |at: usize| command.words.get(at).is_some_and(|word| word.dynamic);
         mapfile_word(&texts, |at| dynamic(at) || braced(at)).is_some_and(|at| {
@@ -310,7 +310,8 @@ fn quoted_callback(args: &[quoted::Word]) -> bool {
         if text == "--" {
             return false;
         }
-        if globbed(text) {
+        // #1422: a brace expression may expand to an option (`{-C,eval}`).
+        if globbed(text) || brace_expression(text) {
             return true;
         }
         if let Some(cluster) = text.strip_prefix('-')
@@ -325,6 +326,25 @@ fn quoted_callback(args: &[quoted::Word]) -> bool {
                 value_next = at + 1 == cluster.len();
             }
         }
+    }
+    false
+}
+
+/// #1422: whether `text` holds a brace expression (`{,mapfile}`, `{a..c}`),
+/// not a parameter expansion (`${PY:-python3.11}`).
+fn brace_expression(text: &str) -> bool {
+    let mut open = false;
+    let mut before = None;
+    for ch in text.chars() {
+        work::step();
+        match ch {
+            '{' => open = before != Some('$'),
+            '}' => open = false,
+            ',' if open => return true,
+            '.' if open && before == Some('.') => return true,
+            _ => {}
+        }
+        before = Some(ch);
     }
     false
 }
