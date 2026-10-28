@@ -167,9 +167,94 @@ fn a_search_ends_with_its_command() {
     assert_eq!(patterns("# don't\ngrep .env x.log"), [".env"]);
 }
 
+#[test]
+fn hostname_program_paths_are_not_search_patterns() {
+    for script in [
+        "rg --hostname-bin .env token .npmrc",
+        "rg --hostname-bin=.env token .npmrc",
+        "rg --hostname-bin .env --hostname-bin .npmrc token .profile",
+        "rg --hostname-bin .env -- token .npmrc",
+        "rg --hostname-bin .env -e token .npmrc",
+    ] {
+        assert_eq!(patterns(script), ["token"], "{script}");
+    }
+    assert_eq!(patterns("rg --hostname-bin hostname .env logs"), [".env"]);
+}
+
+#[test]
+fn exclude_from_abbreviations_keep_the_file_out_of_search_patterns() {
+    for option in [
+        "--exclude-f",
+        "--exclude-fr",
+        "--exclude-fro",
+        "--exclude-from",
+    ] {
+        for script in [
+            format!("grep {option} .env token .npmrc"),
+            format!("grep {option}=.env token .npmrc"),
+            format!("grep {option} .env -e token .npmrc"),
+        ] {
+            assert_eq!(patterns(&script), ["token"], "{script}");
+        }
+    }
+    assert_eq!(patterns("grep --exclude-fr excludes .env logs"), [".env"]);
+}
+
+#[test]
+fn path_option_recognition_respects_dialect_and_command_boundaries() {
+    for script in [
+        "grep --hostname-bin .env token logs",
+        "rg --exclude-fr .env token logs",
+        "grep --exclude- .env token logs",
+        "grep --exclude-from-extra .env token logs",
+    ] {
+        assert_eq!(patterns(script), [".env"], "{script}");
+    }
+    for script in [
+        "rg --hostname-bin .env; cat .npmrc",
+        "grep --exclude-fr .env; cat .npmrc",
+        "rg --hostname-bin\ncat .env",
+        "grep --exclude-fr\ncat .env",
+    ] {
+        assert_eq!(patterns(script), Vec::<String>::new(), "{script}");
+    }
+}
+
 /// Where the operands are unclear, nothing is marked.
 #[test]
 fn unclear_operands_are_not_patterns() {
     assert!(patterns("grep <(cat .env) logs").is_empty());
     assert_eq!(patterns("rg --pre cat token .env"), ["token"]);
+}
+
+#[test]
+fn control_flow_conditions_recognize_search_patterns() {
+    for script in [
+        "if grep -q .env x.log; then :; fi",
+        "if false; then :; elif grep -q .env x.log; then :; fi",
+        "while grep -q .env x.log; do :; done",
+        "until rg -q .env x.log; do :; done",
+    ] {
+        assert_eq!(patterns(script), [".env"], "{script}");
+    }
+}
+
+#[test]
+fn control_flow_words_in_arguments_do_not_start_searches() {
+    for keyword in ["if", "elif", "while", "until"] {
+        let script = format!("cat {keyword} grep .env");
+        assert_eq!(patterns(&script), Vec::<String>::new(), "{script}");
+    }
+}
+
+#[test]
+fn control_flow_search_paths_remain_paths() {
+    for script in [
+        "if grep -q token .env; then :; fi",
+        "if false; then :; elif grep -q token .env; then :; fi",
+        "while grep -q token .env; do :; done",
+        "until rg -q token .env; do :; done",
+    ] {
+        assert_eq!(patterns(script), ["token"], "{script}");
+    }
 }
