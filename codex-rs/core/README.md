@@ -136,6 +136,11 @@ sign-off by Travis on 2026-10-13):
   the labels stay Low until the next TUI or app-server start, or the next
   legacy command, puts them back. If the records are damaged, legacy commands
   that write stop with an error that says how to recover.
+- A command's job doesn't allow breaking away (#733): a child started with
+  `CREATE_BREAKAWAY_FROM_JOB` fails with access denied, so everything a
+  command starts stays in its job, where cancelling ends it and the lease
+  waits for it. A program that asks to break away gets that error unless it
+  retries without the flag. The elevated backend and unsandboxed commands still allow it.
 - Protected paths inside writable roots (and other read-only carve-outs) get
   an explicit Medium label, once, so they don't inherit the Low label and
   other Low-integrity programs can't write them. If that label can't be set
