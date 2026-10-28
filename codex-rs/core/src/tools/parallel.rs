@@ -1498,23 +1498,24 @@ mod tests {
             },
             encrypted_function_args: None,
         };
+        let secs = 1.5;
 
         for name in ["shell_command", "unified_exec"] {
             assert_eq!(
                 "Wall time: 1.5 seconds\naborted by user",
-                ToolCallRuntime::abort_message(&call(codex_tools::ToolName::plain(name)), 1.5)
+                ToolCallRuntime::abort_message(&call(codex_tools::ToolName::plain(name)), secs)
             );
         }
         assert_eq!(
             "aborted by user after 1.5s",
             ToolCallRuntime::abort_message(
                 &call(codex_tools::ToolName::namespaced("mcp", "shell_command")),
-                1.5
+                secs
             )
         );
         assert_eq!(
-            "aborted by user after 1.0s",
-            ToolCallRuntime::abort_message(&call(codex_tools::ToolName::plain("other")), 1.0)
+            "aborted by user after 1.5s",
+            ToolCallRuntime::abort_message(&call(codex_tools::ToolName::plain("other")), secs)
         );
     }
 }
