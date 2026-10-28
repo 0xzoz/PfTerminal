@@ -1573,10 +1573,13 @@ impl Classifier {
         // (`{}`, `{.}`) are only seen in the text as written.
         let braces = command.iter().any(|arg| arg.contains('{'));
         let mut loops = launched_git::PositionalLoops::default();
+        // #1405: a `mapfile` was found, by any spelling.
+        let mut mapfile = false;
         for (index, simple) in lexed.commands.iter().enumerate() {
             work::step();
             let (words, unseen, skipped) =
                 substitute(simple, &variables, &mut self.substitution_budget);
+            mapfile = mapfile || rerun::names_mapfile(&words);
             if let Some(scope) = &mut self.temp {
                 scope.read(simple, &words);
             }
@@ -1676,6 +1679,15 @@ impl Classifier {
             }
         }
         certain_cd::finish(&mut folders);
+        // #1405: the word lexer ignores quotes (`-d 'x>' "$o"`): a line
+        // with a `mapfile` is read with them too.
+        if mapfile
+            && command
+                .iter()
+                .any(|arg| rerun::quoted_mapfile_callback(arg))
+        {
+            self.note(ProtectedActionKind::UnseenCode);
+        }
         // #937: arithmetic on a variable filled from command output or
         // `read` runs the substitutions in its value, like `eval`.
         // #1028: zsh `e`/`+` glob qualifiers run code the classifier does
@@ -1824,7 +1836,8 @@ impl Classifier {
             // #1064: and other commands that run an operand as code.
             let eval_unseen = (matches!(name.as_str(), "eval" | "trap")
                 && unseen[index + 1..].iter().any(|unseen| *unseen))
-                || rerun::runs_unseen(name, words, unseen, *index);
+                || rerun::runs_unseen(name, words, unseen, *index)
+                || rerun::mapfile_callback(simple, words, unseen);
             if self.rebuilt == 0 && (unseen[*index] || inline_unseen || eval_unseen) {
                 // D191: a trap that only removes temp paths.
                 let removes = name == "trap"
@@ -2402,7 +2415,13 @@ impl Classifier {
             if self.runs_elsewhere(elsewhere, *index, preload) {
                 continue;
             }
-            if local(preload) {
+            // #1405: a shell's start-up file is a path it sources; an empty
+            // one (`--rcfile /dev/null`) runs nothing.
+            if shell {
+                if preload != "/dev/null" {
+                    self.required_script(preload, cwd, depth, shell);
+                }
+            } else if local(preload) {
                 self.required_script(preload, cwd, depth, /*shell*/ false);
             } else {
                 let file = self.homes.resolve(preload, cwd);
