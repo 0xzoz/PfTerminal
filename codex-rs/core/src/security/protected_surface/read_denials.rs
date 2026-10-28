@@ -571,6 +571,22 @@ impl ReadDenials {
         // #732: only these direct database entries are generated here. Keep
         // their provenance through the permission profile so Linux never
         // recurses through unrelated descendants when expanding this rule.
+        // #732 review: the top-level scan does not reach the backups folder's
+        // databases; where the command works inside it (so it is not denied
+        // whole), they keep the recursive scan they had.
+        let backups = folder.join("db-backups");
+        if Self::holds_kept(&backups, keep) {
+            let backups = FileSystemPath::GlobPattern {
+                pattern: format!(
+                    "{}/**/*.sqlite*",
+                    crate::security::preflight::glob_escape_path(backups.as_path())
+                ),
+                scan: None,
+            };
+            if !self.globs.contains(&backups) {
+                self.globs.push(backups);
+            }
+        }
         let databases = FileSystemPath::database_entries(folder);
         if !self.globs.contains(&databases) {
             self.globs.push(databases);
