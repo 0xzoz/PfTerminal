@@ -38,6 +38,7 @@ mod indirect;
 mod invocation;
 mod launched_git;
 mod loader_variables;
+mod mktemp;
 mod named_shell;
 mod nested;
 mod outbound;
@@ -358,6 +359,13 @@ const FOLDER_FLAGS: &[&str] = &["-C", "--directory", "--cwd", "--cd", "--chdir"]
 /// Nesting limit for scripts, payloads and literals classified inside an
 /// action. Deeper nesting fails closed.
 const MAX_DEPTH: usize = 4;
+/// Shell builtins that change what the rest of a line does (its folder,
+/// variables or code): named by a path they run a file instead.
+const PATH_BUILTINS: &[&str] = &[
+    "cd", "pushd", "popd", "chdir", "source", ".", "eval", "exec", "export", "local", "declare",
+    "readonly", "typeset", "trap", "alias", "builtin", "command", "let", "read", "set", "shopt",
+    "unset",
+];
 /// Bytes of command text one classification lexes; more fail closed.
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 /// Script files one classification reads; more fail closed.
@@ -532,6 +540,12 @@ fn judged(action: &ApprovalAction, homes: Homes, as_named: bool) -> Classifier {
     if classifier.homes.exhausted() {
         classifier.note(ProtectedActionKind::UnseenCode);
     }
+    // D191: an action that asks anyway asks as on main.
+    if classifier.found.is_some()
+        && let Some(kind) = classifier.held.take()
+    {
+        classifier.note(kind);
+    }
     classifier
 }
 
@@ -547,6 +561,7 @@ impl Classifier {
             sed_scope: None,
             ran: Vec::new(),
             ran_unknown: false,
+            argv0: String::new(),
             written: Vec::new(),
             nested_scripts: 0,
             unknown_folder: 0,
@@ -563,6 +578,8 @@ impl Classifier {
             backslash: false,
             in_file: 0,
             reads_follow: false,
+            temp: None,
+            held: None,
             workspace: String::new(),
             cut_values: HashSet::new(),
             sets_env: false,
@@ -575,6 +592,7 @@ impl Classifier {
 
     /// Judge a command line run in `cwd`.
     fn judge_command(&mut self, command: &[String], cwd: &str) {
+        self.argv0 = command.first().cloned().unwrap_or_default();
         if self.workspace.is_empty() {
             self.workspace = cwd.to_string();
         }
@@ -1147,6 +1165,8 @@ struct Classifier {
     /// one whose name the classifier cannot see.
     ran: Vec<String>,
     ran_unknown: bool,
+    /// The action's own program (`argv[0]`): if it is missing, nothing runs.
+    argv0: String,
     /// #885: files the action's command lines write (`None`: one the
     /// classifier cannot name).
     written: Vec<Option<String>>,
@@ -1175,6 +1195,11 @@ struct Classifier {
     /// #1240: bytes of words and folders the Windows view may still
     /// resolve; past it the action fails closed.
     windows_budget: usize,
+    /// D191: the action's own line's variables that hold a `mktemp` path.
+    temp: Option<mktemp::Scope>,
+    /// D191: prompts only a temp path raised, dropped only when the action
+    /// asks for nothing else (else it asks as on main, for the strongest).
+    held: Option<ProtectedActionKind>,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
@@ -1388,6 +1413,20 @@ impl Classifier {
         }
     }
 
+    /// D191: a prompt that only a temp path raised is held back until the
+    /// line is read (`temp`); any other is noted.
+    fn note_or_hold(&mut self, kind: ProtectedActionKind, temp: bool) {
+        match &mut self.temp {
+            Some(scope) if temp => scope.hold(kind),
+            _ => self.note(kind),
+        }
+    }
+
+    /// D191: a word naming a file at a temp path of this line.
+    fn temp_place(&self, word: &str) -> bool {
+        self.temp.is_some() && mktemp::temp_place(word)
+    }
+
     fn path(&mut self, path: &str) {
         if let Some(kind) = self.homes.classify_resolved(path) {
             self.note(kind);
@@ -1449,6 +1488,13 @@ impl Classifier {
         // #841: this line's own sed programs (nested lines have theirs).
         let outer_scope = std::mem::replace(&mut self.sed_scope, SedScope::of(command));
         let lexed = shell::simple_commands(command);
+        // D191: only the action's own line, judged under POSIX path rules.
+        let outer_temp = std::mem::replace(
+            &mut self.temp,
+            (depth == 0 && !self.homes.windows_paths())
+                .then(|| mktemp::Scope::of(command, &lexed.commands))
+                .flatten(),
+        );
         // #1064: whether the line may build shell text at run time (another
         // language's `chr(64)`, `printf '\x40' | bash`); see
         // `shell::prompt_expansion`. Text rebuilt from joined literals is
@@ -1534,6 +1580,9 @@ impl Classifier {
             let (words, unseen, skipped) =
                 substitute(simple, &variables, &mut self.substitution_budget);
             mapfile = mapfile || rerun::names_mapfile(&words);
+            if let Some(scope) = &mut self.temp {
+                scope.read(simple, &words);
+            }
             if self.substitution_budget.left == 0 {
                 self.note(ProtectedActionKind::UnseenCode);
             }
@@ -1561,7 +1610,15 @@ impl Classifier {
             {
                 self.note(ProtectedActionKind::UnseenCode);
             }
-            arithmetic.note(simple, &words);
+            // D191: a trap that only removes temp paths reads no arithmetic;
+            // its prompt is held back below.
+            if !self
+                .temp
+                .as_ref()
+                .is_some_and(|scope| scope.removal_trap(&words))
+            {
+                arithmetic.note(simple, &words);
+            }
             lexed_seds += sed::positions(&words).len();
             lexed_shells += nested::shell_commands(&words);
             let feeds_pipe = pipe_sources.contains(&index);
@@ -1650,6 +1707,17 @@ impl Classifier {
         {
             self.note(ProtectedActionKind::UnseenCode);
         }
+        // D191: the prompts only a temp path raised, kept now unless its
+        // variable kept that path (see `release_held`).
+        if let Some(scope) = std::mem::replace(&mut self.temp, outer_temp) {
+            match scope.finish(arithmetic.assigns_unseen_name(command)) {
+                (Some(kind), true) => self.note(kind),
+                (Some(kind), false) => {
+                    self.held = Some(self.held.map_or(kind, |held| held.strongest(kind)));
+                }
+                (None, _) => {}
+            }
+        }
         self.path(&folders.cwd);
         // Strings assembled from literals by inline code (`'~/.co' + 'dex'`).
         let outer_foreign = std::mem::replace(&mut self.rebuilt_foreign, foreign);
@@ -1720,7 +1788,13 @@ impl Classifier {
                     // is kept as written.
                     // Once unseen, a variable stays unseen for the action
                     // (a later assignment may not run).
-                    let value = if value.contains(shell::UNSEEN_OUTPUT)
+                    let temp = self
+                        .temp
+                        .as_ref()
+                        .and_then(|scope| scope.value(name, value, !variables.contains_key(name)));
+                    let value = if let Some(temp) = temp {
+                        temp.to_string()
+                    } else if value.contains(shell::UNSEEN_OUTPUT)
                         || variables
                             .get(name)
                             .is_some_and(|old| old.contains(shell::UNSEEN_OUTPUT))
@@ -1765,14 +1839,28 @@ impl Classifier {
                 || rerun::runs_unseen(name, words, unseen, *index)
                 || rerun::mapfile_callback(simple, words, unseen);
             if self.rebuilt == 0 && (unseen[*index] || inline_unseen || eval_unseen) {
-                self.note(ProtectedActionKind::UnseenCode);
+                // D191: a trap that only removes temp paths.
+                let removes = name == "trap"
+                    && !unseen[*index]
+                    && !inline_unseen
+                    && self
+                        .temp
+                        .as_ref()
+                        .is_some_and(|scope| scope.removes_temp(args));
+                self.note_or_hold(ProtectedActionKind::UnseenCode, removes);
             }
             folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
                 && unchecked[index + 1..].iter().any(|word| *word);
-            // #1309: this reading knows the words of `cd "$d"`; it loses
-            // its folder only past the possible folders.
-            let unknown = folders.lost;
-            self.follow_change(name, args, folders, variables, unknown, certain);
+            // `pushd -n x`, `popd +1`: the folder stack changes, the folder
+            // may not (or goes to an entry of a stack not followed).
+            if unknown_folder::stack_change(name, args) {
+                folders.unfollowed = true;
+            } else {
+                // #1309: this reading knows the words of `cd "$d"`; it loses
+                // its folder only past the possible folders.
+                let unknown = folders.lost;
+                self.follow_change(name, args, folders, variables, unknown, certain);
+            }
         }
         let mut git_config = GitConfigWrites::new(&lower, &hidden, &unchecked);
         let mut local_git_config = git_config::Writes::new(words);
@@ -2001,7 +2089,7 @@ impl Classifier {
                     && simple.here_string != Some(position)))
                 && outputs::unseen_place(word)
             {
-                self.note(ProtectedActionKind::Persistence);
+                self.note_or_hold(ProtectedActionKind::Persistence, self.temp_place(word));
             }
             // Attached, assigned and volume forms (`-o/path`, `f=@/path`,
             // `~/.aws:/c`) are paths too.
@@ -2029,7 +2117,8 @@ impl Classifier {
                         && (self.homes.is_persistence(&resolved)
                             || self.unknown_place(folders, candidate))
                     {
-                        self.note(ProtectedActionKind::Persistence);
+                        let temp = self.temp_place(candidate);
+                        self.note_or_hold(ProtectedActionKind::Persistence, temp);
                     }
                     if recursive && !folder_value && self.homes.holds_a_home(&resolved) {
                         self.note(ProtectedActionKind::Credentials);
@@ -2041,7 +2130,8 @@ impl Classifier {
                     let resolved = self.homes.resolve(candidate, base);
                     self.word_path(&resolved, candidate, depth);
                     if self.homes.is_persistence(&resolved) {
-                        self.note(ProtectedActionKind::Persistence);
+                        let temp = self.temp_place(candidate);
+                        self.note_or_hold(ProtectedActionKind::Persistence, temp);
                     }
                 }
             }
@@ -2050,21 +2140,31 @@ impl Classifier {
             }
         }
         // #1159: git writing the working tree in a folder that is or holds
-        // a home.
-        if command
-            .as_ref()
-            .is_some_and(|(index, name)| outputs::writes_working_tree(name, &words[index + 1..]))
-            && bases
+        // a home. D195 (#1309): or in one the classifier cannot know,
+        // unless git's own leading `-C` names one (`git -C /x pull`; not a
+        // value elsewhere, `merge -m --cd=/x`).
+        if let Some((index, name)) = &command
+            && outputs::writes_working_tree(name, &words[index + 1..])
+            && (bases
                 .iter()
                 .chain(other_bases.iter())
                 .any(|base| self.homes.holds_a_home(&self.homes.resolve(".", base)))
+                || (self.unknown_place(folders, ".")
+                    && !(name.as_str() == "git"
+                        && words[index + 1..]
+                            .chunks(2)
+                            .take_while(|pair| pair.len() == 2 && pair[0] == "-C")
+                            .any(|pair| {
+                                work::step();
+                                !self.relative_place(&pair[1])
+                            }))))
         {
             self.note(ProtectedActionKind::Persistence);
         }
         for file in outputs.iter().flatten().chain(&wrapper_outputs) {
             work::step();
             if outputs::unseen_place(file) {
-                self.note(ProtectedActionKind::Persistence);
+                self.note_or_hold(ProtectedActionKind::Persistence, self.temp_place(file));
             }
             for base in bases.iter().chain(other_bases.iter()) {
                 work::step();
@@ -2076,11 +2176,90 @@ impl Classifier {
                     || (file.ends_with('/') && self.homes.holds_a_home(&resolved))
                     || self.unknown_place(folders, file)
                 {
-                    self.note(ProtectedActionKind::Persistence);
+                    self.note_or_hold(ProtectedActionKind::Persistence, self.temp_place(file));
                 }
             }
         }
         self.scripts_of(simple, words, unseen, command.as_ref(), &cwd, depth);
+        self.path_programs(words, command.as_ref(), &cwd, depth);
+    }
+
+    /// A program named by a path (`./python3`, `./env`, `/usr/bin/env`) is
+    /// the file that runs, whatever its name: it is read as any program run
+    /// by its path, besides what its name would run. A shell builtin named
+    /// by a path (`./cd`, `./source`) runs that file, not the builtin, so
+    /// the rest of the line is not known: it asks.
+    fn path_programs(
+        &mut self,
+        words: &[String],
+        command: Option<&(usize, String)>,
+        cwd: &str,
+        depth: usize,
+    ) {
+        // #1261: Windows path rules follow their own reads.
+        if self.homes.windows_paths() {
+            return;
+        }
+        // `scripts_of` read a command that names no shell or interpreter.
+        let read = command
+            .filter(|_| indirect::invocation(words).is_none())
+            .map(|(index, _)| *index);
+        let elsewhere = unknown_folder::elsewhere_at(words);
+        for at in indirect::programs(words) {
+            work::step();
+            let word = &words[at];
+            if !word.contains('/') || Some(at) == read {
+                continue;
+            }
+            if PATH_BUILTINS.contains(&basename(&word.to_lowercase())) {
+                self.note(ProtectedActionKind::UnseenCode);
+            } else if !self.runs_elsewhere(elsewhere, at, word) {
+                self.named_program_file(word, cwd, depth);
+            }
+        }
+    }
+
+    /// A program named by a path whose name is a known tool's: judged as a
+    /// script when it is text. An executable is not one the action ran as
+    /// a script (`/bin/bash`). Missing, it asks as any program run by its
+    /// path, unless it is the action's own program: then nothing runs.
+    fn named_program_file(&mut self, word: &str, cwd: &str, depth: usize) {
+        if word.contains('$') {
+            return;
+        }
+        let file = self.homes.resolve(word, cwd);
+        let data = self
+            .sed_scope
+            .as_ref()
+            .is_some_and(|scope| scope.is_data(word));
+        match self.read_file(&file, word, cwd) {
+            FileText::Binary => {}
+            FileText::Missing if data || (depth == 0 && self.argv0 == word) => {}
+            FileText::Missing | FileText::Unreadable => {
+                self.ran.push(file);
+                self.note(ProtectedActionKind::UnseenCode);
+            }
+            FileText::Text(text) => {
+                self.ran.push(file);
+                self.script(&text, cwd, depth + 1);
+            }
+        }
+    }
+
+    /// Whether `file`, a word of the program at `at` or after it, names a
+    /// file relative to a folder a wrapper before that program moved to
+    /// (`env -C sub bash run.sh`, `sudo -D sub ./run.sh`): which file runs
+    /// is not known, so it asks.
+    /// `from`: `unknown_folder::elsewhere_at` of the command's words.
+    fn runs_elsewhere(&mut self, from: Option<usize>, at: usize, file: &str) -> bool {
+        let elsewhere = !self.homes.windows_paths()
+            && from.is_some_and(|from| from < at)
+            && (file.contains("..")
+                || self.homes.resolve(file, "/a") != self.homes.resolve(file, "/b"));
+        if elsewhere {
+            self.note(ProtectedActionKind::UnseenCode);
+        }
+        elsewhere
     }
 
     /// #1283: for each of a simple command's words, whether the quote-aware
@@ -2166,9 +2345,15 @@ impl Classifier {
             return;
         };
         let local = |word: &str| word.starts_with(['.', '/', '~']);
+        let elsewhere = if self.homes.windows_paths() {
+            None
+        } else {
+            unknown_folder::elsewhere_at(words)
+        };
         let Some(invocation) = indirect::invocation(words) else {
             let word = &words[*index];
-            if word.contains('/') {
+            // `env -C sub ./run.sh` runs `sub/run.sh`.
+            if word.contains('/') && !self.runs_elsewhere(elsewhere, *index, word) {
                 // A binary through an environment path (`$JAVA_HOME/bin/java`)
                 // is not a script; an unseen one was already judged.
                 if !word.contains('$') {
@@ -2194,7 +2379,11 @@ impl Classifier {
         let shell =
             shell::SHELLS.contains(&name.as_str()) || matches!(name.as_str(), "source" | ".");
         match invocation.code {
-            Code::File(file) => self.required_script(file, cwd, depth, shell),
+            Code::File(file) => {
+                if !self.runs_elsewhere(elsewhere, *index, file) {
+                    self.required_script(file, cwd, depth, shell);
+                }
+            }
             Code::Module(module) if module.contains('$') => {
                 self.note(ProtectedActionKind::UnseenCode);
             }
@@ -2202,6 +2391,9 @@ impl Classifier {
                 let module = module.replace('.', "/");
                 for candidate in [format!("{module}.py"), format!("{module}/__main__.py")] {
                     work::step();
+                    if self.runs_elsewhere(elsewhere, *index, &candidate) {
+                        continue;
+                    }
                     let file = self.homes.resolve(&candidate, cwd);
                     self.not_shell += 1;
                     self.script_file(&file, &candidate, cwd, depth, Script::IfPresent);
@@ -2220,6 +2412,9 @@ impl Classifier {
         }
         for preload in invocation.preloads {
             work::step();
+            if self.runs_elsewhere(elsewhere, *index, preload) {
+                continue;
+            }
             // #1405: a shell's start-up file is a path it sources; an empty
             // one (`--rcfile /dev/null`) runs nothing.
             if shell {

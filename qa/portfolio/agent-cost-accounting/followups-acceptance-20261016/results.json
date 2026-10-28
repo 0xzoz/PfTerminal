@@ -14,7 +14,7 @@
  },
  "dispositions": {
   "path": "dispositions.md",
-  "sha256": "67bee8a020f37a98a5f2c55cacce1f76e3861eaeb72ee45dc504444e5fd1dfea"
+  "sha256": "de8d3972752fa8e0557197f33b9922fca5c22c46cde9714f06e10f405548bc83"
  },
  "cases": [
   {
@@ -4863,5 +4863,62 @@
   },
   "raw_vs_disposition": "executor: all five passed; integrator: ACC-11 and ACC-14 blocked (one result each NOT OBSERVED, G7/G11/G16)",
   "note": "Top-level candidate is the first run's build; the five re-run cases carry the R1 candidate hash, so check.py reports them as stale against the first-run candidate by design."
+ },
+ "owner_decisions": {
+  "note": "Owner acceptance is not a clean pass. Each case's 'disposition' above stays as the integrator recorded it (ACC-04, ACC-11 and ACC-14 remain 'blocked'); these decisions are recorded separately.",
+  "decisions": [
+   {
+    "id": "D113",
+    "date": "2026-10-21",
+    "by": "Travis Good (owner)",
+    "cases": [
+     "ACC-04"
+    ],
+    "recorded_as": "passed by owner decision",
+    "basis": "local-model re-run, PR #1191"
+   },
+   {
+    "id": "D207",
+    "date": "2026-10-27",
+    "by": "Travis Good (owner)",
+    "cases": [
+     "ACC-11",
+     "ACC-14"
+    ],
+    "recorded_as": "passed by owner decision",
+    "basis": "re-run R1 (PR #1411): every other result observed and passing; the one missing result of each appears only in later captures (dispositions.md)"
+   },
+   {
+    "id": "D208",
+    "date": "2026-10-27",
+    "by": "Travis Good (owner)",
+    "decision": "S10 signed off",
+    "named_limits": {
+     "ACC-22": "advisory; starting condition not met",
+     "ACC-35": "optional; needs real Moonshot spend (D3), not granted"
+    }
+   }
+  ],
+  "totals_on_record": {
+   "passed": 32,
+   "failed": 0,
+   "blocked": 5,
+   "of": 37
+  },
+  "final_disposition": {
+   "passed": 35,
+   "failed": 0,
+   "blocked": 2,
+   "of": 37,
+   "passed_by_owner_decision": [
+    "ACC-04",
+    "ACC-11",
+    "ACC-14"
+   ],
+   "blocked_cases": [
+    "ACC-22",
+    "ACC-35"
+   ]
+  }
  }
 }

