@@ -205,9 +205,10 @@ The kill switch (`/security` → `g`) works under every level.
   repository's own git folder was unreadable at its first look, config files
   or hooks added before the first complete look may not be reported as new.
   Check that config and those hooks yourself before you run git there. Some
-  setups of your own hold them too until you remove them: a layout made of links (`git new-workdir`, Android's `repo`), a
-  `config.worktree` that `git sparse-checkout` adds, or a hooks folder a hook
-  installer creates where there was none. On Linux the sandbox leaves empty
+  setups of your own hold them too until you remove them: a layout made of
+  links (`git new-workdir`, Android's `repo`), a `config.worktree` that
+  `git sparse-checkout` adds, or a hooks folder a hook installer creates
+  where there was none. On Linux the sandbox leaves empty
   files and folders in place while a command runs: a new config file or hooks
   folder that is empty is reported (in any session) once something is put in
   it, and an empty `.git` folder replaced by another empty one isn't reported
