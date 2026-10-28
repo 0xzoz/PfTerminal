@@ -1,3 +1,4 @@
+#![cfg(unix)]
 use super::*;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
@@ -105,41 +106,63 @@ fn issue_594_a_link_in_a_writable_folder_is_exposed_and_elsewhere_not() {
 fn issue_594_aggressive_is_exposed_only_from_a_folder_holding_the_link() {
     let layout = layout();
     assert_eq!(
-        exposed_links_under_aggressive(&layout.link, &layout.user),
+        exposed_links_under_aggressive(&layout.link, /*policy*/ None, &layout.user),
         vec![exposed(&layout.link, &layout.user)]
     );
     // From a parent of the link's folder too (it is inside the workspace).
     let parent = layout.user.parent().unwrap();
     assert_eq!(
-        exposed_links_under_aggressive(&layout.link, parent),
+        exposed_links_under_aggressive(&layout.link, /*policy*/ None, parent),
         vec![exposed(&layout.link, &layout.user)]
     );
     let project = layout.real.parent().unwrap().join("project");
     std::fs::create_dir_all(&project).unwrap();
     assert_eq!(
-        exposed_links_under_aggressive(&layout.link, &project),
+        exposed_links_under_aggressive(&layout.link, /*policy*/ None, &project),
         Vec::new()
     );
 }
 
+/// The user's own folder is exposed even when it is not writable to them
+/// (a command could make it writable); a folder they neither own nor can
+/// write, with no such folder above it, is not.
 #[test]
-fn issue_594_a_folder_the_user_cannot_write_is_safe() {
+fn issue_594_a_read_only_folder_of_the_users_own_is_still_exposed() {
     let layout = layout();
     let original = std::fs::metadata(&layout.user).unwrap().permissions();
     std::fs::set_permissions(&layout.user, std::fs::Permissions::from_mode(0o555)).unwrap();
-    let user_can = user_can_write(&layout.user);
     let found = exposed_links(
         &layout.link,
         &FileSystemSandboxPolicy::unrestricted(),
         &layout.user,
     );
     std::fs::set_permissions(&layout.user, original).unwrap();
-    if user_can {
-        // root: the folder stays writable, so the link stays exposed.
-        assert_eq!(found, vec![exposed(&layout.link, &layout.user)]);
-    } else {
-        assert_eq!(found, Vec::new());
+    assert_eq!(found, vec![exposed(&layout.link, &layout.user)]);
+    // SAFETY: `geteuid` has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        assert!(!user_controls(Path::new("/")));
     }
+}
+
+/// #594 review: a writable root (or the current folder) named through a
+/// link still covers the link's real folder.
+#[test]
+fn issue_594_a_writable_root_named_through_a_link_is_matched() {
+    let layout = layout();
+    let alias = layout.user.parent().unwrap().join("alias");
+    symlink(&layout.user, &alias).unwrap();
+    assert_eq!(
+        exposed_links(&layout.link, &writable(&alias), &alias),
+        vec![exposed(&layout.link, &layout.user)]
+    );
+    assert_eq!(
+        exposed_links_under_aggressive(&layout.link, /*policy*/ None, &alias),
+        vec![exposed(&layout.link, &layout.user)]
+    );
+    assert_eq!(
+        exposed_links_under_aggressive(&layout.link, Some(&writable(&alias)), &alias),
+        vec![exposed(&layout.link, &layout.user)]
+    );
 }
 
 #[test]

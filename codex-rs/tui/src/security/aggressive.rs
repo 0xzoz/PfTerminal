@@ -453,7 +453,7 @@ fn verify_sandbox(config: &Config, failures: &mut Vec<String>) {
     // could replace; at launch and for every later folder.
     if super::home_link::applies()
         && let Some((real, links)) = super::home_link::check(&config.codex_home, |given| {
-            super::home_link::exposed_links(given, &file_system, cwd)
+            super::home_link::exposed_links_under_aggressive(given, Some(&file_system), cwd)
         })
     {
         failures.push(super::home_link::aggressive_refusal(&real, &links));

@@ -13,7 +13,7 @@ use ratatui::widgets::Widget;
 use super::*;
 use crate::keymap::RuntimeKeymap;
 
-const BLOCKER: &str = "Corbanu home: it is reached through a link (/home/user/.corbanu) in a folder agent commands can write, so a command could replace it and the next start would lose Aggressive. Start Corbanu Terminal with CORBANU_HOME=/home/user/dotfiles/corbanu (the real folder), or from a folder that does not hold the link.";
+const BLOCKER: &str = "Corbanu home: it is reached through a link (/home/user/.corbanu) in a folder agent commands can write, so a command could replace it and the next start would lose Aggressive. Start Corbanu Terminal with CORBANU_HOME=/home/user/dotfiles/corbanu (the real folder), or start it from a folder that does not contain the link.";
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)

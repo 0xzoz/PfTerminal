@@ -1130,7 +1130,7 @@ async fn issue_442_credential_templates_are_exempt() {
 /// #594 (D225): on Linux, Aggressive refuses a Corbanu home reached through a
 /// link in the folder it lets commands write (at launch and for every later
 /// folder, `launch::verify_reloaded`), and accepts the real folder given
-/// directly or a folder that does not hold the link.
+/// directly or a folder that does not contain the link.
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn issue_594_home_reached_through_a_writable_link_fails_verification() {

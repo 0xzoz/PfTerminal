@@ -81,47 +81,71 @@ fn components(path: &Path) -> VecDeque<PathBuf> {
         .collect()
 }
 
-/// The links on the way to `given` whose folder agent commands under
-/// `policy` could write, and the user can write (a command runs as the
-/// user, so a folder the user cannot change is safe).
+/// The links on the way to `given` that agent commands under `policy` could
+/// replace: the profile lets them write the link's folder, and the user (as
+/// whom they run) controls it or a folder above it that the profile also
+/// lets them write (renaming that one rebuilds the path). A folder named
+/// through a link in the policy counts by its real path.
 pub(crate) fn exposed_links(
     given: &Path,
     policy: &FileSystemSandboxPolicy,
     cwd: &Path,
 ) -> Vec<ExposedLink> {
     exposed_links_with(given, |folder| {
-        policy.can_write_path_with_cwd(folder, cwd) && user_can_write(folder)
+        policy.can_write_path_with_cwd(folder, cwd)
+            || policy.can_write_effective_path_with_cwd(folder, cwd)
     })
 }
 
-/// [`exposed_links`] for Aggressive's profile, whose only writable folder is
-/// the current folder (`aggressive::verify` refuses any other).
-pub(crate) fn exposed_links_under_aggressive(given: &Path, cwd: &Path) -> Vec<ExposedLink> {
+/// [`exposed_links`] for Aggressive: `policy`, and also the current folder
+/// by its real path (Aggressive's only writable root; `aggressive::verify`
+/// refuses any other).
+pub(crate) fn exposed_links_under_aggressive(
+    given: &Path,
+    policy: Option<&FileSystemSandboxPolicy>,
+    cwd: &Path,
+) -> Vec<ExposedLink> {
     let real_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     exposed_links_with(given, |folder| {
-        folder.starts_with(&real_cwd) && user_can_write(folder)
+        folder.starts_with(&real_cwd)
+            || policy.is_some_and(|policy| {
+                policy.can_write_path_with_cwd(folder, cwd)
+                    || policy.can_write_effective_path_with_cwd(folder, cwd)
+            })
     })
 }
 
 fn exposed_links_with(given: &Path, writable: impl Fn(&Path) -> bool) -> Vec<ExposedLink> {
     traversed_links(given)
         .into_iter()
-        .filter(|link| writable(&link.folder))
+        .filter(|link| {
+            writable(&link.folder)
+                && link
+                    .folder
+                    .ancestors()
+                    .any(|folder| writable(folder) && user_controls(folder))
+        })
         .collect()
 }
 
+/// Whether the user can change `folder`'s entries: it is writable to them,
+/// or theirs (they could make it writable).
 #[cfg(unix)]
-fn user_can_write(folder: &Path) -> bool {
+fn user_controls(folder: &Path) -> bool {
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
     let Ok(path) = std::ffi::CString::new(folder.as_os_str().as_bytes()) else {
         return true;
     };
     // SAFETY: `path` is a valid NUL-terminated string for the call.
-    unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 }
+    let writable = unsafe { libc::access(path.as_ptr(), libc::W_OK) == 0 };
+    // SAFETY: `geteuid` has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    writable || std::fs::metadata(folder).map_or(true, |meta| meta.uid() == euid)
 }
 
 #[cfg(not(unix))]
-fn user_can_write(_folder: &Path) -> bool {
+fn user_controls(_folder: &Path) -> bool {
     true
 }
 
@@ -183,7 +207,7 @@ pub(crate) fn moderate_warning(real: &Path, links: &[ExposedLink]) -> String {
 /// `/security` review).
 pub(crate) fn aggressive_refusal(real: &Path, links: &[ExposedLink]) -> String {
     format!(
-        "Corbanu home: it is reached through a link ({}) in a folder agent commands can write, so a command could replace it and the next start would lose Aggressive. Start Corbanu Terminal with CORBANU_HOME={} (the real folder), or from a folder that does not hold the link.",
+        "Corbanu home: it is reached through a link ({}) in a folder agent commands can write, so a command could replace it and the next start would lose Aggressive. Start Corbanu Terminal with CORBANU_HOME={} (the real folder), or start it from a folder that does not contain the link.",
         named(links),
         real.display()
     )
@@ -208,11 +232,11 @@ pub(crate) fn aggressive_blocker(codex_home: &Path, cwd: &Path) -> Option<String
         return None;
     }
     check(codex_home, |given| {
-        exposed_links_under_aggressive(given, cwd)
+        exposed_links_under_aggressive(given, /*policy*/ None, cwd)
     })
     .map(|(real, links)| aggressive_refusal(&real, &links))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 #[path = "home_link_tests.rs"]
 mod tests;
