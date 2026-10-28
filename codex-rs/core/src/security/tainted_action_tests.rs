@@ -9776,6 +9776,24 @@ fn issue_1276_launcher_input_as_program_or_code_asks() {
         "xargs -I% env -S'% x' < f",
         "xargs -I% mawk -W v 'BEGIN{system(\"%\")}' < f",
         "xargs -I% sh -c 'find . -exec % \\;' < f",
+        // Review 2: options read on after an unknown option's value, and
+        // more value options; substitutions as the command word; more
+        // placeholders and abbreviations; loops over positional
+        // parameters; positional parameters next to a placeholder; `env
+        // -S` strings that only wrap or in a group; find's `+` only after
+        // `{}`; chroot's option values; `parallel` with no command.
+        "parallel --nice 10 -j4 '{} config core.pager sh' < f",
+        "parallel --env PATH -I% '% x' < f",
+        "parallel --frob x -I% '% x' < f",
+        "parallel '$(echo {}) config core.pager sh' < f",
+        "xargs -I% sh -c '$(printf %s %) x' < f",
+        "parallel '{-1} x' < f",
+        "parallel --extensionrep=@ '@ x' < f",
+        "xargs env -S'nice' < f",
+        "xargs -I% env -iS'% x' < f",
+        r#"find . -exec sh -c '"$1" x' + {} \;"#,
+        "xargs -I% chroot --userspec u:g / % < f",
+        "parallel -j",
     ] {
         assert_eq!(
             script(command),
@@ -9792,6 +9810,8 @@ fn issue_1276_launcher_input_as_program_or_code_asks() {
         "parallel ::: \"$(cat f)\"",
         "parallel 'echo {} | sh' < cmds",
         "parallel 'x={}; $x' < f",
+        "xargs sh -c 'for f; do \"$f\" x; done' _ < f",
+        r#"find . -exec sh -c 'echo {}; eval "$1"' _ {} \;"#,
     ] {
         assert_eq!(
             script(command),
@@ -9847,6 +9867,21 @@ fn issue_1276_launcher_input_as_program_or_code_asks() {
         "xargs -I% ssh % uptime < hosts",
         "xargs -I% env -S'echo %' < f",
         "xargs -I% env ls --sort %",
+        // Review 2: a value option last; launcher names as data before
+        // `.`; `--` before a placeholder; options that only print.
+        "rg parallel -n",
+        "rg 'parallel' -S",
+        "rg -n parallel -a",
+        "echo parallel -I",
+        "rg -n parallel .",
+        "grep -rn parallel . --include='*.py'",
+        "find . -name '*.bak' -exec rm -f -- {} +",
+        "xargs -I{} rm -- {} < f",
+        "fd -x rm -- {}",
+        "parallel 'gzip -- {}' ::: a",
+        "parallel --version",
+        "parallel --help",
+        "parallel --number-of-cores",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
@@ -9866,6 +9901,25 @@ fn issue_1276_launcher_input_checks_are_linear() {
         ("script", "xargs -I% sh -c '", "echo % x; ", "'"),
         ("positional", "xargs sh -c '", "echo \"$1\"; ", "' _"),
         ("substitutions", "xargs -I% sh -c 'echo ", "$(echo ", "%'"),
+        ("env strings", "xargs -I% env ", "-S'echo %' ", ""),
+        (
+            "find env strings",
+            "find . -exec env ",
+            "-S'echo {}' ",
+            "\\;",
+        ),
+        (
+            "parallel readings",
+            "parallel ",
+            "--zz x --yy ",
+            "'{} x' ::: a",
+        ),
+        (
+            "loops",
+            "xargs sh -c '",
+            "for f; do echo \"$f\"; done; ",
+            "' _",
+        ),
     ] {
         work::assert_linear(label, |scale| {
             let line = format!("{prefix}{}{suffix}", unit.repeat(200 * scale));

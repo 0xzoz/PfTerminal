@@ -21,6 +21,7 @@ use super::launched_git::FEEDERS;
 use super::launched_git::FINDERS;
 use super::launched_git::PARALLEL_FLAGS;
 use super::launched_git::PARALLEL_VALUED;
+use super::outbound;
 use super::quoted;
 use super::sed;
 use super::shell::SHELLS;
@@ -48,8 +49,8 @@ const AWKS: &[&str] = &["awk", "gawk", "mawk", "nawk", "busybox-awk"];
 const EVALUATORS: &[&str] = &["eval", "source", ".", "trap"];
 
 /// Programs that run the program named in their words but that the
-/// command-word reading does not skip (`xargs -I% strace %`, `sudo %`).
-const RUNNERS: &[&str] = &["sudo", "strace", "ltrace", "chroot", "doas"];
+/// command-word reading does not skip (`xargs -I% strace %`).
+const RUNNERS: &[&str] = &["strace", "ltrace", "chroot"];
 
 /// How a shell's script refers to its positional parameters, which a
 /// launcher's input fills when it is in the shell's later arguments
@@ -88,9 +89,12 @@ impl Placeholder {
             Self::Braced => text.match_indices('{').any(|(at, _)| {
                 work::step();
                 let after = &text[at + 1..];
-                after.starts_with(|ch: char| ch.is_ascii_digit() || "}./#%=:^@?".contains(ch))
+                after.starts_with(|ch: char| ch.is_ascii_digit() || "}./#%=:^@?,".contains(ch))
                     || after.starts_with("+.")
                     || after.starts_with("+/")
+                    || after
+                        .strip_prefix('-')
+                        .is_some_and(|rest| rest.starts_with(|ch: char| ch.is_ascii_digit()))
             }),
         }
     }
@@ -104,9 +108,32 @@ impl Fills {
         }
     }
 
-    fn positional() -> Self {
+    /// How `code`, a shell's script, may refer to its positional
+    /// parameters: `$1`, `"$@"`, and the variables of loops over them
+    /// (`for f; do`, `for f do`, `select f;`).
+    fn positional(code: &str) -> Self {
+        let mut replacements: Vec<String> =
+            POSITIONAL.iter().map(|name| (*name).to_string()).collect();
+        let words: Vec<&str> = code
+            .split(|ch: char| ch.is_whitespace() || ch == ';')
+            .filter(|word| !word.is_empty())
+            .collect();
+        for pair in words.windows(3) {
+            work::step();
+            if matches!(pair[0], "for" | "select") && pair[2] != "in" {
+                replacements.push(format!("${}", pair[1]));
+            }
+        }
+        // `for f;` at the end of the words too.
+        if let [.., keyword, name] = words.as_slice()
+            && matches!(*keyword, "for" | "select")
+        {
+            replacements.push(format!("${name}"));
+        }
+        let any = replacements.len() > POSITIONAL.len() + MAX_REPLACEMENTS;
         Self {
-            replacements: POSITIONAL.iter().map(|name| (*name).to_string()).collect(),
+            replacements,
+            any,
             ..Self::default()
         }
     }
@@ -154,10 +181,17 @@ enum Launched {
 
 /// Whether input a launcher in `texts` (one simple command's words, as the
 /// quote-aware reading gives them) may run as a program or as code.
-pub(super) fn input_runs(texts: &[String]) -> bool {
+/// `data`: the words are quoted text read as code (`rg 'parallel' -S`),
+/// where no launcher counts as at a program position.
+pub(super) fn input_runs(texts: &[String], data: bool) -> bool {
     let lower: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
-    let Some(programs) = program_positions(texts) else {
-        return true;
+    let programs = if data {
+        vec![false; texts.len()]
+    } else {
+        let Some(programs) = program_positions(texts) else {
+            return true;
+        };
+        programs
     };
     let mut launched = Vec::new();
     let mut launchers = 0;
@@ -346,35 +380,109 @@ fn xargs(words: &[String], xjobs: bool, program: bool, launched: &mut Vec<Launch
     launched.push(Launched::Words(command_words(&words[at..], added), fills));
 }
 
-/// The replacement string a GNU `parallel` option sets, by its name
-/// (`-I`, `--extensionreplace`/`--er`, `--bnr`, `--dnr`, `--bner`,
-/// `--rpl 'R perl'`, ...).
+/// GNU `parallel`'s replacement-string options, by full name (`-I`,
+/// `--extensionreplace`/`--er`, `--bnr`, `--dnr`, `--bner`, `--rpl 'R
+/// perl'`); a long one also by an abbreviation of four letters or more
+/// (`--extensionrep=@`).
 fn sets_replacement(option: &str) -> bool {
+    const LONG: &[&str] = &[
+        "--replace",
+        "--extensionreplace",
+        "--basenamereplace",
+        "--dirnamereplace",
+        "--basenameextensionreplace",
+        "--seqreplace",
+        "--slotreplace",
+        "--rpl",
+    ];
     matches!(
         option,
         "-I" | "--er" | "--bnr" | "--dnr" | "--bner" | "--rpl" | "--parens"
-    ) || (option.contains("replace") && option != "--max-replace-args")
+    ) || (option.len() >= 6
+        && LONG.iter().any(|long| {
+            work::step();
+            long.starts_with(option)
+        }))
 }
 
-/// GNU `parallel` (`env_parallel`): the command words before the first
-/// `:::`-style argument are joined and run as a shell line, with input put
-/// where `{...}` placeholders and replacement strings are, or added at the
-/// end when the line holds none. Without a command it runs its input lines
-/// as commands, unless they are only its own literal `:::` arguments (judged
-/// as lines elsewhere).
-fn parallel(words: &[String], program: bool, launched: &mut Vec<Launched>) {
-    let mut fills = Fills::new(Placeholder::Braced);
-    let mut unsure = false;
-    let mut file_input = false;
-    let mut piped = false;
-    let mut at = 0;
-    while let Some(word) = words.get(at) {
+/// GNU `parallel` options that take a value, besides `PARALLEL_VALUED`
+/// (kept apart: that list also tells `launched_git` an option sets no
+/// replacement string).
+const PARALLEL_MORE_VALUED: &[&str] = &[
+    "--nice",
+    "--env",
+    "--header",
+    "--tagstring",
+    "-s",
+    "--max-chars",
+    "-E",
+    "--eof",
+    "-L",
+    "--max-lines",
+    "--basefile",
+    "--bf",
+    "--arg-sep",
+    "--arg-file-sep",
+    "--sshloginfile",
+    "--slf",
+    "--transferfile",
+    "--tf",
+    "--return",
+    "--trc",
+    "--shebang-wrap",
+    "--sqlmaster",
+    "--sqlworker",
+    "--sqlandworker",
+    "--limit",
+    "--termseq",
+    "--ctag",
+];
+
+/// GNU `parallel` options that print something and run nothing.
+const PARALLEL_INFO: &[&str] = &[
+    "--version",
+    "--help",
+    "-h",
+    "--number-of-cores",
+    "--number-of-cpus",
+    "--number-of-sockets",
+    "--number-of-threads",
+    "--max-line-length-allowed",
+    "--minversion",
+    "--citation",
+    "--bibtex",
+    "--record-env",
+];
+
+/// How far `parallel`'s options were read from a start.
+struct ParallelOptions {
+    /// Where the command (or the `:::` arguments) starts.
+    at: usize,
+    /// The last option is one this reading does not know, which may take
+    /// the word at `at` as its value.
+    unsure: bool,
+    file_input: bool,
+    piped: bool,
+    info: bool,
+}
+
+/// Reads `parallel`'s options in `words` from `start`, adding replacement
+/// strings they set to `fills`.
+fn parallel_options(words: &[String], start: usize, fills: &mut Fills) -> ParallelOptions {
+    let mut read = ParallelOptions {
+        at: start,
+        unsure: false,
+        file_input: false,
+        piped: false,
+        info: false,
+    };
+    while let Some(word) = words.get(read.at) {
         work::step();
         if word.starts_with(":::") || !word.starts_with('-') || word == "-" {
             break;
         }
-        at += 1;
-        unsure = false;
+        read.at += 1;
+        read.unsure = false;
         if word == "--" {
             break;
         }
@@ -383,8 +491,9 @@ fn parallel(words: &[String], program: bool, launched: &mut Vec<Launched>) {
             .map_or((word.as_str(), None), |(option, value)| {
                 (option, Some(value))
             });
-        file_input |= option.starts_with("-a") || option.starts_with("--a");
-        piped |= matches!(option, "--pipe" | "--pipepart");
+        read.file_input |= option.starts_with("-a") || option.starts_with("--a");
+        read.piped |= matches!(option, "--pipe" | "--pipepart");
+        read.info |= PARALLEL_INFO.contains(&option);
         if option == "--parens" {
             // Other placeholder brackets.
             fills.any = true;
@@ -396,8 +505,8 @@ fn parallel(words: &[String], program: bool, launched: &mut Vec<Launched>) {
                 (Some(replacement), _) => replacement,
                 (None, Some(value)) => value,
                 (None, None) => {
-                    at += 1;
-                    words.get(at - 1).map_or("", String::as_str)
+                    read.at += 1;
+                    words.get(read.at - 1).map_or("", String::as_str)
                 }
             };
             fills.push(value.split_whitespace().next().unwrap_or(""));
@@ -411,49 +520,81 @@ fn parallel(words: &[String], program: bool, launched: &mut Vec<Launched>) {
                         .all(|ch| ch.is_ascii_digit() || "+-%".contains(ch))
             })
         });
-        if PARALLEL_VALUED.contains(&option) {
-            at += usize::from(value.is_none());
-        } else if !(counted || PARALLEL_FLAGS.contains(&option)) {
+        if PARALLEL_VALUED.contains(&option) || PARALLEL_MORE_VALUED.contains(&option) {
+            read.at += usize::from(value.is_none());
+        } else if !(counted || PARALLEL_FLAGS.contains(&option) || read.info) {
             // An option this reading does not know: if it takes a value,
             // that is the next word, which may set a replacement string.
-            unsure = value.is_none();
+            read.unsure = value.is_none();
         }
     }
-    let end = words[at..]
-        .iter()
-        .position(|word| word.starts_with(":::"))
-        .map_or(words.len(), |offset| at + offset);
-    if at == end {
-        let literal_only = end < words.len()
-            && !file_input
-            && words[end..].iter().all(|word| {
-                work::step();
-                !word.starts_with("::::")
-                    && !word.contains(['$', '`'])
-                    && !word.contains(super::shell::UNSEEN_OUTPUT)
-            });
-        if program && !literal_only {
-            launched.push(Launched::Lines);
+    // A value option at the end has no value.
+    read.at = read.at.min(words.len());
+    read
+}
+
+/// Readings of `parallel`'s options kept when unknown options may take a
+/// value; past this many the last reading stands.
+const MAX_PARALLEL_READINGS: usize = 4;
+
+/// GNU `parallel` (`env_parallel`): the command words before the first
+/// `:::`-style argument are joined and run as a shell line, with input put
+/// where `{...}` placeholders and replacement strings are, or added at the
+/// end when the line holds none. Without a command it runs its input lines
+/// as commands, unless they are only its own literal `:::` arguments (judged
+/// as lines elsewhere) or it only prints (`--version`). An option this
+/// reading does not know may take the next word as its value (which may
+/// set a replacement string): then the options are read on from the word
+/// after it too.
+fn parallel(words: &[String], program: bool, launched: &mut Vec<Launched>) {
+    let mut fills = Fills::new(Placeholder::Braced);
+    let mut start = 0;
+    for reading in 0..MAX_PARALLEL_READINGS {
+        work::step();
+        let read = parallel_options(words, start, &mut fills);
+        let at = read.at;
+        let end = words[at..]
+            .iter()
+            .position(|word| word.starts_with(":::"))
+            .map_or(words.len(), |offset| at + offset);
+        if at == end {
+            let literal_only = end < words.len()
+                && !read.file_input
+                && words[end..].iter().all(|word| {
+                    work::step();
+                    !word.starts_with("::::")
+                        && !word.contains(['$', '`'])
+                        && !word.contains(super::shell::UNSEEN_OUTPUT)
+                });
+            if program && !literal_only && !read.info {
+                launched.push(Launched::Lines);
+            }
+            return;
         }
-        return;
+        launched.push(parallel_line(
+            &words[at..end],
+            fills.clone(),
+            read.piped,
+            program,
+        ));
+        if !read.unsure || at + 1 >= end || reading + 1 == MAX_PARALLEL_READINGS {
+            return;
+        }
+        // The unknown option took `words[at]` as its value.
+        fills.push(words[at].split_whitespace().next().unwrap_or(""));
+        start = at + 1;
     }
-    if unsure && at + 1 < end {
-        let mut with_value = fills.clone();
-        with_value.push(words[at].split_whitespace().next().unwrap_or(""));
-        launched.push(parallel_line(&words[at + 1..end], with_value, piped));
-    }
-    launched.push(parallel_line(&words[at..end], fills, piped));
 }
 
 /// A `parallel` line: input goes where its placeholders are, else (unless
-/// piped) after its words.
-fn parallel_line(words: &[String], fills: Fills, piped: bool) -> Launched {
+/// piped, and for a launcher at a program position) after its words.
+fn parallel_line(words: &[String], fills: Fills, piped: bool, program: bool) -> Launched {
     let placed = words.iter().any(|word| {
         work::step();
         fills.placed(word)
     });
     let mut words = words.to_vec();
-    if !placed && !piped {
+    if !placed && !piped && program {
         words.push(ADDED.to_string());
     }
     Launched::Line {
@@ -578,10 +719,14 @@ fn finder(words: &[String], fd: bool, program: bool, launched: &mut Vec<Launched
         if !starts {
             continue;
         }
-        let end = words[at..]
-            .iter()
-            .position(|word| matches!(word.as_str(), ";" | "+"))
-            .map_or(words.len(), |offset| at + offset);
+        // `;`, or `+` right after a `{}` (find; fd takes `;` only).
+        let end = (at..words.len())
+            .find(|&end| {
+                work::step();
+                words[end] == ";"
+                    || (!fd && words[end] == "+" && end > at && words[end - 1].ends_with("{}"))
+            })
+            .unwrap_or(words.len());
         let mut command: Vec<String> = attached.into_iter().map(str::to_string).collect();
         command.extend(words[at..end].iter().cloned());
         let fills = Fills::new(placeholder);
@@ -631,12 +776,96 @@ fn fd_exec(word: &str) -> (bool, Option<&str>) {
     (false, None)
 }
 
+/// For each of a launched command's words, whether a program may start
+/// there: its command word and wrappers', or every word after an exec
+/// wrapper, or the word after a finder's exec option. Not after `--`,
+/// which ends options (`xargs -I{} git checkout -- {}`). `None` past
+/// `outbound::MAX_JUDGED_POSITIONS` starts.
+fn launched_programs(words: &[String]) -> Option<Vec<bool>> {
+    let wrapped = indirect::command_word(words)
+        .is_some_and(|(_, name)| outbound::EXEC_WRAPPERS.contains(&name.as_str()));
+    let mut programs = vec![false; words.len()];
+    let mut starts = 0;
+    for start in 0..words.len() {
+        work::step();
+        let exec = start > 0
+            && matches!(
+                words[start - 1].as_str(),
+                "-exec" | "-execdir" | "-ok" | "-okdir"
+            );
+        if !(start == 0 || wrapped || exec) {
+            continue;
+        }
+        starts += 1;
+        if starts > outbound::MAX_JUDGED_POSITIONS {
+            return None;
+        }
+        for at in indirect::programs(&words[start..]) {
+            work::step();
+            programs[start + at] = true;
+        }
+    }
+    Some(programs)
+}
+
+/// `env -S'% x'` (`-iS'…'`, `--split-string=…`): env splits the string
+/// into the words it runs. The words with every such string split, once,
+/// and whether there was one; env's options end at its command.
+fn env_split(words: &[String], options: usize) -> Option<Vec<String>> {
+    let mut env = false;
+    let mut split = false;
+    let mut split_next = false;
+    let mut expanded = Vec::with_capacity(words.len());
+    for word in &words[..options] {
+        work::step();
+        let value = if std::mem::take(&mut split_next) {
+            Some(word.as_str())
+        } else if !env {
+            None
+        } else if let Some(long) = word.strip_prefix("--") {
+            (long.len() > 1 && "split-string".starts_with(long.split('=').next().unwrap_or("")))
+                .then(|| match long.split_once('=') {
+                    Some((_, value)) => Some(value),
+                    None => {
+                        split_next = true;
+                        None
+                    }
+                })
+                .flatten()
+        } else if let Some(group) = word.strip_prefix('-')
+            && let Some(at) = group.find('S')
+        {
+            let value = &group[at + 1..];
+            if value.is_empty() {
+                split_next = true;
+                None
+            } else {
+                Some(value)
+            }
+        } else {
+            None
+        };
+        split |= split_next || value.is_some();
+        match value {
+            Some(value) => expanded.extend(value.split_whitespace().map(str::to_string)),
+            None if split_next => {}
+            None => expanded.push(word.clone()),
+        }
+        env |= basename(&word.to_lowercase()) == "env";
+    }
+    expanded.extend(words[options..].iter().cloned());
+    split.then_some(expanded)
+}
+
 /// Whether input reaches the program `words` run (or a wrapper's, or one
 /// an exec wrapper or `-exec` runs: `xargs -I{} env {} config`), code an
 /// evaluator, interpreter or awk runs, or a shell's script, or the
 /// positional parameters a shell's script runs.
 fn words_run(words: &[String], fills: &Fills, depth: usize) -> bool {
-    let Some(programs) = program_positions(words) else {
+    if depth > MAX_DEPTH {
+        return true;
+    }
+    let Some(programs) = launched_programs(words) else {
         return true;
     };
     if words
@@ -646,46 +875,14 @@ fn words_run(words: &[String], fills: &Fills, depth: usize) -> bool {
     {
         return true;
     }
-    // `env -S'% x'`: env splits the string into the words it runs, before
-    // the words after it (so the input added after them is not the
-    // program).
     let command = indirect::command_word(words);
-    // env's options end at its command (`env git log --stat` has none).
     let options = command.as_ref().map_or(words.len(), |(at, _)| at + 1);
-    let mut env = false;
-    let mut env_split = false;
-    let mut split_next = false;
-    for (at, word) in words[..options].iter().enumerate() {
-        work::step();
-        let value = if std::mem::take(&mut split_next) {
-            Some(word.as_str())
-        } else if let Some(value) = word.strip_prefix("-S") {
-            Some(value)
-        } else if word.starts_with("--s") {
-            word.split_once('=').map(|(_, value)| value)
-        } else {
-            None
-        };
-        if env && let Some(value) = value {
-            env_split = true;
-            if fills.fill(value) {
-                if depth > MAX_DEPTH {
-                    return true;
-                }
-                let mut split: Vec<String> = value.split_whitespace().map(str::to_string).collect();
-                split.extend(words[at + 1..].iter().cloned());
-                if words_run(&split, fills, depth + 1) {
-                    return true;
-                }
-            }
-        }
-        env |= basename(&word.to_lowercase()) == "env";
-        split_next = env
-            && (word == "-S" || (word.starts_with("--s") && !word.contains('=') && word.len() > 3));
+    if let Some(expanded) = env_split(words, options) {
+        // Judged once as the words env runs.
+        return words_run(&expanded, fills, depth + 1);
     }
     // Input added after words that only wrap is the program (`xargs env`).
-    if !env_split
-        && command.as_ref().is_none_or(|(at, _)| words[*at] == ADDED)
+    if command.as_ref().is_none_or(|(at, _)| words[*at] == ADDED)
         && words.iter().any(|word| word == ADDED)
     {
         return true;
@@ -693,18 +890,16 @@ fn words_run(words: &[String], fills: &Fills, depth: usize) -> bool {
     let Some((index, name)) = command else {
         return false;
     };
+    // A command named by a substitution or variable.
+    if name.contains(['$', '`']) || name.contains(super::shell::UNSEEN_OUTPUT) {
+        return words.iter().any(|word| fills.fill(word));
+    }
     let args = &words[index + 1..];
     if EVALUATORS.contains(&name.as_str()) {
         return args.iter().any(|arg| fills.fill(arg));
     }
     if RUNNERS.contains(&name.as_str()) {
-        // The program they run: their first word that is not an option
-        // (after chroot's folder).
-        return args
-            .iter()
-            .filter(|arg| !arg.starts_with('-'))
-            .nth(usize::from(name == "chroot"))
-            .is_some_and(|arg| fills.fill(arg));
+        return runner_program(&name, args).is_some_and(|arg| fills.fill(arg));
     }
     if AWKS.contains(&name.as_str()) {
         let programs = awk_programs(args);
@@ -720,8 +915,8 @@ fn words_run(words: &[String], fills: &Fills, depth: usize) -> bool {
         // `xargs sh -c`: the added input is the code.
         Some(Code::Inline(None)) => args.last().is_some_and(|arg| arg == ADDED),
         Some(Code::Inline(Some(code))) => {
-            if fills.fill(code) {
-                return !shell || line_runs(code, fills, depth + 1);
+            if fills.fill(code) && (!shell || line_runs(code, fills, depth + 1)) {
+                return true;
             }
             // `sh -c '"$1" x' _ {}`: input in the shell's arguments.
             let after = args
@@ -730,10 +925,26 @@ fn words_run(words: &[String], fills: &Fills, depth: usize) -> bool {
                 .map_or(args.len(), |at| at + 1);
             shell
                 && args[after..].iter().any(|arg| fills.fill(arg))
-                && line_runs(code, &Fills::positional(), depth + 1)
+                && line_runs(code, &Fills::positional(code), depth + 1)
         }
         _ => false,
     }
+}
+
+/// The program a runner runs: its first operand (chroot's second, after
+/// the folder), past the values of chroot's `--userspec`/`--groups`.
+fn runner_program<'a>(name: &str, args: &'a [String]) -> Option<&'a String> {
+    let mut operands = args.iter().scan(false, |value_next, arg| {
+        work::step();
+        let value = std::mem::take(value_next);
+        *value_next = name == "chroot" && matches!(arg.as_str(), "--userspec" | "--groups");
+        Some((value, arg))
+    });
+    operands
+        .by_ref()
+        .filter(|(value, arg)| !value && !arg.starts_with('-'))
+        .map(|(_, arg)| arg)
+        .nth(usize::from(name == "chroot"))
 }
 
 /// Whether input reaches a program or code in the commands of a shell line
@@ -753,10 +964,12 @@ fn line_runs(line: &str, fills: &Fills, depth: usize) -> bool {
         work::step();
         let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
         // A shell or interpreter reading code from its input (`echo {} |
-        // sh`, `bash <<< {}`), or a command named by a variable (`x={};
-        // $x`), in a line that holds the input.
-        indirect::command_word(&texts).is_some_and(|(_, name)| name.contains(['$', '`']))
-            || stdin_reader(&texts)
+        // sh`, `bash <<< {}`), or a command named by a variable or
+        // substitution (`x={}; $x`, `$(echo {}) x`), in a line that holds
+        // the input.
+        indirect::command_word(&texts).is_some_and(|(_, name)| {
+            name.contains(['$', '`']) || name.contains(super::shell::UNSEEN_OUTPUT)
+        }) || stdin_reader(&texts)
             || words_run(&texts, fills, depth)
     })
 }

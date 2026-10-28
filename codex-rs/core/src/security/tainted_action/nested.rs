@@ -445,8 +445,10 @@ impl Classifier {
             let launches = launched_git::launches(&texts, found.braces, self.launched);
             // #1276: a launcher's input as the program it runs (`xargs -I%
             // % config`), as an interpreter's code (`xargs -I% python3 -c
-            // '...%...'`), or as whole command lines (`parallel < f`).
-            if launched_input::input_runs(&texts) {
+            // '...%...'`), or as whole command lines (`parallel < f`). In
+            // quoted text read as code (`level` > 0), only where input is
+            // put in place.
+            if launched_input::input_runs(&texts, level > 0) {
                 note_git(found, ProtectedActionKind::UnseenCode);
             }
             // #1283: scripts run in a folder this reading does not follow
