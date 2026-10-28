@@ -3353,7 +3353,11 @@ async fn issue_732_top_level_runtime_databases_stay_hidden() -> anyhow::Result<(
             continue;
         };
         for (level, open, output) in outputs {
-            let achieved = [output.contains("SQLite format 3"), output.contains(CANARY)];
+            // `head -c 16` prints the canary's first 16 bytes.
+            let achieved = [
+                output.contains("SQLite format 3"),
+                output.contains(&CANARY[..16]),
+            ];
             if !output.contains("ran-732")
                 || !output.contains("project-732")
                 || achieved != [open; 2]

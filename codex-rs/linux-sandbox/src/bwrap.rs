@@ -1423,6 +1423,9 @@ fn append_metadata_path_masks_for_writable_root(
 }
 
 type GlobFileScanner = fn(&Path, &[String], Option<usize>) -> Result<Vec<AbsolutePathBuf>>;
+/// Search root, credential rule, depth, and whether it is a database-entry
+/// scan (#732).
+type ScanGroup = (AbsolutePathBuf, bool, Option<usize>, bool);
 
 fn expand_unreadable_globs(
     patterns: &[FileSystemDenyGlob],
@@ -1444,23 +1447,23 @@ fn expand_unreadable_globs(
     let rule_roots = credential_rule_roots(&plain_patterns);
     // #732: depth is part of the group identity. A generic glob sharing this
     // root (even the identical pattern text) retains its own recursive scan.
-    let mut patterns_by_search_root: BTreeMap<(AbsolutePathBuf, bool, Option<usize>), Vec<String>> =
-        BTreeMap::new();
+    // #732 (D226): a database-entry scan lists only its folder's own entries.
+    let mut patterns_by_search_root: BTreeMap<ScanGroup, Vec<String>> = BTreeMap::new();
     for pattern in patterns {
         let database_directory = pattern
             .database_entries_directory()
             .map_err(|message| CodexErr::Fatal(message.to_string()))?;
         let scan = match database_directory {
-            Some(directory) => Some((directory.clone(), "*.sqlite*".to_string(), Some(1))),
+            Some(directory) => Some((directory.clone(), "*.sqlite*".to_string(), Some(1), true)),
             None => split_pattern_for_ripgrep(&pattern.pattern, cwd)
-                .map(|(root, glob)| (root, glob, max_depth)),
+                .map(|(root, glob)| (root, glob, max_depth, false)),
         };
-        if let Some((search_root, glob, depth)) = scan
+        if let Some((search_root, glob, depth, database)) = scan
             && search_root.as_path().is_dir()
         {
             let credential = credential_glob_exempts_templates(&pattern.pattern, &rule_roots);
             patterns_by_search_root
-                .entry((search_root, credential, depth))
+                .entry((search_root, credential, depth, database))
                 .or_default()
                 .push(glob);
         }
@@ -1470,8 +1473,12 @@ fn expand_unreadable_globs(
     // overlay needs the resolved target to prevent a readable symlink path from
     // bypassing an unreadable glob match.
     let mut expanded_paths = BTreeSet::new();
-    for ((search_root, credential, depth), globs) in patterns_by_search_root {
-        for path in scan_files(search_root.as_path(), &globs, depth)? {
+    for ((search_root, credential, depth, database), globs) in patterns_by_search_root {
+        // #732 (D226): ripgrep still opens each subfolder at `--max-depth 1`
+        // (ripgrep 14.1), so an unreadable one failed the scan; listing the
+        // folder itself never opens a subfolder.
+        let scan: GlobFileScanner = if database { glob_files } else { scan_files };
+        for path in scan(search_root.as_path(), &globs, depth)? {
             if credential
                 && path
                     .as_path()
