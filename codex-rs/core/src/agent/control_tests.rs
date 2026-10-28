@@ -1586,13 +1586,14 @@ async fn issue1058_mail_applied_by_a_running_turn_is_not_left_submitted() {
     })
     .await
     .expect("the sender reserves its delivery attempt");
-    // Let a sender that marks the message before its hand-off finish that write.
-    let _ = timeout(Duration::from_secs(5), async {
+    // The sender marks the message Submitted before its hand-off; wait for that write.
+    timeout(Duration::from_secs(5), async {
         while phase(&state_db).await != Some(codex_state::AgentMailboxPhase::Submitted) {
             sleep(Duration::from_millis(10)).await;
         }
     })
-    .await;
+    .await
+    .expect("the sender marks the message Submitted before its hand-off");
 
     // The running turn applies the message inside the send, then the sender goes on.
     session
@@ -1611,6 +1612,133 @@ async fn issue1058_mail_applied_by_a_running_turn_is_not_left_submitted() {
         "mail the running turn applied must not be left Submitted"
     );
     session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+/// #1375 follow-up: the sender writes `Submitted` before it hands the message over (#1058), so a
+/// row still `Submitting` at recovery is an attempt that was reserved but never handed over.
+/// Recovery sends it again instead of quarantining it, unless the rollout already applied it.
+#[tokio::test]
+async fn recovery_resends_a_reserved_message_that_was_never_handed_over() {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::Sqlite);
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (thread_id, thread) = harness.start_thread().await;
+    let state_db = harness.state_db.clone().expect("state db");
+    let mail = |body: &str| {
+        InterAgentCommunication::new(
+            AgentPath::root(),
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            Vec::new(),
+            body.to_string(),
+            /*trigger_turn*/ false,
+        )
+    };
+    let captured = |communication: &InterAgentCommunication| {
+        harness
+            .manager
+            .captured_ops()
+            .iter()
+            .filter(|(captured_thread_id, op)| {
+                *captured_thread_id == thread_id
+                    && matches!(
+                        op,
+                        Op::InterAgentCommunication { communication: captured }
+                            if captured == communication
+                    )
+            })
+            .count()
+    };
+
+    // Reserved, never handed over: the sender stopped between the reservation and the
+    // `Submitted` write (a crash, or a database error on that write).
+    let reserved = mail("reserved, never handed over");
+    let reserved_id = reserved.message_id.clone().expect("stable message id");
+    harness
+        .control
+        .admit_inter_agent_communication(thread_id, &reserved)
+        .await
+        .expect("admit the reserved message");
+    assert!(
+        state_db
+            .begin_agent_message_submission(
+                &reserved_id,
+                codex_state::AgentMailboxPhase::Ready,
+                "reserved-attempt",
+                /*now_ms*/ 1_000,
+            )
+            .await
+            .expect("reserve the delivery attempt")
+    );
+
+    // Reserved and already in the recipient's rollout (an older build marked Submitted only
+    // after the hand-off): the provider outcome is unknown, so it is not sent again.
+    let applied = mail("reserved, already applied");
+    let applied_id = applied.message_id.clone().expect("stable message id");
+    harness
+        .control
+        .admit_inter_agent_communication(thread_id, &applied)
+        .await
+        .expect("admit the applied message");
+    let turn_context = thread.codex.session.new_default_turn().await;
+    thread
+        .codex
+        .session
+        .record_inter_agent_communication(turn_context.as_ref(), applied.clone())
+        .await;
+    assert!(
+        state_db
+            .transition_agent_message(
+                &applied_id,
+                codex_state::AgentMailboxPhase::Completed,
+                codex_state::AgentMailboxPhase::Submitting,
+                /*now_ms*/ 1_001,
+            )
+            .await
+            .expect("leave the applied message reserved")
+    );
+
+    harness
+        .control
+        .recover_inter_agent_communications(thread_id)
+        .await
+        .expect("mailbox recovery");
+
+    let reserved_phase = state_db
+        .get_agent_message(&reserved_id)
+        .await
+        .expect("mailbox lookup")
+        .expect("reserved mailbox row")
+        .phase;
+    assert!(
+        matches!(
+            reserved_phase,
+            codex_state::AgentMailboxPhase::Submitted
+                | codex_state::AgentMailboxPhase::ProviderRunning
+                | codex_state::AgentMailboxPhase::Completed
+        ),
+        "a reserved message that was never handed over is sent again, not quarantined; \
+         phase after recovery: {reserved_phase:?}"
+    );
+    assert_eq!(
+        captured(&reserved),
+        1,
+        "recovery hands the reserved message over once"
+    );
+    assert_eq!(
+        state_db
+            .get_agent_message(&applied_id)
+            .await
+            .expect("mailbox lookup")
+            .expect("applied mailbox row")
+            .phase,
+        codex_state::AgentMailboxPhase::UnknownOutcome,
+        "a reserved message the rollout already applied keeps an unknown outcome"
+    );
+    assert_eq!(
+        captured(&applied),
+        0,
+        "an applied message is not sent again"
+    );
 }
 
 #[tokio::test]
@@ -1675,19 +1803,21 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .admit_inter_agent_communication(spawned_agent.thread_id, &recovery_communication)
         .await
         .expect("durable mailbox admission");
-    let ambiguous_communication = InterAgentCommunication::new(
+    // Reserved (Submitting) but never handed over: the sender writes Submitted before it hands
+    // the message over, so recovery sends it again.
+    let reserved_communication = InterAgentCommunication::new(
         AgentPath::root(),
         agent_path.clone(),
         Vec::new(),
-        "do not replay this ambiguous message".to_string(),
+        "replay this reserved message that was never handed over".to_string(),
         /*trigger_turn*/ true,
     );
     harness
         .control
-        .admit_inter_agent_communication(spawned_agent.thread_id, &ambiguous_communication)
+        .admit_inter_agent_communication(spawned_agent.thread_id, &reserved_communication)
         .await
-        .expect("ambiguous mailbox admission");
-    let ambiguous_message_id = ambiguous_communication
+        .expect("reserved mailbox admission");
+    let reserved_message_id = reserved_communication
         .message_id
         .as_deref()
         .expect("message id");
@@ -1697,7 +1827,7 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
             .as_ref()
             .expect("state db")
             .transition_agent_message(
-                ambiguous_message_id,
+                reserved_message_id,
                 codex_state::AgentMailboxPhase::Ready,
                 codex_state::AgentMailboxPhase::Submitting,
                 /*now_ms*/ 1_000,
@@ -1946,23 +2076,11 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
             .count(),
         1
     );
-    assert_eq!(
-        harness
-            .manager
-            .captured_ops()
-            .iter()
-            .filter(|(thread_id, op)| {
-                *thread_id == spawned_agent.thread_id
-                    && matches!(
-                        op,
-                        Op::InterAgentCommunication { communication }
-                            if communication == &ambiguous_communication
-                    )
-            })
-            .count(),
-        0
-    );
-    for communication in [&submitted_communication, &retryable_communication] {
+    for communication in [
+        &reserved_communication,
+        &submitted_communication,
+        &retryable_communication,
+    ] {
         assert_eq!(
             harness
                 .manager
@@ -2015,19 +2133,18 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         1,
         "the original local submission is captured once; recovery must not submit it again"
     );
-    let ambiguous_row = harness
-        .state_db
-        .as_ref()
-        .expect("state db")
-        .list_recoverable_agent_messages(spawned_agent.thread_id)
-        .await
-        .expect("recoverable mailbox")
-        .into_iter()
-        .find(|message| message.communication.message_id.as_deref() == Some(ambiguous_message_id))
-        .expect("ambiguous mailbox row");
-    assert_eq!(
-        ambiguous_row.phase,
-        codex_state::AgentMailboxPhase::UnknownOutcome
+    assert_ne!(
+        harness
+            .state_db
+            .as_ref()
+            .expect("state db")
+            .get_agent_message(reserved_message_id)
+            .await
+            .expect("mailbox lookup")
+            .expect("reserved mailbox row")
+            .phase,
+        codex_state::AgentMailboxPhase::UnknownOutcome,
+        "a reserved message that was never handed over is not ambiguous"
     );
     let provider_running_row = harness
         .state_db
