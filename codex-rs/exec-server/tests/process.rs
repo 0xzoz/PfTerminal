@@ -24,8 +24,10 @@ use tokio::time::Instant;
 /// `SESSION_ALREADY_ATTACHED_ERROR_CODE` in `src/rpc.rs` (crate-private).
 const SESSION_ALREADY_ATTACHED_ERROR_CODE: i64 = -32010;
 /// How long a resume may keep hitting "already attached" while the server
-/// finishes detaching the closed connection.
+/// finishes detaching the closed connection. The resumed process must outlive
+/// it (see the `sleep 30` below).
 const RESUME_ATTACHED_RETRY_BUDGET: Duration = Duration::from_secs(20);
+const RESUME_ATTACHED_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exec_server_starts_process_over_websocket() -> anyhow::Result<()> {
@@ -355,7 +357,7 @@ async fn exec_server_resumes_detached_session_without_killing_processes() -> any
             "process/start",
             serde_json::json!({
                 "processId": "proc-resume",
-                "argv": ["/bin/sh", "-c", "sleep 5"],
+                "argv": ["/bin/sh", "-c", "sleep 30"],
                 "cwd": PathUri::from_host_native_path(std::env::current_dir()?)?,
                 "env": {},
                 "tty": false,
@@ -405,7 +407,7 @@ async fn exec_server_resumes_detached_session_without_killing_processes() -> any
                 if error.code == SESSION_ALREADY_ATTACHED_ERROR_CODE
                     && Instant::now() < resume_deadline =>
             {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(RESUME_ATTACHED_RETRY_INTERVAL).await;
             }
             other => anyhow::bail!("resume initialize failed: {other:?}"),
         }
