@@ -1776,7 +1776,11 @@ exit 1
             "args": self.args,
             // Process startup can be slow on loaded Windows CI workers, so leave enough slack to
             // avoid turning these auth-cache assertions into a process-launch timing test.
-            "timeout_ms": 10_000,
+            // #1201: 10 s was not enough. On the native Windows lane, `cmd.exe` helper runs
+            // that take ~20 ms took 1.5-4.4 s, and occasionally over 10 s, while Bazel built
+            // other targets (such as `core-unit-tests-bin`) next to this binary. No test here
+            // exercises the timeout; the product default stays 5 s.
+            "timeout_ms": 60_000,
             "refresh_interval_ms": 60000,
             "cwd": self.tempdir.path(),
         }))
