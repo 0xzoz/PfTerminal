@@ -1,4 +1,5 @@
 use super::super::ConnectionIdentity;
+use super::super::ModelClient;
 use super::test_model_client_with_provider;
 use super::test_model_info;
 use super::test_responses_metadata_for_client;
@@ -7,7 +8,11 @@ use crate::Prompt;
 use crate::test_support::TestCodexResponsesRequestKind;
 use codex_api::AuthProvider;
 use codex_api::ResponseEvent;
+use codex_http_client::HttpClientFactory;
+use codex_http_client::OutboundProxyPolicy;
+use codex_login::AuthManager;
 use codex_login::CodexAuth;
+use codex_login::auth::AgentIdentityAuthPolicy;
 use codex_model_provider::BearerAuthProvider;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
@@ -444,6 +449,144 @@ fn issue_1343_brokered_identities_never_match() {
         removed_account,
         ConnectionIdentity::of(Some(&placeholder), &HeaderMap::new(), &BrokeredAuth)
     );
+}
+
+/// #1504: the other half of the broker check. In a brokered process
+/// (`model_key_broker_required()`) identities never match even without the
+/// placeholder key, whatever the sign-in; outside one the same inputs do.
+#[test]
+fn issue_1504_identities_in_a_brokered_process_never_match() {
+    let chatgpt = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+    let api_key = CodexAuth::from_api_key("synthetic-api-key");
+    let bearer = BearerAuthProvider::new("synthetic-token".to_string());
+    let mut headers = HeaderMap::new();
+    headers.insert("x-tenant", HeaderValue::from_static("synthetic-tenant"));
+    for auth in [None, Some(&chatgpt), Some(&api_key)] {
+        let identity = |broker_required| {
+            ConnectionIdentity::with_broker_required(broker_required, auth, &headers, &bearer)
+        };
+        assert_eq!(identity(false), identity(false));
+        assert_ne!(identity(true), identity(true));
+        assert_ne!(identity(true), identity(false));
+    }
+}
+
+/// #1504: a `CodexAuth::Headers` sign-in resolved through the real provider
+/// path (`HeaderAuthProvider`). Rotating the external headers drops the
+/// prewarmed socket and reconnects with the new ones; the same headers keep it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_1504_external_header_sign_in_rotation_reconnects_the_prewarmed_socket() {
+    skip_if_no_network!();
+    let server = start_websocket_server(vec![
+        vec![
+            vec![ev_response_created("old-1"), ev_completed("old-1")],
+            vec![ev_response_created("old-2"), ev_completed("old-2")],
+            // A stale connection completes so the assertions fail without a timeout.
+            vec![ev_response_created("stale-3"), ev_completed("stale-3")],
+        ],
+        vec![vec![ev_response_created("new-3"), ev_completed("new-3")]],
+    ])
+    .await;
+    let thread_id = ThreadId::new();
+    let client_signed_in_as = |value: &'static str| {
+        let mut provider =
+            create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
+        provider.supports_websockets = true;
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static(value));
+        let auth = CodexAuth::Headers(codex_login::AuthHeaders::new(headers));
+        ModelClient::new(
+            Some(AuthManager::from_auth_for_testing(auth)),
+            AgentIdentityAuthPolicy::JwtOnly,
+            thread_id,
+            provider,
+            SessionSource::Cli,
+            "test_originator".to_string(),
+            /*model_verbosity*/ None,
+            /*enable_request_compression*/ false,
+            /*include_timing_metrics*/ false,
+            /*beta_features_header*/ None,
+            /*concurrent_reasoning_summaries_enabled*/ false,
+            /*attestation_provider*/ None,
+            HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+        )
+    };
+    let mut session = client_signed_in_as("Bearer synthetic-old-user").new_session();
+    let telemetry = test_session_telemetry();
+    let model = test_model_info();
+    let setup = session.client.current_client_setup().await.expect("setup");
+    assert!(matches!(setup.auth, Some(CodexAuth::Headers(_))));
+    assert_eq!(
+        setup.api_auth.to_auth_headers().get("authorization"),
+        Some(&HeaderValue::from_static("Bearer synthetic-old-user"))
+    );
+    let metadata = test_responses_metadata_for_client(
+        &session.client,
+        /*turn_id*/ None,
+        "external-header-identity-test".to_string(),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::WebsocketConnection,
+    );
+    session
+        .preconnect_websocket(&telemetry, &metadata)
+        .await
+        .expect("preconnect");
+
+    let mut completions = Vec::new();
+    for (turn, value) in [
+        ("one", "Bearer synthetic-old-user"),
+        ("two", "Bearer synthetic-old-user"),
+        ("three", "Bearer synthetic-new-user"),
+    ] {
+        session.client = client_signed_in_as(value);
+        let metadata = test_responses_metadata_for_client(
+            &session.client,
+            Some(turn),
+            "external-header-identity-test".to_string(),
+            /*parent_thread_id*/ None,
+            TestCodexResponsesRequestKind::Turn,
+        );
+        let mut stream = session
+            .stream(
+                &Prompt::default(),
+                &model,
+                &telemetry,
+                /*effort*/ None,
+                ReasoningSummary::None,
+                /*service_tier*/ None,
+                &metadata,
+                &InferenceTraceContext::disabled(),
+            )
+            .await
+            .expect("stream");
+        while let Some(event) = stream.next().await {
+            if let ResponseEvent::Completed { response_id, .. } = event.expect("event") {
+                completions.push(response_id);
+                break;
+            }
+        }
+    }
+    assert_eq!(completions, vec!["old-1", "old-2", "new-3"]);
+    assert_eq!(
+        server
+            .handshakes()
+            .iter()
+            .map(|handshake| handshake.header("authorization"))
+            .collect::<Vec<_>>(),
+        vec![
+            Some("Bearer synthetic-old-user".to_string()),
+            Some("Bearer synthetic-new-user".to_string()),
+        ]
+    );
+    assert_eq!(
+        server
+            .connections()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        vec![2, 1]
+    );
+    server.shutdown().await;
 }
 
 /// #1343: externally supplied auth headers (`CodexAuth::Headers`) carry no
