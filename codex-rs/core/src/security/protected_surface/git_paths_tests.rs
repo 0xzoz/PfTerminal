@@ -293,16 +293,103 @@ fn issue_675_other_worktrees_dot_git_files_are_protected() {
     let paths = worktree_admin_paths(&base.join("deep/alias/.git"));
     assert!(paths.contains(&base.join("relative/.git")), "{paths:?}");
 
-    // Past the limit: `worktrees` whole, and the `.git` files found so far
-    // (which ones depends on the listing order).
+    // Past the limit: `worktrees` whole, and the `.git` files found so far.
+    // #1468: every extra admin folder names a `.git` file, so whatever the
+    // listing order, all but the few visited earlier are found and kept.
+    let mut extra = Vec::new();
     for n in 0..=MAX_MODULE_DIRS {
-        std::fs::create_dir_all(common.join(format!("worktrees/f{n}")).as_path()).unwrap();
+        let admin = common.join(format!("worktrees/f{n}"));
+        let dot_git = base.join(format!("f{n}/.git"));
+        std::fs::create_dir_all(admin.as_path()).unwrap();
+        std::fs::create_dir_all(base.join(format!("f{n}")).as_path()).unwrap();
+        std::fs::write(dot_git.as_path(), format!("gitdir: {}\n", admin.display())).unwrap();
+        std::fs::write(
+            admin.join("gitdir").as_path(),
+            format!("{}\n", dot_git.display()),
+        )
+        .unwrap();
+        extra.push(dot_git);
     }
     let paths = worktree_admin_paths(&common);
     assert_eq!(paths.first(), Some(&common.join("worktrees")));
-    let found = [&protected[..], &[base.join("w/.git")]].concat();
+    let found = [&protected[..], &[base.join("w/.git")], &extra[..]].concat();
     assert!(
         paths[1..].iter().all(|path| found.contains(path)),
         "{paths:?}"
     );
+    // At most the 8 earlier admin folders took a visit before the limit.
+    assert!(
+        paths[1..]
+            .iter()
+            .filter(|path| extra.contains(path))
+            .count()
+            >= MAX_MODULE_DIRS - 8,
+        "{} found",
+        paths.len() - 1
+    );
+}
+
+/// #1468: a submodule's linked worktrees (`modules/m/worktrees/n`) get the
+/// same protection as the repository's own (#650, #675): the admin folder's
+/// `gitdir` and the `.git` file it names. A `gitdir` spelled `.GIT` names
+/// that file too, where the volume ignores case. Past the walk's limit the
+/// `.git` files found are kept with `modules`.
+#[test]
+fn issue_1468_submodule_worktrees_dot_git_files_are_protected() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = abs(&dir.path().canonicalize().unwrap());
+    let git = base.join("main/.git");
+    let admin = git.join("modules/m/worktrees/n");
+    std::fs::create_dir_all(admin.as_path()).unwrap();
+    std::fs::write(admin.join("commondir").as_path(), "../..\n").unwrap();
+    let dot_git = base.join("n/.git");
+    std::fs::create_dir_all(base.join("n").as_path()).unwrap();
+    std::fs::write(dot_git.as_path(), format!("gitdir: {}\n", admin.display())).unwrap();
+    std::fs::write(
+        admin.join("gitdir").as_path(),
+        format!("{}\n", dot_git.display()),
+    )
+    .unwrap();
+
+    let paths = module_paths(&git);
+    for path in [
+        admin.join("gitdir"),
+        admin.join("commondir"),
+        admin.join("config.worktree"),
+        dot_git.clone(),
+    ] {
+        if cfg!(target_os = "linux") && path.as_path().ends_with("config.worktree") {
+            continue;
+        }
+        assert!(paths.contains(&path), "{}: {paths:?}", path.display());
+    }
+    // Through the repository's own paths too.
+    let paths = git_persistence_paths(&base.join("main"), /*user_home*/ None);
+    assert!(paths.contains(&dot_git), "{paths:?}");
+
+    // `.GIT`: the same file where the volume ignores case.
+    std::fs::write(
+        admin.join("gitdir").as_path(),
+        format!("{}\n", base.join("n/.GIT").display()),
+    )
+    .unwrap();
+    let case_blind = std::fs::symlink_metadata(base.join("n/.GIT").as_path()).is_ok();
+    let paths = module_paths(&git);
+    assert_eq!(
+        paths.contains(&base.join("n/.GIT")),
+        case_blind,
+        "{paths:?}"
+    );
+
+    // Past the limit: `modules` whole, with the `.git` file found before
+    // (the extra folders are below the admin folder, so it comes first).
+    std::fs::write(
+        admin.join("gitdir").as_path(),
+        format!("{}\n", dot_git.display()),
+    )
+    .unwrap();
+    for n in 0..=MAX_MODULE_DIRS {
+        std::fs::create_dir_all(admin.join(format!("x/f{n}")).as_path()).unwrap();
+    }
+    assert_eq!(module_paths(&git), vec![git.join("modules"), dot_git]);
 }

@@ -329,7 +329,10 @@ pub(crate) fn contain(
     )
     .map_err(|err| anyhow!(err))?;
     let (program, program_args) = pane_command(sandbox, &containment.tmp_dir(), executable, args);
-    let user_namespaces = user_namespaces_denied();
+    // #1468: one reading of the levels for both rules, so a level that
+    // rises meanwhile cannot mix them.
+    let level = crate::security::level::protected_level_for_panes();
+    let user_namespaces = user_namespaces_denied_at(level);
     let mut command = sandboxed(
         containment,
         &program,
@@ -337,7 +340,11 @@ pub(crate) fn contain(
         env,
         cwd,
         bridge_port,
-        &rules_at(profile, keychain_denied(), user_namespaces.is_some()),
+        &rules_at(
+            profile,
+            keychain_denied_at(level),
+            user_namespaces.is_some(),
+        ),
     )?;
     command.user_namespaces_denied = user_namespaces;
     Ok(command)
@@ -352,21 +359,23 @@ pub(crate) fn contain(
 /// (bubblewrap) needs one, so it cannot start in such a pane; the pane says
 /// so when a command reports the refusal ([`super::output_parse`]).
 /// Corbanu's sandbox still applies. Permissive, macOS and Windows keep the
-/// profile.
-pub(crate) fn user_namespaces_denied() -> Option<&'static str> {
+/// profile. `level` is [`crate::security::level::protected_level_for_panes`],
+/// read once by [`contain`] for this rule and the keychain's (#1468).
+fn user_namespaces_denied_at(
+    level: Option<crate::security::level::ChosenLevel>,
+) -> Option<&'static str> {
     if !cfg!(target_os = "linux") {
         return None;
     }
-    crate::security::level::protected_level_for_panes()
-        .map(crate::security::level::ChosenLevel::name)
+    level.map(crate::security::level::ChosenLevel::name)
 }
 
 /// #758, #807: under Aggressive (the strictest of the active level, the
-/// saved level and Core's live policy, as for [`user_namespaces_denied`]) a
+/// saved level and Core's live policy, as for [`user_namespaces_denied_at`]) a
 /// contained pane may not reach the macOS keychain services ([`rules_at`]).
-fn keychain_denied() -> bool {
-    crate::security::level::protected_level_for_panes()
-        == Some(crate::security::level::ChosenLevel::Aggressive)
+/// `level` is [`crate::security::level::protected_level_for_panes`].
+fn keychain_denied_at(level: Option<crate::security::level::ChosenLevel>) -> bool {
+    level == Some(crate::security::level::ChosenLevel::Aggressive)
 }
 
 /// The program and arguments run inside the sandbox for `executable args`.
@@ -402,7 +411,7 @@ pub(crate) fn pane_command(
 /// rules, which allow `com.apple.SecurityServer` (Travis, 2026-10-14). Claude
 /// Code reaches the bridge over plain HTTP with the bridge's token, so it
 /// needs neither TLS nor the keychain. #891: on Linux, under Moderate and
-/// Aggressive, no user namespaces ([`user_namespaces_denied`]). Otherwise
+/// Aggressive, no user namespaces ([`user_namespaces_denied_at`]). Otherwise
 /// the profile is kept. [`contain`] applies them.
 fn rules_at(
     profile: PermissionProfile,
@@ -432,10 +441,11 @@ fn rules_at(
 /// The level rules [`contain`] applies, at the current levels.
 #[cfg(test)]
 pub(crate) fn level_rules(profile: PermissionProfile) -> PermissionProfile {
+    let level = crate::security::level::protected_level_for_panes();
     rules_at(
         profile,
-        keychain_denied(),
-        user_namespaces_denied().is_some(),
+        keychain_denied_at(level),
+        user_namespaces_denied_at(level).is_some(),
     )
 }
 
