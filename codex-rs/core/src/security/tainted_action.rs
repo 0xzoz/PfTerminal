@@ -28,13 +28,18 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 
+mod aliases;
 mod arithmetic;
+mod certain_cd;
 mod code_variables;
+mod git_config;
 mod git_helpers;
 mod grammar;
 mod indirect;
 mod invocation;
 mod launched_git;
+mod loader_variables;
+mod mktemp;
 mod named_shell;
 mod nested;
 mod outbound;
@@ -355,6 +360,13 @@ const FOLDER_FLAGS: &[&str] = &["-C", "--directory", "--cwd", "--cd", "--chdir"]
 /// Nesting limit for scripts, payloads and literals classified inside an
 /// action. Deeper nesting fails closed.
 const MAX_DEPTH: usize = 4;
+/// Shell builtins that change what the rest of a line does (its folder,
+/// variables or code): named by a path they run a file instead.
+const PATH_BUILTINS: &[&str] = &[
+    "cd", "pushd", "popd", "chdir", "source", ".", "eval", "exec", "export", "local", "declare",
+    "readonly", "typeset", "trap", "alias", "builtin", "command", "let", "read", "set", "shopt",
+    "unset",
+];
 /// Bytes of command text one classification lexes; more fail closed.
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 /// Script files one classification reads; more fail closed.
@@ -367,6 +379,11 @@ const MAX_SCRIPT_FILES: usize = 16;
 /// judged once on its own.
 const MAX_SUBSTITUTED_BYTES: usize = 1024 * 1024;
 const MAX_SMALL_VALUE: usize = 64;
+/// #1436: loops one line reads again (`LoopPass`); past them a loop with a
+/// folder change starts in a folder not known.
+const MAX_REPLAYED_LOOPS: usize = 8;
+/// #1436: folders a replayed loop's passes may start from (`LoopPass`).
+const MAX_BRANCH_FOLDERS: usize = 8;
 /// Bytes of command text, and command lines, one classification lexes in
 /// all, nested scripts, decoded payloads and script files included (#1065);
 /// more fail closed.
@@ -521,9 +538,19 @@ fn judged(action: &ApprovalAction, homes: Homes, as_named: bool) -> Classifier {
             }
         }
     }
+    // #1064: an interactive POSIX shell sources the file `ENV` names.
+    if classifier.sets_env && classifier.interactive_shell {
+        classifier.note(ProtectedActionKind::UnseenCode);
+    }
     // A lookup budget ran out: something was not followed.
     if classifier.homes.exhausted() {
         classifier.note(ProtectedActionKind::UnseenCode);
+    }
+    // D191: an action that asks anyway asks as on main.
+    if classifier.found.is_some()
+        && let Some(kind) = classifier.held.take()
+    {
+        classifier.note(kind);
     }
     classifier
 }
@@ -540,9 +567,11 @@ impl Classifier {
             sed_scope: None,
             ran: Vec::new(),
             ran_unknown: false,
+            argv0: String::new(),
             written: Vec::new(),
             nested_scripts: 0,
             unknown_folder: 0,
+            unseen_folder: false,
             launched: launched_git::Launch::default(),
             substitution_budget: Budget {
                 left: MAX_SUBSTITUTED_BYTES,
@@ -556,11 +585,24 @@ impl Classifier {
             backslash: false,
             in_file: 0,
             reads_follow: false,
+            temp: None,
+            held: None,
+            workspace: String::new(),
+            cut_values: HashSet::new(),
+            sets_env: false,
+            interactive_shell: false,
+            rebuilt_foreign: true,
+            visited: Vec::new(),
+            visited_all: true,
         }
     }
 
     /// Judge a command line run in `cwd`.
     fn judge_command(&mut self, command: &[String], cwd: &str) {
+        self.argv0 = command.first().cloned().unwrap_or_default();
+        if self.workspace.is_empty() {
+            self.workspace = cwd.to_string();
+        }
         self.homes.allow_lookups_under(cwd);
         self.path(cwd);
         self.command(command, cwd, /*depth*/ 0);
@@ -859,6 +901,199 @@ fn has_flag(word: &str, flag: &str) -> bool {
     }
 }
 
+/// #1064: programs and shell words that neither build text nor run it as
+/// code (`printf` may decode `\x40`, but only to its output or a variable,
+/// which another command would have to run).
+const BUILDS_NO_CODE: &[&str] = &[
+    // The rest of `${a[$((i+1))]}` after the lexer's `))`.
+    "]",
+    "}",
+    "echo",
+    "printf",
+    ":",
+    "true",
+    "false",
+    "test",
+    "[",
+    "[[",
+    "]]",
+    "local",
+    "declare",
+    "typeset",
+    "export",
+    "readonly",
+    "unset",
+    "shift",
+    "return",
+    "exit",
+    "break",
+    "continue",
+    "cd",
+    "pushd",
+    "popd",
+    "dirs",
+    "read",
+    "mapfile",
+    "readarray",
+    "wait",
+    "for",
+    "in",
+    "case",
+    "esac",
+    "done",
+    "fi",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "wc",
+    "uniq",
+    "cut",
+    "tr",
+    "date",
+    "basename",
+    "dirname",
+    "mkdir",
+    "touch",
+    "rm",
+    "cp",
+    "mv",
+    "seq",
+    "pwd",
+    "grep",
+    "sleep",
+    "stat",
+    "realpath",
+    "readlink",
+];
+
+/// #1064: whether a simple command builds no shell text it runs: the text
+/// of an arithmetic expansion, no command, one of [`BUILDS_NO_CODE`] not
+/// behind a wrapper, or a shell given its script on the line (judged as a
+/// line of its own).
+fn runs_no_built_text(simple: &SimpleCommand) -> bool {
+    if simple.arithmetic {
+        return true;
+    }
+    let Some((index, name)) = indirect::command_word(&simple.words) else {
+        return simple.words.iter().all(|word| {
+            work::step();
+            is_assignment(word)
+        });
+    };
+    // Before it only assignments and keywords (`do`, `then`, `!`), no
+    // wrapper.
+    let bare = simple.words[..index].iter().all(|word| {
+        work::step();
+        is_assignment(word)
+            || matches!(
+                word.as_str(),
+                "!" | "if" | "then" | "elif" | "else" | "do" | "while" | "until"
+            )
+    });
+    // The program by its name, not a file named by a path (`./echo`).
+    let named = simple.words[index].to_lowercase() == name;
+    let args = &simple.words[index + 1..];
+    // `mapfile -C eval` runs its callback on each line it reads; `$o` or
+    // `-$x` may spell `-C`.
+    let callback = matches!(name.as_str(), "mapfile" | "readarray")
+        && args.iter().any(|arg| {
+            work::step();
+            (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('C'))
+                || may_be_built(arg)
+        });
+    // Other options may load a file or run code first (`--rcfile notes`,
+    // fish `-C./n`, `$o`): only a POSIX-style shell given known options.
+    // Korn shells may read `ENV` when not interactive (ksh88, pdksh).
+    let inline_script = shell::SHELLS.contains(&name.as_str())
+        && !matches!(
+            name.as_str(),
+            "fish" | "csh" | "tcsh" | "ksh" | "mksh" | "lksh" | "oksh" | "posh"
+        )
+        && plain_shell_options(args)
+        && matches!(
+            invocation::parse(&name, args).map(|invocation| invocation.code),
+            Some(Code::Inline(None))
+        );
+    bare && named && !callback && (BUILDS_NO_CODE.contains(&name.as_str()) || inline_script)
+}
+
+/// #1064: whether `args` are only short options of a POSIX-style shell
+/// that load and run nothing (`-l`, `-c`, `-eu`, `-o pipefail`): no
+/// `-i`/`-k`/`-s`, ksh's `-E`, long option or word built at run time.
+fn plain_shell_options(args: &[String]) -> bool {
+    const LETTERS: &str = "abcefhlmnpuvxBCHP";
+    let mut names = 0usize;
+    for arg in args {
+        work::step();
+        if names > 0 {
+            names -= 1;
+            if arg.is_empty()
+                || !arg
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            {
+                return false;
+            }
+            continue;
+        }
+        let Some(letters) = arg.strip_prefix(['-', '+']) else {
+            return false;
+        };
+        if letters.is_empty() {
+            return false;
+        }
+        for letter in letters.chars() {
+            work::step();
+            if matches!(letter, 'o' | 'O') {
+                names += 1;
+            } else if !LETTERS.contains(letter) {
+                return false;
+            }
+        }
+    }
+    names == 0
+}
+
+/// #1064: whether `word` holds text the shell builds when it runs: a
+/// variable, a substitution or unseen output.
+fn may_be_built(word: &str) -> bool {
+    word.contains(['$', '`']) || word.contains(shell::UNSEEN_OUTPUT)
+}
+
+/// #1064: whether `word` is an assignment as the shell reads one: a name,
+/// an optional subscript, an optional `+`, then `=` (`./b=1` and zsh's
+/// `=bash` are commands).
+fn is_assignment(word: &str) -> bool {
+    let Some((target, _)) = word.split_once('=') else {
+        return false;
+    };
+    let target = target.strip_suffix('+').unwrap_or(target);
+    let name = match target.split_once('[') {
+        Some((name, subscript)) if subscript.ends_with(']') => name,
+        Some(_) => return false,
+        None => target,
+    };
+    name.starts_with(|ch: char| ch.is_ascii_alphabetic() || ch == '_')
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+/// #1064: folders a line may be in that a value the lexer cuts short is
+/// judged against; past it such a value asks.
+const MAX_VISITED_FOLDERS: usize = 64;
+/// #1064: temp folders, which the agent may write.
+const TEMP_FOLDERS: &[&str] = &[
+    "/tmp",
+    "/private/tmp",
+    "/var/tmp",
+    "/private/var/tmp",
+    "/var/folders",
+    "/private/var/folders",
+    "/dev/shm",
+];
+
 /// Bytes of variable values left to substitute (#1065): any value, then
 /// only small ones once that runs out.
 struct Budget {
@@ -866,8 +1101,98 @@ struct Budget {
     small_left: usize,
 }
 
+/// #1436: a loop with a folder change, being read: its first and last
+/// command, the pass (1 to 4), where the pass started, and the state
+/// after the first pass, which the line goes on from.
+struct LoopPass {
+    start: usize,
+    end: usize,
+    round: u8,
+    place: Place,
+    first: Option<(Folders, HashMap<String, String>)>,
+    /// The variables its changes name (`cd "$D"`).
+    names: Vec<String>,
+    /// A word in it climbs (`../x`): a pass deeper than the one before may
+    /// still reach the folders above it.
+    climbs: bool,
+    /// Whether `cd -` and the folder stack count in its `Place`.
+    counts: (bool, bool),
+    /// The folders the line may be in when the pass starts.
+    folders: Vec<String>,
+    /// Folders a pass that came back left the line in besides: one more
+    /// pass is read from each, alone (`cd nope; cd ..`), and from those
+    /// they leave in turn, up to `MAX_BRANCH_FOLDERS`.
+    branches: Vec<String>,
+    /// The folders passes started from or were queued from.
+    seen: Vec<String>,
+    /// Past `MAX_BRANCH_FOLDERS`: after the loop the folder is not known.
+    overflow: bool,
+}
+
+/// #1436: the folders a reading may be in.
+fn possible_folders(folders: &Folders) -> Vec<String> {
+    std::iter::once(&folders.cwd)
+        .chain(&folders.others)
+        .cloned()
+        .collect()
+}
+
+/// #1436: where a reading is: the folder it follows, where `cd -` and
+/// `popd` go, the values of the variables the loop's changes name, and
+/// whether it knows them. Not the other folders it may be in (a change
+/// that may fail): a later pass reads them, but a pass that comes back
+/// (`cd sub; …; cd ..`) has not moved.
+#[derive(PartialEq, Eq)]
+struct Place {
+    cwd: String,
+    previous: String,
+    stack: std::rc::Rc<Vec<String>>,
+    values: Vec<Option<String>>,
+    known: (bool, bool, bool, bool, bool),
+}
+
+impl Place {
+    /// `back`, `stack`: whether the loop goes back or uses the stack, so
+    /// they count.
+    fn of(
+        folders: &Folders,
+        variables: &HashMap<String, String>,
+        names: &[String],
+        (back, stack): (bool, bool),
+    ) -> Self {
+        Self {
+            cwd: folders.cwd.clone(),
+            previous: if back {
+                folders.previous.clone()
+            } else {
+                String::new()
+            },
+            stack: if stack {
+                folders.stack.clone()
+            } else {
+                std::rc::Rc::default()
+            },
+            values: names
+                .iter()
+                .map(|name| {
+                    work::step();
+                    variables.get(name).cloned()
+                })
+                .collect(),
+            known: (
+                folders.unfollowed,
+                folders.lost,
+                folders.unseen,
+                folders.searched,
+                back && folders.back_unsure,
+            ),
+        }
+    }
+}
+
 /// Where the shell is while it runs a script: the folder, the previous one
 /// (`cd -`) and the `pushd` stack.
+#[derive(Clone)]
 struct Folders {
     cwd: String,
     previous: String,
@@ -885,6 +1210,20 @@ struct Folders {
     /// folders to follow, so a file it names relative to its folder may
     /// be anywhere.
     lost: bool,
+    /// D194: folders set aside by a `cd` whose failure stops what follows.
+    aside: certain_cd::Aside,
+    /// #1410: a change went to a folder this reading cannot see (`cd
+    /// "$X"`): a file named relative to the folder may be any file.
+    unseen: bool,
+    /// #1410: the same, by a change in a substitution: until the command
+    /// it is part of.
+    unseen_in_substitution: bool,
+    /// #1436: a name that changes where `cd` goes was set (`CDPATH`,
+    /// `OLDPWD`, `cdable_vars`): a later change may go anywhere.
+    searched: bool,
+    /// #1436: `previous` may not be where `cd -` goes: a change in a
+    /// substitution or subshell, or one that may not have happened.
+    back_unsure: bool,
 }
 
 struct Classifier {
@@ -906,6 +1245,22 @@ struct Classifier {
     /// script runs the first judgment follows exactly
     /// (`named_shell::windows_reads_follow`); only then does it open files.
     reads_follow: bool,
+    /// #1064: the action's working folder, where the agent may write.
+    workspace: String,
+    /// #1064: variables whose value the word lexer may have cut short
+    /// (`loader_variables::scan_split_values`).
+    cut_values: HashSet<String>,
+    /// #1064: the action sets `ENV`, and starts a shell that may be
+    /// interactive (which sources it).
+    sets_env: bool,
+    interactive_shell: bool,
+    /// #1064: the folders the line being judged has been in (up to
+    /// `MAX_VISITED_FOLDERS`; `visited_all` is false past it).
+    visited: Vec<String>,
+    visited_all: bool,
+    /// #1064: the `foreign` reading of the line whose joined literals are
+    /// being judged (see `command`).
+    rebuilt_foreign: bool,
     /// Inside text rebuilt from joined literals: it names things but is not
     /// itself run, so its variables are not judged as unseen code.
     rebuilt: usize,
@@ -919,6 +1274,8 @@ struct Classifier {
     /// one whose name the classifier cannot see.
     ran: Vec<String>,
     ran_unknown: bool,
+    /// The action's own program (`argv[0]`): if it is missing, nothing runs.
+    argv0: String,
     /// #885: files the action's command lines write (`None`: one the
     /// classifier cannot name).
     written: Vec<Option<String>>,
@@ -927,6 +1284,9 @@ struct Classifier {
     /// #1283: inside a nested script whose folder the quote-aware reading
     /// cannot know (run after `cd "$d"`, or by `env -C`).
     unknown_folder: usize,
+    /// #1436: the command being judged runs in a folder the word reading
+    /// cannot see, so a script named relative to it may be any file.
+    unseen_folder: bool,
     /// #1268: inside a script a launcher runs with its input added after
     /// it (`xargs env -S'git config'`) or put into its text (`xargs -I% sh
     /// -c 'git config %'`, where any word may be input).
@@ -947,6 +1307,11 @@ struct Classifier {
     /// #1240: bytes of words and folders the Windows view may still
     /// resolve; past it the action fails closed.
     windows_budget: usize,
+    /// D191: the action's own line's variables that hold a `mktemp` path.
+    temp: Option<mktemp::Scope>,
+    /// D191: prompts only a temp path raised, dropped only when the action
+    /// asks for nothing else (else it asks as on main, for the strongest).
+    held: Option<ProtectedActionKind>,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
@@ -1160,6 +1525,20 @@ impl Classifier {
         }
     }
 
+    /// D191: a prompt that only a temp path raised is held back until the
+    /// line is read (`temp`); any other is noted.
+    fn note_or_hold(&mut self, kind: ProtectedActionKind, temp: bool) {
+        match &mut self.temp {
+            Some(scope) if temp => scope.hold(kind),
+            _ => self.note(kind),
+        }
+    }
+
+    /// D191: a word naming a file at a temp path of this line.
+    fn temp_place(&self, word: &str) -> bool {
+        self.temp.is_some() && mktemp::temp_place(word)
+    }
+
     fn path(&mut self, path: &str) {
         if let Some(kind) = self.homes.classify_resolved(path) {
             self.note(kind);
@@ -1221,6 +1600,22 @@ impl Classifier {
         // #841: this line's own sed programs (nested lines have theirs).
         let outer_scope = std::mem::replace(&mut self.sed_scope, SedScope::of(command));
         let lexed = shell::simple_commands(command);
+        // D191: only the action's own line, judged under POSIX path rules.
+        let outer_temp = std::mem::replace(
+            &mut self.temp,
+            (depth == 0 && !self.homes.windows_paths())
+                .then(|| mktemp::Scope::of(command, &lexed.commands))
+                .flatten(),
+        );
+        // #1064: whether the line may build shell text at run time (another
+        // language's `chr(64)`, `printf '\x40' | bash`); see
+        // `shell::prompt_expansion`. Text rebuilt from joined literals is
+        // read from the line it was joined in.
+        let foreign = if self.rebuilt > 0 {
+            self.rebuilt_foreign
+        } else {
+            self.not_shell > 0 || !lexed.commands.iter().all(runs_no_built_text)
+        };
         let pipe_sources: std::collections::HashSet<usize> = lexed
             .commands
             .iter()
@@ -1231,7 +1626,9 @@ impl Classifier {
         // text, which may reach a shell (`os.system`); the lexed words are
         // checked below.
         if (lexed.incomplete && self.not_shell == 0 && self.rebuilt == 0)
-            || command.iter().any(|arg| shell::prompt_expansion(arg))
+            || command
+                .iter()
+                .any(|arg| shell::prompt_expansion(arg, foreign))
             || lexed.too_deep
             || indirect::opaque_execution(&lexed.commands)
         {
@@ -1245,6 +1642,15 @@ impl Classifier {
             unchecked: self.unknown_folder > 0,
             others: Vec::new(),
             lost: false,
+            aside: if depth == 0 {
+                certain_cd::Aside::for_line(command)
+            } else {
+                certain_cd::Aside::default()
+            },
+            unseen: false,
+            unseen_in_substitution: false,
+            searched: false,
+            back_unsure: false,
         };
         let mut variables: HashMap<String, String> = HashMap::new();
         for (name, value) in [
@@ -1260,6 +1666,19 @@ impl Classifier {
                 variables.insert(name.to_string(), value.to_string());
             }
         }
+        // #1064: assignments the word lexer does not read as the shell does
+        // (a quoted blank, `~` or `$`), judged once the line's folders are
+        // known.
+        let mut splits = Vec::new();
+        for arg in command {
+            work::step();
+            let judgment =
+                loader_variables::scan_split_values(arg, &mut self.cut_values, &mut splits);
+            self.loader_judgment(&judgment);
+        }
+        // #1064: every folder the line is in, up to a limit.
+        let outer_visited = std::mem::replace(&mut self.visited, vec![cwd.to_string()]);
+        let outer_visited_all = std::mem::replace(&mut self.visited_all, self.unknown_folder == 0);
         let mut lexed_seds = 0;
         let mut lexed_shells = 0;
         let mut arithmetic = arithmetic::Arithmetic::new(command);
@@ -1270,10 +1689,68 @@ impl Classifier {
         // (`{}`, `{.}`) are only seen in the text as written.
         let braces = command.iter().any(|arg| arg.contains('{'));
         let mut loops = launched_git::PositionalLoops::default();
-        for (index, simple) in lexed.commands.iter().enumerate() {
+        // #1405: a `mapfile` was found, by any spelling.
+        let mut mapfile = false;
+        let mut aliases = aliases::Aliases::of(&lexed.commands);
+        // #1436: a loop's later passes start where the one before left
+        // (`for i in 1 2; do echo x >> .zshrc; cd ~; done`): a loop with a
+        // folder change whose pass moves the folder (`Place`) is read again
+        // from there, up to three passes, each from the state the one
+        // before ends in. If it still moves, other than deeper (`cd sub`,
+        // with no `..` in the loop), it is read once more in a folder not
+        // known. After it the reading goes on from the first pass, as
+        // before, the folder unknown if it kept moving. Past
+        // `MAX_REPLAYED_LOOPS` such a loop starts in a folder not known.
+        let mut changing = unknown_folder::changing_loops(&lexed.commands).into_iter();
+        let mut next_loop = changing.next();
+        let mut replayed = 0;
+        let mut pass: Option<LoopPass> = None;
+        let mut cursor = 0;
+        while let Some(simple) = lexed.commands.get(cursor) {
             work::step();
+            let index = cursor;
+            cursor += 1;
+            if pass.is_none()
+                && let Some(changing_loop) = next_loop.take_if(|found| found.start == index)
+            {
+                next_loop = changing.next();
+                if replayed < MAX_REPLAYED_LOOPS {
+                    replayed += 1;
+                    pass = Some(LoopPass {
+                        start: changing_loop.start,
+                        end: changing_loop.end,
+                        round: 1,
+                        place: Place::of(
+                            &folders,
+                            &variables,
+                            &changing_loop.names,
+                            (changing_loop.back, changing_loop.stack),
+                        ),
+                        first: None,
+                        names: changing_loop.names,
+                        climbs: changing_loop.climbs,
+                        counts: (changing_loop.back, changing_loop.stack),
+                        folders: possible_folders(&folders),
+                        branches: Vec::new(),
+                        seen: Vec::new(),
+                        overflow: false,
+                    });
+                } else {
+                    folders.unseen = true;
+                }
+            }
             let (words, unseen, skipped) =
                 substitute(simple, &variables, &mut self.substitution_budget);
+            // #1436: a value may climb too (`P=../..; … > $P/.zshrc`).
+            if let Some(current) = &mut pass
+                && !current.climbs
+            {
+                current.climbs = words.iter().any(|word| word.contains(".."));
+            }
+            mapfile = mapfile || rerun::names_mapfile(&words);
+            if let Some(scope) = &mut self.temp {
+                scope.read(simple, &words);
+            }
             if self.substitution_budget.left == 0 {
                 self.note(ProtectedActionKind::UnseenCode);
             }
@@ -1295,13 +1772,49 @@ impl Classifier {
             }
             // Decoded, quote-removed and with known variables substituted:
             // `eval "echo \${v@"P"}"`, `$'\x40'`, `p=@P; eval "echo \${v$p}"`.
-            if words.iter().any(|word| shell::prompt_expansion(word)) {
+            if words
+                .iter()
+                .any(|word| shell::prompt_expansion(word, foreign))
+            {
                 self.note(ProtectedActionKind::UnseenCode);
             }
-            arithmetic.note(simple, &words);
-            lexed_seds += sed::positions(&words).len();
-            lexed_shells += nested::shell_commands(&words);
+            // D191: a trap that only removes temp paths reads no arithmetic;
+            // its prompt is held back below.
+            if !self
+                .temp
+                .as_ref()
+                .is_some_and(|scope| scope.removal_trap(&words))
+            {
+                arithmetic.note(simple, &words);
+            }
+            // #1436: once, not again in a loop's later passes.
+            if pass.as_ref().is_none_or(|current| current.round == 1) {
+                lexed_seds += sed::positions(&words).len();
+                lexed_shells += nested::shell_commands(&words);
+            }
             let feeds_pipe = pipe_sources.contains(&index);
+            // #1410: a substitution's changes end with it.
+            if !simple.substituted {
+                folders.unseen_in_substitution = false;
+            }
+            // D194: where a certain `cd` stops being certain.
+            let certain = certain_cd::before(
+                &mut folders,
+                if simple.substituted {
+                    certain_cd::Joint::Other
+                } else {
+                    simple.after
+                },
+                &simple.words,
+                simple.stdin_from.is_some()
+                    || simple.here_string.is_some()
+                    || !simple.writes_to.is_empty(),
+            );
+            // #1422: an alias the line defines runs text neither reading
+            // reads as the shell does (`alias b=bash` then `b run.sh`).
+            if aliases.read(&words) {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
             self.simple_command(
                 simple,
                 &words,
@@ -1312,7 +1825,140 @@ impl Classifier {
                 &mut variables,
                 &mut loops,
                 depth,
+                certain,
             );
+            // #1309: past its possible folders the line may be anywhere.
+            if folders.lost || folders.unseen || self.unknown_folder > 0 {
+                self.visited_all = false;
+            }
+            for folder in std::iter::once(&folders.cwd).chain(&folders.others) {
+                work::step();
+                if self.visited.contains(folder) {
+                    continue;
+                }
+                if self.visited.len() >= MAX_VISITED_FOLDERS {
+                    self.visited_all = false;
+                } else {
+                    self.visited.push(folder.clone());
+                }
+            }
+            // #1436: the end of a loop being read again.
+            if let Some(current) = &mut pass
+                && current.end == index
+            {
+                let place = Place::of(&folders, &variables, &current.names, current.counts);
+                let now = possible_folders(&folders);
+                if current.round == 0 {
+                    // A pass from another folder: folders it leaves that no
+                    // pass has started from are read too, up to a limit.
+                    for folder in now {
+                        work::step();
+                        if current.seen.contains(&folder) {
+                            continue;
+                        }
+                        if current.seen.len() < MAX_BRANCH_FOLDERS {
+                            current.branches.push(folder.clone());
+                        } else {
+                            current.overflow = true;
+                        }
+                        current.seen.push(folder);
+                    }
+                } else {
+                    let moved = place != current.place;
+                    // A pass that comes back may still leave other folders
+                    // the line may be in (`cd nope; cd ..`).
+                    let widened = now.iter().any(|folder| !current.folders.contains(folder));
+                    let deeper = !current.climbs
+                        && place.known == current.place.known
+                        && place
+                            .cwd
+                            .strip_prefix(current.place.cwd.as_str())
+                            .is_some_and(|rest| rest.starts_with('/'));
+                    if current.round == 1 && (moved || widened) {
+                        current.first = Some((folders.clone(), variables.clone()));
+                    }
+                    let next = match current.round {
+                        1 | 2 if moved => Some(current.round + 1),
+                        3 if moved && !deeper => Some(current.round + 1),
+                        _ => None,
+                    };
+                    if let Some(round) = next {
+                        folders.unseen |= round == 4;
+                        current.round = round;
+                        current.place = place;
+                        current.folders = now;
+                        cursor = current.start;
+                    } else if current.round < 4 && widened {
+                        // Read once more from each of them, alone (round
+                        // 0 marks these passes).
+                        current.seen = current.folders.clone();
+                        for folder in now {
+                            work::step();
+                            if !current.seen.contains(&folder) {
+                                current.branches.push(folder.clone());
+                                current.seen.push(folder);
+                            }
+                        }
+                        current.round = 0;
+                    } else {
+                        if let Some((first, values)) = current.first.take() {
+                            folders = first;
+                            variables = values;
+                            folders.unseen |= current.round == 4;
+                        }
+                        pass = None;
+                    }
+                }
+                if let Some(current) = &mut pass
+                    && current.round == 0
+                {
+                    match (current.branches.pop(), &current.first) {
+                        (Some(branch), Some((first, values))) => {
+                            folders = first.clone();
+                            variables = values.clone();
+                            folders.cwd = branch;
+                            folders.others.clear();
+                            cursor = current.start;
+                        }
+                        _ => {
+                            if let Some((first, values)) = current.first.take() {
+                                folders = first;
+                                variables = values;
+                                // Past the limit the line may be anywhere.
+                                folders.unseen |= current.overflow;
+                            }
+                            pass = None;
+                        }
+                    }
+                }
+            }
+        }
+        if !splits.is_empty() {
+            let here: Vec<&str> = self.visited.iter().map(String::as_str).collect();
+            let roots = std::cell::OnceCell::new();
+            let windows = self.homes.windows_paths();
+            let risky = !self.visited_all
+                || splits.iter().any(|split| {
+                    work::step();
+                    loader_variables::judge_split(split, windows, &|entry| {
+                        self.writable_folder(entry, &here, &roots)
+                    })
+                });
+            if risky {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
+        }
+        certain_cd::finish(&mut folders);
+        // #1405: the word lexer ignores quotes (`-d 'x>' "$o"`): a line
+        // with a `mapfile` is read with them too. #1422: text that may not
+        // be shell is read loosely.
+        let strict = self.not_shell == 0 && self.rebuilt == 0;
+        if mapfile
+            && command
+                .iter()
+                .any(|arg| rerun::quoted_mapfile_callback(arg, strict))
+        {
+            self.note(ProtectedActionKind::UnseenCode);
         }
         // #937: arithmetic on a variable filled from command output or
         // `read` runs the substitutions in its value, like `eval`.
@@ -1333,8 +1979,20 @@ impl Classifier {
         {
             self.note(ProtectedActionKind::UnseenCode);
         }
+        // D191: the prompts only a temp path raised, kept now unless its
+        // variable kept that path (see `release_held`).
+        if let Some(scope) = std::mem::replace(&mut self.temp, outer_temp) {
+            match scope.finish(arithmetic.assigns_unseen_name(command)) {
+                (Some(kind), true) => self.note(kind),
+                (Some(kind), false) => {
+                    self.held = Some(self.held.map_or(kind, |held| held.strongest(kind)));
+                }
+                (None, _) => {}
+            }
+        }
         self.path(&folders.cwd);
         // Strings assembled from literals by inline code (`'~/.co' + 'dex'`).
+        let outer_foreign = std::mem::replace(&mut self.rebuilt_foreign, foreign);
         for arg in command {
             work::step();
             for joined in indirect::joined_literals(arg) {
@@ -1346,9 +2004,12 @@ impl Classifier {
                 self.rebuilt -= 1;
             }
         }
+        self.rebuilt_foreign = outer_foreign;
         // #885: nested shells' scripts and sed programs, read with quotes.
         self.quoted_pass(command, cwd, depth, (lexed_seds, lexed_shells));
         self.sed_scope = outer_scope;
+        self.visited = outer_visited;
+        self.visited_all = outer_visited_all;
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1363,7 +2024,17 @@ impl Classifier {
         variables: &mut HashMap<String, String>,
         loops: &mut launched_git::PositionalLoops,
         depth: usize,
+        certain: bool,
     ) {
+        // #1436: a script named relative to a folder this reading cannot
+        // see may be any file (`cd "$X" && sh ./run.sh`), also in a script
+        // run there or a decoded payload.
+        let outer_unseen_folder = self.unseen_folder;
+        self.unseen_folder = outer_unseen_folder
+            || folders.unseen
+            || folders.unseen_in_substitution
+            || folders.lost
+            || self.unknown_folder > 0;
         let lower: Vec<String> = words.iter().map(|word| word.to_lowercase()).collect();
         let (hidden, mut unchecked) = self.word_marks(simple, words, variables);
         loops.read(&simple.words);
@@ -1398,7 +2069,13 @@ impl Classifier {
                     // is kept as written.
                     // Once unseen, a variable stays unseen for the action
                     // (a later assignment may not run).
-                    let value = if value.contains(shell::UNSEEN_OUTPUT)
+                    let temp = self
+                        .temp
+                        .as_ref()
+                        .and_then(|scope| scope.value(name, value, !variables.contains_key(name)));
+                    let value = if let Some(temp) = temp {
+                        temp.to_string()
+                    } else if value.contains(shell::UNSEEN_OUTPUT)
                         || variables
                             .get(name)
                             .is_some_and(|old| old.contains(shell::UNSEEN_OUTPUT))
@@ -1421,6 +2098,8 @@ impl Classifier {
         if self.rebuilt == 0 && indirect::misread_command(simple, words) {
             self.note(ProtectedActionKind::UnseenCode);
         }
+        // #1436: as the quote-aware reading reads them, when set.
+        folders.searched |= unknown_folder::sets_search(words, command.as_ref());
         if let Some((index, name)) = &command {
             let args = &words[index + 1..];
             // Code named by a variable or substitution the classifier cannot
@@ -1440,18 +2119,69 @@ impl Classifier {
             // #1064: and other commands that run an operand as code.
             let eval_unseen = (matches!(name.as_str(), "eval" | "trap")
                 && unseen[index + 1..].iter().any(|unseen| *unseen))
-                || rerun::runs_unseen(name, words, unseen, *index);
+                || rerun::runs_unseen(name, words, unseen, *index)
+                || rerun::mapfile_callback(simple, words, unseen);
             if self.rebuilt == 0 && (unseen[*index] || inline_unseen || eval_unseen) {
-                self.note(ProtectedActionKind::UnseenCode);
+                // D191: a trap that only removes temp paths.
+                let removes = name == "trap"
+                    && !unseen[*index]
+                    && !inline_unseen
+                    && self
+                        .temp
+                        .as_ref()
+                        .is_some_and(|scope| scope.removes_temp(args));
+                self.note_or_hold(ProtectedActionKind::UnseenCode, removes);
             }
             folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
                 && unchecked[index + 1..].iter().any(|word| *word);
-            // #1309: this reading knows the words of `cd "$d"`; it loses
-            // its folder only past the possible folders.
-            let unknown = folders.lost;
-            self.follow_change(name, args, folders, variables, unknown);
+            // `pushd -n x`, `popd +1`: the folder stack changes, the folder
+            // may not (or goes to an entry of a stack not followed).
+            // #1403: nor does a program named by a path (`./cd sub`): the
+            // file runs, not the builtin (or a function of that name).
+            // #1422: nor `CD sub` or a wrapper's `env cd sub`.
+            if unknown_folder::stack_change(name, args)
+                || unknown_folder::external_change(words, *index, name)
+            {
+                folders.unfollowed = true;
+            } else {
+                // #1309: this reading knows the words of `cd "$d"`; it loses
+                // its folder only past the possible folders.
+                let unknown = folders.lost;
+                let changes = matches!(name.as_str(), "cd" | "pushd");
+                // #1436: `cd -` (`~-`) before any change goes to the
+                // `OLDPWD` the action started with; after one that may not
+                // have happened, or happened in a substitution or subshell,
+                // it may go there too.
+                let back = changes
+                    && (folders.previous == folders.cwd
+                        || folders.back_unsure
+                        || !folders.others.is_empty())
+                    && args.iter().any(|arg| arg == "-" || arg.starts_with("~-"));
+                self.follow_change(name, args, folders, variables, unknown, certain);
+                folders.back_unsure |= unknown_folder::CHANGERS.contains(&name.as_str())
+                    && (simple.substituted || !folders.others.is_empty());
+                // #1410: nor a target it cannot see (a variable never set
+                // in the action, a command's output: `cd "$ZDOTDIR"`, `cd
+                // "$(cat f)"`), which may be any folder; nor zsh `chdir`,
+                // which it does not follow. In a substitution, only for the
+                // commands of that substitution. #1436: nor one a search
+                // name may send anywhere (`CDPATH="$X" cd sub`, `cd -`).
+                if name == "chdir"
+                    || (changes
+                        && (back
+                            || folders.searched
+                            || args.iter().any(|word| self.unseen_value(word))))
+                {
+                    if simple.substituted {
+                        folders.unseen_in_substitution = true;
+                    } else {
+                        folders.unseen = true;
+                    }
+                }
+            }
         }
         let mut git_config = GitConfigWrites::new(&lower, &hidden, &unchecked);
+        let mut local_git_config = git_config::Writes::new(words);
         let mut launched_git = launched_git::LaunchedGit::new(
             words,
             &lower,
@@ -1487,8 +2217,22 @@ impl Classifier {
             {
                 self.note(ProtectedActionKind::Persistence);
             }
+            // Also inspect local command-bearing keys in Git invocations
+            // found through wrappers or dashed helpers, using the shared name.
+            let inspecting = command.as_ref().is_some_and(|(at, _)| {
+                *at == index && git_config::inspection_only_prefix(&words[..index])
+            });
+            let launched_kind = launched_git.judge(index, helper.as_ref());
+            if (name == "git" || helper.is_some())
+                && !inspecting
+                // Unknown launcher input is already classified by the shared check.
+                && launched_kind != Some(ProtectedActionKind::UnseenCode)
+                && local_git_config.writes_code_setting(index + 1, subcommand)
+            {
+                self.note(ProtectedActionKind::Persistence);
+            }
             // #1268: git given words from a launcher's input (`xargs git`).
-            if let Some(kind) = launched_git.judge(index, helper.as_ref()) {
+            if let Some(kind) = launched_kind {
                 self.note(kind);
             }
             launched_git.step(index);
@@ -1554,6 +2298,32 @@ impl Classifier {
         // #1142: setting a variable whose value git or a pager runs.
         if code_variables::sets_code_variable(simple, words, command.as_ref()) {
             self.note(ProtectedActionKind::UnseenCode);
+        }
+        // #1064: a variable that makes a later program load code, set to a
+        // risky value (`PATH=./bin:$PATH`, `NODE_OPTIONS=--require=x`).
+        let here: Vec<&str> = [folders.cwd.as_str(), folders.previous.as_str()]
+            .into_iter()
+            .chain(folders.others.iter().map(String::as_str))
+            .chain(self.visited.iter().map(String::as_str))
+            .collect();
+        let mut cut = std::mem::take(&mut self.cut_values);
+        let roots = std::cell::OnceCell::new();
+        let judgment = loader_variables::judge(
+            simple,
+            words,
+            command.as_ref(),
+            &mut cut,
+            self.homes.windows_paths(),
+            &|entry| !self.visited_all || self.writable_folder(entry, &here, &roots),
+        );
+        self.cut_values = cut;
+        self.loader_judgment(&judgment);
+        if !self.interactive_shell {
+            let fed = simple.pipe_from.is_some()
+                || simple.stdin_from.is_some()
+                || simple.here_string.is_some()
+                || simple.reads_outer_output;
+            self.interactive_shell = loader_variables::starts_interactive_shell(&lower, fed);
         }
         // #1141: an output option makes a writer of its command, and its
         // value is a file written (`git log --output=~/.zshrc`, `-o.zshrc`).
@@ -1637,7 +2407,7 @@ impl Classifier {
                     && simple.here_string != Some(position)))
                 && outputs::unseen_place(word)
             {
-                self.note(ProtectedActionKind::Persistence);
+                self.note_or_hold(ProtectedActionKind::Persistence, self.temp_place(word));
             }
             // Attached, assigned and volume forms (`-o/path`, `f=@/path`,
             // `~/.aws:/c`) are paths too.
@@ -1665,7 +2435,8 @@ impl Classifier {
                         && (self.homes.is_persistence(&resolved)
                             || self.unknown_place(folders, candidate))
                     {
-                        self.note(ProtectedActionKind::Persistence);
+                        let temp = self.temp_place(candidate);
+                        self.note_or_hold(ProtectedActionKind::Persistence, temp);
                     }
                     if recursive && !folder_value && self.homes.holds_a_home(&resolved) {
                         self.note(ProtectedActionKind::Credentials);
@@ -1677,7 +2448,8 @@ impl Classifier {
                     let resolved = self.homes.resolve(candidate, base);
                     self.word_path(&resolved, candidate, depth);
                     if self.homes.is_persistence(&resolved) {
-                        self.note(ProtectedActionKind::Persistence);
+                        let temp = self.temp_place(candidate);
+                        self.note_or_hold(ProtectedActionKind::Persistence, temp);
                     }
                 }
             }
@@ -1686,21 +2458,31 @@ impl Classifier {
             }
         }
         // #1159: git writing the working tree in a folder that is or holds
-        // a home.
-        if command
-            .as_ref()
-            .is_some_and(|(index, name)| outputs::writes_working_tree(name, &words[index + 1..]))
-            && bases
+        // a home. D195 (#1309): or in one the classifier cannot know,
+        // unless git's own leading `-C` names one (`git -C /x pull`; not a
+        // value elsewhere, `merge -m --cd=/x`).
+        if let Some((index, name)) = &command
+            && outputs::writes_working_tree(name, &words[index + 1..])
+            && (bases
                 .iter()
                 .chain(other_bases.iter())
                 .any(|base| self.homes.holds_a_home(&self.homes.resolve(".", base)))
+                || (self.unknown_place(folders, ".")
+                    && !(name.as_str() == "git"
+                        && words[index + 1..]
+                            .chunks(2)
+                            .take_while(|pair| pair.len() == 2 && pair[0] == "-C")
+                            .any(|pair| {
+                                work::step();
+                                !self.relative_place(&pair[1])
+                            }))))
         {
             self.note(ProtectedActionKind::Persistence);
         }
         for file in outputs.iter().flatten().chain(&wrapper_outputs) {
             work::step();
             if outputs::unseen_place(file) {
-                self.note(ProtectedActionKind::Persistence);
+                self.note_or_hold(ProtectedActionKind::Persistence, self.temp_place(file));
             }
             for base in bases.iter().chain(other_bases.iter()) {
                 work::step();
@@ -1712,11 +2494,98 @@ impl Classifier {
                     || (file.ends_with('/') && self.homes.holds_a_home(&resolved))
                     || self.unknown_place(folders, file)
                 {
-                    self.note(ProtectedActionKind::Persistence);
+                    self.note_or_hold(ProtectedActionKind::Persistence, self.temp_place(file));
                 }
             }
         }
         self.scripts_of(simple, words, unseen, command.as_ref(), &cwd, depth);
+        self.path_programs(words, command.as_ref(), &cwd, depth);
+        self.unseen_folder = outer_unseen_folder;
+    }
+
+    /// A program named by a path (`./python3`, `./env`, `/usr/bin/env`) is
+    /// the file that runs, whatever its name: it is read as any program run
+    /// by its path, besides what its name would run. A shell builtin named
+    /// by a path (`./cd`, `./source`) runs that file, not the builtin, so
+    /// the rest of the line is not known: it asks.
+    fn path_programs(
+        &mut self,
+        words: &[String],
+        command: Option<&(usize, String)>,
+        cwd: &str,
+        depth: usize,
+    ) {
+        // #1261: Windows path rules follow their own reads.
+        if self.homes.windows_paths() {
+            return;
+        }
+        // `scripts_of` read a command that names no shell or interpreter.
+        let read = command
+            .filter(|_| indirect::invocation(words).is_none())
+            .map(|(index, _)| *index);
+        let elsewhere = unknown_folder::elsewhere_at(words);
+        for at in indirect::programs(words) {
+            work::step();
+            let word = &words[at];
+            if !word.contains('/') {
+                continue;
+            }
+            // #1403: also when `scripts_of` read it (`./cd`, `./export`).
+            if PATH_BUILTINS.contains(&basename(&word.to_lowercase())) {
+                self.note(ProtectedActionKind::UnseenCode);
+            } else if Some(at) != read && !self.runs_elsewhere(elsewhere, at, word) {
+                self.named_program_file(word, cwd, depth);
+            }
+        }
+    }
+
+    /// A program named by a path whose name is a known tool's: judged as a
+    /// script when it is text. An executable is not one the action ran as
+    /// a script (`/bin/bash`). Missing, it asks as any program run by its
+    /// path, unless it is the action's own program: then nothing runs.
+    fn named_program_file(&mut self, word: &str, cwd: &str, depth: usize) {
+        if word.contains('$') {
+            return;
+        }
+        let file = self.homes.resolve(word, cwd);
+        let data = self
+            .sed_scope
+            .as_ref()
+            .is_some_and(|scope| scope.is_data(word));
+        match self.read_file(&file, word, cwd) {
+            FileText::Binary => {}
+            FileText::Missing if data || (depth == 0 && self.argv0 == word) => {}
+            FileText::Missing | FileText::Unreadable => {
+                self.ran.push(file);
+                self.note(ProtectedActionKind::UnseenCode);
+            }
+            FileText::Text(text) => {
+                self.ran.push(file);
+                self.script(&text, cwd, depth + 1);
+            }
+        }
+    }
+
+    /// Whether `file`, a word of the program at `at` or after it, names a
+    /// file relative to a folder a wrapper before that program moved to
+    /// (`env -C sub bash run.sh`, `sudo -D sub ./run.sh`): which file runs
+    /// is not known, so it asks.
+    /// `from`: `unknown_folder::elsewhere_at` of the command's words.
+    /// #1436: in a folder the word reading cannot see, such a file may be
+    /// another too: it asks, and the file here is still read, as before.
+    fn runs_elsewhere(&mut self, from: Option<usize>, at: usize, file: &str) -> bool {
+        let moved = from.is_some_and(|from| from < at);
+        let relative = !self.homes.windows_paths()
+            && (moved || self.unseen_folder)
+            && (file.contains("..")
+                || self.homes.resolve(file, "/a") != self.homes.resolve(file, "/b"));
+        if relative {
+            self.note(ProtectedActionKind::UnseenCode);
+        }
+        if relative && !moved {
+            self.ran_unknown = true;
+        }
+        relative && moved
     }
 
     /// #1283: for each of a simple command's words, whether the quote-aware
@@ -1802,9 +2671,15 @@ impl Classifier {
             return;
         };
         let local = |word: &str| word.starts_with(['.', '/', '~']);
+        let elsewhere = if self.homes.windows_paths() {
+            None
+        } else {
+            unknown_folder::elsewhere_at(words)
+        };
         let Some(invocation) = indirect::invocation(words) else {
             let word = &words[*index];
-            if word.contains('/') {
+            // `env -C sub ./run.sh` runs `sub/run.sh`.
+            if word.contains('/') && !self.runs_elsewhere(elsewhere, *index, word) {
                 // A binary through an environment path (`$JAVA_HOME/bin/java`)
                 // is not a script; an unseen one was already judged.
                 if !word.contains('$') {
@@ -1830,7 +2705,11 @@ impl Classifier {
         let shell =
             shell::SHELLS.contains(&name.as_str()) || matches!(name.as_str(), "source" | ".");
         match invocation.code {
-            Code::File(file) => self.required_script(file, cwd, depth, shell),
+            Code::File(file) => {
+                if !self.runs_elsewhere(elsewhere, *index, file) {
+                    self.required_script(file, cwd, depth, shell);
+                }
+            }
             Code::Module(module) if module.contains('$') => {
                 self.note(ProtectedActionKind::UnseenCode);
             }
@@ -1838,6 +2717,9 @@ impl Classifier {
                 let module = module.replace('.', "/");
                 for candidate in [format!("{module}.py"), format!("{module}/__main__.py")] {
                     work::step();
+                    if self.runs_elsewhere(elsewhere, *index, &candidate) {
+                        continue;
+                    }
                     let file = self.homes.resolve(&candidate, cwd);
                     self.not_shell += 1;
                     self.script_file(&file, &candidate, cwd, depth, Script::IfPresent);
@@ -1845,7 +2727,10 @@ impl Classifier {
                 }
             }
             Code::Stdin => {
-                if let Some(at) = simple.stdin_from {
+                // #1436: the file the shell opens, in its folder.
+                if let Some(at) = simple.stdin_from
+                    && !self.runs_elsewhere(/*from*/ None, at, &words[at])
+                {
                     self.required_script(&words[at], cwd, depth, shell);
                 }
                 if simple.here_string.is_some_and(|at| unseen[at]) {
@@ -1856,7 +2741,16 @@ impl Classifier {
         }
         for preload in invocation.preloads {
             work::step();
-            if local(preload) {
+            if self.runs_elsewhere(elsewhere, *index, preload) {
+                continue;
+            }
+            // #1405: a shell's start-up file is a path it sources; an empty
+            // one (`--rcfile /dev/null`) runs nothing.
+            if shell {
+                if preload != "/dev/null" {
+                    self.required_script(preload, cwd, depth, shell);
+                }
+            } else if local(preload) {
                 self.required_script(preload, cwd, depth, /*shell*/ false);
             } else {
                 let file = self.homes.resolve(preload, cwd);
@@ -1887,8 +2781,23 @@ impl Classifier {
     /// #1283: in a folder the classifier cannot know, a file named relative
     /// to it (`.zshenv`, `../x`, `$d/x`) may be any file.
     /// #1309: so too past `MAX_POSSIBLE_FOLDERS`.
+    /// #1410: so too after a change to a folder it cannot see.
     fn unknown_place(&self, folders: &Folders, word: &str) -> bool {
-        (self.unknown_folder > 0 || folders.lost) && self.relative_place(word)
+        (self.unknown_folder > 0
+            || folders.lost
+            || folders.unseen
+            || folders.unseen_in_substitution)
+            && self.relative_place(word)
+    }
+
+    /// #1410: whether a word (with the variables this reading knows, the
+    /// homes among them, substituted) holds a value it cannot see: a
+    /// variable it does not know (`$ZDOTDIR`, `$1`) or a command's output.
+    /// As written: a path's cleanup would drop `$X` from `$X/..`. Under
+    /// Windows path rules only output (#1261: a share's `c$` may read as a
+    /// variable there).
+    fn unseen_value(&self, word: &str) -> bool {
+        outputs::unseen_place(word) || (!self.homes.windows_paths() && word.contains('$'))
     }
 
     /// Whether `word` names a file relative to the folder it is used in.
@@ -1898,6 +2807,66 @@ impl Classifier {
             // `C:`'s own folder, which the probes below do not change.
             || (self.homes.windows_paths() && windows_reads::drive_relative(word))
             || self.homes.resolve(word, "/a") != self.homes.resolve(word, "/b")
+    }
+
+    /// #1064: note what [`loader_variables`] found.
+    fn loader_judgment(&mut self, judgment: &loader_variables::Judgment) {
+        self.sets_env |= judgment.sets_env;
+        if judgment.risky {
+            self.note(ProtectedActionKind::UnseenCode);
+        }
+    }
+
+    /// #1064: whether `entry` (a search-path entry, absolute or under `~`)
+    /// is a folder the agent may write: in the action's working folder, in
+    /// a folder of `here` (where the line is; the first resolves `entry`),
+    /// or in a temp folder. Also through canonical forms. `roots`: their
+    /// spellings, worked out on first use.
+    fn writable_folder(
+        &self,
+        entry: &str,
+        here: &[&str],
+        roots: &std::cell::OnceCell<Vec<String>>,
+    ) -> bool {
+        let cwd = here.first().copied().unwrap_or(&self.workspace);
+        let resolved = self.homes.resolve(entry, cwd);
+        if resolved.starts_with('~') {
+            // The home is unknown.
+            return true;
+        }
+        let key = |path: &str| path.replace('\\', "/").to_lowercase();
+        let spellings = |path: &str| {
+            let mut spellings = vec![key(path)];
+            spellings.extend(self.homes.canonical(path).map(|canonical| key(&canonical)));
+            spellings
+        };
+        let roots = roots.get_or_init(|| {
+            let temp = std::env::temp_dir().to_string_lossy().into_owned();
+            let mut roots = Vec::new();
+            for root in [self.workspace.as_str()]
+                .into_iter()
+                .chain(here.iter().copied())
+                .chain(TEMP_FOLDERS.iter().copied())
+                .chain([temp.as_str()])
+            {
+                work::step();
+                if !root.is_empty() {
+                    roots.extend(
+                        spellings(&self.homes.resolve(root, cwd))
+                            .into_iter()
+                            .map(|root| root.trim_end_matches('/').to_string()),
+                    );
+                }
+            }
+            roots
+        });
+        spellings(&resolved).iter().any(|path| {
+            roots.iter().any(|root| {
+                work::step();
+                path.strip_prefix(root.as_str())
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+            })
+        })
     }
 
     /// Follow `cd`, `pushd` and `popd` (also behind `builtin`/`command`).

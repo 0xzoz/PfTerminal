@@ -4,6 +4,8 @@
 //! ask (`Classifier::unknown_place`).
 
 use super::FOLDER_FLAGS;
+use super::indirect;
+use super::shell::SimpleCommand;
 use super::shell::basename;
 use super::work;
 
@@ -71,8 +73,14 @@ const SEARCHES: &[&str] = &["cdpath", "cdablevars", "oldpwd", "autocd"];
 /// folder other than the line's: a wrapper's folder option in any
 /// spelling, `find -execdir`, `chroot` or a systemd `WorkingDirectory=`.
 pub(super) fn runs_elsewhere(texts: &[String]) -> bool {
+    elsewhere_at(texts).is_some()
+}
+
+/// The position of the first of `texts` that makes `runs_elsewhere` true:
+/// it holds for the texts before a position after it, and only those.
+pub(super) fn elsewhere_at(texts: &[String]) -> Option<usize> {
     let mut letters: Vec<char> = Vec::new();
-    for text in texts {
+    for (at, text) in texts.iter().enumerate() {
         work::step();
         let flag = text.split_once('=').map_or(text.as_str(), |(flag, _)| flag);
         if FOLDER_FLAGS.contains(&flag)
@@ -91,7 +99,7 @@ pub(super) fn runs_elsewhere(texts: &[String]) -> bool {
                 window.eq_ignore_ascii_case(b"workingdirectory")
             })
         {
-            return true;
+            return Some(at);
         }
         if text.len() > 1
             && text.starts_with('-')
@@ -101,7 +109,7 @@ pub(super) fn runs_elsewhere(texts: &[String]) -> bool {
                 letters.contains(&letter)
             })
         {
-            return true;
+            return Some(at);
         }
         for (wrapper, letter) in SHORT_FOLDER_FLAGS {
             work::step();
@@ -110,7 +118,7 @@ pub(super) fn runs_elsewhere(texts: &[String]) -> bool {
             }
         }
     }
-    false
+    None
 }
 
 /// Whether `text` defines code that runs later than it is read: a
@@ -137,6 +145,144 @@ pub(super) fn starts_loop(texts: &[String]) -> bool {
     texts.iter().any(|text| {
         work::step();
         LOOPS.contains(&text.as_str())
+    })
+}
+
+/// #1436: a loop that holds a folder change.
+pub(super) struct ChangingLoop {
+    /// Its first and last command.
+    pub(super) start: usize,
+    pub(super) end: usize,
+    /// The variables its changes name (`cd "$D"`, `cd ${D}/x`).
+    pub(super) names: Vec<String>,
+    /// A word in it climbs (`..`).
+    pub(super) climbs: bool,
+    /// A change in it goes back (`cd -`, `~-`) or uses the folder stack
+    /// (`pushd`, `popd`).
+    pub(super) back: bool,
+    pub(super) stack: bool,
+}
+
+/// #1436: the outermost loops of `commands` that hold a folder change
+/// (`cd`, `eval 'cd ~'`, `source f`). A loop starts at a command whose
+/// first word, past keywords (`do for`), is a loop keyword, and ends at a
+/// `done`; one left open ends with the text.
+pub(super) fn changing_loops(commands: &[SimpleCommand]) -> Vec<ChangingLoop> {
+    let mut found = Vec::new();
+    let mut open = 0usize;
+    let mut start = 0;
+    let mut changes = false;
+    let mut names = Vec::new();
+    let mut climbs = false;
+    let mut back = false;
+    let mut stack = false;
+    for (at, command) in commands.iter().enumerate() {
+        work::step();
+        let words = &command.words;
+        let first = words.iter().find(|word| {
+            work::step();
+            !matches!(
+                word.as_str(),
+                "do" | "then" | "else" | "elif" | "if" | "!" | "{" | "time"
+            )
+        });
+        if first.is_some_and(|word| LOOPS.contains(&word.as_str())) {
+            if open == 0 {
+                start = at;
+                changes = false;
+                names.clear();
+                climbs = false;
+                back = false;
+                stack = false;
+            }
+            open += 1;
+        }
+        if open > 0 {
+            climbs |= words.iter().any(|word| word.contains(".."));
+            if let Some((index, name)) = indirect::command_word(words)
+                && (CHANGERS.contains(&name.as_str()) || carries_change(&name, &words[index + 1..]))
+            {
+                changes = true;
+                stack |= matches!(name.as_str(), "pushd" | "popd");
+                for word in &words[index + 1..] {
+                    work::step();
+                    back |= word == "-" || word.starts_with("~-");
+                    names.extend(variable_names(word));
+                }
+            }
+        }
+        if open > 0 && words.first().is_some_and(|word| word == "done") {
+            open -= 1;
+            if open == 0 && changes {
+                found.push(ChangingLoop {
+                    start,
+                    end: at,
+                    names: std::mem::take(&mut names),
+                    climbs,
+                    back,
+                    stack,
+                });
+            }
+        }
+    }
+    if open > 0 && changes {
+        found.push(ChangingLoop {
+            start,
+            end: commands.len() - 1,
+            names,
+            climbs,
+            back,
+            stack,
+        });
+    }
+    found
+}
+
+/// The names of the variables `word` expands (`$D`, `${D}`, `${D:-x}`).
+fn variable_names(word: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = word;
+    while let Some(at) = rest.find('$') {
+        work::step();
+        rest = &rest[at + 1..];
+        let inner = rest.strip_prefix('{').unwrap_or(rest);
+        let end = inner
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .unwrap_or(inner.len());
+        if end > 0 {
+            names.push(inner[..end].to_string());
+        }
+    }
+    names
+}
+
+/// #1436: whether a simple command (`words`, its command word `command`)
+/// sets a name that changes where `cd` goes ([`searches`]): an assignment
+/// on its own, declared, or before a folder change; a name it reads into
+/// (`read CDPATH`); or an option (`shopt -s cdable_vars`, zsh `setopt
+/// auto_cd`).
+pub(super) fn sets_search(words: &[String], command: Option<&(usize, String)>) -> bool {
+    let name = command.map(|(_, name)| name.as_str());
+    let named = matches!(
+        name,
+        Some("shopt" | "setopt" | "set" | "read" | "mapfile" | "readarray" | "printf")
+    );
+    let assigns = matches!(
+        name,
+        None | Some(
+            "export" | "declare" | "typeset" | "local" | "readonly" | "cd" | "pushd" | "popd"
+        )
+    );
+    words.iter().any(|word| {
+        work::step();
+        if named {
+            return searches(word);
+        }
+        assigns
+            && word.split_once('=').is_some_and(|(assigned, _)| {
+                let assigned = assigned.trim_end_matches('+');
+                searches(assigned.split('[').next().unwrap_or(assigned))
+            })
     })
 }
 
@@ -220,6 +366,54 @@ pub(super) fn odd_change(name: &str, args: &[String]) -> bool {
         "pushd" => operands == 0,
         _ => operands > 1,
     }
+}
+
+/// #1403: whether a folder change is named by a path (`./cd`,
+/// `"$PWD/pushd"`): that file runs, not the builtin, so the folder it
+/// leaves is not known. `word` is the command word, `name` its lowercase
+/// basename.
+pub(super) fn path_change(word: &str, name: &str) -> bool {
+    CHANGERS.contains(&name) && word.contains('/')
+}
+
+/// #1422: whether the folder change at `words[index]` (`name`, its
+/// lowercase basename) runs a program, not the builtin, so the folder it
+/// leaves is not known: named by a path (`./cd`, #1403), spelled in
+/// another case (`CD`: builtins are matched exactly), or behind a wrapper
+/// that runs a program (`env cd`, `sudo cd`, `nice cd`, `exec cd`). Only
+/// `command`, `builtin` and the `time` keyword run the builtin.
+pub(super) fn external_change(words: &[String], index: usize, name: &str) -> bool {
+    let Some(word) = words.get(index) else {
+        return false;
+    };
+    if !CHANGERS.contains(&name) {
+        return false;
+    }
+    path_change(word, name)
+        || basename(word) != name
+        || super::indirect::programs(words).into_iter().any(|at| {
+            work::step();
+            at != index
+                && !matches!(
+                    words.get(at).map(|word| basename(word)),
+                    Some("command" | "builtin" | "time")
+                )
+        })
+}
+
+/// Whether `pushd`/`popd` changes the folder stack rather than (only) the
+/// folder: `-n` keeps the folder, `+N`/`-N` pick an entry of a stack that
+/// is not followed, and `pushd -` goes back (zsh).
+pub(super) fn stack_change(name: &str, args: &[String]) -> bool {
+    matches!(name, "pushd" | "popd")
+        && args.iter().any(|arg| {
+            work::step();
+            arg == "-"
+                || arg.starts_with('+')
+                || (arg.starts_with('-')
+                    && !arg.starts_with("--")
+                    && (arg.contains('n') || arg[1..].starts_with(|ch: char| ch.is_ascii_digit())))
+        })
 }
 
 /// The names in `text`: runs of letters, digits and underscores.
