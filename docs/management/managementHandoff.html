@@ -15,6 +15,72 @@ th{background:#f5f5f7}.warn{background:#fff4e5;border-left:4px solid #f0a020;pad
 </head>
 <body>
 <h1>Corbanu Terminal — management handoff</h1>
+<p><small>Update 2026-10-28 ~21:30Z (earlier: 10-28 16:15Z and 03:15Z; resume update, 2026-10-26; closeout update, 2026-10-22). Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code>. This update supersedes earlier operational snapshots below.</small></p>
+<div class="note"><b>Update 2026-10-28 ~21:30Z (handoff-doc14).</b> Sources: <code>$W/todo.md</code> from its 16:13Z line through 21:38Z, the worker results in <code>$HOME/.corbanu-workers/*.result.md</code> written since 16:00Z
+(fix-1476, acct-d223, cat-128, sec-linux, docs-28, rel-1467, sec-722, sec-left, ci-rg, sec-1472, ws-1343, ci-maint, sec-932p2, sec-943b, crash-1491), the coordinator's comments on #1412, #1467, #722, #1468, #943, #932, #128, #1474 and #1483,
+and GitHub re-checked at about 21:30Z. Main is at <code>bb05734780</code> (#1498, 21:18Z; its postmerge run, and those for #1502/#1503, were still running at this snapshot).
+<ul>
+<li><b>16 PRs merged</b> after #1487's snapshot (#1483 at 16:49Z – #1498 at 21:18Z), plus #1487 itself at 16:57Z: 14 ours and 2 from citadelculture (#1376 and #1374, both finished with credit). Section 8.0h lists them by area.
+(#1471, D225, merged at 15:45Z and is in 8.0g.)</li>
+<li><b>No owner answers since 10:27Z.</b> <b>Pending: D219 and D235–D255</b> (22 decisions, section 9, each with options and a recommendation). D253 (the D156 fix as its own PR before W3) was started as decision-free because
+the fix only adds prompts (sec-932h); Travis can still say no.</li>
+<li><b>Main postmerge was red from the 17:30Z run to 20:50Z.</b> #1376 (D226) made the Linux database scan tests require ripgrep; the rust-ci-full Linux test shards had no <code>rg</code>, so every postmerge run from <code>bd494990aa</code> (#1376) through
+<code>fbbe725af5</code> (#1497) failed there. ci-rg's #1500 installs the release's pinned ripgrep 15.2.0 in those shards and in the nightly Bazel Linux job; the run on <code>c8d56d89d3</code> was green (shards 5148/5148 and 4939/4939), as were #1501's and #1374's.</li>
+<li><b>Nightly:</b> #636 is closed: scheduled run 40722950171 on <code>0f19feaf08</code> was green, the first green scheduled nightly since 10-07. Tonight's scheduled nightly must show <code>ripgrep 15.2.0</code> in “Bazel test on ubuntu-24.04” (#1500's second step).</li>
+<li><b>Installed build:</b> main <code>c8d56d89d3</code> (#1500), installed 21:17Z per <code>todo.md</code>; earlier today <code>e344afbab7</code> (#1483) at 17:58Z (section 7).</li>
+<li><b>Windows gate still not run</b> (PC not online); #1080 stays draft at <code>db6b6fa35e</code>.</li>
+<li><b>Running:</b> win-733 (#1505), contrib-990 (#990/#982), sec-932h (D156 fix + measuring harness), fu-1504 (#1508, #1509), sec-943c (#1510) and this handoff-doc14 (section 10).</li>
+</ul></div>
+<details><summary>Update 2026-10-28 ~16:15Z (handoff-doc13; historical, superseded by the box above)</summary>
+<div class="note"><b>Update 2026-10-28 ~16:15Z (handoff-doc13).</b> Sources: <code>$W/todo.md</code> after the 03:15Z handoff (#1439) through its 16:13Z line, the worker results in
+<code>$HOME/.corbanu-workers/*.result.md</code> written since 10-26, <code>$W/triage-20261028.md</code>, <code>wave2-common.md</code>, and GitHub re-checked at about 16:15Z. Main is at <code>2619817aef</code> (#1481, 16:09Z; its postmerge run was still running at this snapshot).
+<ul>
+<li><b>45 PRs merged</b> after #1439's snapshot (#998 at 03:30Z – #1481 at 16:09Z), plus #1439 itself at 03:44Z: 26 ours and 19 from outside contributors (citadelculture 15, counting #994/#995, which GitHub marked merged when
+#1444/#1445 carried their commits; darkmatter-sudo 2; bradsbots 2). Section 8.0g lists them by area.</li>
+<li><b>Travis at 10:27Z:</b> “All recommendations accepted, except it is unclear what you mean around item 16”. D217, D218 and D220–D234 are accepted and carried out or in progress (section 9). <b>Pending: D219, D235, D236, D237 and D238.</b></li>
+<li><b>Security classifier:</b> the follow-up issues #1409, #1422, #1436, #1428 and #1441 are closed by #1433, #1443, #1446, #1440 and #1451, and #1410 (items 2–3 in #1437) was closed by dec-exec2 under D220/D221; also merged: #1459 (71 lines now ask), #1460 (#807), #1464 (#675), #1469 (#1461, Windows), #1471 (D225)
+and #1481 (D217, <code>sudo -C N</code>, owner-approved; the only lines quieter than main are a numeric sudo <code>-C</code>). The CLASSIFIER MERGE QUEUE held. Remaining follow-ups: #1449, #1468, #1470 (D236), #1472, #1480, #1482, #1462 (D235).</li>
+<li><b>CI:</b> rust-clippy renamed <code>master</code> to <code>main</code>, which broke the argument-comment lint on every Rust PR (from about 11:30Z per contrib-14) and main's postmerge at <code>2b135d4a66</code> (#1479); #1484 fixed it at 14:42Z without a workflow edit (D238 is the later pin bump).
+Nightly-ci went green on manual runs after #1424/#1425; the first scheduled run since started at 16:08Z on <code>0f19feaf08</code> and was still running at this snapshot, so #636 stays open.</li>
+<li><b>Windows gate not run:</b> win-gate-pf84 polled for 5 hours (01:55Z–06:56Z); the PC never came online in Tailscale. #1080 stays draft at <code>db6b6fa35e</code>.</li>
+<li><b>Overnight 10-28:</b> triage-1 triaged all 70 open issues (<code>$W/triage-20261028.md</code>; 9 closed as done; D225–D230 raised). GitHub was unreachable from the Mac and glitch for about ten minutes (coordinator's brief: 09:38–09:48Z; <code>todo.md</code>
+notes it at 09:46Z and “reachable again” at 09:50Z); githubstatus showed no incident, so it was a local or ISP route problem.</li>
+<li><b>Task Node:</b> #1453 makes the CLI fail evidence receipts that confirm nothing; the server-side stall behind 0xzoz's task is filed upstream as <b>postfiatorg/tasknode#347</b> (D232/D233). #1280 stays open for the operators' repair; who forwards it is D237.</li>
+<li><b>Installed build:</b> main <code>82d22facc4</code> (#1484), installed 15:41Z (section 7).</li>
+<li><b>Running:</b> acct-d223 (#1483, D228), sec-linux (#1376, D226), ci-maint (scheduled nightly, #1298, #982, #796), cat-128 (#128/#368; #1486 open) and this handoff-doc13 (section 10).</li>
+</ul></div>
+</details>
+<details><summary>Update 2026-10-28 ~03:15Z (handoff-doc12; historical, superseded by the boxes above)</summary>
+<div class="note"><b>Update 2026-10-28 ~03:15Z (handoff-doc12).</b> Sources: <code>$W/todo.md</code> from “2026-10-26 19:05Z TRAVIS: Resume everything” through its 03:13Z line, the worker results in
+<code>$HOME/.corbanu-workers/*.result.md</code> written since 10-26, <code>wave2-common.md</code>, and GitHub re-checked at about 03:15Z. Main is at <code>1a613a7e4c</code> (#1433, 03:13Z; its postmerge run was still running at this snapshot).
+<ul>
+<li><b>54 PRs merged</b> since the resume (10-26 19:14Z – 10-28 03:13Z): 19 ours, 30 from outside contributors and 5 Dependabot workflow/action bumps (section 8.0f).</li>
+<li><b>cargo-deny unblocked:</b> since about 10-24 new RustSec advisories failed <code>cargo-deny</code> (and so <code>CI required</code>) on every PR. #1407 (zstd 0.14.3, tokio 1.53.3) and #1408 (a dated
+exception for RUSTSEC-2026-0387, crypto-bigint via aws-config, D198) merged at 21:08Z on 10-27; #1401 tracks removing the exception (re-review by 2027-01-31).</li>
+<li><b>Security classifier:</b> D194 (#1404, narrowed to option B, a strict command allowlist), D195 (#1415), D191 (#1406) and the follow-ups #1354, #1356, #1418, #1421 and #1433 merged. D191 and D194
+are the owner-approved relaxations; D195 adds prompts, and the others are reviewed follow-up fixes (section 8.0f). Follow-ups #1410 and #1422 are open; D217 (<code>sudo -C</code>) is pending.</li>
+<li><b>Accounting S10 signed off</b> (#1419): the raw record is 32 passed, 0 failed, 5 blocked; the re-run record (#1411) counts 33/0/4 with ACC-04 passed under D113; with the owner decisions D207/D208 it is 35/0/2, ACC-22 and ACC-35 as
+named limits. ACC-11 and ACC-14 stay <i>blocked</i> in the raw rows; their pass is an owner decision, listed separately.</li>
+<li><b>PF-84 Windows gate not run:</b> the Windows PC has been offline in Tailscale since 10-27 21:07Z (last poll 03:10Z: down). #1080 stays draft at <code>db6b6fa35e</code> (CI 35 passed, 0 failed).</li>
+<li><b>Installed build:</b> main <code>21db61709f</code> (#1406), installed 10-28 01:08Z (section 7).</li>
+<li><b>Waiting on Travis:</b> D217 and D218 (#1430), plus turning the Windows PC on (D212, accepted 01:54Z, not yet online). Running: ci-nightly, contrib-10, sec-fu2, sec-1428, win-gate-pf84 and this handoff-doc12 (section 10).</li>
+</ul></div>
+</details>
+<div class="note"><b>Resumed 2026-10-26.</b> Travis said “Resume everything”. Opus 5.5 High is available again (smoke OK 19:02Z), so reviews are Opus again; the 2026-10-22 Astra High exception covered only that batch (#1305/#1318/#1365).
+#1305 and #1318 merged during the pause (<code>180a24b5cc</code> / <code>55ffd0277c</code>) after review of their unchanged heads and green CI.
+<b>Now running:</b> sec-recover (#1354 and #1356 conflict recovery and review), sec-d194 (D194 definite-cd handling, then D195 unknown-folder git checks), sec-d191 (bounded plain-mktemp recognition) and a contributor sweep.
+<b>Still waiting:</b> the Windows box is unreachable (powered off) and the Z.AI balance is still empty (D190 recharge unconfirmed), so the PF-84 Windows gate and the in-product GLM runs (including the accounting rerun) wait.
+Raw failed/blocked results stay separate from owner acceptance; nothing in this resume changes a raw result into a pass.
+#1365's two Windows script findings (dirty source before build; binary replaced before verification) are fixed in the scripts; the fixes have not been run on Windows yet.
+The pause text below is kept as the 2026-10-22 record.</div>
+<div class="warn"><b>Paused at the owner's request, 2026-10-22.</b> Travis accepted all recommendations (D182–D195), confirmed the Windows machine is up, and asked to finish in-flight work and pause.
+The three remaining Opus workers exited on a provider 429. A fresh Opus 5.5 High check at about 20:10Z was blocked by the same local cooldown (about 38 hours remaining).
+No alternate worker model was substituted. The recovery watchdog has been stopped so it cannot restart workers during the pause.
+See sections 10–12 for the current state; earlier “running” statements are historical.</div>
+<p><b>Approved decisions:</b> D182–D195 are accepted. Security evidence dispositions are recorded in the
+<a href="../../qa/security-levels/milestones/localmodel-run3-20261022/owner-decisions-20261022.md">owner decision addendum</a>.
+Raw failed/blocked results are retained separately from owner acceptance. The Windows gate and the #1337 account-key input defect still block #1080's default-on rollout. (Update 10-28: #1337 merged 10-26 19:14Z; the Windows gate and Travis's sign-off remain.)</p>
+<details><summary>Previous update at 12:45Z (historical; superseded by this closeout)</summary>
 <p><small>Kept by the coordinating agent (Claude, running in Corbanu Terminal as “coordinator”) for its successor; this update written by the coordinator's handoff-doc11 worker.
 State as of <b>2026-10-22 12:45 UTC (05:45 America/Phoenix)</b>, with <code>todo.md</code> read through its 12:59Z lines (including the install of <code>d88d018ab2</code>) and GitHub re-checked at about 13:03Z. Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code> (base branch <code>main</code>, head
 <code>2cee3b5984</code>, the merge of #1333 at 12:29Z; main moved to <code>e2ddef8698</code> with tui-qa2's record #1341 at 12:51Z).
@@ -67,6 +133,8 @@ plain-language report that always ends with the open decisions and a recommendat
 waiting on him until he answers</b>. He usually answers “all as recommended” or “accept all recommendations”.
 <b>Overnight rule:</b> 01:30–09:30 Pacific Travis is unavailable. Only launch work that needs no decision from him, and queue the decisions, with recommendations, for
 the morning. In October that is 08:30Z–16:30Z. This update falls inside the window; Travis answered at 05:15Z and 08:20Z before it began, and is expected back at about 16:30Z.</div>
+
+</details>
 
 <div class="warn"><b>Three-day stop: <code>claude-plan</code> 429 (2026-10-16 13:55Z → 2026-10-19 18:30Z).</b>
 <ul>
@@ -514,6 +582,60 @@ models; the coordinator relaunches it with a RECOVERY NOTE after the recharge.</
 </ul>
 No request is waiting at this update.</li>
 </ul>
+<h3>Wave 2 additions (2026-10-26/28, since #1365): coordinator standing rules and lessons</h3>
+<p>All rules are in <code>wave2-common.md</code>; write them into briefs where they apply.</p>
+<ul>
+<li><b>NO GIT STASH RULE</b> (coordinator, 10-27): never use <code>git stash</code> (push, pop or apply). The stash is shared by every worktree of the repository: sec-d194 and sec-d191 both popped another
+worktree's “PF58 resumable source…” stash into their own worktrees (each reset only its own worktree; the stash is intact). For fail-before checks use <code>git worktree add</code> at main,
+<code>git show main:path &gt; /tmp/…</code>, or a scratch commit that is then reverted. Never <code>drop</code> or <code>clear</code> the existing stash.</li>
+<li><b>CARGO-DENY</b> (10-27): fixed on main by #1407/#1408 (D198). The <code>cargo-deny</code> job checks out the PR head, not the merge ref, so a PR only goes green after origin/main is merged into it
+(a plain merge commit, never a force-push; for contributor branches ask kindly, or push the merge when maintainer edits are allowed). A main merge whose
+<code>git diff &lt;approved-head&gt; &lt;new-head&gt; -- &lt;the PR's own files&gt;</code> is empty needs no re-review. Don't edit <code>deny.toml</code>/<code>audit.toml</code> outside an owner decision.</li>
+<li><b>CLASSIFIER MERGE QUEUE</b> (coordinator, 10-27 23:20Z): post-taint classifier PRs merge in the order #1354, #1406 (D191), then the D195 and sec-fu PRs; each green run takes about 55 minutes and every
+merge forces a re-merge on the others. (#1415, D195, merged at 23:41Z, before #1406; sec-d191-2 reports it caused no conflict.)</li>
+<li><b>BUILD DIR RULE</b> (coordinator, 10-28): Mac build and target directories (<code>CARGO_TARGET_DIR</code>, Bazel output) go on <code>/Volumes/CorbanuDrive</code>, e.g.
+<code>.codex-work/targets/&lt;worker&gt;</code>, never under <code>$HOME/.cache</code> or elsewhere on the internal disk. Prefer glitch for heavy builds.</li>
+</ul>
+<p><b>Lessons from this stretch</b> (the facts are in <code>todo.md</code>):</p>
+<ul>
+<li><b>Grant-file naming.</b> Workers poll exactly <code>$W/&lt;name&gt;.grant.md</code>. On 10-27 the coordinator wrote the grants for sec-d191-2 and contrib-8 as <code>&lt;name&gt;.grant1.md</code>; at 19:01Z
+the slip was found and the files copied, and sec-d191-2 had lost about an hour. Related: contrib-8 exited at 22:23Z without carrying out the decisions in its <code>contrib-8.grant2.md</code>/<code>grant4.md</code>
+files (D199–D204), so contrib-9 was launched to do them. Write <code>&lt;name&gt;.grant.md</code> first (then keep a numbered copy if useful), and confirm the worker acknowledged it.</li>
+<li><b>Workers don't re-read rules mid-run.</b> A rule added to <code>wave2-common.md</code> reaches only workers launched afterwards. Example: sec-1428, launched before the BUILD DIR RULE, kept using
+<code>~/.cache/sec-1428-target</code>. Tell running workers directly (a <code>.grant.md</code> note or the brief's message channel) and act on the machine where needed.</li>
+<li><b>Internal-disk build dirs.</b> The internal disk dropped from 59 to 47 GB free at 02:51Z on 10-28 (sec-1428's target in <code>~/.cache</code>, 14 GB) and to 33 GB by 02:57Z. With no cargo running,
+the coordinator deleted that target (27 GB) and symlinked <code>~/.cache/sec-1428-target</code> to <code>.codex-work/targets/sec-1428</code> on CorbanuDrive. Watch free space (stop a worker's
+rustc if it falls below about 25 GB). <code>~/.cache/huggingface</code> (124 GB) and <code>~/Library/Caches</code> (47 GB) are not the program's.</li>
+</ul>
+<h3>Wave 2 additions (2026-10-28, since #1439): coordinator standing rules and lessons</h3>
+<p>NO GIT STASH, CARGO-DENY, CLASSIFIER MERGE QUEUE and BUILD DIR (above) still apply; one rule is new. All are in <code>wave2-common.md</code>.</p>
+<ul>
+<li><b>WINDOWS SKIP RULE</b> (coordinator, 10-28 10:42Z): never add a Windows <code>#[cfg_attr(windows, ignore)]</code> or skip to a new test without running it in the native Windows CI job first; skip only tests
+that actually fail there, with a specific reason and issue number. win-691c found 66 classifier tests that had copied the “Unix fixtures … #691” skip without ever running on Windows; 58 passed there (#1463), and the
+8 that differ name #1461/#1462 (#1469 then re-enabled one).</li>
+<li><b>CLASSIFIER MERGE QUEUE outcome:</b> #1354 and #1406 merged first (10-27); then #1437, #1443, #1446, #1459, #1469 and #1481 in turn. #1446 had to re-merge main after #1443 landed in the same files and used a granted merge-only review round. The search-parser PRs went
+#1360 → #1363 → #1366 → #1364, after #1446, with main merged in between and each security review seeing the earlier ones applied; #1459 went in after #1363.</li>
+</ul>
+<p><b>Lessons from this stretch</b> (the facts are in <code>todo.md</code>):</p>
+<ul>
+<li><b>Grant-file naming (again).</b> sec-d217 renamed its first grant to <code>sec-d217.grant-round4.md</code> so it could detect a second one; the coordinator's round script counted that archived file as an answer,
+so sec-d217's second request (14:54Z) went unanswered until 16:08Z. The script is fixed. Keep exactly one live <code>&lt;name&gt;.grant.md</code> per open request; archive under a name the script ignores.</li>
+<li><b>Workers don't re-read rules mid-run.</b> Still true: the WINDOWS SKIP RULE came after #1455/#1459 had each copied another untried Windows skip (win-691c's report), and ci-maint restarted its nightly poll right after the
+coordinator killed it (12:09Z/13:09Z). Tell running workers directly and act on the machine where needed.</li>
+<li><b>Internal-disk build dirs.</b> Free space dipped to 32 GB again around 15:52Z and recovered to 49 GB on its own (transient). A user process outside the program (a node <code>x-bookmark-backfill</code>) held
+12.7 GB of swap at 13:50Z. Keep all program build dirs on CorbanuDrive or glitch.</li>
+</ul>
+<h3>Wave 2 additions (2026-10-28, since #1487): lessons</h3>
+<p>No new standing rule in this stretch; everything in <code>wave2-common.md</code> still applies. Lessons (from the coordinator and <code>todo.md</code>):</p>
+<ul>
+<li><b>Round-script freeze false positive.</b> The coordinator's round script treats “Operation not permitted” in a worker's log as the #616 sign that macOS revoked access to CorbanuDrive. Sandbox tests print that text as their
+expected output, so a worker running them looks frozen when it isn't. Before acting, check the process itself (CPU, log growth, whether it can still read its folder); kill only a reviewer that really sits at 0% CPU with no output for 10+ minutes.</li>
+<li><b>Dependency PRs wait for the V8 from-source job.</b> A PR that changes dependencies (here #1498's notify bump and <code>MODULE.bazel.lock</code>) triggers v8-canary's from-source V8 build: on #1498 it ran from 18:20Z to 21:17Z.
+Plan for about three hours of CI on such PRs and do other work meanwhile; it is not a hang.</li>
+<li><b>A main-only test lane can go red after a green PR.</b> #1376's new ripgrep requirement passed PR CI because no PR job runs the Linux sandbox tests; only rust-ci-full (postmerge) and the nightly Bazel Linux job do.
+Main was red for about 3 h 20 min until #1500 (ci-rg). When a PR adds a tool requirement to tests, check which lanes actually run them.</li>
+</ul>
+
 <h2>4. Merge and CI rules</h2>
 <ul>
 <li>Merge commits only: <code>gh pr merge N --merge --match-head-commit &lt;sha&gt;</code>, only when <b>all</b> checks are
@@ -735,7 +857,36 @@ whose targets and temp folders are on CorbanuDrive. Travis was told. At handoff-
 It execs <code>.codex-work/corbanu-terminal/bin/corbanu</code>, a <b>symlink</b> to the real binary
 <code>.codex-work/integration-build-20260922a/integration-package-dev/bin/corbanu</code>. <b>Install over the real binary, never over the launcher</b>: at 10:53–10:56Z the
 coordinator briefly copied a binary over the launcher by mistake and restored it; sessions started in those three minutes ran without <code>activate.sh</code>'s environment.</li>
-<li>Last install: main <code>d88d018ab2</code> (installed 2026-10-22 12:59Z per <code>todo.md</code>, just after this update's snapshot; <code>INSTALL.json</code>'s
+<li><b>Current install (2026-10-28 21:17Z):</b> main <b><code>c8d56d89d3</code></b>, the merge of #1500 (ripgrep in the rust-ci-full Linux shards), postmerge green (run 40759219551, finished 20:50Z); installed 21:17Z per <code>todo.md</code>
+(<code>INSTALL.json</code> <code>built_at</code> 21:02Z), Rust 1.99.1, developer-accounting marker on, signed with the same Developer ID, sha256 begins <code>2e5f0977e4a5c840</code>, smoke OK. Installs since #1487:
+<ul>
+<li><code>e344afbab7</code> (17:58Z; the merge of #1483, postmerge green; sha256 begins <code>26e55116fd500de2</code>; adds #1469, #1474, #1471, #1364, #1475, #1481 and #1483);</li>
+<li><code>c8d56d89d3</code> (21:17Z; adds #1486, #1487, #1376, #1493, #1488, #1495, #1494, #1499, #1496, #1497 and #1500). Main's postmerge was red from <code>bd494990aa</code> (#1376) to <code>fbbe725af5</code> (#1497) on the missing <code>rg</code>, so none of those was installable.</li>
+</ul>
+Kept next to the real binary: <code>corbanu.prev-e344afbab7</code>, <code>corbanu.prev-82d22facc4</code> and <code>corbanu.prev-e3a39cc67f</code>. Moved to <code>old-binaries/</code>: <code>prev-21db61709f</code> (17:58Z) and <code>prev-32901550cb</code> (21:17Z).
+<b>Not in it</b> (merged after #1500): #1501, #1374, #1502, #1503 and #1498. Next install: the newest main whose postmerge run is green in every real job (#1501's and #1374's were green; #1502, #1503 and #1498 were running at 21:30Z).</li>
+<li>Install at 10-28 15:41Z (superseded): main <code>82d22facc4</code>, the merge of #1484 (argument-comment lint fix), postmerge green at 15:36Z; installed 15:41Z per <code>todo.md</code>
+(<code>INSTALL.json</code> <code>built_at</code> 15:43Z), Rust 1.99.1, developer-accounting marker on, signed with the same Developer ID, sha256 begins <code>a9676c4f2b0adc70</code>, smoke OK. Installs since #1439:
+<ul>
+<li><code>32901550cb</code> (04:40Z; the merge of #1437; adds the 03:15Z “Not in it” list plus #998 and #1439);</li>
+<li><code>e3a39cc67f</code> (06:57Z; the merge of #1426; adds #1440, #1442, #1444/#994, #1445/#995 and #1426);</li>
+<li><code>82d22facc4</code> (15:41Z; adds #1443, #1447, #1438, #1434, #1361, #1362, #1368, #1446, #1451, #1453, #1456–#1458, #1372, #1313, #1270, #1166, #1360, #1430, #1463, #1460, #1464, #1465, #1363, #1371,
+#1459, #1466, #1366, #1477 and #1484). Main's postmerge failed at <code>2b135d4a66</code> (#1477) on the #1479 lint breakage (todo.md 13:50Z); the next green postmerge noted was <code>82d22facc4</code>.</li>
+</ul>
+Kept next to the real binary: <code>corbanu.prev-e3a39cc67f</code>, <code>corbanu.prev-32901550cb</code> and <code>corbanu.prev-21db61709f</code>. Moved to <code>old-binaries/</code>: <code>prev-d88d018ab2</code> (04:40Z),
+<code>prev-55ffd0277c</code> (06:57Z) and <code>prev-c1ad482df9</code> (15:41Z). <b>Not in it</b> (merged after #1484): #1469, #1474, #1471, #1364, #1475 and #1481. Next install: the newest main whose postmerge run is
+green in every real job (the run for <code>2619817aef</code> was in progress at 16:15Z).</li>
+<li>Install at 10-28 01:08Z (superseded): main <code>21db61709f</code>, the merge of #1406 (D191), postmerge green at 01:03Z; installed 01:08Z (<code>INSTALL.json</code>
+<code>built_at</code> 01:10Z), Rust 1.99.1, signed with the same Developer ID, sha256 begins <code>c8fc3f61d00a6b7a</code>, smoke OK. Installs since the resume:
+<ul>
+<li><code>55ffd0277c</code> (10-27 17:50Z; the merge of #1318, the pause's last merge);</li>
+<li><code>c1ad482df9</code> (10-27 19:21Z; the merge of #1390; adds the contributor merges of 10-26/27: #1337, #1147, #1342, #1395, #1316, #1389, #1387, #1381, #1378, #1359, #1073, #1063, #1152, #1388, #1386, #1379 and #1390);</li>
+<li><code>21db61709f</code> (10-28 01:08Z; adds #1407/#1408, #1411, #1404, #1397, #1365, #1398, #1161, #1356, #1377, #1419, #1382, #1113, #1399, #1354, #1415, #99, #100, #96 and #1406).</li>
+</ul>
+Kept next to the real binary: <code>corbanu.prev-c1ad482df9</code>, <code>corbanu.prev-55ffd0277c</code> and <code>corbanu.prev-d88d018ab2</code>. Moved to <code>old-binaries/</code>: <code>prev-11443dc2b5</code>
+(17:50Z), <code>prev-0e2c02529d</code> (19:21Z) and <code>prev-b0fa02105f</code> (01:08Z). <b>Not in it</b> (merged after #1406): #1391, #1423, #1417, #1424, #1414, #1418, #1425, #1375, #979, #141, #252, #1029,
+#98, #1429, #1421, #1427 and #1433. Next install: the newest main whose postmerge run is green in every real job.</li>
+<li>Install at the 10-22 pause: main <code>d88d018ab2</code> (installed 2026-10-22 12:59Z per <code>todo.md</code>, just after this update's snapshot; <code>INSTALL.json</code>'s
 <code>built_at</code> reads 13:05Z; the merge of #1319, postmerge fully green; sha256 begins <code>69a609b614de1baa</code>), built with Rust 1.99.1. It is a dev build with
 developer-accounting, signed with Travis's Developer ID (“Developer ID Application: Travis Good”; <code>codesign --force -s DB43D928… -i com.corbanu.corbanu -o runtime</code>), swapped atomically, and the smoke
 <code>exec</code> passed through the launcher. <code>.codex-work/integration-build-20260922a/INSTALL.json</code> is authoritative (commit, time, toolchain, checksum, previous binary). Build target dir:
@@ -1239,6 +1390,102 @@ revertable with no effect on what runs</td><td>agg-1312</td></tr>
 #1267, #1268, #1269, #1283, #1286, #1287, #1291, #1296, #1311, #1312 and #1324. Filed: #1283, #1286–#1291, #1296, #1298, #1309, #1311, #1312, #1323, #1324, #1326, #1331, #1334 and #1335 (both
 with credit to the contributor who found them), #1340 (a #1327 follow-up) and #1343 (websocket identity cases #1330 doesn't cover).
 Merged just after this snapshot: <b>#1341</b> (12:51Z, tui-qa2): the record of post-merge true-TUI checks of #1327, #1322, #1320 and #1319 (no model step declined).</p>
+<h3>8.0f What landed since the resume (2026-10-26 19:05Z – 2026-10-28 03:15Z), by area</h3>
+<p>Every merge used the literal head SHA with all checks green after an independent Opus 5.5 High APPROVE; a later main-merge commit whose own-files diff was unchanged needed no re-review (CARGO-DENY rule). Merge times are GitHub's (UTC).</p>
+<ul>
+<li><b>CI and dependencies:</b>
+<ul>
+<li>#1407 (zstd 0.14.3, tokio 1.53.3: RUSTSEC-2026-0386/0391/0398/0403/0410, none reached by our code) and #1408 (D198: exception for RUSTSEC-2026-0387, crypto-bigint 0.5.5 via p256 ← aws-config ←
+codex-aws-auth; reached only with an <code>aws login</code> session; remove when aws-config moves to p256 0.14+, re-review by 2027-01-31), both 10-27 21:08Z (deny-1401). #1402 closed as a duplicate of #1401.</li>
+<li>#1382 (D199, build-test limit 10→20 min, citadelculture), #1377 (D200), #1113 (D202, setup-node 7.1.0), #99 then #100, #96, #98 (D210 workflow bumps), #1417 (D206, darkmatter-sudo: upload macOS crash
+reports only when the job fails; #1367 stays open).</li>
+<li>#1423 (#1416: the Windows CI self-test warms the boot-time PowerShell query with a 60 s budget; the probe and archived results are unchanged; D215).</li>
+<li>#1424 and #1425 (ci-nightly, #636: Bazel Noble zlib repin; two Windows timing bounds widened). The nightly repair continues (section 10).</li>
+<li>#1414 (maint-1400: OpenTelemetry 0.33.1 and tracing-opentelemetry 0.34.0; reqwest 0.12 adapter keeps TLS; export retries off on all 7 exporters, D216; closes #1400 and credits #1117).</li>
+<li>#1429 (flake-1413: test-only <code>ScopedTestSubscriber</code>; exec-server trace-propagation test 12/20 → 20/20 on glitch; closes #1413; CI was never affected).</li>
+</ul></li>
+<li><b>Security classifier</b> (post-taint):
+<ul>
+<li>#1356 (#1064: code-loading variables set to risky values ask, with the Korn <code>ENV</code> fix <code>67422ee1d8</code>) and #1354 (#1261 follow-up; <code>pushd -n</code> and other stack changes still ask), sec-recover-2.</li>
+<li>#1404 (D194, option B after round 5 found a zsh hole: after <code>cd x &amp;&amp;</code> or <code>cd x || exit</code> the folder change is certain only if every command on the line is on a fixed list) and
+#1415 (D195: git commands that write the working tree ask in an unknown folder; read-only git stays quiet; <code>find … -execdir sh -c 'git pull'</code> now asks), sec-d194-2. Follow-ups #1409 (closed by #1433) and #1410 (open).</li>
+<li>#1406 (D191: a variable the action's own script sets from a plain <code>mktemp</code> counts as a known temp path; writing it and a remove-only trap no longer ask), sec-d191-2, 6 rounds plus 2 granted merge-only rounds.</li>
+<li>#1418 (#1405: <code>mapfile -C</code> callbacks and shell start-up files are judged) and #1421 (#1403 item 1: a builtin run by a path asks; <code>./cd</code> is not followed), sec-fu; neither makes a line quieter than main. Leftovers in #1422; the <code>sudo -C</code> item is D217.</li>
+<li>#1433 (#1409: zsh <code>&gt;&gt;|</code> and <code>&gt;&gt;&amp;</code> pinned in D194's scan), sec-fu2, 03:13Z.</li>
+<li>Contributor PRs touching the classifier: #1147, #1152, #1161 (D145/D158) and #1399 (D203, under a security sign-off).</li>
+</ul></li>
+<li><b>Preflight:</b> #1427 (#802: Aggressive's recheck ignores content changes of Corbanu's own history folders and <code>*.sqlite</code> files; symlinks and all other reviewed files still block), rel-fix. New issue #1428 (<code>-wal</code>/<code>-shm</code> symlinks), being fixed by sec-1428.</li>
+<li><b>Accounting:</b> #1411 (S10 re-run R1: ACC-06, ACC-15, ACC-18 passed; ACC-11, ACC-14 still blocked; #898 confirmed fixed) and #1419 (D207–D209 sign-off, owner decisions in a separate section of <code>dispositions.md</code> and an <code>owner_decisions</code> entry in <code>results.json</code>). Filed #1412 (<code>resume --last</code>, low).</li>
+<li><b>Outside contributors (D152 unless noted):</b> bradsbots #1337 (key paste into the add-account name field; unblocks #1080), #1342, #1395, #1397, #1375; citadelculture #1147, #1152, #1316 (fixes #1290), #1389, #1387, #1381,
+#1378, #1359, #1073, #1063, #1388, #1386, #1379, #1390, #1391, #1161, #1382, #1377, #979, #141, #1029; local-maxi #1398; grapemarketer #1399, #252; darkmatter-sudo #1417. #1375, #979, #141, #252 and #1029 were merged
+by contrib-10 (still running; its report is pending).</li>
+<li><b>Docs:</b> #1365 (the 10-26 resume handoff plus the Windows closeout script fixes; coordinator merge at <code>3a4efdd1c7</code>, own-files diff empty against the approved <code>da467e3db8</code>).</li>
+<li><b>Closed, not merged:</b> #1277 (D169), #1117 (→ #1400/#1414), #1396 (D201, warmly; its author then opened #1417), #124, #112, #113, #105, #104 (D211); issues #1290, #1402, #1413, #1416 and #1409 closed, and #802, #1400 and #1405 closed by their fixes.</li>
+</ul>
+
+<h3>8.0g What landed since #1439 (2026-10-28 03:15Z – 16:15Z), by area</h3>
+<p>Same merge discipline as 8.0f: literal head SHA, all checks green, independent Opus 5.5 High APPROVE on the merged head (or a coordinator-verified own-files-unchanged main merge or comment-only change). Times are GitHub's (UTC).
+Worker reports are in <code>$HOME/.corbanu-workers/&lt;worker&gt;.result.md</code>.</p>
+<ul>
+<li><b>Security classifier</b> (post-taint; all add prompts unless noted):
+<ul>
+<li>#1437 (#1410 part, sec-fu2): after a <code>cd</code>/<code>pushd</code> to a folder the classifier can't see, relative writes and git working-tree writes ask; read-only git in a known folder stays quiet. #1410 closed by dec-exec2 (D220/D221).</li>
+<li>#1443 (#1422, sec-fu3, 6 rounds, 5 and 6 granted): <code>mapfile -C</code> spellings, <code>compgen -C</code>, aliases the line defines and uses; <code>CD sub</code> and <code>env</code>/<code>sudo</code>/<code>nice</code>/<code>nohup</code>/<code>timeout cd</code> are not followed.
+It also made two #1418 prompts quiet again (each confirmed quiet before #1418). Leftovers in #1449.</li>
+<li>#1446 (#1436, sec-fu3): nested <code>cd "$X/.."</code>, <code>cd</code> after <code>CDPATH</code>/<code>OLDPWD</code>/<code>cdable_vars</code>, <code>cd -</code>, later loop passes, scripts in unseen folders. It added two low-severity loop prompts;
+sec-fu4's #1455 tried to remove them, every round found a bypass, and it was closed per the round-5 grant (main keeps both prompts; D236; #1470).</li>
+<li>#1459 (#1449/#1064/#1159, sec-fu4): 71 lines now ask: <code>su</code>/<code>runuser -c</code>, <code>flock -c</code>, <code>script -c</code>, <code>rsync -e</code>, <code>rg --pre</code>, <code>tar</code> program options, <code>sort --compress-program</code>, <code>gcc -MF</code>, <code>rustc --out-dir</code>, more alias spellings.</li>
+<li>#1463 (#691, win-691c): 58 more classifier tests run on Windows; 8 keep a specific skip naming #1461/#1462. #1469 (#1461, sec-1461): on Windows a <code>cd</code> to a <code>$</code> variable counts as an unknown folder (UNC-share-safe; never quieter); one skip removed.</li>
+<li>#1481 (D217, sec-d217): <code>sudo -C N</code> closes file descriptors and names no folder, for sudo only, under narrow conditions; the only lines quieter than main have a numeric sudo <code>-C</code>. 4 rounds (round 4 granted, test-only) plus a coordinator-verified comment-only change. #1403 closed; leftovers #1482.</li>
+</ul></li>
+<li><b>Sandbox and preflight:</b> #1440 (#1428, sec-1428: <code>-wal</code>/<code>-shm</code>/<code>-journal</code> side files that are symlinks, pipes, devices or hard links block the save), #1451 (#1441, sec-1441: a dangling symlink's target is denied at launch on macOS/Linux; Windows hard links counted),
+#1460 (#807: contained panes follow the strictest of launch, saved and live levels; the keychain block keeps commands sandboxed), #1464 (#675: other linked worktrees' own <code>.git</code> files are read-only), both sec-stricter (leftovers #1468),
+and #1471 (D225, #594, sec-linux: on Linux, a Corbanu home reached through a link inside a writable folder warns under Moderate and refuses Aggressive; follow-up #1472).</li>
+<li><b>Providers and accounting:</b> #1442 (#863 items 3–4, fu-863: <code>api.openai.com.</code> and ten regional OpenAI hosts get the native multi-agent tools; regional hosts unit-tested only), #1474 (D223, acct-d223: realtime sessions record reported tokens, cost unknown; #889 closed),
+#1477 (release note: GLM 5.2 “medium” runs as Standard on Z.AI and Ambient after #1270; the Plan route is #1476).</li>
+<li><b>Task Node:</b> #1453 (#1280, tn-1280): a receipt with no event id, transaction hash or CID now fails (<code>task_evidence_receipt_unconfirmed</code>); successful receipts carry <code>submissionRef</code>. Upstream: postfiatorg/tasknode#347 (dec-exec2).</li>
+<li><b>CI and tests:</b>
+<ul>
+<li>#1484 (#1479, ci-1479): the dylint 6.1.1 driver build clones rust-clippy's <code>master</code>, now renamed <code>main</code>; a git fetch refspec (<code>+refs/heads/*ain:refs/remotes/*aster</code>) set through <code>GIT_CONFIG_*</code> in
+<code>wrapper_common.py</code> and <code>.cargo/config.toml</code> maps it; canary #1485 proved the lint is still strict. Upstream: trailofbits/dylint#2146 (D238).</li>
+<li>#1430 (D218, #1420): PRs that don't touch packaging skip artifact staging. #1371 (D231, citadelculture): changed-path git-diff failures fail loudly.</li>
+<li>#1426 (darkmatter-sudo: <code>request_compression</code> on 8 MiB test stacks) and #1465 (D224: <code>docs/install.md</code> notes plain <code>cargo test -p codex-core</code> needs <code>RUST_MIN_STACK=8388608</code>; #1450 closed).</li>
+<li>Flakes: #1456, #1457, #1458 (flake-1448: abort output printed; <code>tool_parallelism</code> uses <code>exec_command</code> and checks overlap; <code>multi_agent_resume</code> extra mock), #1466 (D234a: <code>abort_tasks</code> accepts the <code>"aborted"</code> fallback, message format pinned; D234b is #1467),
+#1447 (ci-maint, #796: exec-server resume retries while the old connection is attached). #1201 reopened (two Windows recurrences on 10-22, 102 clean jobs since).</li>
+</ul></li>
+<li><b>Outside contributors (D152, or finished with credit under D146/D151):</b> citadelculture #998 (contrib-10), #994/#995 (as #1444/#1445, sec-1428), #1361, #1362, #1368 (contrib-11), #1372, #1313, #1270, #1166, #1360, #1363, #1366 (contrib-13), #1371 (D231, dec-exec2), #1364 (contrib-14);
+darkmatter-sudo #1426 (flake-1426), #1434 (D206, contrib-12); bradsbots #1438 (closes #1435; follow-up #1452), #1475 (closes #1473, contrib-15). #1349 closed (all four items fixed by citadelculture); search-parser follow-ups in #1480.</li>
+<li><b>Docs:</b> #1439 (the 03:15Z handoff).</li>
+<li><b>Closed, not merged:</b> #1455 (round-5 grant), #1454 (win-691c's Windows probe), #1485 (lint canary). Issues closed: triage-1's nine done (#1052, #1001, #874, #837, #941, #609, #603, #864, #818), #607 (coordinator, into #716/#1056),
+#505 (D227), #993 (D229), #863 (D222), #1410, #1011 (already done by citadelculture, mcp-1011), #928, #1355, #1048, #1403, #1479, plus those closed by the PRs above.</li>
+</ul>
+<h3>8.0h What landed since #1487 (2026-10-28 16:15Z – 21:30Z), by area</h3>
+<p>Same merge discipline as 8.0g: literal head SHA, all checks green, independent Opus 5.5 High APPROVE on the merged head (or a coordinator-verified own-files-unchanged main merge). Times are GitHub's (UTC).
+Worker reports are in <code>$HOME/.corbanu-workers/&lt;worker&gt;.result.md</code>.</p>
+<ul>
+<li><b>Security and sandbox</b> (stricter-only or display-only unless noted):
+<ul>
+<li>#1376 (D226, #732, citadelculture, finished with credit by sec-linux; 17:30Z): the Linux database-folder scan lists only its top level, without ripgrep (ripgrep 14.1 still opened subfolders, so an unreadable <code>systemd-private-*</code> folder blocked every protected command); <code>db-backups</code> keeps the full-depth scan. #732 closed.</li>
+<li>#1494 (#1468, sec-left): macOS <code>/status</code> no longer says approved commands can leave the sandbox when the keychain rule keeps them in; contained panes read the level once; the Claude-pane and <code>/permissions</code> gates also count the enforced level; submodule worktrees get the <code>.git</code> protection. #1468 open (items 5 and 6: D248, D250).</li>
+<li>#1496 (#1480, sec-left, 3 rounds): the search-pattern parser starts and ends every search where main does, so it never hides a note main shows; a 5,000-assignment line went from 4.87 s to 0.02 s. #1480 closed; citadelculture credited.</li>
+<li>#1497 (#943, sec-left): an empty-for-empty <code>.git</code> re-swap after a full <code>.git</code> was swapped is now reported and keeps blocking approvals. #1502 (sec-943b, 3 rounds): closes the cross-session race #1497's review found; a shared, never-cleared list (capped at 1024; past that every <code>.git</code> counts as swapped, over-reporting).
+#1503 (sec-943b): #943 items 3, 18 and 22a (notes and tests). #943 open (D249, D250, D255).</li>
+<li>#1499 (#1056, sec-722): the Linux placeholder sweep stops when the mount table can't be read; failed items keep the identity this sweep checked. #1056 and #722 stay open (#722 has no stricter-only fix: D245–D247).</li>
+<li>#1501 (#1472, sec-1472): test-only; the rename-a-home-ancestor attack is already blocked by #592's pins on Linux Moderate/Aggressive (proved by disabling the pins in a scratch edit). #1472 closed.</li>
+<li>#1374 (#1343, citadelculture, finished with credit by ws-1343; 20:26Z): websocket connection identity covers header-based sign-ins and configured provider headers; brokered sign-ins never match; #1398's pinned test flipped to its post-fix values. #1343 closed; review nits in #1504 (fu-1504).</li>
+</ul></li>
+<li><b>Providers, models and accounting:</b> #1483 (D228, acct-d223; 16:49Z): <code>/cost</code> says “Totals for this day may be incomplete”, ledger format 7 (older builds then turn collection off for that home); #314 closed.
+#1486 (#128, cat-128): explicit dispositions for the six retained IDs (owl-alpha retired, hidden row kept; gpt-5.5 no cap on purpose); #128 closed, #368 open. #1488 (#1476, fix-1476): an explicit Standard choice for Plan GLM 5.2 is kept;
+#1489 filed (on the Plan route Standard and Deep both send no reasoning setting).</li>
+<li><b>Runtime:</b> #1495 (#1467, D234b, rel-1467): a hard-aborted turn now saves the tool's abort output; loaded glitch runs 15/15 vs 9/15 before; #1467 closed (D244 is the rare finished-then-killed case). #1498 (#1491, crash-1491): notify 8.2.0 → 8.2.1 fixes a use-after-free when the kill-switch's file watcher stops
+(stress test crashed 3/5 before, 0/5 after; kill-switch behaviour unchanged); #1491 closed; darkmatter-sudo credited for #1417's crash upload.</li>
+<li><b>CI:</b> #1500 (ci-rg; 19:59Z): pinned ripgrep 15.2.0 via DotSlash in the rust-ci-full Linux test shards and the nightly Bazel Linux job (tests unchanged, not skipped); fixed main's postmerge (red since #1376). ci-maint closed #636 (green scheduled nightly), #1298 (done by #1305) and #796 (#1447);
+#982's fix is citadelculture's draft #990 (contrib-990).</li>
+<li><b>Docs:</b> #1487 (the 16:15Z handoff), #1493 (docs-28: <code>docs/provider-accounts.md</code> realtime tokens, the D224 <code>just test</code> note, five OpenRouter rows, #141's contract; citadelculture credited).</li>
+<li><b>No PR, with the owner:</b> #1412 (fix-1476: <code>resume --last</code> matches upstream; D243), #722 (sec-722; D245–D247), #932 phase 2 (sec-932p2: write-up only, posted on #932; D251–D254).</li>
+<li><b>Issues closed:</b> #314, #128, #732, #1476, #1467, #1480, #1472, #636, #1343, #158 (win-733) and #1491. Issues filed: #1489, #1491, #1504.</li>
+</ul>
+
 <h3>8.1 Security levels (P0/P1) — “Aggressive ships” milestone (signed off 2026-10-16)</h3>
 <div class="note"><b>Signed off by Travis on 2026-10-16</b> (“all as recommended”, D10; with D8 option (a) and D9), on the third targeted re-run's combined status:
 <b>58 passed, 0 failed, 2 blocked (AGG-R14 result 2, AGG-R06), 4 accepted (AGG-18, R07, R10, 20) of 64</b> (record #868, resting on #819, #788, #741, #628 and #447).
@@ -2133,8 +2380,282 @@ finish it ourselves with credit (D146). Offered by contrib-4; the author hasn't 
 key is Travis's own <code>/vault</code> action (D178b, section 11).</td><td><code>todo.md</code></td></tr>
 <tr><td>10-22</td><td>(D180) Skip a re-record of #1273's reel clip; cover it in the next reel.</td><td>#1297</td></tr>
 <tr><td>10-22</td><td>(D181) Approve one ChatGPT test-account sign-in for the D136/NA-05/NA-06 re-runs (approved and done 08:24Z).</td><td>#1080</td></tr>
+<tr><td colspan="3"><i>2026-10-26 19:05Z “Resume everything”; 10-27 21:04Z “All recommendations accepted. I'll try and boot the machine in a bit.” (D196, D198–D205; todo.md “21:04Z TRAVIS”):</i></td></tr>
+<tr><td>10-27</td><td>(D196) PF-84 Windows gate: Travis boots the Windows machine; launch win-gate-pf84 when SSH answers (launched 21:05Z; the PC stayed offline, so the gate did not run; see D212).</td><td>#1080</td></tr>
+<tr><td>10-27</td><td>(D197) Z.AI balance for the GLM runs: resolved by Travis's recharge; <code>zai_key_3</code> answered 200 again at 17:42Z (closes D190's open recharge). acct-rerun2 then ran (#1411).</td><td><code>todo.md</code> 17:42Z</td></tr>
+<tr><td>10-27</td><td>(D198) Approve the RUSTSEC-2026-0387 exception (#1408; option 1, dated and explained); merged 21:08Z with #1407.</td><td>#1401, #1408</td></tr>
+<tr><td>10-27</td><td>(D199) Merge #1382 (build-test limit 10→20 min) and file the skip-the-download follow-up (#1382 merged, #1391 then merged, #1420 filed).</td><td>#1382, #1420</td></tr>
+<tr><td>10-27</td><td>(D200) Merge #1377 (merged 22:59Z).</td><td>#1377</td></tr>
+<tr><td>10-27</td><td>(D201) Decline #1396 warmly (briefly held while flake-1367 checked #1367; closed by contrib-9, inviting a crash-report PR and a narrow <code>request_compression</code> stack fix).</td><td>#1396, #1367</td></tr>
+<tr><td>10-27</td><td>(D202) Merge #1113 (actions/setup-node 7.1.0; merged 23:20Z).</td><td>#1113</td></tr>
+<tr><td>10-27</td><td>(D203) Security sign-off and merge #1399 (merged 23:26Z after a short re-review of its main merge).</td><td>#1399</td></tr>
+<tr><td>10-27</td><td>(D204) Accept #1373's <code>exec --json</code> format change (<code>usage</code> may be <code>null</code>) once the SDK, script, docs (#1336) and release-notes changes land (note posted; #1373 still open).</td><td>#1373, #290</td></tr>
+<tr><td>10-27</td><td>(D205) Accept D194's residual gap (an exported <code>CDPATH</code>, a <code>cd</code> function from start-up files, or a symlink can still move a “certain” <code>cd</code>); track it with #932.</td><td>#1404, #932</td></tr>
+<tr><td colspan="3"><i>2026-10-27 22:49Z, “All recommendations accepted” (D206–D211; todo.md “22:49Z TRAVIS”):</i></td></tr>
+<tr><td>10-27</td><td>(D206) macOS crash reports in CI: wait about a week for darkmatter-sudo's offered PR (else a worker opens one around 11-03). It arrived as #1417 and merged 10-28 01:01Z; #1367 stays open.</td><td>#1367, #1417</td></tr>
+<tr><td>10-27</td><td>(D207) Record ACC-11 and ACC-14 as passed by owner decision, as D113 did for ACC-04; their raw rows stay blocked (#1419).</td><td>#1411, #1419</td></tr>
+<tr><td>10-27</td><td>(D208) Accept S10 at 35 passed, 0 failed, 2 blocked, with ACC-22 (advisory) and ACC-35 (optional; needs D3) as named limits (#1419).</td><td>#1419</td></tr>
+<tr><td>10-27</td><td>(D209) Update the S10 sprint page and the sprint index to the final counts (#1419).</td><td>#1419</td></tr>
+<tr><td>10-27</td><td>(D210) Merge the workflow bumps, #99 first (main pinned a pnpm commit no longer in pnpm's repository), then #96, #98, #100 (all merged).</td><td>#96, #98, #99, #100</td></tr>
+<tr><td>10-27</td><td>(D211) Close #104 (Cargo.lock only, no Bazel lockfile) and fold it into the next dependency update (closed).</td><td>#104</td></tr>
+<tr><td colspan="3"><i>2026-10-28 01:54Z, “All recommendations approved. Windows will come online in a couple hours” (D212–D216; todo.md “01:54Z TRAVIS”):</i></td></tr>
+<tr><td>10-28</td><td>(D212) Boot the Windows PC, sign it into Tailscale and keep it awake for 2–3 hours; win-gate-pf84 relaunched to poll for up to 5 hours (still offline at 03:10Z).</td><td>#1080</td></tr>
+<tr><td>10-28</td><td>(D213) The Windows gate covers the API-key route only; ChatGPT sign-in already passed on macOS.</td><td>#1080</td></tr>
+<tr><td>10-28</td><td>(D214) Approve #1420's approach (skip artifact staging on PRs that don't touch packaging); the finished PR comes back to Travis (now #1430, D218).</td><td>#1420, #1430</td></tr>
+<tr><td>10-28</td><td>(D215) Keep the probe's 8 s Windows boot-query limit for now; raise it to about 30 s at the next planned three-platform re-measurement (b). Recorded on #1416.</td><td>#1416, #1423</td></tr>
+<tr><td>10-28</td><td>(D216) Keep OTLP export retries off (one line per exporter to turn them on later). Recorded on #1414.</td><td>#1414</td></tr>
+<tr><td colspan="3"><i>2026-10-28 10:27Z, “All recommendations accepted, except it is unclear what you mean around item 16” (D217, D218, D220–D234; todo.md “10:27Z TRAVIS”). The log records D219 as explained and still pending:</i></td></tr>
+<tr><td>10-28</td><td>(D217) (a) A PR titled “… needs security sign-off” that stops treating <code>sudo -C N</code> as a folder flag, for sudo only (<code>-D</code>/<code>--chdir</code> keep asking). Done: #1481 merged 16:09Z; #1403 closed; leftovers #1482.</td><td>#1403, #1481</td></tr>
+<tr><td>10-28</td><td>(D218) Merge #1430 (skip artifact staging on PRs that don't touch packaging). Merged 10:27Z at its reviewed head <code>ab8a33e128</code>.</td><td>#1420, #1430</td></tr>
+<tr><td>10-28</td><td>(D220) A: keep word-anywhere git write detection in unknown or home folders (#1410 item 1); <code>git log --grep pull</code> still asks there after untrusted content. Recorded on #1410 (closed).</td><td>#1410</td></tr>
+<tr><td>10-28</td><td>(D221) A: <code>cd "$(git rev-parse --show-toplevel)" &amp;&amp; git pull</code> stays quiet, as on main. Recorded on #1410.</td><td>#1410</td></tr>
+<tr><td>10-28</td><td>(D222) (b) Gateways and proxies in front of OpenAI: do nothing until someone reports one (then a per-provider opt-in). Recorded; #863 closed.</td><td>#863</td></tr>
+<tr><td>10-28</td><td>(D223) (b) Realtime sessions record the token counts OpenAI reports; cost stays unknown. Done: #1474 merged 15:45Z; #889 closed.</td><td>#889, #1474</td></tr>
+<tr><td>10-28</td><td>(D224) A: keep 8 MiB as the standard debug test stack and add a docs note. Done: #1465 merged; #1450 closed. (Reviewer's optional tweak, point to <code>just test</code>, is for the next docs pass.)</td><td>#1450, #1465</td></tr>
+<tr><td>10-28</td><td>(D225) (a) #594: on Linux, warn under Moderate and refuse Aggressive when the Corbanu home is a link inside a folder the profile can write. Done: #1471 merged 15:45Z; #594 closed; follow-up #1472.</td><td>#594, #1471</td></tr>
+<tr><td>10-28</td><td>(D226) (a) #732: limit the Linux database-pattern scan to the top level by finishing citadelculture's #1376 with credit, with security review. In progress (sec-linux): 2 security APPROVE rounds, was blocked only by #1479; not merged at 16:15Z.</td><td>#732, #1376</td></tr>
+<tr><td>10-28</td><td>(D227) (a) Aggressive's restart-only protections are the permanent design; #505 closed.</td><td>#505</td></tr>
+<tr><td>10-28</td><td>(D228) (a) <code>/cost</code> marks days whose totals may be incomplete (low priority). In progress (acct-d223): #1483 approved in round 4 (granted 13:50Z); the coordinator allowed a merge without re-review (own lines unchanged); not merged at 16:15Z.</td><td>#314, #1483</td></tr>
+<tr><td>10-28</td><td>(D229) (a) Don't restore Zstandard/LZMA zip support (D46); #993 closed.</td><td>#993</td></tr>
+<tr><td>10-28</td><td>(D230) (a) #1064's needless prompt on complex array subscripts waits for the shell-grammar work in #932. Recorded on #1064 (open for its other items) and #932.</td><td>#1064, #932</td></tr>
+<tr><td>10-28</td><td>(D231) Approve citadelculture's #1371 (CI workflow: changed-path git-diff failures fail loudly). Merged 11:15Z.</td><td>#1371</td></tr>
+<tr><td>10-28</td><td>(D232) File the Task Node server bug upstream and tell the operators. Filed postfiatorg/tasknode#347 (no secrets, task id or receipt).</td><td>#1280, tasknode#347</td></tr>
+<tr><td>10-28</td><td>(D233) Forward 0xzoz's task-repair request to the Task Node operators. Carried in tasknode#347; 0xzoz asked to raise it in the community channel too (Task Node's SUPPORT.md routes operator requests elsewhere; see D237).</td><td>#1280, tasknode#347</td></tr>
+<tr><td>10-28</td><td>(D234) (a) <code>abort_tasks</code> test accepts the <code>"aborted"</code> fallback (#1466, merged) and (b) a low-priority product follow-up (#1467 filed).</td><td>#1448, #1466, #1467</td></tr>
+<tr><td colspan="3"><i>Pending at this update (section 11):</i></td></tr>
+<tr><td>10-28</td><td>(D219) <b>Pending.</b> goodalexander's #94 (sync with upstream Codex 0.147.0, from August; 5,868 commits behind; upstream is now 0.165.0). (a) Close it with credit and do a fresh sync to the latest upstream, (b) close it and skip syncs,
+(c) keep it open. Recommended: close #94 with credit plus a scoping report on the 0.147→0.165 sync. Not answered at 10:27Z; <code>todo.md</code> records it as explained and still pending.</td><td>#94</td></tr>
+<tr><td>10-28</td><td>(D235) <b>Pending.</b> #1462: seven classifier tests where Windows asks more than macOS/Linux (temp files from <code>mktemp</code>, a certain <code>cd</code>, scripts read before they run). (a) Keep Windows stricter and change the tests to
+check what Windows does, or (b) make Windows match, each area with its own security review. Recommended: (a); (b) only if Windows users complain.</td><td>#1462</td></tr>
+<tr><td>10-28</td><td>(D236) <b>Pending.</b> The two loop prompts #1446 added (<code>for i in 1 2; do cd sub; ./build.sh; cd ..; done</code>, and a write after such a loop in a deep workspace). A: keep them, or B: build a stricter pruning version
+(only when every loop command is on a short approved list and the line defines no functions or traps), with a new review budget. Recommended: A (every attempt to quiet them was bypassed).</td><td>#1470, #1455</td></tr>
+<tr><td>10-28</td><td>(D237) <b>Pending.</b> Who takes 0xzoz's repair request to the Post Fiat operators: (a) leave it in tasknode#347, (b) Travis or someone with a Post Fiat operations contact forwards it, (c) nothing more. Recommended: (b) if a contact exists, else (a).</td><td>#1280, tasknode#347</td></tr>
+<tr><td>10-28</td><td>(D238) <b>Pending.</b> When dylint releases its fix (trailofbits/dylint#2146), bump <code>CARGO_DYLINT_VERSION</code>/<code>DYLINT_LINK_VERSION</code> in the workflows and the <code>dylint_*</code> pins, and remove #1484's workaround.
+Workflow edits need owner approval. Recommended: yes, as a small follow-up once the release is out; the alternative is keeping the harmless workaround.</td><td>#1479, #1484</td></tr>
+<tr><td colspan="3"><i>Raised after #1487 (16:15Z – 21:30Z); all pending, none answered yet:</i></td></tr>
+<tr><td>10-28</td><td>(D239) <b>Pending.</b> Should WebRTC realtime calls also record tokens (no price)? Their control channel sees the token reports only while connected. (a) Leave as is, or (b) record them too, with no price.
+Recommended: (a) until someone uses WebRTC realtime with developer accounting.</td><td>#1474, #889</td></tr>
+<tr><td>10-28</td><td>(D240) <b>Pending.</b> Failures before the ledger is reachable (state database unreachable, or a newer ledger format) leave no gap marker, only a log line or warning. Recommended: accept (nothing can be written in that case).</td><td>#1483, #314</td></tr>
+<tr><td>10-28</td><td>(D241) <b>Pending.</b> Retired <code>openrouter/owl-alpha</code>: (a) keep the hidden, documented row (a saved config finds its own row; requests fail with OpenRouter's error), (b) stop before sending with a local message pointing to <code>/model</code>, or (c) remove the row.
+Recommended: (a); revisit (b) only if users hit it.</td><td>#128, #1486</td></tr>
+<tr><td>10-28</td><td>(D242) <b>Pending.</b> GPT-5.x rows have no output cap while GPT-6 rows say 128,000 (no effect today: requests to OpenAI never send the cap). (a) Leave it, or (b) make all OpenAI rows match, which also needs checked Bedrock limits (gpt-5.5 is the base of the Bedrock rows).
+Recommended: (a).</td><td>#128, #1486</td></tr>
+<tr><td>10-28</td><td>(D243) <b>Pending.</b> What <code>resume --last</code> treats as last used (today: the conversation with the newest turn, as upstream intends). (A) Keep and document; (B) open the conversation that was on screen at quit (only <code>resume --last</code>
+changes; <code>/resume</code> order and the upstream test stay); (C) count simply opening a conversation as use (reorders <code>/resume</code>, rewrites the upstream test). Recommended: B; avoid C.</td><td>#1412</td></tr>
+<tr><td>10-28</td><td>(D244) <b>Pending.</b> In a rare race a tool finishes (say, a patch is applied) and the turn is force-killed before its real result is saved; the model is told “aborted by user” (no worse than the bare “aborted” before #1495).
+(a) Leave it, or (b) a low-priority follow-up that saves the finished result instead. Recommended: (b), mainly for tools that change files.</td><td>#1467, #1495</td></tr>
+<tr><td>10-28</td><td>(D245) <b>Pending.</b> Hooks in remote sessions run on this machine with the remote folder, so they usually fail to start, and a failed “PreToolUse” hook doesn't block. (a) Run hooks in a local folder (exactly as locally, including
+“PermissionRequest” hooks that allow without asking); (b) stopgap: on remote work, a matching PreToolUse hook that can't start blocks the action (stricter, but changes Permissive behaviour); (c) document hooks as local-only, as upstream does.
+Recommended: (b) now, (a) once remote environments are supported.</td><td>#722</td></tr>
+<tr><td>10-28</td><td>(D246) <b>Pending.</b> Network on remote environments: today the remote side refuses unlisted sites without asking, and the refusal doesn't fail the command. (a) Send every remote network decision to this machine (same prompts and
+failure reporting as locally; the remote path loosens to match local), (b) keep the silent refusal but report it as a failure (stricter-only; protocol change), or (c) leave it. Remote “limited” mode keeps failing closed in every option.
+Recommended: (a), with a security review.</td><td>#722</td></tr>
+<tr><td>10-28</td><td>(D247) <b>Pending.</b> The remote connection ignores IP ranges in <code>NO_PROXY</code>, so it goes through the proxy when the regular HTTP client wouldn't; fixing it makes that connection go direct.
+Recommended: fix at low priority, with a short security review.</td><td>#722</td></tr>
+<tr><td>10-28</td><td>(D248) <b>Pending.</b> #1468 item 5: an agent can hide another worktree's <code>.git</code> file from the next start by making its admin folder unreadable before a restart. (a) Cache the found paths in the Corbanu home,
+(b) make the whole <code>worktrees</code> folder read-only when an admin folder can't be read (breaks git there until fixed), or (c) document it. Recommended: (c) for now (needs a planted folder and a restart; the command-text check still applies).</td><td>#1468</td></tr>
+<tr><td>10-28</td><td>(D249) <b>Pending.</b> #943 SF5: a process a command left running can change <code>.git</code> after the last check. (a) Don't let approvals lift the protected-file rules while such processes live, or (b) keep it as documented.
+Recommended: (b) (approvals would stop working while any such process runs).</td><td>#943</td></tr>
+<tr><td>10-28</td><td>(D250) <b>Pending; security sign-off.</b> Changes that make reports quieter: approve #943 r8 N2 (report the same entry once instead of at every check; it still blocks approvals) and #943 item 14 (a duplicate report);
+leave #943 items 15 and 21 and #1468 item 6 as they are. Recommended: as stated.</td><td>#943, #1468</td></tr>
+<tr><td>10-28</td><td>(D251) <b>Pending; security sign-off.</b> #932 widening W1: let the grammar (phase 3) accept one leading <code>cd</code> to an absolute folder in plain characters. Only zsh-only prompts after untrusted content disappear (corpus estimate
+about 48 → 330 qualifying lines; bash/dash users already have this through D85). (a) Approve now as a PR titled “… needs security sign-off”, or (b) wait for the measuring harness to confirm the numbers on the real classifier. Recommended: (a).</td><td>#932</td></tr>
+<tr><td>10-28</td><td>(D252) <b>Pending.</b> Accept a scan of 142,644 real worker commands plus a test-only measuring harness in place of the phase-2 logs D129 asked for (phase 2 logs only at debug level; no real-use logs exist). Recommended: yes.</td><td>#932, D129</td></tr>
+<tr><td>10-28</td><td>(D253) <b>Pending, started.</b> Fix D156's split <code>-c</code> gap (a missing prompt main also has) as its own PR before W3. Because the fix only adds prompts, the coordinator started it as decision-free (sec-932h, with the measuring harness).
+Recommended: yes; a “no” would mean holding that PR.</td><td>#932, D156</td></tr>
+<tr><td>10-28</td><td>(D254) <b>Pending.</b> Order of the later widenings: W2 (exact redirections <code>2&gt;&amp;1</code> and <code>&gt;/dev/null</code>) → W3 (git subcommand certain when the grammar proves the words before it; covers D104/D157's accepted prompts) → W4 (D230's array subscripts).
+Recommended: approve the order only; each widening still gets its own approval and security sign-off.</td><td>#932</td></tr>
+<tr><td>10-28</td><td>(D255) <b>Pending</b> (changing them would need security sign-off). #943 items 16 and 22c (remove a duplicate report) and 22b (skip an early check on runs that get refused) would make reports quieter. Recommended: leave all three as they are.</td><td>#943</td></tr>
 </table>
 
+<h2>10. Current state</h2>
+<p><b>Running</b> at about 21:30Z on 2026-10-28, as tmux sessions on <code>$HOME/.corbanu-workers/tmux.sock</code> (6 workers including this one). States are from <code>todo.md</code>, logs and GitHub, not final reports.</p>
+<table><tr><th>Worker (tmux start, UTC)</th><th>Task</th><th>State at the snapshot</th></tr>
+<tr><td>win-733 (20:23Z)</td><td>#158 (verify and close) and #733 (drop BREAKAWAY_OK for integrity-lease jobs).</td><td>#158 closed 20:32Z. #1505 open (“windows-sandbox: legacy commands can't break away from their job”), CI running.</td></tr>
+<tr><td>contrib-990 (20:29Z)</td><td>Finish citadelculture's draft #990 (#982, compiler response files for the argument-comment lint) per D146/D151.</td><td>Posted a note on #990 at 20:29Z and is waiting up to 90 minutes for a reply before pushing to their branch.</td></tr>
+<tr><td>sec-932h (20:45Z)</td><td>D156 fix (adds prompts only; D253) and the test-only measuring harness (D252).</td><td>Running tests locally; no PR yet.</td></tr>
+<tr><td>fu-1504 (20:56Z)</td><td>#1504 (websocket review nits from #1374) and #1201 (Windows flake).</td><td>#1508 (#1504) has an APPROVE in its log; #1509 (#1201, longer timeout for the Windows cmd.exe auth helper) open; CI running on both.</td></tr>
+<tr><td>sec-943c (21:07Z)</td><td>#943 leftovers: a test for the 1024 cap, a louder note naming the <code>.git</code> finding when an approved extra write is refused, wording.</td><td>#1510 open, CI running.</td></tr>
+<tr><td>handoff-doc14 (21:24Z)</td><td>This refresh.</td><td>—</td></tr>
+</table>
+<h3>Open items</h3>
+<table><tr><th>Item</th><th>State</th><th>Next</th></tr>
+<tr><td>PF-84 Windows gate / #1080</td><td>Not run: the PC has not come online in Tailscale. #1080 is still draft at <code>db6b6fa35e</code>. The gate scripts in <code>$W/win-gate-pf84/</code> have never run on Windows; expect first-run fixes.</td>
+<td>Travis brings the PC online (Tailscale, sleep off, 2–3 hours; D212). Check <code>tailscale status</code> before relaunching, then gate (API-key route only, D213), then Travis's sign-off. Keep #1080 draft until then.</td></tr>
+<tr><td>Tonight's nightly</td><td>#1500 added ripgrep to the nightly Bazel Linux job, which has not run since. The cron is set for 09:17Z; GitHub has been starting it hours late.</td><td>Check that “Bazel test on ubuntu-24.04” prints <code>ripgrep 15.2.0</code> and <code>linux-sandbox-unit-tests</code> passes; judge that job on its own.</td></tr>
+<tr><td>Main postmerge</td><td>Green at <code>c8d56d89d3</code>, <code>530c916a93</code> (#1501) and <code>6488383fa9</code> (#1374). Runs for <code>21e2177e25</code> (#1502), <code>8095d707c9</code> (#1503) and <code>bb05734780</code> (#1498) in progress.</td><td>Install the newest fully green main (adds section 7's “Not in it” list).</td></tr>
+<tr><td>#1284 (citadelculture, #1094)</td><td>Waiting on their one-sentence wording fix since the 10-26 D170 review (head <code>ffe154face</code>); still waiting per contrib-15.</td><td>Coordinator: finish with credit around 11-04 if still quiet (maintainer edits allowed), review round 2, merge under D170.</td></tr>
+<tr><td>#1489</td><td>On Corbanu Plan, GLM 5.2 Standard and Deep both send no reasoning setting, so #1488 fixed the recorded choice but not which mode the request runs in (low).</td><td>Check against the Plan gateway before choosing a fix.</td></tr>
+<tr><td>#368 dated items</td><td>Sol price unchanged; the promo runs “at least through November 21, 2026”. China has not published the 2027 holiday notice, so DeepSeek's 2027 holidays aren't staged.</td><td>Re-read Sol's price just before 11-21. Add DeepSeek's 2027 holidays before 12-01, when the nightly check starts failing.</td></tr>
+<tr><td>Owner decisions with work waiting</td><td>#1462 (D235), #1470 (D236), #722 (D245–D247), #1468 item 5 (D248), #943 (D249, D250, D255), #932 W1–W4 (D251, D252, D254), #1412 (D243), #1467's race (D244), #128 rows (D241, D242), accounting (D239, D240).</td><td>Act on each answer; quieter changes go out as “… needs security sign-off” PRs.</td></tr>
+<tr><td>Decision-free follow-ups</td><td>#1449, #1482, #1064 (D230 part), #1056 (repeat-failure rotation, low; citadelculture drafts #1246 and #1384), #1468's refusal wording, #1448 (abort/timing flakes), #1201 (fu-1504), #982 (contrib-990), #733 (win-733).</td><td>Assign when slots free; stricter-only unless sign-off is obtained.</td></tr>
+<tr><td>Task Node</td><td>#1280 open for the operator repair; postfiatorg/tasknode#347 filed.</td><td>D237. Watch #347 for an upstream reply.</td></tr>
+<tr><td>#94 (D219)</td><td>goodalexander's upstream 0.147.0 sync, 5,868 commits behind.</td><td>Travis's answer.</td></tr>
+<tr><td>Contributor PRs</td><td>bradsbots' #1492 (#1452, ready since 17:06Z) has <b>no maintainer comment yet</b>. Still open: #1373 (D204), #1380 (changes requested), #1055, #161, #139, #103/#101 (Dependabot), citadelculture drafts (#1246, #1348, #1370, #1383–#1385, #1392–#1394, #983, #135) and #990 (contrib-990).</td>
+<td>Answer #1492 first (SWEEP RULE); then contributor sweeps, warm notes, D151 after about a week of silence.</td></tr>
+</table>
+<p><b>Main CI:</b> postmerge red from <code>bd494990aa</code> (#1376, run started 17:30Z) through <code>fbbe725af5</code> (#1497): rust-ci-full Linux test shards 1 and 2 had no <code>rg</code>. Green again at <code>c8d56d89d3</code> (#1500, run 40759219551, finished 20:50Z) and on the next two merges.
+Nightly: scheduled run 40722950171 on <code>0f19feaf08</code> green (#636 closed).</p>
+<p><b>Raw results vs owner acceptance:</b> unchanged by this stretch. The S10 raw record keeps ACC-11 and ACC-14 blocked (32/0/5 raw; 33/0/4 with ACC-04 under D113); 35/0/2 is the owner-accepted count (D207/D208). The PF-84 Windows gate has no result.
+The PRs above are code changes with their own fail-before evidence, not milestone re-runs. Worker recommendations in section 9 (D239–D255) are not owner acceptance; D253's PR proceeds only because it adds prompts.</p>
+<p><b>Evidence:</b> worker reports and reviewer outputs in <code>$HOME/.corbanu-workers/</code>; requests and grants in <code>$W</code>; decision log <code>$W/todo.md</code>; #932's W1 proposal on #932 (sec-932p2).</p>
+
+<h2>11. Decisions and remaining external actions</h2>
+<p><b>Pending numbered decisions: D219 and D235–D255</b> (22; section 9, with options and recommendations). If approved as recommended, D250 and D251 (quieter reports or fewer prompts) and D245 (b) (changes Permissive behaviour) need security sign-off, and D246 (a) and D247 a security review; D255 needs sign-off only if Travis picks the quieter option.
+D253 is already being done as decision-free. Repeat the pending ones in every check-in until answered.</p>
+<p><b>Owner action:</b> bring the Windows PC online in Tailscale and keep it awake 2–3 hours (D212). Not re-checked in this update: D178b (point <code>provider/zai_api_key</code> at the new key in <code>/vault</code>) and D18 (delete the malformed <code>kimi_api</code> label).</p>
+<p><b>Coordinator-owned follow-ups:</b> answer #1492; #1284 around 11-04; #368's Sol re-read before 11-21 and DeepSeek 2027 holidays before 12-01; tonight's nightly ripgrep check; D215's probe limit at the next three-platform re-measurement; #1401's exception review by 2027-01-31.</p>
+
+<h2>12. Resume sequence</h2>
+<ol>
+<li>Read the top box and the <code>todo.md</code> tail; check <code>tmux -S $HOME/.corbanu-workers/tmux.sock ls</code> and each running worker's log before launching anything. Don't relaunch a worker that is still running.</li>
+<li>Ask D219 and D235–D255.</li>
+<li>Collect the win-733, contrib-990, sec-932h, fu-1504 and sec-943c reports.</li>
+<li>Check tonight's nightly for <code>ripgrep 15.2.0</code> in the Bazel Linux job.</li>
+<li>Windows: once Travis confirms the PC is online in Tailscale, relaunch win-gate-pf84; then Travis signs off and #1080 merges with the literal head SHA after a fresh green run.</li>
+<li>Rebuild and install from the newest main whose postmerge run is green in every real job.</li>
+<li>Keep one live <code>&lt;name&gt;.grant.md</code> per request, tell running workers about new rules directly, keep build dirs on CorbanuDrive or glitch, never use <code>git stash</code>, follow the WINDOWS SKIP RULE, and don't treat “Operation not permitted” in a test log as a freeze.</li>
+<li>Keep the 5-minute reports, the overnight rule (section 3) and warm contributor and Task Node notes.</li>
+</ol>
+
+<details><summary>Sections 10–12 at 2026-10-28 16:15Z (handoff-doc13; historical, superseded by the sections above)</summary>
+<h2>10. Current state</h2>
+<p><b>Running</b> at about 16:15Z on 2026-10-28, as tmux sessions on <code>$HOME/.corbanu-workers/tmux.sock</code> (5 workers including this one). States are from <code>todo.md</code>, interim result files and logs, not final reports.</p>
+<table><tr><th>Worker (launched, UTC)</th><th>Task</th><th>State at the snapshot</th></tr>
+<tr><td>ci-maint (10-28 05:56Z)</td><td>Close #636 after a green scheduled nightly; #1298; #982 (citadelculture's draft #990 is the fix); #796.</td><td>Merged #1447 (#796 exec-server resume retry). Its poll waited hours for the 09:17Z cron, which GitHub only started at 16:08Z (run on <code>0f19feaf08</code>, in progress).</td></tr>
+<tr><td>sec-linux (10:58Z)</td><td>D225 (#594) and D226 (#732, finishing citadelculture's #1376 with credit).</td><td>#1471 (D225) merged 15:45Z. #1376 at <code>33562ad0ff</code>: 2 security APPROVE rounds; was blocked only by #1479; merge pending.</td></tr>
+<tr><td>acct-d223 (11:48Z)</td><td>D223 (#889) and D228 (#314).</td><td>#1474 (D223) merged 15:45Z. #1483 (D228) approved in round 4 (granted 13:50Z); merge without re-review granted at 15:58Z (own lines unchanged); head now <code>521304c780</code>, not merged at 16:15Z.</td></tr>
+<tr><td>cat-128 (15:47Z)</td><td>#128 (explicit dispositions for the six retired model IDs) and #368 (dated price/holiday items).</td><td>#1486 open (<code>f8ee94bcce</code>).</td></tr>
+<tr><td>handoff-doc13 (16:13Z)</td><td>This refresh.</td><td>—</td></tr>
+</table>
+<h3>Open items</h3>
+<table><tr><th>Item</th><th>State</th><th>Next</th></tr>
+<tr><td>PF-84 Windows gate / #1080</td><td>Not run: the PC never came online in Tailscale during win-gate-pf84's 5-hour window (01:55Z–06:56Z). #1080 is still draft at <code>db6b6fa35e</code>. The gate scripts in <code>$W/win-gate-pf84/</code> have never run on Windows; expect first-run fixes.</td>
+<td>Travis brings the PC online (Tailscale, sleep off, 2–3 hours; D212). Check <code>tailscale status</code> before relaunching, then gate (API-key route only, D213), then Travis's sign-off. Keep #1080 draft until then.</td></tr>
+<tr><td>#1376 (D226), #1483 (D228)</td><td>Approved, with sec-linux and acct-d223.</td><td>Merge with the literal head SHA once green (CARGO-DENY rule applies after main moves).</td></tr>
+<tr><td>#1284 (citadelculture, #1094)</td><td>Waiting on their one-sentence wording fix since the 10-26 D170 review (head <code>ffe154face</code>).</td><td>Coordinator: finish with credit around 11-04 if still quiet (maintainer edits allowed), review round 2, merge under D170.</td></tr>
+<tr><td>#1462 (D235), #1470 (D236)</td><td>Owner decisions pending.</td><td>On D235 (a): update the 7 Windows tests to Windows' behaviour. On D236 A: close #1470's pruning item.</td></tr>
+<tr><td>#1467, #1476, #1480</td><td>#1467: D234(b) product fix for the lost abort output (low). #1476: Corbanu Plan GLM 5.2 “medium” still runs as XHigh. #1480: advisory-note follow-ups from #1364's reviews.</td><td>Decision-free; assign when slots free.</td></tr>
+<tr><td>Other security follow-ups</td><td>#1449, #1468, #1472, #1482, #1064 (D230 part), #932 (D205 gap). All are stricter-only or equally quiet on main.</td><td>Decision-free unless a fix would make a line quieter than main.</td></tr>
+<tr><td>CI</td><td>#636 (waits for the 16:08Z scheduled nightly), #1448 (open for the abort_tasks product side), #1201 (reopened; slow Windows runner suspected), #1298, #982, #796 (ci-maint), #1479's workaround (D238).</td><td>ci-maint reports; close #636 only on a green scheduled run.</td></tr>
+<tr><td>Task Node</td><td>#1280 open for the operator repair; postfiatorg/tasknode#347 filed.</td><td>D237. Watch #347 for an upstream reply.</td></tr>
+<tr><td>#94 (D219)</td><td>goodalexander's upstream 0.147.0 sync, 5,868 commits behind.</td><td>Travis's answer.</td></tr>
+<tr><td>Contributor PRs</td><td>Done in this stretch: #1361, #1362, #994, #995 (and #1368, #1372, #1313, #1270, #1166, #1360, #1363, #1366, #1364). Still open: #1373 (D204; waits on its follow-ups), #1380 (changes requested), #1055, #103/#101 (Dependabot),
+citadelculture drafts needing their work (#1374 conflicts, #1246, #1348, #1370) and #990 (ci-maint). #1452 offered to bradsbots.</td><td>Contributor sweeps (SWEEP RULE), warm notes, D151 after about a week of silence.</td></tr>
+</table>
+<p><b>Main CI:</b> postmerge green at <code>82d22facc4</code> (15:36Z, the installed build). It failed at <code>2b135d4a66</code> (#1477) on the #1479 lint breakage. The run for <code>2619817aef</code> (#1481) was in progress at 16:15Z.
+Nightly: a manual run on main (<code>c36c8d4b61</code>, 01:26Z) was fully green after #1424/#1425; the scheduled run was in progress.</p>
+<p><b>Raw results vs owner acceptance:</b> unchanged by this stretch. The S10 raw record keeps ACC-11 and ACC-14 blocked (32/0/5 raw; 33/0/4 with ACC-04 under D113); 35/0/2 is the owner-accepted count (D207/D208). The PF-84 Windows gate has no result.
+The classifier PRs are code changes with their own fail-before evidence, not milestone re-runs; D217's relaxation is an owner decision, reviewed under security sign-off.</p>
+<p><b>Evidence:</b> worker reports and reviewer outputs in <code>$HOME/.corbanu-workers/</code>; requests and grants in <code>$W</code>; triage table in <code>$W/triage-20261028.md</code>; decision log <code>$W/todo.md</code>.</p>
+
+<h2>11. Decisions and remaining external actions</h2>
+<p><b>Pending numbered decisions: D219, D235, D236, D237 and D238</b> (section 9, with options and recommendations). D217, D218 and D220–D234 were answered at 10:27Z. Repeat the pending ones in every check-in until answered.</p>
+<p><b>Owner action:</b> bring the Windows PC online in Tailscale and keep it awake 2–3 hours (D212; not online during the 01:55Z–06:56Z window). Not re-checked in this update: D178b (point <code>provider/zai_api_key</code> at the new key in <code>/vault</code>) and D18 (delete the malformed <code>kimi_api</code> label).</p>
+<p><b>Coordinator-owned follow-ups:</b> #1284 around 11-04; the D224 docs tweak (point to <code>just test</code>) in the next docs pass; D215's probe limit at the next three-platform re-measurement; #1401's exception review by 2027-01-31.</p>
+
+<h2>12. Resume sequence</h2>
+<ol>
+<li>Read the top box and the <code>todo.md</code> tail; check <code>tmux -S $HOME/.corbanu-workers/tmux.sock ls</code> and each running worker's log before launching anything. Don't relaunch a worker that is still running.</li>
+<li>Ask D219, D235, D236, D237 and D238.</li>
+<li>Collect the ci-maint, sec-linux, acct-d223 and cat-128 reports; close #636 only after a green scheduled nightly.</li>
+<li>Windows: once Travis confirms the PC is online in Tailscale, relaunch win-gate-pf84; then Travis signs off and #1080 merges with the literal head SHA after a fresh green run.</li>
+<li>Rebuild and install from the newest main whose postmerge run is green in every real job (adds section 7's “Not in it” list).</li>
+<li>Keep one live <code>&lt;name&gt;.grant.md</code> per request, tell running workers about new rules directly, keep build dirs on CorbanuDrive or glitch, never use <code>git stash</code>, and follow the WINDOWS SKIP RULE.</li>
+<li>Keep the 5-minute reports, the overnight rule (section 3) and warm contributor and Task Node notes.</li>
+</ol>
+
+</details>
+
+<details><summary>Sections 10–12 at 2026-10-28 03:15Z (handoff-doc12; historical, superseded by the sections above)</summary>
+<h2>10. Current state</h2>
+<p><b>Running</b> at about 03:15Z on 2026-10-28, as tmux sessions on <code>$HOME/.corbanu-workers/tmux.sock</code> (6 Opus workers including this one; the cap is 6). <code>wgp-poll</code> is win-gate-pf84's SSH poller, not a worker.
+Running workers report through <code>$HOME/.corbanu-workers/&lt;name&gt;.result.md</code> when they exit; the states below are from their logs, not their reports.</p>
+<table><tr><th>Worker (launched, UTC)</th><th>Task</th><th>State at the snapshot</th></tr>
+<tr><td>ci-nightly (10-28 00:22Z)</td><td>nightly-ci has failed every night (#636: Bazel tests on Linux musl/gnu and Windows, Bazel clippy, release-build verify, sdk).</td><td>Merged #1424 (zlib repin) and #1425 (Windows timing bounds). The sdk lane passed on a branch run; the verifying nightly run on main (40615049351, on <code>c36c8d4b61</code>) was still running. Interim note only; no final report yet.</td></tr>
+<tr><td>contrib-10 (00:22Z)</td><td>#1417 (D206), the contributor sweep (incl. goodalexander's #126/#94, drafts #1362/#1361) and D152 merges.</td><td>Merged #1417, #1375, #979, #141, #252 and #1029; waiting on #998's checks. Report pending.</td></tr>
+<tr><td>sec-fu2 (01:44Z)</td><td>#1409 and #1410 (D194/D195 review follow-ups).</td><td>#1433 merged 03:13Z (closes #1409); #1410 still open.</td></tr>
+<tr><td>win-gate-pf84 (relaunched 01:54Z, D212)</td><td>PF-84 Windows gate, API-key route only (D213); polls SSH for up to 5 hours.</td><td>Windows PC still down at 03:10Z. Gate scripts in <code>$W/win-gate-pf84/</code> have never run on Windows; expect first-run fixes.</td></tr>
+<tr><td>sec-1428 (02:40Z)</td><td>#1428 (<code>-wal</code>/<code>-shm</code>/<code>-journal</code> side files count like the database: content ignored, symlinks block), then citadelculture's drafts #994/#995 (D146/D151: ask first, finish with credit if no reply in about 2 hours).</td><td>Fixing clippy errors in its #1428 change. Its <code>~/.cache/sec-1428-target</code> is now a symlink to <code>.codex-work/targets/sec-1428</code> (BUILD DIR RULE).</td></tr>
+<tr><td>handoff-doc12 (03:13Z)</td><td>This refresh.</td><td>—</td></tr>
+</table>
+<h3>Open items</h3>
+<table><tr><th>Item</th><th>State</th><th>Next</th></tr>
+<tr><td>#1080 (PF-84 named accounts on by default)</td><td>Draft at <code>db6b6fa35e</code> (main merged after #1408, includes #1337), CI 35 passed, 9 skipped, 0 failed. Mac: CLI named-account tests 6/6 and filtered TUI tests 725/725 passed, but 8 TUI tmux integration tests failed on an earlier local merge (at least one because the wallet program wasn't built); unconfirmed on the final head, not a pass.</td><td>Windows gate (D212/D213), then Travis's sign-off, then merge. Without #1362 a sub-agent on a removed account still waits silently (not a safety blocker, per tui-fix3).</td></tr>
+<tr><td>#1430 (#1420)</td><td>Ready, green, 2 APPROVE rounds, head <code>ab8a33e12899abcd5424009c4da7fbbd186cd6ee</code>.</td><td>D218. If main moves before the merge, the CARGO-DENY rule applies.</td></tr>
+<tr><td>D217 (<code>sudo -C</code>)</td><td>No PR; in #1403's thread (sec-fu report).</td><td>Travis's answer; option (a) would be a PR titled “… needs security sign-off”.</td></tr>
+<tr><td>Security follow-ups</td><td>#1422 (remaining <code>mapfile -C</code> spellings, <code>CD sub</code>/<code>env cd sub</code>, a few needless prompts), #1410 (D195), #1428 (sec-1428). #1409 closed by #1433.</td><td>sec-fu2 and sec-1428 are on #1410 and #1428; #1422 is unassigned.</td></tr>
+<tr><td>Contributor drafts</td><td>citadelculture #1362 (Opus APPROVE at <code>ad8d9124c8</code>; needs ready, main merge, green), #1361 (clippy: lock held across an <code>await</code> in its new test), #994 and #995 (last #928 items).</td><td>Coordinator call: wait for the contributor, then finish with credit after about 10-28 (D146/D151). #994/#995 are with sec-1428.</td></tr>
+<tr><td>Other contributor PRs</td><td>#1373 (D204; waits on its follow-ups), #1284 and #1380 (changes requested), #103 (regenerate its lockfile), #1055 (merge main), #101 (its failed job passed on re-run; mergeable once checks are green), #998 (contrib-10).</td><td>contrib sweeps; warm replies; D151 after about a week of silence.</td></tr>
+<tr><td>Tracking issues</td><td>#1367 (one macOS SIGSEGV; crash reports now upload via #1417), #1401 (0387 exception, re-review by 2027-01-31), #1412 (low), #932 (D205 gap).</td><td>Close #1367 as a one-off if it doesn't recur once crash reports are collected.</td></tr>
+</table>
+<p><b>Main CI:</b> postmerge green at <code>21db61709f</code> (01:03Z, the installed build). Later merges up to #1427 (<code>0dee885a38</code>) and #1433 (<code>1a613a7e4c</code>) were not checked green in this update; the run for <code>1a613a7e4c</code> was pending at 03:15Z. Nightly is red until ci-nightly's fixes are verified.</p>
+<p><b>Raw results vs owner acceptance:</b> the S10 raw record keeps ACC-11 and ACC-14 blocked: 32/0/5 raw, 33/0/4 with ACC-04 passed under D113 (#1411's count); 35/0/2 is the owner-accepted count (D207/D208). The PF-84 Windows gate has no result yet; the earlier 24 CLI assertions on Windows (10-22) are not the gate.</p>
+<p><b>Evidence:</b> worker reports and reviewer outputs in <code>$HOME/.corbanu-workers/</code>; requests and grants in <code>$W</code>; the decision log is <code>$W/todo.md</code>. Don't delete unmerged worktrees (#1430's <code>worktrees/ci-1420</code> stays until it is merged or closed).</p>
+
+<h2>11. Decisions and remaining external actions</h2>
+<p><b>Pending numbered decisions: D217 and D218</b> (section 9, with options and recommendations). D196–D216 are answered (Travis at 10-27 21:04Z, 22:49Z and 10-28 01:54Z; D197 was resolved by his Z.AI recharge). Repeat D217 and D218 in every check-in until answered.</p>
+<p><b>Owner action:</b> bring the Windows PC online in Tailscale and keep it awake 2–3 hours (D212, accepted; not online at 03:10Z). Not re-checked in this update and still unconfirmed from 10-22: D178b (point <code>provider/zai_api_key</code> at the new key in <code>/vault</code>) and D18 (delete the malformed <code>kimi_api</code> label). D190's recharge is done (D197).</p>
+<p><b>Coordinator-owned follow-ups:</b> #1362/#1361 and #994/#995 under D146/D151; D215's probe limit at the next planned three-platform re-measurement; #1401's exception review by 2027-01-31; contrib-10's report may add decisions.</p>
+
+<h2>12. Resume sequence</h2>
+<ol>
+<li>Read the top box and the <code>todo.md</code> tail; check <code>tmux -S $HOME/.corbanu-workers/tmux.sock ls</code> and each running worker's log before launching anything. Don't relaunch a worker that is still running.</li>
+<li>Windows: when <code>wgp-poll</code> reports UP, win-gate-pf84 runs the gate (API-key route only). Then Travis signs off and #1080 merges with the literal head SHA after a fresh green run.</li>
+<li>Ask D217 and D218. On a D218 yes, merge #1430 with <code>--match-head-commit</code> on the literal SHA (merge main first if the cargo-deny check needs it).</li>
+<li>Collect ci-nightly, contrib-10, sec-fu2 and sec-1428 reports; confirm the next scheduled nightly run on main is green before closing #636.</li>
+<li>Rebuild and install from the newest main whose postmerge run is green in every real job (it would add the PRs listed under section 7's “Not in it”).</li>
+<li>Write grants as <code>&lt;name&gt;.grant.md</code>, tell running workers about new rules directly, keep build dirs on CorbanuDrive, never use <code>git stash</code>.</li>
+<li>Keep the 5-minute reports, the overnight rule (section 3) and warm contributor and Task Node notes.</li>
+</ol>
+
+</details>
+
+<details><summary>Sections 10–12 at the 2026-10-26 resume (historical; superseded by the sections above)</summary>
+<h2>10. Current state</h2>
+<p><b>Paused at the owner's request.</b> No program worker is running. The remaining work is preserved in pushed PRs and clean worktrees.
+The old <code>watchdog</code> tmux session was explicitly stopped; do not restart it during the pause. The old <code>f905</code> shell was confirmed idle in <code>worktrees/flake-905/codex-rs</code> with no child processes and closed. The program's worker tmux server has no sessions.</p>
+<table><tr><th>Work</th><th>State / evidence</th><th>Resume action</th></tr>
+<tr><td>sec-1302r / #1354</td><td>Head <code>9d6f0bad1a4e440d00c7054edd9c2b9519062ea3</code>; independent review APPROVE, checks green, conflicts with main. Earlier #1302 merged.</td><td>Recover the existing worktree, resolve conflicts, verify the resulting diff and review coverage, then require green checks.</td></tr>
+<tr><td>sec-1064b / #1356</td><td>Head <code>4ec31e993fa16aeb4276a5b85541dcc47ce3256e</code>; round 4 ended on 429 without a verdict; conflicts with main.</td><td>Recover the fourth review and conflict resolution. No approval is inferred from the interrupted run.</td></tr>
+<tr><td>tui-fix2 / #1357</td><td>Merged during closeout at reviewed head <code>35ff363283f392d9e7263c4abce961166c71480e</code>, all 38 checks passed or skipped. Coordinator rebuilt it and verified /providers, both local-provider actions, deactivate/reactivate, and onboarding wording in real tmux with disposable homes; no model calls.</td><td>Done. Evidence and limits posted on #1357; captures in <code>.codex-work/closeout-1357/</code>.</td></tr>
+<tr><td>tui-fix2 / #1358</td><td>Merged at <code>0670510bc74584ee28db078c0e023f7b9936d6df</code> after the single Windows setup-failure rerun passed. Reviewed head <code>4074cd0468a5cdea36bc502ab0952719d2619563</code> unchanged; all 38 checks passed or skipped; final-build real tmux evidence in the worker record.</td><td>Done. No review or CI gate was waived.</td></tr>
+<tr><td>Contributor #1353</td><td>Merged during closeout under D192, reviewed head <code>9fbc89f0c90bf4e91bb653ab147721fc2a511536</code>, all checks green. Author thanked.</td><td>Done.</td></tr>
+<tr><td>Contributor #1305 / #1318</td><td>D187/D188 approved. Heads advanced after review to <code>7f613ee3167a74b61ea8cee2f6c283f8bf67a5f0</code> / <code>684a77003ca8702ae7817edef09fdf80bf79bca2</code>. Follow-up commits implement review suggestions.</td><td>Done (2026-10-22 pause batch, Astra High exception): merged at <code>180a24b5cce3ff1e86e9fe2abca0a68ecdbaab14</code> / <code>55ffd0277cba12bbe90dfa687a086809d14c4c10</code> after review of the unchanged heads and green CI.</td></tr>
+<tr><td>Windows PF-84 gate</td><td>Coordinator built main <code>36ca28ce2e</code> on <code>DESKTOP-UJS3HC4</code> (Windows 11 Pro, Rust 1.99.1) and passed <b>24 CLI account assertions</b> with synthetic credentials, a loopback provider and disposable homes. <a href="../../qa/provider-auth/pf-84/windows-closeout-20261022/README.md">Supporting evidence</a>. The full independent gate has not run. As of the 2026-10-26 resume Opus is available but the Windows machine is unreachable.</td><td>Use <code>$W/win-gate-pf84.md</code> once the Windows machine is reachable. Finish Windows TUI, device-code, held-lock and active-request removal checks on the actual default-on candidate; check Z.AI balance. The verified CLI binary is retained under <code>C:\CorbanuQA\closeout-20261022\bin</code>.</td></tr>
+<tr><td>Accounting rerun</td><td>Paused previously on Z.AI 429 code 1113. D190 recharge approved, completion unconfirmed. No case was judged in this rerun.</td><td><code>.codex-work/acct-rerun-20261022/RESUME.md</code>; resume only when funded.</td></tr>
+</table>
+<p><b>Completed since #1345's snapshot:</b> #1302, #1332, #1339, #1347, #1351 and #1352; contributor #1330, #1329, #1338, #1346, #1344 and #1336. #1350 closed with a detailed duplicate explanation and credit. #814 closed under D193, preserving the accepted rare split/cumulative accounting limitations.</p>
+<p><b>PF-84:</b> #1080 stays draft. The earlier claim that only Windows and sign-off remain is superseded: #1337's Ctrl+J/immediate-key routing defect is also a blocker before default-on. #1342 needs the one-way legacy-label retry fix. Give the contributors time to respond as already agreed. Newly queued: ready comment-only #1359 (acknowledged, not independently reviewed), and contributor drafts #1360–#1364 and #1366. Do not duplicate those implementations on resumption.</p>
+<p><b>Main/build:</b> latest completed main postmerge CI verified during closeout passed at <code>1e90ae8defbad68dd3f8787f72d92148f1a8dbcf</code> (run 39814812253). At the final 20:53Z check, postmerge runs for this closeout's three merges (#1353, #1357 and #1358) were still running; no green postmerge claim is made for them.
+Installed signed binary on the Mac remains <code>d88d018ab2</code>; later merged changes are not yet installed there. The separately built Windows candidate is recorded above. No new release sign-off is claimed. Draft #1365's first macOS security integration run crashed with SIGSEGV (<b>#1367</b>, job 120066112486); cause unknown, one occurrence, no Rust changes in that draft.</p>
+<p><b>Evidence:</b> original worker logs and reviewer outputs are retained in <code>$HOME/.corbanu-workers/</code> and <code>.codex-work/tui-fix2/</code>.
+The decision ledger is <code>$W/pause-20261022.md</code>, linked at the top of <code>$W/todo.md</code>; <code>$W/closeout-recovery-20261022.md</code> records exact recovery steps. This handoff and the Windows record are in #1365 (independent Opus review after the 2026-10-26 resume). Do not delete unmerged worktrees or their review evidence. The merged TUI worktrees/cache are retained for now; check live owner references before later cleanup.</p>
+
+<h2>11. Decisions and remaining external actions</h2>
+<p><b>No unanswered numbered decision through D195.</b> Travis accepted all recommendations. D189 keeps CI-policy decisions with him; it does not expand D152.
+D191 (bounded plain-mktemp recognition), D194 (definite-cd handling) and D195 (unknown-folder git checks, after D194) are approved and queued for the next session, not implemented here.
+D186 keeps the existing zbus advisory exceptions until a viable maintained replacement exists; #992 remains open.
+D185's setup checklist is added to future tester packets; frozen packets stay unchanged.</p>
+<p><b>External actions whose execution is not confirmed:</b> D190 Z.AI recharge; D178b updating <code>provider/zai_api_key</code> to the new value; D18 deleting the malformed <code>kimi_api</code> vault entry.
+The old exposed Z.AI key was revoked by Travis; that is separate from updating the provider label. Workers must use <code>zai_key_3</code> at use time.
+Windows availability is now confirmed. PF-84's final sign-off is a future gate, not implied by “all recommendations accepted”.</p>
+<p><b>Deferred questions:</b> Zstandard/LZMA ZIP support remains open for a later owner decision. The older low-priority items are retained in the historical snapshot below; recheck their context before resurfacing them.</p>
+
+<h2>12. Resume sequence</h2>
+<ol>
+<li>Wait for Travis to resume. Do not automatically restart after cooldown expiry. Recheck Opus 5.5 High availability with one short smoke test; preserve the model requirement.</li>
+<li>Re-read current GitHub heads, checks and comments before recovering #1354/#1356 or reviewing #1305/#1318. Use the existing work, reviews and contributor replies; avoid duplicate implementation.</li>
+<li>Complete the Windows PF-84 gate and fix/review #1337 before seeking final sign-off for #1080. Relay any required test-account device code promptly. #1080 stays draft until all gates are satisfied.</li>
+<li>Confirm Z.AI funding and resume the preserved accounting run. Keep raw run results and owner-accepted dispositions distinct.</li>
+<li>Resume approved follow-ups D191, D194/D195 and the contributor queue only after the pause ends. #1277's agreed waiting deadline is 2026-10-23 02:03Z; check for replies first. Quiet-contributor follow-ups around 10-28 remain as previously agreed.</li>
+<li>Rebuild/install only from a validated green main with signed-binary smoke evidence. Maintain demo reels and warm, factual contributor/Task Node acknowledgments.</li>
+<li>Resume periodic progress reports and repeat unresolved owner questions until answered; keep the overnight rule from section 3.</li>
+</ol>
+
+</details>
+
+<details><summary>Previous sections 10–12, recorded at 12:45Z (historical; instructions superseded)</summary>
 <h2>10. Current state</h2>
 <h3>Workers</h3>
 <p>Running at 2026-10-22 12:45 UTC (05:45 America/Phoenix), as tmux sessions on <code>$HOME/.corbanu-workers/tmux.sock</code>. Check with
@@ -2339,6 +2860,9 @@ bump by D101.</li>
 <li><b>PF-13-S07:</b> re-run the Linux canary harness on the current candidate (glitch), then archive the sprint (its Aggressive-sign-off condition is met).</li>
 <li>Carried items (section 11).</li>
 </ol>
+
+
+</details>
 
 <h2>13. Files</h2>
 <ul>

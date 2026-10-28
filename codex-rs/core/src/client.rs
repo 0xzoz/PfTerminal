@@ -30,6 +30,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
 use codex_api::AgentIdentityTelemetry;
@@ -385,8 +386,12 @@ type SharedServerConversationState = Arc<StdMutex<Option<ServerConversationState
 /// account and user, or the API key), as a digest, never the credential. A
 /// session whose sign-in was replaced by another user's or another key never
 /// reuses a connection opened with the old one; a refreshed token of the same
-/// sign-in keeps it. Providers without a `CodexAuth` identity use a digest of
-/// their resolved API auth headers instead (#1326).
+/// sign-in keeps it. Sign-ins without an account, user or API key (no
+/// `CodexAuth`, or externally supplied auth headers) use a digest of their
+/// configured provider headers and resolved API auth headers instead; the
+/// others also digest the configured provider headers (#1326, #1343). A
+/// brokered credential is invisible to Core, so brokered identities never
+/// match (#1343).
 #[derive(Clone, PartialEq, Eq)]
 struct ConnectionIdentity([u8; 32]);
 
@@ -397,7 +402,11 @@ impl std::fmt::Debug for ConnectionIdentity {
 }
 
 impl ConnectionIdentity {
-    fn of(auth: Option<&CodexAuth>, api_auth: &dyn AuthProvider) -> Self {
+    fn of(
+        auth: Option<&CodexAuth>,
+        provider_headers: &ApiHeaderMap,
+        api_auth: &dyn AuthProvider,
+    ) -> Self {
         use sha2::Digest;
         let mut digest = sha2::Sha256::new();
         let mut field = |value: Option<&str>| match value {
@@ -409,25 +418,41 @@ impl ConnectionIdentity {
             None => digest.update([0]),
         };
         let mode = auth.map(|auth| format!("{:?}", auth.auth_mode()));
+        let account_id = auth.and_then(CodexAuth::get_account_id);
+        let user_id = auth.and_then(CodexAuth::get_chatgpt_user_id);
+        let api_key = auth.and_then(CodexAuth::api_key);
         field(mode.as_deref());
-        field(auth.and_then(CodexAuth::get_account_id).as_deref());
-        field(auth.and_then(CodexAuth::get_chatgpt_user_id).as_deref());
-        field(auth.and_then(CodexAuth::api_key));
-        if auth.is_none() {
-            // No semantic sign-in identity is available for this provider.
-            // Hash the actual resolved header bytes, not the auth object's
-            // address or Debug output. Keep duplicate-value order, but ignore
-            // insertion order between different header names.
-            let headers = api_auth.to_auth_headers();
-            let mut fields = headers.iter().collect::<Vec<_>>();
-            fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
-            digest.update(b"api-auth-headers");
-            for (name, value) in fields {
-                digest.update((name.as_str().len() as u64).to_le_bytes());
-                digest.update(name.as_str().as_bytes());
-                digest.update((value.as_bytes().len() as u64).to_le_bytes());
-                digest.update(value.as_bytes());
-            }
+        field(account_id.as_deref());
+        field(user_id.as_deref());
+        field(api_key);
+        if codex_model_provider::model_key_broker_required()
+            || api_key == Some(codex_model_provider::BROKERED_KEY_PLACEHOLDER)
+        {
+            // The broker attaches the credential, so Core cannot tell two
+            // brokered sign-ins apart: never reuse a connection across them.
+            static BROKERED: AtomicU64 = AtomicU64::new(0);
+            digest.update(b"brokered");
+            digest.update(BROKERED.fetch_add(1, Ordering::Relaxed).to_le_bytes());
+        }
+        let mut headers = provider_headers.clone();
+        if account_id.is_none() && user_id.is_none() && api_key.is_none() {
+            // No semantic sign-in identity: the resolved auth headers are the
+            // sign-in. Apply them last, matching websocket handshake
+            // precedence. A semantic identity skips them so that a refreshed
+            // bearer token keeps the connection.
+            api_auth.add_auth_headers(&mut headers);
+        }
+        // Configured headers can carry the sign-in too. Hash bytes rather than
+        // an object's address or Debug output. Keep duplicate-value order, but
+        // ignore insertion order between header names.
+        let mut fields = headers.iter().collect::<Vec<_>>();
+        fields.sort_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+        digest.update(b"api-auth-headers");
+        for (name, value) in fields {
+            digest.update((name.as_str().len() as u64).to_le_bytes());
+            digest.update(name.as_str().as_bytes());
+            digest.update((value.as_bytes().len() as u64).to_le_bytes());
+            digest.update(value.as_bytes());
         }
         Self(digest.finalize().into())
     }
@@ -1551,7 +1576,7 @@ impl ModelClient {
                 deferred
                     .resolve_path(
                         self.state.provider.info(),
-                        client_setup.auth.as_ref(),
+                        client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                         &client_setup
                             .api_provider
                             .url_for_path(RESPONSES_COMPACT_ENDPOINT),
@@ -1707,9 +1732,9 @@ impl ModelClient {
         ));
         let api_provider = api_provider_override.unwrap_or(client_setup.api_provider);
         // Creating the call is a model request the operator paid for, so it is
-        // recorded. Its response carries no usage - the realtime protocol this
-        // client parses carries none anywhere - so the attempt lands with its
-        // tokens unknown, which is what the provider actually said.
+        // recorded. Its response carries no usage, and the call's sideband
+        // reports are not recorded (#889 D223 covers WebSocket sessions), so
+        // the attempt lands with its tokens unknown.
         //
         // The route is read from the API client rather than restated: call
         // creation picks its path from the session's parser and appends the
@@ -1722,7 +1747,7 @@ impl ModelClient {
                 deferred
                     .resolve_path(
                         self.state.provider.info(),
-                        client_setup.auth.as_ref(),
+                        client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                         &call_url,
                         &call_route,
                     )
@@ -1768,10 +1793,11 @@ impl ModelClient {
     }
 
     /// #824: record a realtime WebSocket session that has just opened under
-    /// `base_url` as one request. A session is billed but this client never
-    /// sees its token usage, so the record states the route, model, provider
-    /// and start time now, the end time when the session closes
-    /// (`RealtimeSessionRecord::end`), and no token counts. `credential` is
+    /// `base_url` as one request. The record states the route, model,
+    /// provider and start time now, the tokens each finished response reports
+    /// (#889 D223, `RealtimeSessionRecord::observe_response`), the end time
+    /// when the session closes (`RealtimeSessionRecord::end`), and no price.
+    /// `credential` is
     /// the API key the session sends. `None` leaves the session unrecorded; it
     /// is never refused.
     pub(crate) async fn begin_realtime_session_record(
@@ -1810,7 +1836,12 @@ impl ModelClient {
         };
         let model = session_config.model.as_deref().unwrap_or_default();
         crate::accounting::realtime::RealtimeSessionRecord::begin(
-            &deferred, provider, credential, &url, &path, model,
+            &deferred,
+            provider,
+            credential.map(CodexAuth::auth_mode),
+            &url,
+            &path,
+            model,
         )
         .await
     }
@@ -1873,7 +1904,7 @@ impl ModelClient {
                 deferred
                     .resolve_path(
                         self.state.provider.info(),
-                        client_setup.auth.as_ref(),
+                        client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                         &client_setup
                             .api_provider
                             .url_for_path(MEMORIES_SUMMARIZE_ENDPOINT),
@@ -3752,8 +3783,11 @@ impl ModelClientSession {
                 "failed to build websocket prewarm client setup: {err}"
             ))
         })?;
-        let identity =
-            ConnectionIdentity::of(client_setup.auth.as_ref(), client_setup.api_auth.as_ref());
+        let identity = ConnectionIdentity::of(
+            client_setup.auth.as_ref(),
+            &client_setup.api_provider.headers,
+            client_setup.api_auth.as_ref(),
+        );
         let auth_context = AuthRequestTelemetryContext::new(
             client_setup.auth.as_ref().map(CodexAuth::auth_mode),
             client_setup.api_auth.as_ref(),
@@ -4487,8 +4521,11 @@ impl ModelClientSession {
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
             let client_setup = self.client.current_client_setup().await?;
-            let identity =
-                ConnectionIdentity::of(client_setup.auth.as_ref(), client_setup.api_auth.as_ref());
+            let identity = ConnectionIdentity::of(
+                client_setup.auth.as_ref(),
+                &client_setup.api_provider.headers,
+                client_setup.api_auth.as_ref(),
+            );
             self.drop_websocket_of_another_sign_in(&identity);
             let request_auth_context = AuthRequestTelemetryContext::new(
                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),

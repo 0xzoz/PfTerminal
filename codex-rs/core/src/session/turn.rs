@@ -2731,9 +2731,19 @@ async fn drain_in_flight(
     while let Some(res) = in_flight.next().await {
         match res {
             Ok(Ok(response_input)) => {
+                let call_id = match &response_input {
+                    ResponseInputItem::FunctionCallOutput { call_id, .. }
+                    | ResponseInputItem::McpToolCallOutput { call_id, .. }
+                    | ResponseInputItem::CustomToolCallOutput { call_id, .. }
+                    | ResponseInputItem::ToolSearchOutput { call_id, .. } => Some(call_id.clone()),
+                    ResponseInputItem::Message { .. } => None,
+                };
                 let response_item = response_input.into();
                 sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
                     .await;
+                if let Some(call_id) = call_id {
+                    turn_context.pending_tool_calls.complete(&call_id);
+                }
                 mark_thread_memory_mode_polluted_if_external_context(
                     sess.as_ref(),
                     turn_context.as_ref(),

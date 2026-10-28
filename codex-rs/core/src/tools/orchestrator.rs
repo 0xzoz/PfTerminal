@@ -944,7 +944,9 @@ impl ToolOrchestrator {
         );
         // D48 (c): a person's approval of a known tool's command after
         // untrusted content lifts no rule but would allow user namespaces:
-        // held back too, and the person is told why.
+        // held back too, and the person is told why (#943 item 18: only the
+        // namespaces, where no rule would have been lifted).
+        let rules_held_back = git_held_back;
         if !git_held.is_empty()
             && user_namespaces_warned_at.is_some()
             && approved_by == Some(ApprovalResolutionSource::User)
@@ -952,7 +954,7 @@ impl ToolOrchestrator {
             git_held_back = true;
         }
         if git_held_back {
-            warn(tool_ctx, &git_held_note(&git_held)).await;
+            warn(tool_ctx, &git_held_note(&git_held, rules_held_back)).await;
         }
         // A person's approval of this command when asked about it now: it
         // counts for nothing below while the git check's findings stand
@@ -1016,20 +1018,6 @@ impl ToolOrchestrator {
             user_namespaces_warned_at.is_some() && approved_by_person_now,
             user_namespaces_warned_at,
         );
-        // A retry of this run (after a sandbox or network denial) reuses
-        // these permissions: the same approved command, so the same answer.
-        if user_namespaces_allowed {
-            crate::security::user_namespaces::note_allowed_run(
-                tool_ctx.session.thread_id(),
-                &turn_ctx.sub_id,
-                &tool_ctx.call_id,
-            );
-            tracing::info!(
-                target: "codex_core::security::tainted_action",
-                call_id = %tool_ctx.call_id,
-                "user namespaces allowed for this run by the person's approval of its request to run outside the sandbox (Moderate)"
-            );
-        }
         let (denied_exec_server_permissions, permissions) = if !user_namespaces_allowed
             && crate::security::user_namespaces::rule_applies(
                 protected_level,
@@ -1219,6 +1207,22 @@ impl ToolOrchestrator {
                 person_asked: approved_by == Some(ApprovalResolutionSource::User),
             });
         }
+        // #1048: only a round that reaches its first attempt gets an
+        // allowed-run note. A stale round never ran; its note must not hide
+        // a later denial for the same call. A sandbox/network retry reuses
+        // these permissions and this one note.
+        if user_namespaces_allowed {
+            crate::security::user_namespaces::note_allowed_run(
+                tool_ctx.session.thread_id(),
+                &turn_ctx.sub_id,
+                &tool_ctx.call_id,
+            );
+            tracing::info!(
+                target: "codex_core::security::tainted_action",
+                call_id = %tool_ctx.call_id,
+                "user namespaces allowed for this run by the person's approval of its request to run outside the sandbox (Moderate)"
+            );
+        }
         let initial_attempt_start = Instant::now();
         let (first_result, first_deferred_network_approval) = Self::run_attempt(
             tool,
@@ -1296,8 +1300,11 @@ impl ToolOrchestrator {
                     post_taint.is_some(),
                     network_approval_context.is_some(),
                 );
+                // #943 item 3: never after the note above: the rules it kept
+                // deny reads, which keep the run in the sandbox, and under
+                // Moderate (D48) it never leaves it.
                 if unsandboxed_allowed && !git_held.is_empty() {
-                    warn(tool_ctx, &git_held_note(&git_held)).await;
+                    warn(tool_ctx, &git_held_note(&git_held, /*rules*/ true)).await;
                 }
                 let unsandboxed_allowed = unsandboxed_allowed && git_held.is_empty();
                 // Under `Never` or `OnRequest`, do not retry without sandbox;
@@ -1679,8 +1686,10 @@ async fn git_refresh(
     held
 }
 
-/// Why an approval or grant didn't lift the protected-file rules (#874).
-fn git_held_note(held: &[String]) -> String {
+/// Why an approval or grant didn't lift the protected-file rules (#874), or
+/// (`rules` false: a D48 approval, which lifts no rule) only didn't let the
+/// command create user namespaces.
+fn git_held_note(held: &[String], rules: bool) -> String {
     const SHOWN: usize = 20;
     let mut shown = held
         .iter()
@@ -1691,10 +1700,15 @@ fn git_held_note(held: &[String]) -> String {
     if held.len() > SHOWN {
         shown.push_str(&format!(" and {} more", held.len() - SHOWN));
     }
+    let withheld = if rules {
+        "doesn't lift the protected-file rules for this command (nor run it outside the \
+         sandbox, nor let it create user namespaces)"
+    } else {
+        "doesn't let this command create user namespaces"
+    };
     format!(
-        "The approval doesn't lift the protected-file rules for this command (nor run it \
-         outside the sandbox, nor let it create user namespaces) while the project's git \
-         folder still holds what Corbanu reported: {shown}."
+        "The approval {withheld} while the project's git folder still holds what Corbanu \
+         reported: {shown}."
     )
 }
 
@@ -2804,3 +2818,8 @@ mod tests {
 #[cfg(test)]
 #[path = "orchestrator_stale_tests.rs"]
 mod stale_tests;
+
+#[cfg(test)]
+#[cfg(target_os = "linux")]
+#[path = "orchestrator_namespace_note_tests.rs"]
+mod namespace_note_tests;
