@@ -105,6 +105,12 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   the keychain rule by itself now keeps escalated and allow-listed commands in
   the sandbox. Aggressive already kept them there through its other rules, so
   nothing you see changes. Permissive and Moderate are unchanged.
+- **Claude panes and `/permissions` also follow Core's live level** (#1468).
+  Claude panes (outside containment) and permission changes are refused while
+  the live session runs a protected level (Aggressive, for `/permissions`),
+  not only when it is active or saved. On macOS, `/status` no longer says
+  approved commands can leave the sandbox when a permission profile keeps the
+  keychain away (they can't).
 
 ## Named accounts (behind `named_accounts`)
 
@@ -167,6 +173,10 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   repository works as before. `git worktree repair` of another worktree now
   fails for agent commands as well, as `git worktree move` and `remove` already
   did. Permissive is unchanged.
+- **The same holds for a submodule's linked worktrees** (#1468): the `gitdir`
+  in `.git/modules/<module>/worktrees/<name>` and the `.git` file it names stay
+  read-only too, and a `gitdir` spelled `.GIT` counts where the volume ignores
+  case.
 
 ## GLM 5.2 on Z.AI and Ambient: "medium" now runs as Standard
 

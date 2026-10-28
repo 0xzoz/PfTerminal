@@ -100,12 +100,20 @@ pub(crate) fn status_line(
     }
 }
 
-/// Human permission changes are refused while a non-Permissive level is
-/// stored or active: `/permissions` must not quietly undo Aggressive.
+/// Human permission changes are refused while Aggressive is stored, active
+/// or (#1468) in force in Core's live policy on this home: `/permissions`
+/// must not quietly undo Aggressive.
 pub(crate) fn permission_change_block_reason() -> Option<String> {
     let context = context()?;
-    let stored = load(&context.codex_home).enforced();
-    (context.active == ChosenLevel::Aggressive || stored == ChosenLevel::Aggressive).then(|| {
+    permission_change_block_reason_in([
+        context.active,
+        load(&context.codex_home).enforced(),
+        live_level(&context.codex_home),
+    ])
+}
+
+fn permission_change_block_reason_in(levels: [ChosenLevel; 3]) -> Option<String> {
+    levels.contains(&ChosenLevel::Aggressive).then(|| {
         "Security level Aggressive manages permissions. Choose Permissive in /security and restart before changing them.".to_string()
     })
 }
@@ -124,10 +132,14 @@ pub(crate) fn external_agent_block_reason() -> Option<String> {
     }
     #[cfg(test)]
     if let Some((active, stored)) = test_levels::LEVELS.get() {
-        return external_agent_block_reason_in(active, stored);
+        return external_agent_block_reason_in(active, stored, test_levels::LIVE.get());
     }
     let context = context()?;
-    external_agent_block_reason_in(context.active, load(&context.codex_home).enforced())
+    external_agent_block_reason_in(
+        context.active,
+        load(&context.codex_home).enforced(),
+        live_level(&context.codex_home),
+    )
 }
 
 /// #891, #807: the strictest of the active level, the saved level and the
@@ -173,7 +185,7 @@ fn strictest_protected(levels: [ChosenLevel; 3]) -> Option<ChosenLevel> {
 /// there is one.
 pub(crate) fn external_agent_block_reason_for_home(codex_home: &Path) -> Option<String> {
     let active = context().map_or(ChosenLevel::Permissive, |context| context.active);
-    external_agent_block_reason_in(active, load(codex_home).enforced())
+    external_agent_block_reason_in(active, load(codex_home).enforced(), live_level(codex_home))
 }
 
 /// Stand-in active and saved levels for the Claude pane gate tests, on the
@@ -217,11 +229,24 @@ pub(crate) mod test_levels {
     }
 }
 
-fn external_agent_block_reason_in(active: ChosenLevel, stored: ChosenLevel) -> Option<String> {
-    (active != ChosenLevel::Permissive || stored != ChosenLevel::Permissive).then(|| {
+/// #1468: `live` is the level in force in Core's live policy on this home,
+/// which counts as the active and saved levels do.
+fn external_agent_block_reason_in(
+    active: ChosenLevel,
+    stored: ChosenLevel,
+    live: ChosenLevel,
+) -> Option<String> {
+    let level = if active != ChosenLevel::Permissive {
+        active
+    } else if stored != ChosenLevel::Permissive {
+        stored
+    } else {
+        live
+    };
+    (level != ChosenLevel::Permissive).then(|| {
         format!(
             "Claude panes are off under security level {}: Claude Code would run outside Corbanu's sandbox with your environment and network. Choose Permissive in /security and restart to use them, or turn on the contained_external_agents and secretless_agent_launch features to run them in the sandbox, asking you before every command, file edit and web request; /panes switches back to Main.",
-            if active != ChosenLevel::Permissive { active } else { stored }.name()
+            level.name()
         )
     })
 }

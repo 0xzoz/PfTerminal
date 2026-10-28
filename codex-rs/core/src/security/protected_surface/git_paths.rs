@@ -213,7 +213,12 @@ fn linked_dot_git(admin: &AbsolutePathBuf) -> Option<AbsolutePathBuf> {
     }
     let base = std::fs::canonicalize(admin.as_path()).unwrap_or_else(|_| admin.to_path_buf());
     let dot_git = AbsolutePathBuf::resolve_path_against_base(named, base);
-    if dot_git.as_path().file_name() != Some(std::ffi::OsStr::new(".git")) {
+    // #1468: `.GIT` names the same file on a case-insensitive volume.
+    if !dot_git
+        .as_path()
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(".git"))
+    {
         return None;
     }
     match std::fs::symlink_metadata(dot_git.as_path()) {
@@ -293,11 +298,19 @@ const GIT_BULK: &[&str] = &["objects", "refs", "logs", "lfs", "rr-cache"];
 /// Every folder below `git_dir/modules`, without following links: its four
 /// entries, whether or not it looks like a git folder (removing `HEAD` or
 /// adding `objects` must not unprotect one). Git's bulk folders are not
-/// entered. Past the limits, or when a folder cannot be read, `modules` as a
-/// whole (fail closed).
+/// entered. #1468: a folder in a `worktrees` folder (a submodule's linked
+/// worktree, `modules/m/worktrees/n`) also gets its `gitdir` and the `.git`
+/// file that names, as [`worktree_admin_paths`] gives them. Past the limits,
+/// or when a folder cannot be read, `modules` as a whole (fail closed), with
+/// the `.git` files found until then.
 fn module_paths(git_dir: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
     let modules = git_dir.join("modules");
-    let closed = || vec![modules.clone()];
+    let mut dot_gits = Vec::new();
+    let closed = |dot_gits: Vec<AbsolutePathBuf>| {
+        let mut paths = vec![modules.clone()];
+        paths.extend(dot_gits);
+        paths
+    };
     let mut paths = Vec::new();
     let mut pending = vec![(modules.clone(), 0)];
     let mut visited = 0;
@@ -305,14 +318,15 @@ fn module_paths(git_dir: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
         let children = match std::fs::read_dir(folder.as_path()) {
             Ok(children) => children,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return closed(),
+            Err(_) => return closed(dot_gits),
         };
+        let in_worktrees = depth > 0 && folder.as_path().ends_with("worktrees");
         for child in children {
             let Ok(child) = child else {
-                return closed();
+                return closed(dot_gits);
             };
             let Ok(kind) = child.file_type() else {
-                return closed();
+                return closed(dot_gits);
             };
             let name = child.file_name();
             if !kind.is_dir() || (depth > 0 && GIT_BULK.iter().any(|bulk| name == *bulk)) {
@@ -320,13 +334,21 @@ fn module_paths(git_dir: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
             }
             visited += 1;
             if visited > MAX_MODULE_DIRS || depth >= MAX_MODULE_DEPTH {
-                return closed();
+                return closed(dot_gits);
             }
             let module = folder.join(name);
             paths.extend(entries(&module, /*below_modules*/ true));
+            if in_worktrees {
+                let gitdir = module.join("gitdir");
+                if !cfg!(target_os = "linux") || !missing(&gitdir) {
+                    paths.push(gitdir);
+                }
+                dot_gits.extend(linked_dot_git(&module));
+            }
             pending.push((module, depth + 1));
         }
     }
+    paths.extend(dot_gits);
     paths
 }
 

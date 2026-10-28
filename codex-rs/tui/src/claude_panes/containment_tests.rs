@@ -465,7 +465,7 @@ fn issue_891_contained_panes_deny_user_namespaces_under_protected_levels_on_linu
         }
         assert_eq!(
             (
-                user_namespaces_denied(),
+                user_namespaces_denied_at(crate::security::level::protected_level_for_panes()),
                 profile
                     .file_system_sandbox_policy()
                     .denies_user_namespaces(),
