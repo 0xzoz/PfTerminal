@@ -396,7 +396,7 @@ fn accounting_recording_gap_says_the_day_may_be_incomplete() {
         .collect();
     insta::assert_snapshot!(screen.join("\n"), @"
     This conversation on 1970-01-01 (UTC):
-    Totals for this day may be incomplete: Corbanu failed to record at least one request of this conversation or its subagents, which may still have been billed. The cause is in the log (target codex_core::accounting); check your provider's bill.
+    Totals for this day may be incomplete: Corbanu failed to record at least one request of this conversation or its subagents, which may still have been billed. The cause is in Corbanu's accounting log; check your provider's bill.
     • synthetic · synthetic-model — Pay per use. 1 request, 140 tokens. Estimated cost: at least $0.000180 (1 attempt had no price).
     No other conversation recorded requests on this day.
     Next step for requests priced only in part: check the bill from synthetic. Some of their tokens have no published price, so the estimate is only a lower bound.

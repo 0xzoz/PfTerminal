@@ -2488,7 +2488,7 @@ fn route_line(quotes: &[&ObservationQuote], named: bool) -> String {
 /// totals never read as complete. Missing work is never free work.
 fn recording_gap_line(span: &str) -> String {
     format!(
-        "Totals for {span} may be incomplete: Corbanu failed to record at least one request of this conversation or its subagents, which may still have been billed. The cause is in the log (target codex_core::accounting); check your provider's bill."
+        "Totals for {span} may be incomplete: Corbanu failed to record at least one request of this conversation or its subagents, which may still have been billed. The cause is in Corbanu's accounting log; check your provider's bill."
     )
 }
 
