@@ -9524,7 +9524,7 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
 fn issue_1449_runner_values_are_bounded() {
     let mut words = vec!["tar".to_string()];
     words.extend(std::iter::repeat_n("-Ia".to_string(), 1000));
-    let (values, cut) = super::rerun::runner_values(&words, 0, words.len(), usize::MAX);
+    let (values, cut) = super::rerun::runner_values(&words, /*at*/ 0, words.len(), usize::MAX);
     assert!(cut);
     assert!(values.len() <= super::outbound::MAX_JUDGED_POSITIONS + 1);
     let line = format!("{}tar -x {}", "tar -x -- ".repeat(63), "-Ia ".repeat(2000));
