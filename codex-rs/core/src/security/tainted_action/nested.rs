@@ -27,6 +27,7 @@ use super::outputs;
 use super::quoted;
 use super::quoted::Command;
 use super::quoted::Word;
+use super::rerun;
 use super::sed;
 use super::shadow;
 use super::shell::SHELLS;
@@ -353,9 +354,10 @@ impl Classifier {
             // A substitution's `cd` does not move this line.
             if !command.substituted
                 && let Some((index, name)) = &command_at
-                && unknown_folder::path_change(&texts[*index], name)
+                && unknown_folder::external_change(&texts, *index, name)
             {
                 // #1403: `./cd sub` runs that file: the folder is unknown.
+                // #1422: so do `CD sub` and `env cd sub`.
                 folders.unchecked = true;
             } else if !command.substituted
                 && let Some((index, name)) = &command_at
@@ -600,6 +602,13 @@ impl Classifier {
                         push_script(found, folders, line, replaced(launches[at]), unknown);
                     }
                     continue;
+                }
+                // #1422: `compgen -C cmd` runs `cmd` as shell code.
+                if resolved_name == "compgen" {
+                    for code in rerun::compgen_commands(&texts[at + 1..]) {
+                        work::step();
+                        push_script(found, folders, code, replaced(launches[at]), unknown);
+                    }
                 }
                 let shell = SHELLS.contains(&resolved_name.as_str());
                 let code = invocation::parse(&resolved_name, &texts[at + 1..])

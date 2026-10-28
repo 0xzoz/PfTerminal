@@ -8990,3 +8990,121 @@ fn issue_1405_checks_are_linear() {
         });
     }
 }
+
+/// #1422: more spellings that run `mapfile -C`, aliases, `compgen -C`,
+/// and folder changes that run a program rather than the builtin (`CD`,
+/// `env cd`), so the folder they leave is not followed.
+#[cfg(unix)]
+#[test]
+fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
+    let evil = "echo x >> ~/.zshenv\n";
+    // The shell runs `run.sh` where it is, unless it changes folder.
+    let files = [
+        ("evil.sh", evil),
+        ("run.sh", evil),
+        ("sub/run.sh", "true\n"),
+    ];
+    let mut wrong = Vec::new();
+    for line in [
+        // A quoted blank or separator in an assignment before the name.
+        "x='a b' mapfile -C eval -c 1 a < notes",
+        "x='a;b' readarray -tC eval a < notes",
+        "x=\"a|b\" mapfile -C eval a < notes",
+        // A brace-spelled name and a quoted separator.
+        "{,mapfile} -d ';' -C eval -c 1 a < notes",
+        "{,readarray} -d '|' -C eval a < notes",
+        "{mapfile,-C} -d ';' eval -c 1 a < notes",
+        // Aliases.
+        "shopt -s expand_aliases; alias m=mapfile\nm -C eval a < notes",
+        "shopt -s expand_aliases; alias e=eval\ne \"$1\"",
+        "shopt -s expand_aliases; alias s=source\ns ./evil.sh",
+        "shopt -s expand_aliases; alias b=bash\nb evil.sh",
+        "shopt -s expand_aliases; alias a=b b=bash\na evil.sh",
+        "bash -c 'shopt -s expand_aliases; alias b=bash\nb evil.sh'",
+        // `compgen -C` runs its command.
+        "compgen -C 'bash evil.sh' x",
+        "compgen -A file -C 'bash evil.sh' x",
+        "compgen -Wfoo -C'bash evil.sh' x",
+        "bash -c \"compgen -C 'bash evil.sh' x\"",
+        // A folder change that runs a program.
+        "CD sub; bash run.sh",
+        "Cd sub && bash run.sh",
+        "PUSHD sub; bash run.sh",
+        "env cd sub; bash run.sh",
+        "sudo cd sub; bash run.sh",
+        "nice cd sub; bash run.sh",
+        "nohup cd sub; bash run.sh",
+        "timeout 5 cd sub; bash run.sh",
+        "bash -c 'CD sub; bash run.sh'",
+        "bash -c 'env cd sub; bash run.sh'",
+    ] {
+        if in_workspace(&files, line).is_none() {
+            wrong.push(line);
+        }
+    }
+    // An alias that changes the folder is not followed either.
+    let moved = [("run.sh", "true\n"), ("sub/run.sh", evil)];
+    let line = "shopt -s expand_aliases; alias c=cd\nc sub; bash run.sh";
+    if in_workspace(&moved, line).is_none() {
+        wrong.push(line);
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+    // Ordinary lines stay quiet.
+    let quiet = [
+        ("run.sh", "true\n"),
+        ("sub/run.sh", "true\n"),
+        ("notes", "a\nb\n"),
+        ("tool.py", "msg = 'don\\'t'\nmapfile = load()\n"),
+    ];
+    for line in [
+        "cd sub; bash run.sh",
+        "builtin cd sub; bash run.sh",
+        "command cd sub; bash run.sh",
+        "time cd sub; bash run.sh",
+        "alias ll='ls -l'\nll",
+        "alias ll='ls -l'; ls",
+        "shopt -s expand_aliases; alias g=git\ng status",
+        "shopt -s expand_aliases; alias b=bash\nb run.sh",
+        "compgen -c git",
+        "compgen -W 'a b' -- a",
+        "compgen -W '-C x' -- a",
+        "compgen -C 'echo hi' x",
+        "x=1 mapfile -t a < notes",
+        "x='a b' mapfile -t a < notes",
+        "echo mapfile; cat notes",
+        "printf '%s\\n' readarray",
+        "python3 tool.py",
+        "bash --rcfile missing.rc -c 'ls'",
+        "bash --init-file missing.rc -c 'ls'",
+        "bash --rcfile=missing.rc run.sh",
+    ] {
+        assert_eq!(in_workspace(&quiet, line), None, "{line}");
+    }
+    // A start-up file an interactive shell reads is still judged.
+    for line in [
+        "bash --rcfile missing.rc -ic 'ls'",
+        "bash --rcfile missing.rc -c -i 'ls'",
+        "bash --rcfile missing.rc",
+    ] {
+        assert!(in_workspace(&quiet, line).is_some(), "{line}");
+    }
+}
+
+/// #1422: the checks stay linear.
+#[cfg(unix)]
+#[test]
+fn issue_1422_checks_are_linear() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let cwd = root.path().to_string_lossy().into_owned();
+    for (label, unit) in [
+        ("assigned mapfile", "x='a b' mapfile -t a < n; "),
+        ("aliases", "alias b='bash -c true'; b; "),
+        ("compgen", "compgen -A file -C 'true' x; "),
+        ("external cd", "CD sub; env cd sub; "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = unit.repeat(40 * scale);
+            let _ = classify_fixture(&shell_in(&cwd, &["bash", "-lc", &line]));
+        });
+    }
+}

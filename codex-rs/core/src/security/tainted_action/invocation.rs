@@ -34,6 +34,25 @@ pub(super) struct Invocation<'a> {
 /// Parse an invocation of `name` (a lowercase basename) with `args`.
 /// `None` when `name` is not a shell or interpreter.
 pub(super) fn parse<'a>(name: &str, args: &'a [String]) -> Option<Invocation<'a>> {
+    let mut start_up = Vec::new();
+    let mut invocation = parse_options(name, args, &mut start_up)?;
+    // #1422: a shell reads `--rcfile`/`--init-file` only when interactive:
+    // with `-i`, or reading commands from its input, which may be a
+    // terminal. Any `i` letter in an option word counts, wherever it is
+    // (`bash -c -i 'x'` is interactive).
+    if !start_up.is_empty() && (invocation.code == Code::Stdin || interactive(args)) {
+        invocation.preloads.extend(start_up);
+    }
+    Some(invocation)
+}
+
+/// `parse`, setting aside in `start_up` the start-up files that a shell
+/// reads only when interactive.
+fn parse_options<'a>(
+    name: &str,
+    args: &'a [String],
+    start_up: &mut Vec<&'a str>,
+) -> Option<Invocation<'a>> {
     if matches!(name, "source" | ".") {
         let code = args.first().map_or(Code::Stdin, |file| Code::File(file));
         return Some(Invocation {
@@ -150,6 +169,11 @@ pub(super) fn parse<'a>(name: &str, args: &'a [String]) -> Option<Invocation<'a>
                 index += 1;
             }
             Opt::PreloadAttached(file) => preloads.push(file),
+            Opt::StartUp => {
+                start_up.extend(next);
+                index += 1;
+            }
+            Opt::StartUpAttached(file) => start_up.push(file),
             Opt::Value => index += 1,
             Opt::Stdin => {
                 return Some(Invocation {
@@ -192,6 +216,9 @@ enum Opt<'a> {
     ModuleAttached(&'a str),
     Preload,
     PreloadAttached(&'a str),
+    /// #1422: a start-up file an interactive shell reads.
+    StartUp,
+    StartUpAttached(&'a str),
     Value,
     Stdin,
     Flag,
@@ -240,6 +267,11 @@ impl Family {
                 "command" if self == Self::Shell => Opt::Inline,
                 // #1405: an interactive shell sources its start-up file
                 // first (`bash --rcfile f -i`, yash `--profile=f -l`).
+                // #1422: only when interactive, as written (bash's
+                // spellings): before #1405 they were values, not judged.
+                "rcfile" | "init-file" if self == Self::Shell => {
+                    attached.map_or(Opt::StartUp, Opt::StartUpAttached)
+                }
                 _ if self == Self::Shell && start_up_file(key) => {
                     attached.map_or(Opt::Preload, Opt::PreloadAttached)
                 }
@@ -302,13 +334,33 @@ impl Family {
 /// any case, ignores other than letters and digits, and takes a prefix of
 /// two letters or more (`--rc=f`, `--RC-FILE=f`, `--prof f`).
 fn start_up_file(key: &str) -> bool {
-    let key: String = key
-        .chars()
-        .filter(char::is_ascii_alphanumeric)
-        .map(|ch| ch.to_ascii_lowercase())
-        .collect();
+    let key = normalized(key);
     key.len() >= 2
         && ["rcfile", "initfile", "profile"]
             .iter()
             .any(|name| name.starts_with(key.as_str()))
+}
+
+/// A long option name as yash compares it: letters and digits, lowercased.
+fn normalized(key: &str) -> String {
+    key.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect()
+}
+
+/// #1422: whether a shell invoked with `args` may be interactive: an option
+/// word with an `i` letter (`-i`, `-ic`, `-c -i`, `-rcfile`), or a long one
+/// yash may read as `--interactive` (`--in`). Read loosely, so a start-up
+/// file is judged: any word counts, operands too.
+fn interactive(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        work::step();
+        if let Some(long) = arg.strip_prefix("--") {
+            let key = normalized(long.split_once('=').map_or(long, |(key, _)| key));
+            key.len() >= 2 && "interactive".starts_with(key.as_str())
+        } else {
+            arg.starts_with(['-', '+']) && arg.contains('i')
+        }
+    })
 }

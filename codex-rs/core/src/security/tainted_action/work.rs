@@ -175,6 +175,7 @@ mod tests {
     /// The classifier's sources, which must step the counter in every loop.
     const SOURCES: &[(&str, &str)] = &[
         ("tainted_action.rs", include_str!("../tainted_action.rs")),
+        ("aliases.rs", include_str!("aliases.rs")),
         ("arithmetic.rs", include_str!("arithmetic.rs")),
         ("certain_cd.rs", include_str!("certain_cd.rs")),
         ("grammar.rs", include_str!("grammar.rs")),

@@ -236,6 +236,31 @@ pub(super) fn path_change(word: &str, name: &str) -> bool {
     CHANGERS.contains(&name) && word.contains('/')
 }
 
+/// #1422: whether the folder change at `words[index]` (`name`, its
+/// lowercase basename) runs a program, not the builtin, so the folder it
+/// leaves is not known: named by a path (`./cd`, #1403), spelled in
+/// another case (`CD`: builtins are matched exactly), or behind a wrapper
+/// that runs a program (`env cd`, `sudo cd`, `nice cd`, `exec cd`). Only
+/// `command`, `builtin` and the `time` keyword run the builtin.
+pub(super) fn external_change(words: &[String], index: usize, name: &str) -> bool {
+    let Some(word) = words.get(index) else {
+        return false;
+    };
+    if !CHANGERS.contains(&name) {
+        return false;
+    }
+    path_change(word, name)
+        || basename(word) != name
+        || super::indirect::programs(words).into_iter().any(|at| {
+            work::step();
+            at != index
+                && !matches!(
+                    words.get(at).map(|word| basename(word)),
+                    Some("command" | "builtin" | "time")
+                )
+        })
+}
+
 /// Whether `pushd`/`popd` changes the folder stack rather than (only) the
 /// folder: `-n` keeps the folder, `+N`/`-N` pick an entry of a stack that
 /// is not followed, and `pushd -` goes back (zsh).
