@@ -58,6 +58,250 @@ const COMMAND_OPTIONS: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
+/// #1449: how a runner runs an option's value: as a shell line, as a
+/// program given a file it names, or as a program given data on its input
+/// (a compressor, `tar --to-command`), which a shell runs as code.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Runs {
+    Line,
+    Program,
+    Filter,
+}
+
+/// #1449: commands with options whose value is a command they run (`su -c
+/// CMD`, `su -s SHELL`, `rsync -e CMD`, `rg --pre CMD`, `tar -I CMD`, `tar
+/// --to-command=CMD`, `sort --compress-program=CMD`): their names, then
+/// each option, the shortest prefix of it the program takes (a long one;
+/// getopt takes any unique one) and how it runs the value. A short option
+/// may be in a group (`su -lc`, `rsync -ave`), its value the rest of the
+/// group or the next word; a long one's value is attached (`=`) or the
+/// next word. `tar --checkpoint-action=exec=CMD` runs CMD; old-style `tar
+/// xIf CMD a.tar` takes the values in the order of its letters.
+const OPERAND_RUNNERS: &[(&[&str], RunnerOptions)] = &[
+    (
+        &["su", "runuser"],
+        &[
+            ("-c", 2, Runs::Line),
+            ("--command", 3, Runs::Line),
+            ("--session-command", 4, Runs::Line),
+            ("-s", 2, Runs::Line),
+            ("--shell", 4, Runs::Line),
+        ],
+    ),
+    (
+        &["flock"],
+        &[("-c", 2, Runs::Line), ("--command", 5, Runs::Line)],
+    ),
+    (
+        &["script"],
+        &[("-c", 2, Runs::Line), ("--command", 3, Runs::Line)],
+    ),
+    (
+        &["rsync"],
+        &[("-e", 2, Runs::Program), ("--rsh", 5, Runs::Program)],
+    ),
+    (&["rg"], &[("--pre", 5, Runs::Program)]),
+    (
+        &["sort", "gsort"],
+        &[("--compress-program", 4, Runs::Filter)],
+    ),
+    (
+        TARS,
+        &[
+            ("-I", 2, Runs::Filter),
+            ("--use-compress-program", 5, Runs::Filter),
+            ("--to-command", 6, Runs::Filter),
+            ("-F", 2, Runs::Line),
+            ("--info-script", 5, Runs::Line),
+            ("--new-volume-script", 6, Runs::Line),
+            ("--rsh-command", 4, Runs::Program),
+            ("--checkpoint-action", 13, Runs::Line),
+        ],
+    ),
+];
+
+/// #1449: a runner's options: each spelling, its shortest prefix and how
+/// it runs the value.
+type RunnerOptions = &'static [(&'static str, usize, Runs)];
+
+/// #1449: GNU tar's names.
+const TARS: &[&str] = &["tar", "gtar"];
+/// #1449: old-style tar letters that take the next value, in order.
+const TAR_VALUE_LETTERS: &str = "bCfFgHIKLNTVX";
+
+/// #1449: the commands of [`OPERAND_RUNNERS`] that `nested::runner_scripts`
+/// reads only with [`runner_values`] (it reads the others' `-c` as before,
+/// and these values besides).
+pub(super) const VALUE_RUNNERS: &[&str] = &["rsync", "rg", "sort", "gsort", "tar", "gtar"];
+
+/// #1449: an option value a runner runs.
+pub(super) struct RunnerValue {
+    /// The word holding it.
+    pub(super) holder: usize,
+    pub(super) value: String,
+    pub(super) runs: Runs,
+}
+
+/// #1449: for the [`OPERAND_RUNNERS`] command at `at` in `words`, its
+/// option values that are commands, for the options among the words
+/// before `end`; and whether those words go past `limit`, unread (the
+/// line asks). The command word's own options are all read: only a
+/// wrapper before it (`flock F …`) is held to the limit ([`limit_for`]).
+pub(super) fn runner_values(
+    words: &[String],
+    at: usize,
+    end: usize,
+    limit: usize,
+) -> (Vec<RunnerValue>, bool) {
+    let lower = words[at].to_lowercase();
+    let name = basename(&lower);
+    let Some((_, options)) = OPERAND_RUNNERS
+        .iter()
+        .find(|(names, _)| names.contains(&name))
+    else {
+        return (Vec::new(), false);
+    };
+    let end = end.min(words.len());
+    let read_end = end.min(at.saturating_add(1).saturating_add(limit));
+    let mut values = Vec::new();
+    // Old-style tar: a first word of letters without a dash; its values
+    // run to `old_end`.
+    let mut old_end = at + 2;
+    if TARS.contains(&name)
+        && let Some(letters) = words
+            .get(at + 1)
+            .filter(|word| at + 1 < end && !word.starts_with('-'))
+    {
+        let mut next = at + 2;
+        for letter in letters.chars() {
+            work::step();
+            if !TAR_VALUE_LETTERS.contains(letter) {
+                continue;
+            }
+            let Some(value) = words.get(next) else {
+                break;
+            };
+            let runs = match letter {
+                'I' => Some(Runs::Filter),
+                'F' => Some(Runs::Line),
+                _ => None,
+            };
+            if let Some(runs) = runs {
+                values.push(RunnerValue {
+                    holder: next,
+                    value: value.clone(),
+                    runs,
+                });
+            }
+            next += 1;
+        }
+        old_end = next;
+    }
+    for index in at + 1..read_end {
+        work::step();
+        let word = &words[index];
+        // Options end at `--`, unless it is an option's value (`tar -cf
+        // --`, old-style `tar xf --`).
+        if word == "--"
+            && !words[index - 1].starts_with('-')
+            && !(TARS.contains(&name) && index < old_end)
+        {
+            return (values, false);
+        }
+        // More values than are judged: the line asks.
+        if values.len() > super::outbound::MAX_JUDGED_POSITIONS {
+            return (values, true);
+        }
+        // An option's value may be the word after the last one read.
+        let next = || words.get(index + 1).map(|next| (index + 1, next.clone()));
+        for (option, shortest, runs) in *options {
+            work::step();
+            let value = if option.starts_with("--") {
+                let (long, attached) = match word.split_once('=') {
+                    Some((long, value)) => (long, Some(value)),
+                    None => (word.as_str(), None),
+                };
+                if !(long.len() >= *shortest && option.starts_with(long)) {
+                    continue;
+                }
+                match attached {
+                    Some(value) => Some((index, value.to_string())),
+                    None => next(),
+                }
+            } else if let Some(cluster) = word.strip_prefix('-')
+                && !cluster.starts_with('-')
+                && let Some(letter) = option.chars().nth(1)
+                && let Some((at_letter, _)) = cluster.char_indices().find(|(_, ch)| *ch == letter)
+            {
+                let rest = &cluster[at_letter + 1..];
+                if rest.is_empty() {
+                    next()
+                } else {
+                    Some((index, rest.to_string()))
+                }
+            } else {
+                continue;
+            };
+            let Some((holder, value)) = value else {
+                continue;
+            };
+            let value = if *option == "--checkpoint-action" {
+                match value.strip_prefix("exec=") {
+                    Some(command) => command.to_string(),
+                    None => continue,
+                }
+            } else {
+                value
+            };
+            values.push(RunnerValue {
+                holder,
+                value,
+                runs: *runs,
+            });
+        }
+    }
+    (values, end > read_end)
+}
+
+/// #1449: how many words after a runner at `at` are read for its
+/// options, for a line whose command word is at `command`: all for the
+/// command itself when `whole` (the first one read in full: one per
+/// simple command), else `MAX_JUDGED_POSITIONS`.
+pub(super) fn limit_for(at: usize, command: usize, whole: bool) -> usize {
+    if at == command && whole {
+        usize::MAX
+    } else {
+        super::outbound::MAX_JUDGED_POSITIONS
+    }
+}
+
+/// #1449: where the options of the runner at `at` may be, for a line
+/// whose command word is at `command`: `flock`'s end at the command it
+/// runs (`flock F grep -c "$p"`); the others' (`su bob -c CMD`) at the end.
+pub(super) fn options_end(words: &[String], at: usize, command: usize) -> usize {
+    if at < command && basename(&words[at].to_lowercase()) == "flock" {
+        command + 1
+    } else {
+        words.len()
+    }
+}
+
+/// #1449: whether a runner among `words` up to the command word at `index`
+/// (`su -c`, `flock F -c`, `rsync -e`, `tar -I`; see [`OPERAND_RUNNERS`])
+/// runs an option value holding a value the classifier cannot see (`flock
+/// F -c "$(cat notes)"`), or has more words than are read
+/// ([`options_end`]).
+pub(super) fn runner_unseen(words: &[String], unseen: &[bool], index: usize) -> bool {
+    (0..=index.min(words.len().saturating_sub(1))).any(|at| {
+        work::step();
+        let end = options_end(words, at, index);
+        let (values, cut) = runner_values(words, at, end, limit_for(at, index, /*whole*/ true));
+        cut || values
+            .iter()
+            .any(|value| unseen.get(value.holder).copied().unwrap_or(true))
+    })
+}
+
 /// Whether a simple command runs an operand holding a value the classifier
 /// cannot see. `index` and `name` are its command word's index and
 /// lowercase basename; `unseen` marks the words holding such a value.
