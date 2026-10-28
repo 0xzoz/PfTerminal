@@ -69,23 +69,101 @@ pub(super) const CHANGERS: &[&str] = &["cd", "pushd", "popd", "chdir"];
 /// underscores removed (zsh option spelling).
 const SEARCHES: &[&str] = &["cdpath", "cdablevars", "oldpwd", "autocd"];
 
+/// sudo's short options that take no value.
+const SUDO_LETTERS: &str = "AbBEeHiKklnNPSsVv";
+
+/// sudo's short options that take a value, attached or the next word.
+const SUDO_VALUE_LETTERS: &str = "aCcDgpRrTtUu";
+
+/// sudo's long options that take a value, `=`-attached or the next word.
+const SUDO_VALUE_LONG: &[&str] = &[
+    "auth-type",
+    "chdir",
+    "chroot",
+    "close-from",
+    "command-timeout",
+    "group",
+    "login-class",
+    "other-user",
+    "prompt",
+    "role",
+    "type",
+    "user",
+];
+
+/// D217 (#1403): the positions of `words` that are sudo's own `-C N`
+/// (`-C N`, `-CN`, `-nC N`, `-C=N`): it closes file descriptors from N and
+/// names no folder. Only a sudo that is the command's first program counts,
+/// and only options read with certainty: an unknown option, `-h` (whose
+/// value sudo may take from the next word) or the first operand ends them,
+/// so any other `-C` still reads as a folder. `defines_code`: the action
+/// defines or imports code a name may run (`sudo() { env "$@"; }`), so
+/// `sudo` may not be sudo: none counts.
+pub(super) fn sudo_close_from(words: &[String], defines_code: bool) -> Vec<usize> {
+    let mut closes = Vec::new();
+    if defines_code {
+        return closes;
+    }
+    let Some(&at) = indirect::programs(words).first() else {
+        return closes;
+    };
+    let word = &words[at];
+    if !(word == "sudo" || (word.starts_with('/') && basename(word) == "sudo")) {
+        return closes;
+    }
+    let mut index = at + 1;
+    while let Some(word) = words.get(index) {
+        work::step();
+        if word == "--" || word.len() < 2 || !word.starts_with('-') {
+            break;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            index += 1 + usize::from(SUDO_VALUE_LONG.contains(&long));
+            continue;
+        }
+        let mut next = 0;
+        for (offset, letter) in word[1..].char_indices() {
+            work::step();
+            if SUDO_LETTERS.contains(letter) {
+                continue;
+            }
+            if !SUDO_VALUE_LETTERS.contains(letter) {
+                // `-h`, or an option sudo does not have.
+                return closes;
+            }
+            if letter == 'C' {
+                closes.push(index);
+            }
+            // The value is the rest of the word, or the next word.
+            next = usize::from(offset + letter.len_utf8() + 1 == word.len());
+            break;
+        }
+        index += 1 + next;
+    }
+    closes
+}
+
 /// Whether a command with these words runs the scripts it is given in a
 /// folder other than the line's: a wrapper's folder option in any
 /// spelling, `find -execdir`, `chroot` or a systemd `WorkingDirectory=`.
-pub(super) fn runs_elsewhere(texts: &[String]) -> bool {
-    elsewhere_at(texts).is_some()
+/// `defines_code`: see [`sudo_close_from`].
+pub(super) fn runs_elsewhere(texts: &[String], defines_code: bool) -> bool {
+    elsewhere_at(texts, defines_code).is_some()
 }
 
 /// The position of the first of `texts` that makes `runs_elsewhere` true:
 /// it holds for the texts before a position after it, and only those.
-pub(super) fn elsewhere_at(texts: &[String]) -> Option<usize> {
+pub(super) fn elsewhere_at(texts: &[String], defines_code: bool) -> Option<usize> {
     let mut letters: Vec<char> = Vec::new();
+    let closes = sudo_close_from(texts, defines_code);
     for (at, text) in texts.iter().enumerate() {
         work::step();
         let flag = text.split_once('=').map_or(text.as_str(), |(flag, _)| flag);
-        if FOLDER_FLAGS.contains(&flag)
+        // D217: sudo's `-C N` names no folder.
+        let close = closes.contains(&at);
+        if (!close && FOLDER_FLAGS.contains(&flag))
             // `env -C"$d"`: the folder attached.
-            || text.starts_with("-C")
+            || (!close && text.starts_with("-C"))
             || IN_FOUND_FOLDER.contains(&text.as_str())
             || ELSEWHERE.contains(&basename(text))
             || (flag.len() > 2

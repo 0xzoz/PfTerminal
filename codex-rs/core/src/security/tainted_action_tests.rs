@@ -6438,6 +6438,116 @@ fn folder_stack_and_wrapper_folders_ask() {
     }
 }
 
+/// D217 (#1403, owner-approved): sudo's `-C N` closes file descriptors from
+/// N and names no folder, so `sudo -C 3 ./x` runs (and is judged by) `./x`
+/// here. sudo's folder options (`-D`, `--chdir`) and every other `-C` still
+/// ask as before.
+#[cfg(unix)]
+#[test]
+fn d217_sudo_close_from_names_no_folder() {
+    let evil = "echo x >> ~/.zshenv\n";
+    let harmless = [("x", "true\n")];
+    let mut wrong = Vec::new();
+    for line in [
+        "sudo -C 3 ./x",
+        "sudo -C3 ./x",
+        "sudo -C=3 ./x",
+        "sudo -nC 3 ./x",
+        "sudo -nC3 ./x",
+        "sudo -E -u root -C 3 ./x",
+        "sudo --user root -C 3 -n ./x",
+        "/usr/bin/sudo -C 3 ./x",
+        "X=1 sudo -C 3 ./x",
+        "sudo --close-from=3 ./x",
+        "sudo --close-from 3 ./x",
+        "sudo -C 3 bash x",
+        "sudo -C 3 -- ./x",
+        // Quiet stays quiet.
+        "sudo ./x",
+        "sudo -u root ./x",
+        "sudo bash x",
+    ] {
+        if in_workspace(&harmless, line).is_some() {
+            wrong.push(line);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new(), "should be quiet");
+    // The script that runs is still judged.
+    for line in ["sudo -C 3 ./x", "sudo -C3 bash x", "sudo -C 3 sh -c 'sh x'"] {
+        if in_workspace(&[("x", evil)], line).is_none() {
+            wrong.push(line);
+        }
+    }
+    // A folder option of sudo or of another program, or a `-C` that may
+    // not be sudo's, still asks.
+    let there = [
+        ("run.sh", "true\n"),
+        ("sub/run.sh", evil),
+        ("defs.sh", "sudo() { env \"$@\"; }\n"),
+    ];
+    for line in [
+        "sudo -D sub ./run.sh",
+        "sudo -Dsub ./run.sh",
+        "sudo --chdir=sub ./run.sh",
+        "sudo -C 3 -D sub ./run.sh",
+        "sudo -D sub -C 3 ./run.sh",
+        "sudo -C 3 --chdir=sub ./run.sh",
+        "sudo -C 3 env -C sub ./run.sh",
+        "sudo -u root env -C sub ./run.sh",
+        "sudo -- env -C sub ./run.sh",
+        "sudo X=1 env -C sub ./run.sh",
+        "env -C sub sudo -C 3 ./run.sh",
+        "env -u sudo -C sub ./run.sh",
+        "env -a sudo -C sub ./run.sh",
+        "nice sudo -C sub ./run.sh",
+        "sudo -h host -C sub ./run.sh",
+        "sudo -X -C sub ./run.sh",
+        "alias sudo=env; sudo -C sub ./run.sh",
+        // `sudo` defined or imported as a function.
+        "sudo() { env \"$@\"; }; sudo -C sub ./run.sh",
+        "function sudo { env \"$@\"; }; sudo -C sub ./run.sh",
+        "bash -c 'sudo() { env \"$@\"; }; export -f sudo; bash -c \"sudo -C sub ./run.sh\"'",
+        "env 'BASH_FUNC_sudo%%=() { env \"$@\"; }' bash -c 'sudo -C sub ./run.sh'",
+        ". ./defs.sh; sudo -C sub ./run.sh",
+        "bash -c '. ./defs.sh; sudo -C sub ./run.sh'",
+        "BASH_ENV=./defs.sh bash -c 'sudo -C sub ./run.sh'",
+    ] {
+        if in_workspace(&there, line).is_none() {
+            wrong.push(line);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new(), "should ask");
+    for command in [
+        "sudo git -C ~ config -f .zshenv a.b v",
+        "sudo -C 3 git -C ~ config -f .zshenv a.b v",
+        "sudo -C 3 env -C ~ sh -c 'echo x >> .zshenv'",
+        "sudo -C 3 -D ~ sh -c 'echo x >> .zshenv'",
+        "sudo -C 3 tar -C ~ -xf a.tar .zshenv",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+    let words = |line: &str| line.split(' ').map(str::to_string).collect::<Vec<_>>();
+    for (line, closes) in [
+        ("sudo -C 3 ./x", vec![1]),
+        ("sudo -n -C3 -u root -nC 4 ./x -C 5", vec![2, 5]),
+        ("sudo --user root --close-from 3 -C 4 ./x", vec![5]),
+        ("sudo -DC ./x", vec![]),
+        ("sudo -h -C 3 ./x", vec![]),
+        ("env sudo -C 3 ./x", vec![]),
+        ("./sudo -C 3 ./x", vec![]),
+    ] {
+        assert_eq!(
+            unknown_folder::sudo_close_from(&words(line), false),
+            closes,
+            "{line}"
+        );
+    }
+}
+
 /// #1302 follow-up: programs named by a path, behind a wrapper's folder,
 /// are judged in linear work.
 #[cfg(unix)]

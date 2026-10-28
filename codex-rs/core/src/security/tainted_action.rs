@@ -572,6 +572,7 @@ impl Classifier {
             nested_scripts: 0,
             unknown_folder: 0,
             unseen_folder: false,
+            defines_code: false,
             launched: launched_git::Launch::default(),
             substitution_budget: Budget {
                 left: MAX_SUBSTITUTED_BYTES,
@@ -1293,6 +1294,10 @@ struct Classifier {
     launched: launched_git::Launch,
     /// #1065: bytes of variable values left to substitute.
     substitution_budget: Budget,
+    /// D217: a text read so far defines a function, trap or alias, or
+    /// imports a function (`BASH_FUNC_`): `sudo` may then not be sudo, so
+    /// its `-C` reads as a folder again.
+    defines_code: bool,
     /// #1065: bytes of command text, and command lines, lexed so far.
     classified_bytes: usize,
     classified_lines: usize,
@@ -1597,6 +1602,10 @@ impl Classifier {
         if self.homes.is_windows_view() {
             self.windows_text(command, cwd, depth);
         }
+        self.defines_code |= command.iter().any(|part| {
+            work::step();
+            part.contains("BASH_FUNC") || unknown_folder::defines(part)
+        });
         // #841: this line's own sed programs (nested lines have theirs).
         let outer_scope = std::mem::replace(&mut self.sed_scope, SedScope::of(command));
         let lexed = shell::simple_commands(command);
@@ -2376,6 +2385,8 @@ impl Classifier {
         // folder the line may be in, after the folder flags given so far.
         let mut flags: Vec<&str> = Vec::new();
         let mut other_bases = std::borrow::Cow::Borrowed(folders.others.as_slice());
+        // D217: sudo's `-C N` names no folder.
+        let closes = unknown_folder::sudo_close_from(words, self.defines_code);
         for (position, word) in words.iter().enumerate() {
             work::step();
             let written = simple.writes_to.contains(&position)
@@ -2384,6 +2395,7 @@ impl Classifier {
             let mut folder_value = false;
             if let Some(flag) = previous
                 && FOLDER_FLAGS.contains(&flag)
+                && !(position > 0 && closes.contains(&(position - 1)))
             {
                 folder = self.homes.resolve(word, &cwd);
                 self.chain_folder(&mut chained, word, &cwd);
@@ -2391,6 +2403,7 @@ impl Classifier {
                 flags.push(word);
             } else if let Some((flag, value)) = word.split_once('=')
                 && FOLDER_FLAGS.contains(&flag)
+                && !closes.contains(&position)
             {
                 folder = self.homes.resolve(value, &cwd);
                 self.chain_folder(&mut chained, value, &cwd);
@@ -2528,7 +2541,7 @@ impl Classifier {
         let read = command
             .filter(|_| indirect::invocation(words).is_none())
             .map(|(index, _)| *index);
-        let elsewhere = unknown_folder::elsewhere_at(words);
+        let elsewhere = unknown_folder::elsewhere_at(words, self.defines_code);
         for at in indirect::programs(words) {
             work::step();
             let word = &words[at];
@@ -2679,7 +2692,7 @@ impl Classifier {
         let elsewhere = if self.homes.windows_paths() {
             None
         } else {
-            unknown_folder::elsewhere_at(words)
+            unknown_folder::elsewhere_at(words, self.defines_code)
         };
         let Some(invocation) = indirect::invocation(words) else {
             let word = &words[*index];
