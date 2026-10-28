@@ -183,7 +183,7 @@ jobs:
           mkdir -p "$out"
           for _ in 1 2 3 4 5 6; do
             find "$HOME/Library/Logs/DiagnosticReports" /Library/Logs/DiagnosticReports \
-              -maxdepth 1 -name '*.ips' -mmin -70 -exec cp -p {} "$out/" \; 2>/dev/null
+              -maxdepth 1 -name '*.ips' -mmin -70 -exec cp -p {} "$out/" \; 2>/dev/null || true
             [ -n "$(ls -A "$out")" ] && break
             sleep 5
           done
