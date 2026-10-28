@@ -54,9 +54,11 @@ const REPORT_LIMIT: u64 = 1 << 20;
 const TEMPORARY_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 /// The largest record file read.
 const RECORD_LIMIT: u64 = 16 << 20;
-/// Leave large cleanup backlogs for later sweeps rather than removing them
-/// all while holding the record folder's lock.
-const SWEEP_REMOVAL_LIMIT: usize = 64;
+/// Leave large cleanup backlogs for later sweeps rather than working through
+/// them all while holding the record folder's lock: a sweep reads the mount
+/// points of every process of this user at most this many times, once per
+/// placeholder it tries to remove, whether or not that removes it.
+const SWEEP_MOUNT_READ_LIMIT: usize = 64;
 /// How long a run waits for the record folder's lock (a backstop: the lock
 /// is a write lock, which a command that sees the folder read-only cannot
 /// take). Then the run goes on without the record, as before (nothing
@@ -222,6 +224,9 @@ struct Journal {
     /// Set when the lock could not be taken in time: from then on this run
     /// records nothing and removes nothing.
     unavailable: bool,
+    /// Reads the mount points of this user's processes ([`mount_points`];
+    /// replaced in tests).
+    mount_points: Box<dyn Fn() -> Option<HashSet<Vec<u8>>> + Send>,
 }
 
 static JOURNAL: Mutex<Option<Journal>> = Mutex::new(None);
@@ -307,6 +312,7 @@ fn open_journal(dir: &Path) -> io::Result<Journal> {
         lock_file,
         held: false,
         unavailable: false,
+        mount_points: Box::new(mount_points),
     })
 }
 
@@ -515,8 +521,15 @@ enum Removal {
 }
 
 /// Removes the placeholder at `real` (reached without following a link)
-/// when it is still exactly what was made and no process mounts over it.
-fn remove_if_made(path: &Path, real: &Path, kind: Kind, identity: &Identity) -> Removal {
+/// when it is still exactly what was made and no process mounts over it
+/// (by the mount points `read_mounts` reads now).
+fn remove_if_made(
+    path: &Path,
+    real: &Path,
+    kind: Kind,
+    identity: &Identity,
+    read_mounts: &dyn Fn() -> Option<HashSet<Vec<u8>>>,
+) -> Removal {
     let still_made = || match crate::placeholder_registry::find_without_links(real) {
         Ok(Some(found)) if matches_made(&found, kind, identity) => Ok(found),
         Ok(Some(_)) => Err(Removal::Kept(Kept::Changed)),
@@ -528,7 +541,7 @@ fn remove_if_made(path: &Path, real: &Path, kind: Kind, identity: &Identity) -> 
     }
     // A live run that left no record (an older helper, a record it could
     // not write, another Corbanu home) may mount over it: read now.
-    if mounted_anywhere(&[path, real]) {
+    if mounted_anywhere(&[path, real], read_mounts()) {
         return Removal::Failed;
     }
     // Checked again last, right before the removal.
@@ -558,9 +571,10 @@ fn remove_if_made(path: &Path, real: &Path, kind: Kind, identity: &Identity) -> 
 
 /// Whether any of `paths` is a mount point in the mount namespace of any of
 /// this user's processes (a sandbox's mounts are at the paths they have on
-/// the host), read now. When that cannot be told, as if it were.
-fn mounted_anywhere(paths: &[&Path]) -> bool {
-    mount_points().as_ref().is_none_or(|points| {
+/// the host), by `points` as read now. When that cannot be told, as if it
+/// were.
+fn mounted_anywhere(paths: &[&Path], points: Option<HashSet<Vec<u8>>>) -> bool {
+    points.as_ref().is_none_or(|points| {
         paths
             .iter()
             .any(|path| points.contains(path.as_os_str().as_bytes()))
@@ -1068,9 +1082,21 @@ impl Journal {
         let in_use = |path: &Path, real: &Path| {
             live.iter().any(|(_, record)| uses(record, path, real)) || used_by_registry(path, real)
         };
-        let mut removals_left = SWEEP_REMOVAL_LIMIT;
+        // Every read of the mount points counts. Once they cannot be read,
+        // every later placeholder would fail the same way, after reading
+        // them again: the rest is left for a later sweep.
+        let reader = &self.mount_points;
+        let mount_reads = std::cell::Cell::new(0_usize);
+        let unreadable = std::cell::Cell::new(false);
+        let read_mounts = || {
+            mount_reads.set(mount_reads.get() + 1);
+            let points = reader();
+            unreadable.set(unreadable.get() || points.is_none());
+            points
+        };
+        let exhausted = || mount_reads.get() >= SWEEP_MOUNT_READ_LIMIT || unreadable.get();
         for (stem, record) in ended {
-            if removals_left == 0 {
+            if exhausted() {
                 break;
             }
             let mut kept = Vec::new();
@@ -1084,7 +1110,7 @@ impl Journal {
                 if matches!(entry, Entry::Uses { .. }) {
                     continue;
                 }
-                if removals_left == 0 {
+                if exhausted() {
                     // A child removed in this sweep can change a deferred
                     // parent. Keep only the identity change already checked
                     // below, so the next sweep can still check it exactly.
@@ -1119,12 +1145,11 @@ impl Journal {
                         identity,
                     } => {
                         let identity = expected.get(real).unwrap_or(identity);
-                        match remove_if_made(path, real, *kind, identity) {
+                        match remove_if_made(path, real, *kind, identity, &read_mounts) {
                             Removal::Removed {
                                 folder_before,
                                 folder_after,
                             } => {
-                                removals_left -= 1;
                                 // Only the change an unlink makes: times and
                                 // size, never its mode or owner (a chmod or
                                 // chown in between). Both readings come from
