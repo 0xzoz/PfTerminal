@@ -126,6 +126,9 @@ struct Sed {
     /// it followed did not happen: without its program file there, sed
     /// fails.
     other_folder: bool,
+    /// #1436: the reading cannot know the folder it runs in, so a program
+    /// file named relative to it may be another.
+    unknown: bool,
 }
 
 /// What quoted text is to the command that gets it.
@@ -222,6 +225,8 @@ impl Classifier {
             },
             unseen: false,
             unseen_in_substitution: false,
+            searched: false,
+            back_unsure: false,
         };
         let mut found = Found {
             braces: command.iter().any(|arg| arg.contains('{')),
@@ -372,10 +377,13 @@ impl Classifier {
                     certain,
                 );
                 // #1283: `cd "$d"` goes where this reading cannot follow.
+                // #1436: as written, homes expanded: path cleanup would
+                // drop `$X` from `$X/..` (and a command's output).
                 folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
                     && texts[index + 1..].iter().any(|text| {
                         work::step();
-                        self.homes.resolve(text, "").contains(['$', '`'])
+                        let text = self.homes.expand_homes(text);
+                        text.contains(['$', '`']) || outputs::unseen_place(&text)
                     });
             }
             // #1309: nor where `CDPATH`, `cdable_vars`, `OLDPWD`, a
@@ -710,6 +718,8 @@ impl Classifier {
                     aside: folders.aside.inner(),
                     unseen: folders.unseen,
                     unseen_in_substitution: folders.unseen_in_substitution,
+                    searched: folders.searched,
+                    back_unsure: folders.back_unsure,
                 };
                 let reading = quoted::commands(&word.text);
                 found.unreadable |= reading.too_deep || reading.unsure;
@@ -874,6 +884,10 @@ impl Classifier {
                         .as_deref()
                         .is_none_or(|written| name(written) == name(&file.text))
                 });
+            // #1436: the file here is still read.
+            if sed.unknown && self.relative_place(&file.text) {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
             let path = self.homes.resolve(&file.text, &sed.cwd);
             match (rewritten, self.read_file(&path, &file.text, &sed.cwd)) {
                 (false, FileText::Text(text)) => chunks.push(text),
@@ -1124,6 +1138,7 @@ fn collect_seds(
                     fed,
                     replaced,
                     other_folder,
+                    unknown: folders.unchecked || folders.unseen || folders.lost,
                 });
             }
         }

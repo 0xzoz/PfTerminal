@@ -7506,7 +7506,8 @@ fn d194_zsh_append_redirections_keep_a_change_certain() {
             "cd /home/fixture; make >>&| cp a b; cd /tmp && echo x >> .zshenv",
             // The word reading splits `>|` as a pipe: the file `fi` reaches
             // `certain_cd::before` as a compound keyword, which ends what
-            // `|| exit` set aside.
+            // `|| exit` set aside. #1436: stricter than needed (the shell
+            // writes a file `fi` or `done` in `/tmp`).
             "cd /home/fixture; cd /tmp || exit; make >| fi; echo x >> .zshenv",
             "cd /home/fixture; cd /tmp || exit; make >>| done; echo x >> .zshenv",
         ]
@@ -8987,6 +8988,149 @@ fn issue_1405_checks_are_linear() {
     ] {
         work::assert_linear(label, |scale| {
             let _ = script(&format!("{} a < notes", unit.repeat(400 * scale)));
+        });
+    }
+}
+
+/// #1436: more ways a line reaches a folder the reading cannot see: a
+/// nested script after `cd "$X/.."`, a `cd` that `CDPATH`, `OLDPWD` or
+/// `cdable_vars` sends elsewhere, a loop's later pass, and a script named
+/// relative to such a folder.
+#[cfg(unix)]
+#[test]
+fn issue_1436_unseen_folders_ask() {
+    let many = format!(
+        "{}for i in 1 2; do echo x >> .zshrc; cd ~; done",
+        "for i in 1 2; do cd /tmp; done; ".repeat(9)
+    );
+    // These were quiet on main.
+    let quiet = [
+        // A nested script after `cd "$X/.."`.
+        "cd \"$NVM_DIR/..\" && sh -c 'echo x >> .zshrc'",
+        "cd \"$X/..\" && bash -c 'git checkout -- .zshrc'",
+        "cd \"$(cat f)/..\" && sh -c 'echo x >> .zshrc'",
+        // `cd` searches.
+        "CDPATH=\"$X\" cd sub && echo x >> .zshrc",
+        "export CDPATH=/home; cd fixture && echo x >> .zshrc",
+        "export OLDPWD=\"$X\"; cd - && echo x >> .zshrc",
+        "shopt -s cdable_vars; cd X && echo x >> .zshrc",
+        "cd - && echo x >> .zshrc",
+        // A loop's later pass.
+        "for i in 1 2; do echo x >> .zshrc; cd \"$X\"; done",
+        "for i in 1 2; do echo x >> .zshrc; cd ~; done",
+        "while true; do git checkout -- .zshrc; cd /home/fixture; done",
+        "for i in 1 2\ndo\n  echo x >> .zshrc\n  cd ~\ndone",
+        "until false; do for j in a; do echo x >> .zshrc; done; cd ~; done",
+        "cd /home/fixture/a/b; for i in 1 2 3; do echo x >> .zshrc; cd ..; done",
+        // Past `MAX_REPLAYED_LOOPS`, a loop with a change starts unknown.
+        &many,
+        // Review 1: a change that may fail, a variable, `cd -` or the
+        // stack a pass leaves, a deeper pass that climbs back.
+        "for i in 1 2; do echo x >> .zshrc; cd ~; cd nope; done",
+        "D=.; for i in 1 2; do cd \"$D\"; echo x >> .zshrc; D=~; done",
+        "cd /tmp; for i in 1 2; do cd -; echo x >> .zshrc; cd ~; cd /tmp; done",
+        "pushd ~; pushd /tmp; pushd /var; for i in 1 2; do popd; echo x >> .zshrc; cd /var; done",
+        "cd /home/fixture/w; for i in 1 2 3 4; do cd d; echo x >> ../../../../../.zshrc; done",
+        // Review 1: `cd -` after a change that may not have happened.
+        "cd /nonexistent; cd - && echo x >> .zshrc",
+        "(cd /tmp); cd - && echo x >> .zshrc",
+        "x=$(cd /tmp); cd - && echo x >> .zshrc",
+        "cd ~- && echo x >> .zshrc",
+        // Review 2: a value that climbs, a pass that comes back after a
+        // change that may fail.
+        "P=../../../../..; cd /home/fixture/w; for i in 1 2 3 4; do cd d; echo x >> $P/.zshrc; done",
+        "cd /home/fixture/w; for i in 1 2; do echo x >> .zshrc; cd nope; cd ..; done",
+        // Review 3: a pass from another folder leaves one more.
+        "cd /home/fixture/a/w; for i in 1 2 3; do echo x >> .zshrc; cd nope; cd ..; done",
+    ]
+    .into_iter()
+    .filter(|command| script(command).is_none())
+    .collect::<Vec<_>>();
+    assert_eq!(quiet, Vec::<&str>::new());
+    // A script named relative to a folder the reading cannot see: a
+    // harmless file of that name here does not keep the line quiet.
+    let here = [
+        ("run.sh", "true\n"),
+        ("tool.py", "print(1)\n"),
+        ("prog.sed", "p\n"),
+        ("notes", "a\n"),
+    ];
+    let mut wrong = Vec::new();
+    for line in [
+        "cd \"$X\" && sh ./run.sh",
+        "cd \"$X\" && bash run.sh",
+        "cd \"$X\" && ./run.sh",
+        "cd \"$X\" && sh < run.sh",
+        "cd \"$X\" && source run.sh",
+        "cd \"$X\" && . ./run.sh",
+        "cd \"$(cat f)\" && python3 tool.py",
+        "cd \"$X/..\" && bash run.sh",
+        "x=$(cd \"$X\" && sh ./run.sh)",
+        // Review 1: a decoded payload, a sed program file.
+        "cd \"$X/..\" && echo YmFzaCBydW4uc2g= | base64 -d | sh",
+        "cd \"$X/..\" && sed -n -f prog.sed notes",
+    ] {
+        if in_workspace(&here, line).is_none() {
+            wrong.push(line);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+    // Review 1: what the file here holds is still found.
+    let vault = [("run.sh", "corbanu vault get k\n")];
+    assert_eq!(
+        in_workspace(&vault, "cd \"$X/..\" && bash run.sh"),
+        Some(ProtectedActionKind::Vault)
+    );
+    // Ordinary lines stay quiet.
+    for line in [
+        "cd \"$PWD\" && sh ./run.sh",
+        "sh ./run.sh && cd \"$X\"",
+        "cd \"$(git rev-parse --show-toplevel)\" && sh ./run.sh",
+    ] {
+        if in_workspace(&here, line).is_some() {
+            wrong.push(line);
+        }
+    }
+    for command in [
+        "for x in a b; do cd sub; make > log; cd ..; done",
+        "for x in a b; do (cd sub && make > log); done",
+        "for f in *.md; do wc -l \"$f\" >> counts.txt; done",
+        "for x in a b; do echo \"$x\" >> list.txt; done; cd sub",
+        "cd /tmp && cd - && make > log",
+        "while read -r l; do echo \"$l\"; done < notes > out.txt",
+        "cd ~/proj && make > log",
+        // Review 1: naming a search name does not set it; a loop's later
+        // passes do not count its commands again.
+        "echo \"$OLDPWD\"; cd sub && make > log",
+        "for i in 1 2; do cd /tmp/w; sed -n 1p f; done",
+        "for i in 1 2; do cd ~/proj; bash -c 'make'; done",
+    ] {
+        if script(command).is_some() {
+            wrong.push(command);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new());
+}
+
+/// #1436: the checks stay linear.
+#[test]
+#[cfg_attr(
+    windows,
+    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
+)]
+fn issue_1436_checks_are_linear() {
+    for (label, unit) in [
+        ("loops", "for i in 1 2; do echo x >> f; cd ~; done; "),
+        ("searches", "CDPATH=x cd /a; "),
+        ("unseen scripts", "cd /tmp && cd \"$X\" && sh ./r.sh; "),
+        ("nested", "cd \"$X/..\" && sh -c 'echo x'; "),
+        (
+            "branches",
+            "for i in 1 2; do echo x >> f; cd nope; cd ..; done; ",
+        ),
+    ] {
+        work::assert_linear(label, |scale| {
+            let _ = script(&unit.repeat(40 * scale));
         });
     }
 }
