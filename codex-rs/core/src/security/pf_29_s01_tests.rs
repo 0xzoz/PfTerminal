@@ -8,6 +8,7 @@ use tempfile::TempDir;
 
 use super::preflight::ConfigLayerInput;
 use super::preflight::Disposition;
+use super::preflight::Drift;
 #[cfg(unix)]
 use super::preflight::EntryStatus;
 use super::preflight::Finding;
@@ -583,6 +584,92 @@ fn pf_29_s01_drift_between_preflight_and_activation() {
 
     let (_, flags) = first.recheck(&sources, ReadinessFlags::default());
     assert!(flags.readiness_changed);
+}
+
+/// #802: Corbanu's own writes to its history stores and state databases
+/// (start-up settles them for some seconds) are not drift; a change to any
+/// other reviewed item, or a symlink at a store, still is.
+#[test]
+fn pf_29_s01_corbanu_own_store_writes_are_not_drift() {
+    let fixture = Fixture::new();
+    let corbanu = fixture.corbanu();
+    fixture.write(&corbanu.join("pfterminal_logs_2.sqlite"), b"page one");
+    fixture.write(&corbanu.join("sessions/2026/10/27/rollout-a.jsonl"), b"{}");
+    fixture.write(&corbanu.join("history.jsonl"), b"one\n");
+    fixture.write(&corbanu.join(".env"), b"PLAIN=1\n");
+    let sources = fixture.sources();
+    let first = fixture.run(&sources);
+
+    // What start-up and a running session write: a checkpoint, a new
+    // database, a new store and appended history, with a rollout added.
+    fixture.write(&corbanu.join("pfterminal_logs_2.sqlite"), b"page one, two");
+    fixture.write(&corbanu.join("pfterminal_state_5.sqlite"), b"state");
+    fixture.write(&corbanu.join("shell_snapshots/s.sh"), b"snapshot");
+    fixture.write(&corbanu.join("history.jsonl"), b"one\ntwo\n");
+    fixture.write(&corbanu.join("sessions/2026/rollout-b.jsonl"), b"{}");
+    let (second, drift) = first.recheck(&sources, ALL_ON);
+    assert!(drift.is_empty(), "{drift:?}");
+
+    // History cleared is not drift either.
+    std::fs::remove_file(corbanu.join("history.jsonl")).expect("remove history");
+    let (_, drift) = second.recheck(&sources, ALL_ON);
+    assert!(drift.is_empty(), "{drift:?}");
+
+    // Another file in the Corbanu home still counts, and so does a folder
+    // named like a database.
+    fixture.write(&corbanu.join(".env"), b"PLAIN=2\n");
+    fixture.write(&corbanu.join("odd.sqlite/inside"), b"x");
+    let (third, drift) = second.recheck(&sources, ALL_ON);
+    let id = |location: &str| {
+        third
+            .inventory
+            .findings
+            .iter()
+            .find(|finding| finding.location.ends_with(location))
+            .unwrap_or_else(|| panic!("no finding for {location}"))
+            .id
+            .clone()
+    };
+    assert_eq!(
+        drift,
+        Drift {
+            added: vec![id("odd.sqlite")],
+            changed: vec![id(".env")],
+            ..Drift::default()
+        }
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn pf_29_s01_symlink_at_a_corbanu_store_is_drift() {
+    let fixture = Fixture::new();
+    let corbanu = fixture.corbanu();
+    fixture.write(&corbanu.join("log/codex-tui.log"), b"line");
+    let sources = fixture.sources();
+    let first = fixture.run(&sources);
+
+    std::fs::rename(corbanu.join("log"), fixture.home().join("elsewhere")).expect("move log");
+    std::os::unix::fs::symlink(fixture.home().join("elsewhere"), corbanu.join("log"))
+        .expect("symlink");
+    let (second, drift) = first.recheck(&sources, ALL_ON);
+    assert_eq!(drift.changed.len(), 1, "{drift:?}");
+
+    // A symlink that appears where no store was also counts, a database
+    // included, and so does a symlinked store going away.
+    std::os::unix::fs::symlink(fixture.home().join("missing"), corbanu.join("sessions"))
+        .expect("dangling symlink");
+    std::os::unix::fs::symlink(
+        fixture.home().join("elsewhere/codex-tui.log"),
+        corbanu.join("x.sqlite"),
+    )
+    .expect("database symlink");
+    let (third, drift) = second.recheck(&sources, ALL_ON);
+    assert_eq!(drift.added.len(), 2, "{drift:?}");
+
+    std::fs::remove_file(corbanu.join("log")).expect("remove log symlink");
+    let (_, drift) = third.recheck(&sources, ALL_ON);
+    assert_eq!(drift.removed.len(), 1, "{drift:?}");
 }
 
 #[test]
