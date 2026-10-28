@@ -9704,6 +9704,31 @@ fn issue_1276_launcher_input_checks_are_linear() {
     assert_eq!(script(&line), None);
 }
 
+/// #1276 items 8 to 10 (tmux and other line runners under a launcher, fish
+/// `-C`, shell options that take a value before `-c`) already ask on main;
+/// kept as regressions.
+#[test]
+fn issue_1276_line_runners_and_shell_options_ask() {
+    for command in [
+        "xargs -I% tmux new 'cd .; git config %' < f",
+        "xargs -I% tmux new-session -d 'git config %' < f",
+        "xargs -I% tmux run-shell 'git config %' < f",
+        "tmux new 'git config core.pager sh'",
+        "xargs -I% watch 'git config %' < f",
+        "fish -C 'git config core.pager sh'",
+        "fish -c true -C 'git config core.pager sh'",
+        "fish --init-command 'git config core.pager sh'",
+        "fish --init-command='git config core.pager sh'",
+        "xargs -I% zsh --emulate sh -c 'git config %' < f",
+        "xargs -I% ksh93 -R file -c 'git config %' < f",
+        "xargs -I% mksh -T tty -c 'git config %' < f",
+        "zsh --emulate sh -c 'git config core.pager sh'",
+        "mksh -T tty -c 'git config core.pager sh'",
+    ] {
+        assert!(script(command).is_some(), "{command}");
+    }
+}
+
 /// #1276 item 3: a `git config` word holding a value the classifier cannot
 /// see outside double quotes may be several words, as `"$@"` may: it asks
 /// as a write unless the visible words make it a read. So does such a
