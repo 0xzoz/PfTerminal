@@ -1528,8 +1528,8 @@ const BREAKAWAY_PROBE_TEST: &str = "unified_exec::tests::legacy_breakaway_probe_
 const BREAKAWAY_PROBE_RESULT: &str = "breakaway-probe: ";
 
 /// The command of [`legacy_command_cannot_break_away_from_its_job`]: starts
-/// a short `cmd.exe` with `CREATE_BREAKAWAY_FROM_JOB` and reports whether
-/// Windows allowed it. Does nothing otherwise.
+/// a short `cmd.exe` normally, then with `CREATE_BREAKAWAY_FROM_JOB`, and
+/// reports whether Windows allowed each. Does nothing otherwise.
 #[test]
 fn legacy_breakaway_probe_entry() {
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -1543,44 +1543,49 @@ fn legacy_breakaway_probe_entry() {
     if std::env::var_os(BREAKAWAY_PROBE_ENV).is_none() {
         return;
     }
-    let mut command_line = crate::winutil::to_wide(format!(
-        "\"{}\" /d /c exit 0",
-        system32_exe("cmd.exe").display()
-    ));
-    // SAFETY: zeroed plain-data structs; the call fills in `info`.
-    let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
-    startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
-    let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
-    // SAFETY: every pointer refers to a live buffer above; nothing is inherited.
-    let started = unsafe {
-        CreateProcessW(
-            std::ptr::null(),
-            command_line.as_mut_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            /*binherithandles*/ 0,
-            CREATE_BREAKAWAY_FROM_JOB | CREATE_NO_WINDOW,
-            std::ptr::null(),
-            std::ptr::null(),
-            &startup,
-            &mut info,
-        )
-    } != 0;
-    // SAFETY: read right after the call.
-    let error = if started {
-        0
-    } else {
-        unsafe { GetLastError() }
-    };
-    if started {
+    let start = |flags: u32| -> (bool, u32) {
+        let mut command_line = crate::winutil::to_wide(format!(
+            "\"{}\" /d /c exit 0",
+            system32_exe("cmd.exe").display()
+        ));
+        // SAFETY: zeroed plain-data structs; the call fills in `info`.
+        let mut startup: STARTUPINFOW = unsafe { std::mem::zeroed() };
+        startup.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+        let mut info: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: every pointer refers to a live buffer above; nothing is inherited.
+        let started = unsafe {
+            CreateProcessW(
+                std::ptr::null(),
+                command_line.as_mut_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                /*binherithandles*/ 0,
+                CREATE_NO_WINDOW | flags,
+                std::ptr::null(),
+                std::ptr::null(),
+                &startup,
+                &mut info,
+            )
+        } != 0;
+        if !started {
+            // SAFETY: read right after the call.
+            return (false, unsafe { GetLastError() });
+        }
         // SAFETY: returned by the call above and not used again.
         unsafe {
             CloseHandle(info.hThread);
             CloseHandle(info.hProcess);
         }
-    }
+        (true, 0)
+    };
+    // The control shows a refusal below comes from the job, not from the
+    // token or the desktop.
+    let (control, control_error) = start(/*flags*/ 0);
+    let (started, error) = start(CREATE_BREAKAWAY_FROM_JOB);
     // Own line: libtest prints the test name without a newline first.
-    println!("\n{BREAKAWAY_PROBE_RESULT}started={started} error={error}");
+    println!(
+        "\n{BREAKAWAY_PROBE_RESULT}control={control}/{control_error} breakaway={started}/{error}"
+    );
 }
 
 /// #733: a legacy command can't start a child outside its job. With
@@ -1640,7 +1645,7 @@ fn legacy_command_cannot_break_away_from_its_job() {
     // 5 is ERROR_ACCESS_DENIED: the job refuses the breakaway.
     assert_eq!(
         (exit_code, result),
-        (0, Some("started=false error=5")),
+        (0, Some("control=true/0 breakaway=false/5")),
         "stdout={stdout:?}\n{log}"
     );
 }
