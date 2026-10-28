@@ -15,7 +15,23 @@ th{background:#f5f5f7}.warn{background:#fff4e5;border-left:4px solid #f0a020;pad
 </head>
 <body>
 <h1>Corbanu Terminal — management handoff</h1>
-<p><small>Update 2026-10-28 ~16:15Z (earlier: 10-28 03:15Z; resume update, 2026-10-26; closeout update, 2026-10-22). Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code>. This update supersedes earlier operational snapshots below.</small></p>
+<p><small>Update 2026-10-28 ~21:30Z (earlier: 10-28 16:15Z and 03:15Z; resume update, 2026-10-26; closeout update, 2026-10-22). Owner: <b>Travis</b>. Repository: <code>CorbanuCore/CorbanuTerminal</code>. This update supersedes earlier operational snapshots below.</small></p>
+<div class="note"><b>Update 2026-10-28 ~21:30Z (handoff-doc14).</b> Sources: <code>$W/todo.md</code> from its 16:13Z line through 21:38Z, the worker results in <code>$HOME/.corbanu-workers/*.result.md</code> written since 16:00Z
+(fix-1476, acct-d223, cat-128, sec-linux, docs-28, rel-1467, sec-722, sec-left, ci-rg, sec-1472, ws-1343, ci-maint, sec-932p2, sec-943b, crash-1491), the coordinator's comments on #1412, #1467, #722, #1468, #943, #932, #128, #1474 and #1483,
+and GitHub re-checked at about 21:30Z. Main is at <code>bb05734780</code> (#1498, 21:18Z; its postmerge run, and those for #1502/#1503, were still running at this snapshot).
+<ul>
+<li><b>16 PRs merged</b> after #1487's snapshot (#1483 at 16:49Z – #1498 at 21:18Z), plus #1487 itself at 16:57Z: 14 ours and 2 from citadelculture (#1376 and #1374, both finished with credit). Section 8.0h lists them by area.
+(#1471, D225, merged at 15:45Z and is in 8.0g.)</li>
+<li><b>No owner answers since 10:27Z.</b> <b>Pending: D219 and D235–D255</b> (22 decisions, section 9, each with options and a recommendation). D253 (the D156 fix as its own PR before W3) was started as decision-free because
+the fix only adds prompts (sec-932h); Travis can still say no.</li>
+<li><b>Main postmerge was red from 17:30Z to 20:50Z.</b> #1376 (D226) made the Linux database scan tests require ripgrep; the rust-ci-full Linux test shards had no <code>rg</code>, so every postmerge run from <code>bd494990aa</code> (#1376) through
+<code>fbbe725af5</code> (#1497) failed there. ci-rg's #1500 installs the release's pinned ripgrep 15.2.0 in those shards and in the nightly Bazel Linux job; the run on <code>c8d56d89d3</code> was green (shards 5148/5148 and 4939/4939), as were #1501's and #1374's.</li>
+<li><b>Nightly:</b> #636 is closed: scheduled run 40722950171 on <code>0f19feaf08</code> was green, the first green scheduled nightly since 10-07. Tonight's scheduled nightly must show <code>ripgrep 15.2.0</code> in “Bazel test on ubuntu-24.04” (#1500's second step).</li>
+<li><b>Installed build:</b> main <code>c8d56d89d3</code> (#1500), installed 21:17Z per <code>todo.md</code>; earlier today <code>e344afbab7</code> (#1483) at 17:58Z (section 7).</li>
+<li><b>Windows gate still not run</b> (PC not online); #1080 stays draft at <code>db6b6fa35e</code>.</li>
+<li><b>Running:</b> win-733 (#1505), contrib-990 (#990/#982), sec-932h (D156 fix + measuring harness), fu-1504 (#1508, #1509), sec-943c (#1510) and this handoff-doc14 (section 10).</li>
+</ul></div>
+<details><summary>Update 2026-10-28 ~16:15Z (handoff-doc13; historical, superseded by the box above)</summary>
 <div class="note"><b>Update 2026-10-28 ~16:15Z (handoff-doc13).</b> Sources: <code>$W/todo.md</code> after the 03:15Z handoff (#1439) through its 16:13Z line, the worker results in
 <code>$HOME/.corbanu-workers/*.result.md</code> written since 10-26, <code>$W/triage-20261028.md</code>, <code>wave2-common.md</code>, and GitHub re-checked at about 16:15Z. Main is at <code>2619817aef</code> (#1481, 16:09Z; its postmerge run was still running at this snapshot).
 <ul>
@@ -33,7 +49,8 @@ notes it at 09:46Z and “reachable again” at 09:50Z); githubstatus showed no 
 <li><b>Installed build:</b> main <code>82d22facc4</code> (#1484), installed 15:41Z (section 7).</li>
 <li><b>Running:</b> acct-d223 (#1483, D228), sec-linux (#1376, D226), ci-maint (scheduled nightly, #1298, #982, #796), cat-128 (#128/#368; #1486 open) and this handoff-doc13 (section 10).</li>
 </ul></div>
-<details><summary>Update 2026-10-28 ~03:15Z (handoff-doc12; historical, superseded by the box above)</summary>
+</details>
+<details><summary>Update 2026-10-28 ~03:15Z (handoff-doc12; historical, superseded by the boxes above)</summary>
 <div class="note"><b>Update 2026-10-28 ~03:15Z (handoff-doc12).</b> Sources: <code>$W/todo.md</code> from “2026-10-26 19:05Z TRAVIS: Resume everything” through its 03:13Z line, the worker results in
 <code>$HOME/.corbanu-workers/*.result.md</code> written since 10-26, <code>wave2-common.md</code>, and GitHub re-checked at about 03:15Z. Main is at <code>1a613a7e4c</code> (#1433, 03:13Z; its postmerge run was still running at this snapshot).
 <ul>
@@ -608,6 +625,16 @@ coordinator killed it (12:09Z/13:09Z). Tell running workers directly and act on 
 <li><b>Internal-disk build dirs.</b> Free space dipped to 32 GB again around 15:52Z and recovered to 49 GB on its own (transient). A user process outside the program (a node <code>x-bookmark-backfill</code>) held
 12.7 GB of swap at 13:50Z. Keep all program build dirs on CorbanuDrive or glitch.</li>
 </ul>
+<h3>Wave 2 additions (2026-10-28, since #1487): lessons</h3>
+<p>No new standing rule in this stretch; everything in <code>wave2-common.md</code> still applies. Lessons (from the coordinator and <code>todo.md</code>):</p>
+<ul>
+<li><b>Round-script freeze false positive.</b> The coordinator's round script treats “Operation not permitted” in a worker's log as the #616 sign that macOS revoked access to CorbanuDrive. Sandbox tests print that text as their
+expected output, so a worker running them looks frozen when it isn't. Before acting, check the process itself (CPU, log growth, whether it can still read its folder); kill only a reviewer that really sits at 0% CPU with no output for 10+ minutes.</li>
+<li><b>Dependency PRs wait for the V8 from-source job.</b> A PR that changes dependencies (here #1498's notify bump and <code>MODULE.bazel.lock</code>) triggers v8-canary's from-source V8 build: on #1498 it ran from 18:20Z to 21:17Z.
+Plan for about three hours of CI on such PRs and do other work meanwhile; it is not a hang.</li>
+<li><b>A main-only test lane can go red after a green PR.</b> #1376's new ripgrep requirement passed PR CI because no PR job runs the Linux sandbox tests; only rust-ci-full (postmerge) and the nightly Bazel Linux job do.
+Main was red for about 3 h 20 min until #1500 (ci-rg). When a PR adds a tool requirement to tests, check which lanes actually run them.</li>
+</ul>
 
 <h2>4. Merge and CI rules</h2>
 <ul>
@@ -830,7 +857,15 @@ whose targets and temp folders are on CorbanuDrive. Travis was told. At handoff-
 It execs <code>.codex-work/corbanu-terminal/bin/corbanu</code>, a <b>symlink</b> to the real binary
 <code>.codex-work/integration-build-20260922a/integration-package-dev/bin/corbanu</code>. <b>Install over the real binary, never over the launcher</b>: at 10:53–10:56Z the
 coordinator briefly copied a binary over the launcher by mistake and restored it; sessions started in those three minutes ran without <code>activate.sh</code>'s environment.</li>
-<li><b>Current install (2026-10-28 15:41Z):</b> main <b><code>82d22facc4</code></b>, the merge of #1484 (argument-comment lint fix), postmerge green at 15:36Z; installed 15:41Z per <code>todo.md</code>
+<li><b>Current install (2026-10-28 21:17Z):</b> main <b><code>c8d56d89d3</code></b>, the merge of #1500 (ripgrep in the rust-ci-full Linux shards), postmerge green (run 40759219551, finished 20:50Z); installed 21:17Z per <code>todo.md</code>
+(<code>INSTALL.json</code> <code>built_at</code> 21:02Z), Rust 1.99.1, developer-accounting marker on, signed with the same Developer ID, sha256 begins <code>2e5f0977e4a5c840</code>, smoke OK. Installs since #1487:
+<ul>
+<li><code>e344afbab7</code> (17:58Z; the merge of #1483, postmerge green; sha256 begins <code>26e55116fd500de2</code>; adds #1469, #1474, #1471, #1364, #1475, #1481 and #1483);</li>
+<li><code>c8d56d89d3</code> (21:17Z; adds #1486, #1487, #1376, #1493, #1488, #1495, #1494, #1499, #1496, #1497 and #1500). Main's postmerge was red from <code>bd494990aa</code> (#1376) to <code>fbbe725af5</code> (#1497) on the missing <code>rg</code>, so none of those was installable.</li>
+</ul>
+Kept next to the real binary: <code>corbanu.prev-e344afbab7</code>, <code>corbanu.prev-82d22facc4</code> and <code>corbanu.prev-e3a39cc67f</code>. Moved to <code>old-binaries/</code>: <code>prev-21db61709f</code> (17:58Z) and <code>prev-32901550cb</code> (21:17Z).
+<b>Not in it</b> (merged after #1500): #1501, #1374, #1502, #1503 and #1498. Next install: the newest main whose postmerge run is green in every real job (#1501's and #1374's were green; #1502, #1503 and #1498 were running at 21:30Z).</li>
+<li>Install at 10-28 15:41Z (superseded): main <code>82d22facc4</code>, the merge of #1484 (argument-comment lint fix), postmerge green at 15:36Z; installed 15:41Z per <code>todo.md</code>
 (<code>INSTALL.json</code> <code>built_at</code> 15:43Z), Rust 1.99.1, developer-accounting marker on, signed with the same Developer ID, sha256 begins <code>a9676c4f2b0adc70</code>, smoke OK. Installs since #1439:
 <ul>
 <li><code>32901550cb</code> (04:40Z; the merge of #1437; adds the 03:15Z “Not in it” list plus #998 and #1439);</li>
@@ -1423,6 +1458,32 @@ darkmatter-sudo #1426 (flake-1426), #1434 (D206, contrib-12); bradsbots #1438 (c
 <li><b>Docs:</b> #1439 (the 03:15Z handoff).</li>
 <li><b>Closed, not merged:</b> #1455 (round-5 grant), #1454 (win-691c's Windows probe), #1485 (lint canary). Issues closed: triage-1's nine done (#1052, #1001, #874, #837, #941, #609, #603, #864, #818), #607 (coordinator, into #716/#1056),
 #505 (D227), #993 (D229), #863 (D222), #1410, #1011 (already done by citadelculture, mcp-1011), #928, #1355, #1048, #1403, #1479, plus those closed by the PRs above.</li>
+</ul>
+<h3>8.0h What landed since #1487 (2026-10-28 16:15Z – 21:30Z), by area</h3>
+<p>Same merge discipline as 8.0g: literal head SHA, all checks green, independent Opus 5.5 High APPROVE on the merged head (or a coordinator-verified own-files-unchanged main merge). Times are GitHub's (UTC).
+Worker reports are in <code>$HOME/.corbanu-workers/&lt;worker&gt;.result.md</code>.</p>
+<ul>
+<li><b>Security and sandbox</b> (stricter-only or display-only unless noted):
+<ul>
+<li>#1376 (D226, #732, citadelculture, finished with credit by sec-linux; 17:30Z): the Linux database-folder scan lists only its top level, without ripgrep (ripgrep 14.1 still opened subfolders, so an unreadable <code>systemd-private-*</code> folder blocked every protected command); <code>db-backups</code> keeps the full-depth scan. #732 closed.</li>
+<li>#1494 (#1468, sec-left): macOS <code>/status</code> no longer says approved commands can leave the sandbox when the keychain rule keeps them in; contained panes read the level once; the Claude-pane and <code>/permissions</code> gates also count the enforced level; submodule worktrees get the <code>.git</code> protection. #1468 open (items 5 and 6: D248, D250).</li>
+<li>#1496 (#1480, sec-left, 3 rounds): the search-pattern parser starts and ends every search where main does, so it never hides a note main shows; a 5,000-assignment line went from 4.87 s to 0.02 s. #1480 closed; citadelculture credited.</li>
+<li>#1497 (#943, sec-left): an empty-for-empty <code>.git</code> re-swap after a full <code>.git</code> was swapped is now reported and keeps blocking approvals. #1502 (sec-943b, 3 rounds): closes the cross-session race #1497's review found; a shared, never-cleared list (capped at 1024; past that every <code>.git</code> counts as swapped, over-reporting).
+#1503 (sec-943b): #943 items 3, 18 and 22a (notes and tests). #943 open (D249, D250, D255).</li>
+<li>#1499 (#1056, sec-722): the Linux placeholder sweep stops when the mount table can't be read; failed items keep the identity this sweep checked. #1056 and #722 stay open (#722 has no stricter-only fix: D245–D247).</li>
+<li>#1501 (#1472, sec-1472): test-only; the rename-a-home-ancestor attack is already blocked by #592's pins on Linux Moderate/Aggressive (proved by disabling the pins in a scratch edit). #1472 closed.</li>
+<li>#1374 (#1343, citadelculture, finished with credit by ws-1343; 20:26Z): websocket connection identity covers header-based sign-ins and configured provider headers; brokered sign-ins never match; #1398's pinned test flipped to its post-fix values. #1343 closed; review nits in #1504 (fu-1504).</li>
+</ul></li>
+<li><b>Providers, models and accounting:</b> #1483 (D228, acct-d223; 16:49Z): <code>/cost</code> says “Totals for this day may be incomplete”, ledger format 7 (older builds then turn collection off for that home); #314 closed.
+#1486 (#128, cat-128): explicit dispositions for the six retained IDs (owl-alpha retired, hidden row kept; gpt-5.5 no cap on purpose); #128 closed, #368 open. #1488 (#1476, fix-1476): an explicit Standard choice for Plan GLM 5.2 is kept;
+#1489 filed (on the Plan route Standard and Deep both send no reasoning setting).</li>
+<li><b>Runtime:</b> #1495 (#1467, D234b, rel-1467): a hard-aborted turn now saves the tool's abort output; loaded glitch runs 15/15 vs 9/15 before; #1467 closed (D244 is the rare finished-then-killed case). #1498 (#1491, crash-1491): notify 8.2.0 → 8.2.1 fixes a use-after-free when the kill-switch's file watcher stops
+(stress test crashed 3/5 before, 0/5 after; kill-switch behaviour unchanged); #1491 closed; darkmatter-sudo credited for #1417's crash upload.</li>
+<li><b>CI:</b> #1500 (ci-rg; 19:59Z): pinned ripgrep 15.2.0 via DotSlash in the rust-ci-full Linux test shards and the nightly Bazel Linux job (tests unchanged, not skipped); fixed main's postmerge (red since #1376). ci-maint closed #636 (green scheduled nightly), #1298 (done by #1305) and #796 (#1447);
+#982's fix is citadelculture's draft #990 (contrib-990).</li>
+<li><b>Docs:</b> #1487 (the 16:15Z handoff), #1493 (docs-28: <code>docs/provider-accounts.md</code> realtime tokens, the D224 <code>just test</code> note, five OpenRouter rows, #141's contract; citadelculture credited).</li>
+<li><b>No PR, with the owner:</b> #1412 (fix-1476: <code>resume --last</code> matches upstream; D243), #722 (sec-722; D245–D247), #932 phase 2 (sec-932p2: write-up only, posted on #932; D251–D254).</li>
+<li><b>Issues closed:</b> #314, #128, #732, #1476, #1467, #1480, #1472, #636, #1343, #158 (win-733) and #1491. Issues filed: #1489, #1491, #1504.</li>
 </ul>
 
 <h3>8.1 Security levels (P0/P1) — “Aggressive ships” milestone (signed off 2026-10-16)</h3>
@@ -2371,8 +2432,93 @@ check what Windows does, or (b) make Windows match, each area with its own secur
 <tr><td>10-28</td><td>(D237) <b>Pending.</b> Who takes 0xzoz's repair request to the Post Fiat operators: (a) leave it in tasknode#347, (b) Travis or someone with a Post Fiat operations contact forwards it, (c) nothing more. Recommended: (b) if a contact exists, else (a).</td><td>#1280, tasknode#347</td></tr>
 <tr><td>10-28</td><td>(D238) <b>Pending.</b> When dylint releases its fix (trailofbits/dylint#2146), bump <code>CARGO_DYLINT_VERSION</code>/<code>DYLINT_LINK_VERSION</code> in the workflows and the <code>dylint_*</code> pins, and remove #1484's workaround.
 Workflow edits need owner approval. Recommended: yes, as a small follow-up once the release is out; the alternative is keeping the harmless workaround.</td><td>#1479, #1484</td></tr>
+<tr><td colspan="3"><i>Raised after #1487 (16:15Z – 21:30Z); all pending, none answered yet:</i></td></tr>
+<tr><td>10-28</td><td>(D239) <b>Pending.</b> Should WebRTC realtime calls also record tokens (no price)? Their control channel sees the token reports only while connected. (a) Leave as is, or (b) record them too, with no price.
+Recommended: (a) until someone uses WebRTC realtime with developer accounting.</td><td>#1474, #889</td></tr>
+<tr><td>10-28</td><td>(D240) <b>Pending.</b> Failures before the ledger is reachable (state database unreachable, or a newer ledger format) leave no gap marker, only a log line or warning. Recommended: accept (nothing can be written in that case).</td><td>#1483, #314</td></tr>
+<tr><td>10-28</td><td>(D241) <b>Pending.</b> Retired <code>openrouter/owl-alpha</code>: (a) keep the hidden, documented row (a saved config finds its own row; requests fail with OpenRouter's error), (b) stop before sending with a local message pointing to <code>/model</code>, or (c) remove the row.
+Recommended: (a); revisit (b) only if users hit it.</td><td>#128, #1486</td></tr>
+<tr><td>10-28</td><td>(D242) <b>Pending.</b> GPT-5.x rows have no output cap while GPT-6 rows say 128,000 (no effect today: requests to OpenAI never send the cap). (a) Leave it, or (b) make all OpenAI rows match, which also needs checked Bedrock limits (gpt-5.5 is the base of the Bedrock rows).
+Recommended: (a).</td><td>#128, #1486</td></tr>
+<tr><td>10-28</td><td>(D243) <b>Pending.</b> What <code>resume --last</code> treats as last used (today: the conversation with the newest turn, as upstream intends). (A) Keep and document; (B) open the conversation that was on screen at quit (only <code>resume --last</code>
+changes; <code>/resume</code> order and the upstream test stay); (C) count simply opening a conversation as use (reorders <code>/resume</code>, rewrites the upstream test). Recommended: B; avoid C.</td><td>#1412</td></tr>
+<tr><td>10-28</td><td>(D244) <b>Pending.</b> In a rare race a tool finishes (say, a patch is applied) and the turn is force-killed before its real result is saved; the model is told “aborted by user” (no worse than the bare “aborted” before #1495).
+(a) Leave it, or (b) a low-priority follow-up that saves the finished result instead. Recommended: (b), mainly for tools that change files.</td><td>#1467, #1495</td></tr>
+<tr><td>10-28</td><td>(D245) <b>Pending.</b> Hooks in remote sessions run on this machine with the remote folder, so they usually fail to start, and a failed “PreToolUse” hook doesn't block. (a) Run hooks in a local folder (exactly as locally, including
+“PermissionRequest” hooks that allow without asking); (b) stopgap: on remote work, a matching PreToolUse hook that can't start blocks the action (stricter, but changes Permissive behaviour); (c) document hooks as local-only, as upstream does.
+Recommended: (b) now, (a) once remote environments are supported.</td><td>#722</td></tr>
+<tr><td>10-28</td><td>(D246) <b>Pending.</b> Network on remote environments: today the remote side refuses unlisted sites without asking, and the refusal doesn't fail the command. (a) Send every remote network decision to this machine (same prompts and
+failure reporting as locally; the remote path loosens to match local), (b) keep the silent refusal but report it as a failure (stricter-only; protocol change), or (c) leave it. Remote “limited” mode keeps failing closed in every option.
+Recommended: (a), with a security review.</td><td>#722</td></tr>
+<tr><td>10-28</td><td>(D247) <b>Pending.</b> The remote connection ignores IP ranges in <code>NO_PROXY</code>, so it goes through the proxy when the regular HTTP client wouldn't; fixing it makes that connection go direct.
+Recommended: fix at low priority, with a short security review.</td><td>#722</td></tr>
+<tr><td>10-28</td><td>(D248) <b>Pending.</b> #1468 item 5: an agent can hide another worktree's <code>.git</code> file from the next start by making its admin folder unreadable before a restart. (a) Cache the found paths in the Corbanu home,
+(b) make the whole <code>worktrees</code> folder read-only when an admin folder can't be read (breaks git there until fixed), or (c) document it. Recommended: (c) for now (needs a planted folder and a restart; the command-text check still applies).</td><td>#1468</td></tr>
+<tr><td>10-28</td><td>(D249) <b>Pending.</b> #943 SF5: a process a command left running can change <code>.git</code> after the last check. (a) Don't let approvals lift the protected-file rules while such processes live, or (b) keep it as documented.
+Recommended: (b) (approvals would stop working while any such process runs).</td><td>#943</td></tr>
+<tr><td>10-28</td><td>(D250) <b>Pending; security sign-off.</b> Changes that make reports quieter: approve #943 r8 N2 (report the same entry once instead of at every check; it still blocks approvals) and #943 item 14 (a duplicate report);
+leave #943 items 15 and 21 and #1468 item 6 as they are. Recommended: as stated.</td><td>#943, #1468</td></tr>
+<tr><td>10-28</td><td>(D251) <b>Pending; security sign-off.</b> #932 widening W1: let the grammar (phase 3) accept one leading <code>cd</code> to an absolute folder in plain characters. Only zsh-only prompts after untrusted content disappear (corpus estimate
+about 48 → 330 qualifying lines; bash/dash users already have this through D85). (a) Approve now as a PR titled “… needs security sign-off”, or (b) wait for the measuring harness to confirm the numbers on the real classifier. Recommended: (a).</td><td>#932</td></tr>
+<tr><td>10-28</td><td>(D252) <b>Pending.</b> Accept a scan of 142,644 real worker commands plus a test-only measuring harness in place of the phase-2 logs D129 asked for (phase 2 logs only at debug level; no real-use logs exist). Recommended: yes.</td><td>#932, D129</td></tr>
+<tr><td>10-28</td><td>(D253) <b>Pending, started.</b> Fix D156's split <code>-c</code> gap (a missing prompt main also has) as its own PR before W3. Because the fix only adds prompts, the coordinator started it as decision-free (sec-932h, with the measuring harness).
+Recommended: yes; a “no” would mean holding that PR.</td><td>#932, D156</td></tr>
+<tr><td>10-28</td><td>(D254) <b>Pending.</b> Order of the later widenings: W2 (exact redirections <code>2&gt;&amp;1</code> and <code>&gt;/dev/null</code>) → W3 (git subcommand certain when the grammar proves the words before it; covers D104/D157's accepted prompts) → W4 (D230's array subscripts).
+Recommended: approve the order only; each widening still gets its own approval and security sign-off.</td><td>#932</td></tr>
+<tr><td>10-28</td><td>(D255) <b>Pending; security sign-off.</b> #943 items 16 and 22c (remove a duplicate report) and 22b (skip an early check on runs that get refused) would make reports quieter. Recommended: leave all three as they are.</td><td>#943</td></tr>
 </table>
 
+<h2>10. Current state</h2>
+<p><b>Running</b> at about 21:30Z on 2026-10-28, as tmux sessions on <code>$HOME/.corbanu-workers/tmux.sock</code> (6 workers including this one). States are from <code>todo.md</code>, logs and GitHub, not final reports.</p>
+<table><tr><th>Worker (tmux start, UTC)</th><th>Task</th><th>State at the snapshot</th></tr>
+<tr><td>win-733 (20:23Z)</td><td>#158 (verify and close) and #733 (drop BREAKAWAY_OK for integrity-lease jobs).</td><td>#158 closed 20:32Z. #1505 open (“windows-sandbox: legacy commands can't break away from their job”), CI running.</td></tr>
+<tr><td>contrib-990 (20:29Z)</td><td>Finish citadelculture's draft #990 (#982, compiler response files for the argument-comment lint) per D146/D151.</td><td>Posted a note on #990 at 20:29Z and is waiting up to 90 minutes for a reply before pushing to their branch.</td></tr>
+<tr><td>sec-932h (20:45Z)</td><td>D156 fix (adds prompts only; D253) and the test-only measuring harness (D252).</td><td>Running tests locally; no PR yet.</td></tr>
+<tr><td>fu-1504 (20:56Z)</td><td>#1504 (websocket review nits from #1374) and #1201 (Windows flake).</td><td>#1508 (#1504) has an APPROVE in its log; #1509 (#1201, longer timeout for the Windows cmd.exe auth helper) open; CI running on both.</td></tr>
+<tr><td>sec-943c (21:07Z)</td><td>#943 leftovers: a test for the 1024 cap, a louder note naming the <code>.git</code> finding when an approved extra write is refused, wording.</td><td>#1510 open, CI running.</td></tr>
+<tr><td>handoff-doc14 (21:24Z)</td><td>This refresh.</td><td>—</td></tr>
+</table>
+<h3>Open items</h3>
+<table><tr><th>Item</th><th>State</th><th>Next</th></tr>
+<tr><td>PF-84 Windows gate / #1080</td><td>Not run: the PC has not come online in Tailscale. #1080 is still draft at <code>db6b6fa35e</code>. The gate scripts in <code>$W/win-gate-pf84/</code> have never run on Windows; expect first-run fixes.</td>
+<td>Travis brings the PC online (Tailscale, sleep off, 2–3 hours; D212). Check <code>tailscale status</code> before relaunching, then gate (API-key route only, D213), then Travis's sign-off. Keep #1080 draft until then.</td></tr>
+<tr><td>Tonight's nightly</td><td>#1500 added ripgrep to the nightly Bazel Linux job, which has not run since. The cron is set for 09:17Z; GitHub has been starting it hours late.</td><td>Check that “Bazel test on ubuntu-24.04” prints <code>ripgrep 15.2.0</code> and <code>linux-sandbox-unit-tests</code> passes; judge that job on its own.</td></tr>
+<tr><td>Main postmerge</td><td>Green at <code>c8d56d89d3</code>, <code>530c916a93</code> (#1501) and <code>6488383fa9</code> (#1374). Runs for <code>21e2177e25</code> (#1502), <code>8095d707c9</code> (#1503) and <code>bb05734780</code> (#1498) in progress.</td><td>Install the newest fully green main (adds section 7's “Not in it” list).</td></tr>
+<tr><td>#1284 (citadelculture, #1094)</td><td>Waiting on their one-sentence wording fix since the 10-26 D170 review (head <code>ffe154face</code>); still waiting per contrib-15.</td><td>Coordinator: finish with credit around 11-04 if still quiet (maintainer edits allowed), review round 2, merge under D170.</td></tr>
+<tr><td>#1489</td><td>On Corbanu Plan, GLM 5.2 Standard and Deep both send no reasoning setting, so #1488 fixed the recorded choice but not which mode the request runs in (low).</td><td>Check against the Plan gateway before choosing a fix.</td></tr>
+<tr><td>#368 dated items</td><td>Sol price unchanged; the promo runs “at least through November 21, 2026”. China has not published the 2027 holiday notice, so DeepSeek's 2027 holidays aren't staged.</td><td>Re-read Sol's price just before 11-21. Add DeepSeek's 2027 holidays before 12-01, when the nightly check starts failing.</td></tr>
+<tr><td>Owner decisions with work waiting</td><td>#1462 (D235), #1470 (D236), #722 (D245–D247), #1468 item 5 (D248), #943 (D249, D250, D255), #932 W1–W4 (D251, D252, D254), #1412 (D243), #1467's race (D244), #128 rows (D241, D242), accounting (D239, D240).</td><td>Act on each answer; quieter changes go out as “… needs security sign-off” PRs.</td></tr>
+<tr><td>Decision-free follow-ups</td><td>#1449, #1482, #1064 (D230 part), #1056 (repeat-failure rotation, low; citadelculture drafts #1246 and #1384), #1468's refusal wording, #1448 (abort/timing flakes), #1201 (fu-1504), #982 (contrib-990), #733 (win-733).</td><td>Assign when slots free; stricter-only unless sign-off is obtained.</td></tr>
+<tr><td>Task Node</td><td>#1280 open for the operator repair; postfiatorg/tasknode#347 filed.</td><td>D237. Watch #347 for an upstream reply.</td></tr>
+<tr><td>#94 (D219)</td><td>goodalexander's upstream 0.147.0 sync, 5,868 commits behind.</td><td>Travis's answer.</td></tr>
+<tr><td>Contributor PRs</td><td>bradsbots' #1492 (#1452, ready since 17:06Z) has <b>no maintainer comment yet</b>. Still open: #1373 (D204), #1380 (changes requested), #1055, #161, #139, #103/#101 (Dependabot), citadelculture drafts (#1246, #1348, #1370, #1383–#1385, #1392–#1394, #983, #135) and #990 (contrib-990).</td>
+<td>Answer #1492 first (SWEEP RULE); then contributor sweeps, warm notes, D151 after about a week of silence.</td></tr>
+</table>
+<p><b>Main CI:</b> postmerge red from <code>bd494990aa</code> (#1376, run started 17:30Z) through <code>fbbe725af5</code> (#1497): rust-ci-full Linux test shards 1 and 2 had no <code>rg</code>. Green again at <code>c8d56d89d3</code> (#1500, run 40759219551, finished 20:50Z) and on the next two merges.
+Nightly: scheduled run 40722950171 on <code>0f19feaf08</code> green (#636 closed).</p>
+<p><b>Raw results vs owner acceptance:</b> unchanged by this stretch. The S10 raw record keeps ACC-11 and ACC-14 blocked (32/0/5 raw; 33/0/4 with ACC-04 under D113); 35/0/2 is the owner-accepted count (D207/D208). The PF-84 Windows gate has no result.
+The PRs above are code changes with their own fail-before evidence, not milestone re-runs. Worker recommendations in section 9 (D239–D255) are not owner acceptance; D253's PR proceeds only because it adds prompts.</p>
+<p><b>Evidence:</b> worker reports and reviewer outputs in <code>$HOME/.corbanu-workers/</code>; requests and grants in <code>$W</code>; decision log <code>$W/todo.md</code>; #932's W1 proposal on #932 (sec-932p2).</p>
+
+<h2>11. Decisions and remaining external actions</h2>
+<p><b>Pending numbered decisions: D219 and D235–D255</b> (22; section 9, with options and recommendations). If approved as recommended, D250, D251 and D255 (quieter reports or fewer prompts) and D245 (b) (changes Permissive behaviour) need security sign-off, and D246 (a) and D247 a security review.
+D253 is already being done as decision-free. Repeat the pending ones in every check-in until answered.</p>
+<p><b>Owner action:</b> bring the Windows PC online in Tailscale and keep it awake 2–3 hours (D212). Not re-checked in this update: D178b (point <code>provider/zai_api_key</code> at the new key in <code>/vault</code>) and D18 (delete the malformed <code>kimi_api</code> label).</p>
+<p><b>Coordinator-owned follow-ups:</b> answer #1492; #1284 around 11-04; #368's Sol re-read before 11-21 and DeepSeek 2027 holidays before 12-01; tonight's nightly ripgrep check; D215's probe limit at the next three-platform re-measurement; #1401's exception review by 2027-01-31.</p>
+
+<h2>12. Resume sequence</h2>
+<ol>
+<li>Read the top box and the <code>todo.md</code> tail; check <code>tmux -S $HOME/.corbanu-workers/tmux.sock ls</code> and each running worker's log before launching anything. Don't relaunch a worker that is still running.</li>
+<li>Ask D219 and D235–D255.</li>
+<li>Collect the win-733, contrib-990, sec-932h, fu-1504 and sec-943c reports.</li>
+<li>Check tonight's nightly for <code>ripgrep 15.2.0</code> in the Bazel Linux job.</li>
+<li>Windows: once Travis confirms the PC is online in Tailscale, relaunch win-gate-pf84; then Travis signs off and #1080 merges with the literal head SHA after a fresh green run.</li>
+<li>Rebuild and install from the newest main whose postmerge run is green in every real job.</li>
+<li>Keep one live <code>&lt;name&gt;.grant.md</code> per request, tell running workers about new rules directly, keep build dirs on CorbanuDrive or glitch, never use <code>git stash</code>, follow the WINDOWS SKIP RULE, and don't treat “Operation not permitted” in a test log as a freeze.</li>
+<li>Keep the 5-minute reports, the overnight rule (section 3) and warm contributor and Task Node notes.</li>
+</ol>
+
+<details><summary>Sections 10–12 at 2026-10-28 16:15Z (handoff-doc13; historical, superseded by the sections above)</summary>
 <h2>10. Current state</h2>
 <p><b>Running</b> at about 16:15Z on 2026-10-28, as tmux sessions on <code>$HOME/.corbanu-workers/tmux.sock</code> (5 workers including this one). States are from <code>todo.md</code>, interim result files and logs, not final reports.</p>
 <table><tr><th>Worker (launched, UTC)</th><th>Task</th><th>State at the snapshot</th></tr>
@@ -2418,6 +2564,8 @@ The classifier PRs are code changes with their own fail-before evidence, not mil
 <li>Keep one live <code>&lt;name&gt;.grant.md</code> per request, tell running workers about new rules directly, keep build dirs on CorbanuDrive or glitch, never use <code>git stash</code>, and follow the WINDOWS SKIP RULE.</li>
 <li>Keep the 5-minute reports, the overnight rule (section 3) and warm contributor and Task Node notes.</li>
 </ol>
+
+</details>
 
 <details><summary>Sections 10–12 at 2026-10-28 03:15Z (handoff-doc12; historical, superseded by the sections above)</summary>
 <h2>10. Current state</h2>
