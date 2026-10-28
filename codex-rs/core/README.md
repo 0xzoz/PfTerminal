@@ -156,19 +156,18 @@ lease waits for them. A program that asks to break away gets that error unless
 it retries without the flag. The elevated backend and unsandboxed commands
 still allow breaking away.
 
-Other ways to start a process (#1507, measured on the hosted Windows runner):
-WMI's `Win32_Process.Create`, the Task Scheduler and Explorer's `ShellWindows`
-refuse a legacy command. Starting a child with another legacy process as its
-parent (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`) would put it in that
-process's job, with that process's token; the legacy token's default DACL
-therefore denies `PROCESS_CREATE_PROCESS` to a marker SID that every legacy
-token restricts on, so no legacy command can open any legacy process for it.
-That deny also applies to `TOKEN_ADJUST_DEFAULT` on token objects a legacy
-command creates (the bit is shared). Still open in #1507: the COM servers
-`ShellBrowserWindow` and `MMC20.Application` start programs for a legacy
-command outside its job (the first with an unrestricted Low token), and a
-legacy command can still open another legacy session's processes for other
-write access, such as writing their memory.
+Other ways to start a process (#1507), measured on the hosted Windows runner
+(no Explorer running; not yet measured on a desktop): WMI's
+`Win32_Process.Create` refuses a legacy command (access denied), as do
+activating Explorer's `ShellWindows` (E_ACCESSDENIED) and registering a task
+with the Task Scheduler (0x80070003).
+Three routes still start a child outside the command's job: naming another
+legacy session's process as the parent (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`;
+the child gets that session's job and token, because every legacy process's
+default DACL lets every legacy command open it with full access), and the
+COM servers `ShellBrowserWindow` (the child runs at Low integrity but with an
+unrestricted token) and `MMC20.Application` (Low, restricted). Closing them
+needs a product decision; their tests are ignored until then.
 
 Protected paths that already exist inside writable roots when a session
 starts, such as `.git`, `.codex`, and `.agents`, also get an Everyone deny of
@@ -178,8 +177,8 @@ parent, which would otherwise let it plant Git hooks or config that later run
 unsandboxed. Not covered (#1506): renaming a writable ancestor of a nested
 protected path (a command can then recreate the path), and `.codex` or
 `.agents` folders that don't exist when the session starts (a command can
-create them). The deny entries are persistent and visible in the folder's security
-settings. Unsandboxed deletes normally keep working because they use each
+create them). The deny entries are persistent and visible in the folder's
+security settings. Unsandboxed deletes normally keep working because they use each
 object's own `DELETE` right; only a delete that relies on the parent's
 `FILE_DELETE_CHILD` is affected. To remove the entries, run
 `icacls <dir> /remove:d *S-1-1-0` on the affected directories. That command

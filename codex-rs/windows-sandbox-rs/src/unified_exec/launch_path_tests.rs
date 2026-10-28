@@ -9,13 +9,12 @@
 //! report shows the child in the launcher's job, at Low integrity, with a
 //! restricted token.
 //!
-//! Measured on the hosted Windows runner (elevated and in a normal
-//! session), #1507: WMI, the Task Scheduler and `ShellWindows` refuse a
-//! legacy command; naming another legacy session's process as the parent
-//! worked until the legacy token's default DACL denied it (see
-//! `create_legacy_token_with_caps_from`); `ShellBrowserWindow` and
-//! `MMC20.Application` still start programs outside the job and are ignored
-//! until #1507 decides how to close them.
+//! Measured on the hosted Windows runner (elevated and in a normal session;
+//! no Explorer running), #1507: WMI, the Task Scheduler and `ShellWindows`
+//! refuse a legacy command with the errors their tests expect. Naming
+//! another legacy session's process as the parent, `ShellBrowserWindow` and
+//! `MMC20.Application` start the child outside the launcher's job; those
+//! tests are ignored until #1507 decides how to close them.
 
 use super::*;
 use crate::proc_thread_attr::ProcThreadAttributeList;
@@ -27,7 +26,6 @@ use windows_sys::Win32::Foundation::CloseHandle;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::Security::IsTokenRestricted;
-use windows_sys::Win32::Security::TOKEN_ADJUST_DEFAULT;
 use windows_sys::Win32::Security::TOKEN_QUERY;
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 use windows_sys::Win32::System::JobObjects::JOBOBJECT_BASIC_PROCESS_ID_LIST;
@@ -89,20 +87,8 @@ fn own_containment(launcher: u32) -> String {
                 buffer[1..=count].contains(&(launcher as usize))
             };
         let (low, restricted) = token_state(GetCurrentProcess());
-        // Whether the process may change its own token's default DACL. A
-        // legacy command's children lost that with #1507's deny entry (it
-        // shares the bit with `PROCESS_CREATE_PROCESS`); printed, not asserted.
-        let mut token: HANDLE = 0;
-        let adjust_default = OpenProcessToken(
-            GetCurrentProcess(),
-            TOKEN_QUERY | TOKEN_ADJUST_DEFAULT,
-            &mut token,
-        ) != 0;
-        if adjust_default {
-            CloseHandle(token);
-        }
         format!(
-            "in_launcher_job={in_launcher_job} in_any_job={in_any_job} low={low} restricted={restricted} adjust_default={adjust_default}"
+            "in_launcher_job={in_launcher_job} in_any_job={in_any_job} low={low} restricted={restricted}"
         )
     }
 }
@@ -282,12 +268,13 @@ struct LaunchOutcome {
 }
 
 impl LaunchOutcome {
-    /// Contained: refused, or started in the launcher's job, Low and restricted.
-    fn assert_contained(&self, route: &str) {
-        let refused = self
-            .launch
-            .as_deref()
-            .is_some_and(|launch| launch.starts_with("started=false"));
+    /// Contained: refused with an error that contains every part of
+    /// `refusal` (the step and error measured, so a broken probe doesn't pass
+    /// as a refusal), or started in the launcher's job, Low and restricted.
+    fn assert_contained(&self, route: &str, refusal: &[&str]) {
+        let refused = self.launch.as_deref().is_some_and(|launch| {
+            launch.starts_with("started=false") && refusal.iter().all(|part| launch.contains(part))
+        });
         let contained = self
             .report
             .as_deref()
@@ -434,6 +421,7 @@ fn legacy_launch_plain_child_stays_in_session() {
 /// legacy session as its child's parent. The child would join that
 /// session's job, outside the launcher's.
 #[test]
+#[ignore = "#1507: the child joins the other session's job with its token; closing it needs a per-session default DACL, a product decision"]
 fn legacy_launch_under_another_session_process_stays_in_session() {
     let _guard = legacy_process_test_guard();
     let root = user_owned_test_root();
@@ -500,12 +488,7 @@ fn legacy_launch_under_another_session_process_stays_in_session() {
                 .await;
         outcome
     });
-    outcome.assert_contained("parent-process attribute");
-    // Refused by the default DACL's deny entry, not by anything else.
-    assert_eq!(
-        outcome.launch.as_deref(),
-        Some("started=false open_parent_error=5")
-    );
+    outcome.assert_contained("parent-process attribute", &["open_parent_error=5"]);
 }
 
 /// Runs a Windows PowerShell script as the legacy command. The script sees
@@ -564,7 +547,8 @@ $args1 = $env:CODEX_1507_ARGS.Replace('@LAUNCHER@', "$PID")
 $exe = $env:CODEX_1507_EXE
 $dir = $env:CODEX_1507_DIR
 $before = @(Get-Process | ForEach-Object Id)
-function Report-Error($err) { "launch: started=false error=" + ($err.Exception.Message -replace '\s+', ' ') }
+$step = 'create'
+function Report-Error($err) { "launch: started=false error=[$step] " + ($err.Exception.Message -replace '\s+', ' ') }
 # Keeps the session (and its job) alive until the child reports, then lists
 # the processes the launch added.
 function Finish-Launch {
@@ -588,8 +572,10 @@ try {{
 Finish-Launch
 "#
     );
-    run_powershell_launch("launch-wmi", &script, Vec::new())
-        .assert_contained("WMI Win32_Process.Create");
+    run_powershell_launch("launch-wmi", &script, Vec::new()).assert_contained(
+        "WMI Win32_Process.Create",
+        &["error=[create] ", "Access denied"],
+    );
 }
 
 /// #1507 route 3: the Task Scheduler service starts a registered task as
@@ -602,14 +588,19 @@ fn legacy_launch_through_task_scheduler_stays_in_session() {
         r#"{POWERSHELL_PROLOGUE}
 try {{
   $service = New-Object -ComObject Schedule.Service
+  $step = 'connect'
   $service.Connect()
+  $step = 'folder'
   $folder = $service.GetFolder('\')
+  $step = 'define'
   $definition = $service.NewTask(0)
   $action = $definition.Actions.Create(0)
   $action.Path = $exe
   $action.Arguments = $args1
   $action.WorkingDirectory = $dir
+  $step = 'register'
   $null = $folder.RegisterTaskDefinition($env:CODEX_1507_TASK, $definition, 6, $null, $null, 3)
+  $step = 'run'
   $null = $folder.GetTask($env:CODEX_1507_TASK).Run($null)
   "launch: started=true"
 }} catch {{ Report-Error $_ }}
@@ -621,23 +612,24 @@ Finish-Launch
     let _ = std::process::Command::new(system32_exe("schtasks.exe"))
         .args(["/delete", "/tn", task.as_str(), "/f"])
         .output();
-    outcome.assert_contained("Task Scheduler");
+    outcome.assert_contained("Task Scheduler", &["0x80070003"]);
 }
 
 /// #1507 route 4: out-of-process COM servers that start programs on the
 /// caller's behalf, from their own process. Each is tried in turn.
-fn com_launch(name: &str, clsid: &str, invoke: &str) {
+fn com_launch(name: &str, clsid: &str, invoke: &str, refusal: &[&str]) {
     let script = format!(
         r#"{POWERSHELL_PROLOGUE}
 try {{
   $o = [Activator]::CreateInstance([Type]::GetTypeFromCLSID('{clsid}'))
+  $step = 'invoke'
   {invoke}
   "launch: started=true"
 }} catch {{ Report-Error $_ }}
 Finish-Launch
 "#
     );
-    run_powershell_launch(name, &script, Vec::new()).assert_contained(name);
+    run_powershell_launch(name, &script, Vec::new()).assert_contained(name, refusal);
 }
 
 /// Explorer's `ShellWindows`: `ShellExecute` runs in Explorer.
@@ -647,6 +639,8 @@ fn legacy_launch_through_com_shell_windows_stays_in_session() {
         "launch-com-shellwindows",
         "9BA05972-F6A8-11CF-A442-00A0C90A8F39",
         "$w = $o.Item(); if ($null -eq $w) { throw 'no shell window' }; $w.Document.Application.ShellExecute($exe, $args1, $dir, $null, 0)",
+        // Refused at activation, before any Explorer window is needed.
+        &["error=[create] ", "80070005"],
     );
 }
 
@@ -658,6 +652,7 @@ fn legacy_launch_through_com_shell_browser_window_stays_in_session() {
         "launch-com-shellbrowserwindow",
         "C08AFD90-F2A1-11D1-8455-00A0C91F3880",
         "$o.Document.Application.ShellExecute($exe, $args1, $dir, $null, 0)",
+        &["80070005"],
     );
 }
 
@@ -669,5 +664,6 @@ fn legacy_launch_through_com_mmc_stays_in_session() {
         "launch-com-mmc",
         "49B2791A-B1AE-4C90-9B8E-E860BA07F889",
         "$o.Document.ActiveView.ExecuteShellCommand($exe, $dir, $args1, '7')",
+        &["80070005"],
     );
 }

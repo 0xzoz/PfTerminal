@@ -27,7 +27,8 @@ use crate::sandbox_utils::ensure_codex_home_exists;
 use crate::sandbox_utils::inject_git_safe_directory;
 use crate::setup::effective_write_roots_for_permissions;
 use crate::token::LocalSid;
-use crate::token::create_legacy_token_with_caps_from;
+use crate::token::create_readonly_token_with_cap;
+use crate::token::create_workspace_write_token_with_caps_from;
 use crate::token::get_current_token_for_restriction;
 use crate::token::get_logon_sid_bytes;
 use crate::workspace_acl::deny_delete_child_route;
@@ -166,16 +167,14 @@ pub(crate) fn prepare_legacy_session_security(
                 .iter()
                 .map(|root| root.sid.as_ptr())
                 .collect();
-            let h_token = create_legacy_token_with_caps_from(base, cap_ptrs.as_slice());
+            let h_token = create_workspace_write_token_with_caps_from(base, cap_ptrs.as_slice());
             CloseHandle(base);
             let h_token = h_token?;
             (h_token, None, None, write_root_sids)
         } else {
             let psid = LocalSid::from_string(&caps.readonly)?;
-            let base = get_current_token_for_restriction()?;
-            let h_token = create_legacy_token_with_caps_from(base, &[psid.as_ptr()]);
-            CloseHandle(base);
-            (h_token?, Some(psid), Some(caps.readonly), Vec::new())
+            let (h_token, _psid) = create_readonly_token_with_cap(psid.as_ptr())?;
+            (h_token, Some(psid), Some(caps.readonly), Vec::new())
         }
     };
     // #158: Low integrity closes the parent FILE_DELETE_CHILD route that the
