@@ -154,17 +154,31 @@ sign-off): a child started with `CREATE_BREAKAWAY_FROM_JOB` fails with access
 denied, so its descendants stay in its job, where cancelling ends them and the
 lease waits for them. A program that asks to break away gets that error unless
 it retries without the flag. The elevated backend and unsandboxed commands
-still allow breaking away. Routes that job limits can't close (starting a
-child under another legacy session's process, or through a launch broker such
-as WMI) are tracked in #1507.
+still allow breaking away.
+
+Other ways to start a process (#1507, measured on the hosted Windows runner):
+WMI's `Win32_Process.Create`, the Task Scheduler and Explorer's `ShellWindows`
+refuse a legacy command. Starting a child with another legacy process as its
+parent (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`) would put it in that
+process's job, with that process's token; the legacy token's default DACL
+therefore denies `PROCESS_CREATE_PROCESS` to a marker SID that every legacy
+token restricts on, so no legacy command can open any legacy process for it.
+That deny also applies to `TOKEN_ADJUST_DEFAULT` on token objects a legacy
+command creates (the bit is shared). Still open in #1507: the COM servers
+`ShellBrowserWindow` and `MMC20.Application` start programs for a legacy
+command outside its job (the first with an unrestricted Low token), and a
+legacy command can still open another legacy session's processes for other
+write access, such as writing their memory.
 
 Protected paths that already exist inside writable roots when a session
 starts, such as `.git`, `.codex`, and `.agents`, also get an Everyone deny of
 `FILE_DELETE_CHILD` on the path, its subdirectories, and its parent directory.
 That keeps the sandbox from deleting, moving, or replacing them through the
 parent, which would otherwise let it plant Git hooks or config that later run
-unsandboxed. Renaming a writable ancestor of a nested protected path is not
-covered. The deny entries are persistent and visible in the folder's security
+unsandboxed. Not covered (#1506): renaming a writable ancestor of a nested
+protected path (a command can then recreate the path), and `.codex` or
+`.agents` folders that don't exist when the session starts (a command can
+create them). The deny entries are persistent and visible in the folder's security
 settings. Unsandboxed deletes normally keep working because they use each
 object's own `DELETE` right; only a delete that relies on the parent's
 `FILE_DELETE_CHILD` is affected. To remove the entries, run

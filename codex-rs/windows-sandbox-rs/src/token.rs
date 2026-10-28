@@ -10,6 +10,7 @@ use windows_sys::Win32::Foundation::HLOCAL;
 use windows_sys::Win32::Foundation::LUID;
 use windows_sys::Win32::Foundation::LocalFree;
 use windows_sys::Win32::Security::AdjustTokenPrivileges;
+use windows_sys::Win32::Security::Authorization::DENY_ACCESS;
 use windows_sys::Win32::Security::Authorization::EXPLICIT_ACCESS_W;
 use windows_sys::Win32::Security::Authorization::GRANT_ACCESS;
 use windows_sys::Win32::Security::Authorization::SetEntriesInAclW;
@@ -45,6 +46,13 @@ const WRITE_RESTRICTED: u32 = 0x08;
 const GENERIC_ALL: u32 = 0x1000_0000;
 const WIN_WORLD_SID: i32 = 1;
 const SE_GROUP_LOGON_ID: u32 = 0xC0000000;
+/// `PROCESS_CREATE_PROCESS`: needed to name a process as a new process's
+/// parent (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`).
+const PROCESS_CREATE_PROCESS: u32 = 0x0080;
+/// #1507: a restricting SID in every legacy (unelevated) sandbox token and in
+/// no ACL that grants anything. Its only use is the deny entry
+/// [`create_legacy_token_with_caps_from`] puts in the token's default DACL.
+const LEGACY_SANDBOX_MARKER_SID: &str = "S-1-5-21-2834155117-1393618552-3866371417-1507";
 
 #[repr(C)]
 struct TokenDefaultDaclInfo {
@@ -53,24 +61,34 @@ struct TokenDefaultDaclInfo {
 
 /// Sets a permissive default DACL so sandboxed processes can create pipes/IPC objects
 /// without hitting ACCESS_DENIED when PowerShell builds pipelines.
-unsafe fn set_default_dacl(h_token: HANDLE, sids: &[*mut c_void]) -> Result<()> {
+/// `deny`, if any, comes first: a SID and the rights it is refused.
+unsafe fn set_default_dacl(
+    h_token: HANDLE,
+    sids: &[*mut c_void],
+    deny: Option<(*mut c_void, u32)>,
+) -> Result<()> {
     if sids.is_empty() {
         return Ok(());
     }
-    let entries: Vec<EXPLICIT_ACCESS_W> = sids
-        .iter()
-        .map(|sid| EXPLICIT_ACCESS_W {
-            grfAccessPermissions: GENERIC_ALL,
-            grfAccessMode: GRANT_ACCESS,
-            grfInheritance: 0,
-            Trustee: TRUSTEE_W {
-                pMultipleTrustee: std::ptr::null_mut(),
-                MultipleTrusteeOperation: 0,
-                TrusteeForm: TRUSTEE_IS_SID,
-                TrusteeType: TRUSTEE_IS_UNKNOWN,
-                ptstrName: *sid as *mut u16,
-            },
-        })
+    let entry = |sid: *mut c_void, permissions: u32, mode| EXPLICIT_ACCESS_W {
+        grfAccessPermissions: permissions,
+        grfAccessMode: mode,
+        grfInheritance: 0,
+        Trustee: TRUSTEE_W {
+            pMultipleTrustee: std::ptr::null_mut(),
+            MultipleTrusteeOperation: 0,
+            TrusteeForm: TRUSTEE_IS_SID,
+            TrusteeType: TRUSTEE_IS_UNKNOWN,
+            ptstrName: sid as *mut u16,
+        },
+    };
+    let entries: Vec<EXPLICIT_ACCESS_W> = deny
+        .map(|(sid, permissions)| entry(sid, permissions, DENY_ACCESS))
+        .into_iter()
+        .chain(
+            sids.iter()
+                .map(|sid| entry(*sid, GENERIC_ALL, GRANT_ACCESS)),
+        )
         .collect();
     let mut p_new_dacl: *mut ACL = std::ptr::null_mut();
     let res = SetEntriesInAclW(
@@ -348,17 +366,6 @@ unsafe fn enable_single_privilege(h_token: HANDLE, name: &str) -> Result<()> {
 }
 
 /// # Safety
-/// Caller must close the returned token handle.
-pub unsafe fn create_readonly_token_with_cap(
-    psid_capability: *mut c_void,
-) -> Result<(HANDLE, *mut c_void)> {
-    let base = get_current_token_for_restriction()?;
-    let res = create_readonly_token_with_cap_from(base, psid_capability);
-    CloseHandle(base);
-    res
-}
-
-/// # Safety
 /// Caller must close the returned token handle; base_token must be a valid primary token.
 /// # Safety
 /// Caller must close the returned token handle; base_token must be a valid primary token.
@@ -366,7 +373,12 @@ pub unsafe fn create_readonly_token_with_cap_from(
     base_token: HANDLE,
     psid_capability: *mut c_void,
 ) -> Result<(HANDLE, *mut c_void)> {
-    let new_token = create_token_with_caps_from(base_token, &[psid_capability], &[])?;
+    let new_token = create_token_with_caps_from(
+        base_token,
+        &[psid_capability],
+        &[],
+        /*legacy_marker*/ None,
+    )?;
     Ok((new_token, psid_capability))
 }
 
@@ -378,7 +390,12 @@ pub unsafe fn create_workspace_write_token_with_caps_from(
     base_token: HANDLE,
     psid_capabilities: &[*mut c_void],
 ) -> Result<HANDLE> {
-    create_token_with_caps_from(base_token, psid_capabilities, &[])
+    create_token_with_caps_from(
+        base_token,
+        psid_capabilities,
+        &[],
+        /*legacy_marker*/ None,
+    )
 }
 
 /// Create a restricted token that includes all provided capability SIDs, the token user SID, and
@@ -409,7 +426,12 @@ pub unsafe fn create_readonly_token_with_caps_from(
     base_token: HANDLE,
     psid_capabilities: &[*mut c_void],
 ) -> Result<HANDLE> {
-    create_token_with_caps_from(base_token, psid_capabilities, &[])
+    create_token_with_caps_from(
+        base_token,
+        psid_capabilities,
+        &[],
+        /*legacy_marker*/ None,
+    )
 }
 
 /// Create a restricted token that includes all provided capability SIDs, the token user SID, and
@@ -442,13 +464,41 @@ unsafe fn create_token_with_caps_user_and_additional_restrictions_from(
     let mut extra_restricting_sids = Vec::with_capacity(additional_restricting_sids.len() + 1);
     extra_restricting_sids.push(psid_user);
     extra_restricting_sids.extend_from_slice(additional_restricting_sids);
-    create_token_with_caps_from(base_token, psid_capabilities, &extra_restricting_sids)
+    create_token_with_caps_from(
+        base_token,
+        psid_capabilities,
+        &extra_restricting_sids,
+        /*legacy_marker*/ None,
+    )
+}
+
+/// The restricted token of a legacy (unelevated) sandbox session, read-only
+/// or workspace-write (they differ only in `psid_capabilities`).
+///
+/// #1507: it also carries [`LEGACY_SANDBOX_MARKER_SID`] as a restricting SID,
+/// and its default DACL denies that SID `PROCESS_CREATE_PROCESS`. Every
+/// process of every legacy session gets that DACL, and the token is
+/// write-restricted, so the restricting SIDs (the marker among them) are
+/// checked for that right: no legacy command can open a legacy process to
+/// start a child under it, which would put the child in that process's job
+/// and give it that process's token. Unsandboxed processes don't hold the
+/// marker and keep the access.
+///
+/// # Safety
+/// Caller must close the returned token handle; base_token must be a valid primary token.
+pub(crate) unsafe fn create_legacy_token_with_caps_from(
+    base_token: HANDLE,
+    psid_capabilities: &[*mut c_void],
+) -> Result<HANDLE> {
+    let marker = LocalSid::from_string(LEGACY_SANDBOX_MARKER_SID)?;
+    create_token_with_caps_from(base_token, psid_capabilities, &[], Some(marker.as_ptr()))
 }
 
 unsafe fn create_token_with_caps_from(
     base_token: HANDLE,
     psid_capabilities: &[*mut c_void],
     extra_restricting_sids: &[*mut c_void],
+    legacy_marker: Option<*mut c_void>,
 ) -> Result<HANDLE> {
     if psid_capabilities.is_empty() {
         return Err(anyhow!("no capability SIDs provided"));
@@ -457,6 +507,8 @@ unsafe fn create_token_with_caps_from(
     let psid_logon = logon_sid_bytes.as_mut_ptr() as *mut c_void;
     let mut everyone = world_sid()?;
     let psid_everyone = everyone.as_mut_ptr() as *mut c_void;
+    let mut extra_restricting_sids = extra_restricting_sids.to_vec();
+    extra_restricting_sids.extend(legacy_marker);
 
     // Exact order: Capabilities..., ExtraRestricting..., Logon, Everyone
     let mut entries: Vec<SID_AND_ATTRIBUTES> =
@@ -507,7 +559,11 @@ unsafe fn create_token_with_caps_from(
     dacl_sids.push(psid_logon);
     dacl_sids.push(psid_everyone);
     dacl_sids.extend_from_slice(psid_capabilities);
-    set_default_dacl(new_token, &dacl_sids)?;
+    let deny = legacy_marker.map(|marker| (marker, PROCESS_CREATE_PROCESS));
+    if let Err(err) = set_default_dacl(new_token, &dacl_sids, deny) {
+        CloseHandle(new_token);
+        return Err(err);
+    }
 
     enable_single_privilege(new_token, "SeChangeNotifyPrivilege")?;
     Ok(new_token)
