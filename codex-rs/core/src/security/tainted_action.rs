@@ -1860,6 +1860,29 @@ impl Classifier {
                 // its folder only past the possible folders.
                 let unknown = folders.lost;
                 self.follow_change(name, args, folders, variables, unknown, certain);
+                // #1410: nor a target it cannot see (a variable never set
+                // in the action, a command's output: `cd "$ZDOTDIR"`, `cd
+                // "$(cat f)"`), which may be any folder. Not in a
+                // substitution, which does not move the line, nor under
+                // Windows path rules (#1261: a share's `c$` may read as a
+                // variable there).
+                if matches!(name.as_str(), "cd" | "pushd")
+                    && !simple.substituted
+                    && !self.homes.windows_paths()
+                    && args
+                        .iter()
+                        .position(|word| !word.starts_with('-') || word == "-")
+                        .is_some_and(|at| {
+                            let target = &args[at];
+                            unseen.get(index + 1 + at) == Some(&true)
+                                && (self.homes.resolve(target, "").contains('$')
+                                    || outputs::unseen_place(target))
+                        })
+                {
+                    folders.unchecked = true;
+                    folders.lost = true;
+                    folders.others.clear();
+                }
             }
         }
         let mut git_config = GitConfigWrites::new(&lower, &hidden, &unchecked);
