@@ -165,11 +165,17 @@ fn other_output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
             let parts: Vec<&str> = passed.split(',').collect();
             for (at, part) in parts.iter().enumerate() {
                 work::step();
-                let file = if matches!(*part, "-MD" | "-MMD" | "-MF" | "-o" | "--output") {
+                let file = if matches!(
+                    *part,
+                    "-MD" | "-MMD" | "-MF" | "-o" | "--output" | "-Map" | "--Map"
+                ) {
                     parts.get(at + 1).copied()
                 } else {
                     part.strip_prefix("--output=")
                         .or_else(|| part.strip_prefix("-Map="))
+                        .or_else(|| part.strip_prefix("--Map="))
+                        .or_else(|| part.strip_prefix("--out-implib="))
+                        .or_else(|| part.strip_prefix("--dependency-file="))
                         .or_else(|| part.strip_prefix("-MF").filter(|file| !file.is_empty()))
                         .or_else(|| part.strip_prefix("-o").filter(|file| !file.is_empty()))
                 };

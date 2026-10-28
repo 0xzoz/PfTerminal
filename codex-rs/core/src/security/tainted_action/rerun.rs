@@ -164,7 +164,9 @@ pub(super) fn runner_values(
     let end = end.min(words.len());
     let read_end = end.min(at.saturating_add(1).saturating_add(limit));
     let mut values = Vec::new();
-    // Old-style tar: a first word of letters without a dash.
+    // Old-style tar: a first word of letters without a dash; its values
+    // run to `old_end`.
+    let mut old_end = at + 2;
     if TARS.contains(&name)
         && let Some(letters) = words
             .get(at + 1)
@@ -193,6 +195,7 @@ pub(super) fn runner_values(
             }
             next += 1;
         }
+        old_end = next;
     }
     for index in at + 1..read_end {
         work::step();
@@ -201,9 +204,13 @@ pub(super) fn runner_values(
         // --`, old-style `tar xf --`).
         if word == "--"
             && !words[index - 1].starts_with('-')
-            && !(TARS.contains(&name) && index == at + 2)
+            && !(TARS.contains(&name) && index < old_end)
         {
             return (values, false);
+        }
+        // More values than are judged: the line asks.
+        if values.len() > super::outbound::MAX_JUDGED_POSITIONS {
+            return (values, true);
         }
         // An option's value may be the word after the last one read.
         let next = || words.get(index + 1).map(|next| (index + 1, next.clone()));
@@ -258,13 +265,13 @@ pub(super) fn runner_values(
 
 /// #1449: how many words after a runner at `at` are read for its
 /// options, for a line whose command word is at `command`: all for the
-/// command itself (one runner, read once), `MAX_JUDGED_POSITIONS` for a
-/// wrapper before it.
-pub(super) fn limit_for(at: usize, command: usize) -> usize {
-    if at < command {
-        super::outbound::MAX_JUDGED_POSITIONS
-    } else {
+/// command itself when `whole` (the first one read in full: one per
+/// simple command), else `MAX_JUDGED_POSITIONS`.
+pub(super) fn limit_for(at: usize, command: usize, whole: bool) -> usize {
+    if at == command && whole {
         usize::MAX
+    } else {
+        super::outbound::MAX_JUDGED_POSITIONS
     }
 }
 
@@ -288,7 +295,7 @@ pub(super) fn runner_unseen(words: &[String], unseen: &[bool], index: usize) -> 
     (0..=index.min(words.len().saturating_sub(1))).any(|at| {
         work::step();
         let end = options_end(words, at, index);
-        let (values, cut) = runner_values(words, at, end, limit_for(at, index));
+        let (values, cut) = runner_values(words, at, end, limit_for(at, index, /*whole*/ true));
         cut || values
             .iter()
             .any(|value| unseen.get(value.holder).copied().unwrap_or(true))

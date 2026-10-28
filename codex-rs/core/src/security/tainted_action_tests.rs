@@ -9425,6 +9425,11 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
         ("x=a\\ b alias $1", UnseenCode),
         ("x+='a b' alias $1", UnseenCode),
         ("cc -Wl,-Map=.git/hooks/pre-push x.o", Persistence),
+        // Review 3: old-style values that are `--`, `-Map` by commas.
+        ("tar xfK a.tar -- --to-command=./x.sh", Vault),
+        ("tar xfC a.tar -- -I ./x.sh", Vault),
+        ("tar xbf 20 -- --to-command=./x.sh", Vault),
+        ("cc -Wl,-Map,.git/hooks/pre-push x.o", Persistence),
     ];
     let mut wrong = Vec::new();
     for (line, expected) in cases {
@@ -9510,6 +9515,20 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
         }
     }
     assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #1449 review 3: a runner's values are capped (past the cap the line
+/// asks), and only one runner per command is read to its end.
+#[cfg(unix)]
+#[test]
+fn issue_1449_runner_values_are_bounded() {
+    let mut words = vec!["tar".to_string()];
+    words.extend(std::iter::repeat_n("-Ia".to_string(), 1000));
+    let (values, cut) = super::rerun::runner_values(&words, 0, words.len(), usize::MAX);
+    assert!(cut);
+    assert!(values.len() <= super::outbound::MAX_JUDGED_POSITIONS + 1);
+    let line = format!("{}tar -x {}", "tar -x -- ".repeat(63), "-Ia ".repeat(2000));
+    assert!(script(&line).is_some());
 }
 
 /// #1449: the runner and alias checks stay linear.

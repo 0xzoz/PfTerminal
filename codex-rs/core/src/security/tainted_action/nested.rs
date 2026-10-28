@@ -486,6 +486,9 @@ impl Classifier {
             let mut wrappers_checked = 0;
             let mut joined_left = MAX_JOINED_BYTES;
             let mut runners = 0;
+            // #1449: one runner's options are read to the end of the
+            // command; any other's up to `MAX_JUDGED_POSITIONS` words.
+            let mut read_whole = true;
             let mut watched = false;
             let mut sed_command = false;
             for start in starts {
@@ -512,6 +515,7 @@ impl Classifier {
                         &texts,
                         wrapper,
                         last,
+                        &mut read_whole,
                         &mut joined_left,
                         &mut found.unreadable,
                     );
@@ -1469,6 +1473,7 @@ fn runner_scripts(
     texts: &[String],
     at: usize,
     last: usize,
+    whole: &mut bool,
     left: &mut usize,
     cut: &mut bool,
 ) -> Vec<(usize, String, bool)> {
@@ -1493,7 +1498,8 @@ fn runner_scripts(
         // #1449: an option's command, given what it runs on: a file it
         // names, or data on its input (a shell runs either as code).
         name if rerun::VALUE_RUNNERS.contains(&name) => {
-            runner_option_scripts(texts, at, texts.len(), rerun::limit_for(at, last), cut)
+            let limit = rerun::limit_for(at, last, at == last && std::mem::take(whole));
+            runner_option_scripts(texts, at, texts.len(), limit, cut)
         }
         "su" | "runuser" | "flock" | "script" | "env" => {
             let (letter, long) = if wrapper == "env" {
@@ -1549,8 +1555,8 @@ fn runner_scripts(
             // command it runs when it wraps one.
             if wrapper != "env" {
                 let end = rerun::options_end(texts, at, last);
-                for found in runner_option_scripts(texts, at, end, rerun::limit_for(at, last), cut)
-                {
+                let limit = rerun::limit_for(at, last, at == last && std::mem::take(whole));
+                for found in runner_option_scripts(texts, at, end, limit, cut) {
                     work::step();
                     if !scripts
                         .iter()
