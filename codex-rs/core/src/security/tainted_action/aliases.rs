@@ -55,22 +55,38 @@ impl Aliases {
     /// The definitions in one command's `words`: after an `alias` word (or,
     /// as written, a command word holding a value, which may be `alias`:
     /// `$a`, `al$x`), each `name=value` word. Where the definer is the
-    /// command (past `eval`, `builtin`, `command`, or after an assignment,
-    /// which the lexer may misread: `x='a b' alias`), a value that may
-    /// hold a definition (`alias $1`, `alias "$@"`) asks, as does `-s`
-    /// (zsh suffix aliases) before the definitions. Any alias table word
-    /// counts too.
+    /// command (past `eval`, zsh `noglob`/`nocorrect`/`-` and their
+    /// options, `eval -- alias`), a word before the first definition that
+    /// may hold one asks: a value or a glob (`alias $1`, `alias "$@"`,
+    /// `alias b?bash`), as does `-s` (zsh suffix aliases); so does a name
+    /// holding one (`alias b[=]bash`). Words after a definition may be its
+    /// quoted value (`alias k='kubectl --context $CTX'`). Any alias table
+    /// word counts too, and zsh `set -A aliases`.
     fn define(&mut self, words: &[String], as_written: bool) {
         if self.opaque {
             return;
         }
         let command = indirect::command_word(words).map(|(at, _)| at);
         let valued = command.filter(|at| as_written && unknown(&words[*at]));
-        let assigned_before = command.is_some_and(|at| {
-            words[..at].iter().any(|word| {
-                work::step();
-                word.contains('=')
-            })
+        // Where a command-position `alias` is: past the words that run
+        // their operands as a command.
+        let position = command.map(|command| {
+            command
+                + words[command..]
+                    .iter()
+                    .take_while(|word| {
+                        work::step();
+                        matches!(word.as_str(), "eval" | "noglob" | "nocorrect" | "-")
+                            || word.starts_with('-')
+                    })
+                    .count()
+        });
+        let sets_array = command.is_some_and(|at| {
+            words[at] == "set"
+                && words[at + 1..].iter().any(|word| {
+                    work::step();
+                    word.starts_with(['-', '+']) && word.contains('A')
+                })
         });
         let mut defining = false;
         let mut commanding = false;
@@ -78,40 +94,35 @@ impl Aliases {
         for (at, word) in words.iter().enumerate() {
             work::step();
             self.table(word);
+            self.opaque |= sets_array && TABLES.contains(&word.as_str());
             if basename(word).eq_ignore_ascii_case("alias") || valued == Some(at) {
                 defining = true;
                 named = false;
                 // A command named by a value defines only `name=value`
                 // words (`$PYTHON "$f"` is not `alias "$f"`).
-                commanding = valued != Some(at)
-                    && (assigned_before
-                        || command.is_some_and(|command| {
-                            command <= at
-                                && words[command..at].iter().all(|word| {
-                                    work::step();
-                                    matches!(word.as_str(), "eval" | "builtin" | "command")
-                                })
-                        }));
+                commanding = valued != Some(at) && position == Some(at);
                 continue;
             }
             if !defining {
                 continue;
             }
-            if word.starts_with('-') {
-                // `alias -s sh=bash`: suffix aliases run for file names.
-                self.opaque |=
-                    commanding && !named && !word.starts_with("--") && word.contains('s');
-            } else if let Some((name, _)) = word.split_once('=')
+            if let Some((name, _)) = word.split_once('=')
                 && !name.is_empty()
+                && !word.starts_with('-')
             {
                 named = true;
-                if unknown(name) {
+                if unknown(name) || (commanding && globbed(name)) {
                     self.opaque = true;
                 } else {
                     self.names.insert(name.to_lowercase());
                 }
-            } else if commanding && unknown(word) {
-                self.opaque = true;
+            } else if commanding && !named {
+                // `alias -s sh=bash`: suffix aliases run for file names.
+                self.opaque |= if word.starts_with('-') {
+                    !word.starts_with("--") && word.contains('s')
+                } else {
+                    unknown(word) || globbed(word)
+                };
             }
         }
     }
@@ -129,9 +140,16 @@ impl Aliases {
                 let rest = &word[at + table.len()..];
                 let before = word[..at].chars().next_back();
                 // A parameter's name starts the word or follows `${`, `$`,
-                // `${!`, `${#` or `=` (not `jq '.aliases[0]'`).
-                if !matches!(before, None | Some('{' | '$' | '!' | '#' | '=')) {
+                // `${!`, `${#`, `=`, zsh flags `${(AA)` or an option's
+                // letter (`printf -vBASH_ALIASES[b]`), not `jq
+                // '.aliases[0]'`.
+                let option = word.starts_with('-') && before == Some('v');
+                if !option && !matches!(before, None | Some('{' | '$' | '!' | '#' | '=' | ')')) {
                     continue;
+                }
+                if before == Some(')') {
+                    self.opaque = true;
+                    return;
                 }
                 if let Some(subscript) = rest.strip_prefix('[') {
                     // Up to its `]`; one inside another is not read.
@@ -155,6 +173,11 @@ impl Aliases {
             }
         }
     }
+}
+
+/// Whether `text` may glob into other words.
+fn globbed(text: &str) -> bool {
+    text.contains(['*', '?', '['])
 }
 
 /// Whether `text` holds a value the readings do not know.

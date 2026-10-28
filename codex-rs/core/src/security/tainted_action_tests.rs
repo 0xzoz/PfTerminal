@@ -9057,6 +9057,17 @@ fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
         "shopt -s expand_aliases\ntrap 'b evil.sh' EXIT\nd=b=bash; alias $d",
         "shopt -s expand_aliases\ntrap 'b evil.sh' EXIT\nx=ias; al$x b=bash",
         "f() { eval 'b evil.sh'; }\nx=ias; al$x b=bash\nf",
+        // Review 5: `eval --`, zsh precommand modifiers, an attached
+        // option value, globs, zsh array assignments.
+        "shopt -s expand_aliases; f() { eval -- alias $1; }; f b=bash\nb evil.sh",
+        "f() { noglob alias $1 }; f b=bash\nb evil.sh",
+        "noglob alias -s sh=bash\n./run.sh",
+        "shopt -s expand_aliases; printf -vBASH_ALIASES[b] %s bash\nb evil.sh",
+        "print -valiases[b] bash\nb evil.sh",
+        "touch b=bash; alias b?bash\nb evil.sh",
+        "alias *\nb evil.sh",
+        "alias b[=]bash\nb evil.sh",
+        "set -A aliases b bash\nb evil.sh",
         // `compgen -C` runs its command.
         "compgen -C 'bash evil.sh' x",
         "compgen -A file -C 'bash evil.sh' x",
@@ -9114,7 +9125,12 @@ fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
         "grep alias -s notes",
         "grep alias \"$f\"",
         "CC=gcc; $CC -std=c11 x.c",
-        "P=python3; $P tool.py \"$f\"",
+        "P=printf; $P '%s\\n' \"$f\"",
+        "LC_ALL=C grep -n alias \"$f\"",
+        "LC_ALL=C grep alias -s notes",
+        "env FOO=1 grep alias \"$f\"",
+        "alias path='echo $PATH'",
+        "alias k='kubectl --context $CTX' l='ls *.txt'",
         "jq '.aliases[]' notes",
         "jq '.aliases[0]' notes; head -n 0 notes",
         "compgen -c git",
@@ -9166,4 +9182,13 @@ fn issue_1422_checks_are_linear() {
             let _ = classify_fixture(&shell_in(&cwd, &["bash", "-lc", &line]));
         });
     }
+    // Review 5: `eval`s before many `alias` words.
+    work::assert_linear("eval alias", |scale| {
+        let line = format!(
+            "{}{}",
+            "eval ".repeat(200 * scale),
+            "alias ".repeat(200 * scale)
+        );
+        let _ = classify_fixture(&shell_in(&cwd, &["bash", "-lc", &line]));
+    });
 }
