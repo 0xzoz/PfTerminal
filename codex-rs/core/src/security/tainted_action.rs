@@ -1114,6 +1114,19 @@ struct LoopPass {
     climbs: bool,
     /// Whether `cd -` and the folder stack count in its `Place`.
     counts: (bool, bool),
+    /// The folders the line may be in when the pass starts.
+    folders: Vec<String>,
+    /// Folders a first pass that came back left the line in besides: one
+    /// more pass is read from each, alone (`cd nope; cd ..`).
+    branches: Vec<String>,
+}
+
+/// #1436: the folders a reading may be in.
+fn possible_folders(folders: &Folders) -> Vec<String> {
+    std::iter::once(&folders.cwd)
+        .chain(&folders.others)
+        .cloned()
+        .collect()
 }
 
 /// #1436: where a reading is: the folder it follows, where `cd -` and
@@ -1708,6 +1721,8 @@ impl Classifier {
                         names: changing_loop.names,
                         climbs: changing_loop.climbs,
                         counts: (changing_loop.back, changing_loop.stack),
+                        folders: possible_folders(&folders),
+                        branches: Vec::new(),
                     });
                 } else {
                     folders.unseen = true;
@@ -1715,6 +1730,12 @@ impl Classifier {
             }
             let (words, unseen, skipped) =
                 substitute(simple, &variables, &mut self.substitution_budget);
+            // #1436: a value may climb too (`P=../..; … > $P/.zshrc`).
+            if let Some(current) = &mut pass
+                && !current.climbs
+            {
+                current.climbs = words.iter().any(|word| word.contains(".."));
+            }
             mapfile = mapfile || rerun::names_mapfile(&words);
             if let Some(scope) = &mut self.temp {
                 scope.read(simple, &words);
@@ -1811,6 +1832,12 @@ impl Classifier {
             {
                 let place = Place::of(&folders, &variables, &current.names, current.counts);
                 let moved = place != current.place;
+                // A pass that comes back may still leave other folders the
+                // line may be in (`cd nope; cd ..`): read again from them,
+                // not into a folder not known.
+                let widened = possible_folders(&folders)
+                    .iter()
+                    .any(|folder| !current.folders.contains(folder));
                 let deeper = !current.climbs
                     && place.known == current.place.known
                     && place
@@ -1820,15 +1847,42 @@ impl Classifier {
                 if current.round == 1 && moved {
                     current.first = Some((folders.clone(), variables.clone()));
                 }
+                if current.round == 1 && widened && !moved {
+                    current.first = Some((folders.clone(), variables.clone()));
+                    current.branches = possible_folders(&folders)
+                        .into_iter()
+                        .filter(|folder| !current.folders.contains(folder))
+                        .collect();
+                    // Read in the passes below (round 0 marks them).
+                    current.round = 0;
+                }
                 let next = match current.round {
                     1 | 2 if moved => Some(current.round + 1),
                     3 if moved && !deeper => Some(current.round + 1),
                     _ => None,
                 };
-                if let Some(round) = next {
+                if current.round == 0 {
+                    match (current.branches.pop(), &current.first) {
+                        (Some(branch), Some((first, values))) => {
+                            folders = first.clone();
+                            variables = values.clone();
+                            folders.cwd = branch;
+                            folders.others.clear();
+                            cursor = current.start;
+                        }
+                        _ => {
+                            if let Some((first, values)) = current.first.take() {
+                                folders = first;
+                                variables = values;
+                            }
+                            pass = None;
+                        }
+                    }
+                } else if let Some(round) = next {
                     folders.unseen |= round == 4;
                     current.round = round;
                     current.place = place;
+                    current.folders = possible_folders(&folders);
                     cursor = current.start;
                 } else {
                     if let Some((first, values)) = current.first.take() {

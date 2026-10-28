@@ -9036,6 +9036,10 @@ fn issue_1436_unseen_folders_ask() {
         "(cd /tmp); cd - && echo x >> .zshrc",
         "x=$(cd /tmp); cd - && echo x >> .zshrc",
         "cd ~- && echo x >> .zshrc",
+        // Review 2: a value that climbs, a pass that comes back after a
+        // change that may fail.
+        "P=../../../../..; cd /home/fixture/w; for i in 1 2 3 4; do cd d; echo x >> $P/.zshrc; done",
+        "cd /home/fixture/w; for i in 1 2; do echo x >> .zshrc; cd nope; cd ..; done",
     ]
     .into_iter()
     .filter(|command| script(command).is_none())
@@ -9118,6 +9122,10 @@ fn issue_1436_checks_are_linear() {
         ("searches", "CDPATH=x cd /a; "),
         ("unseen scripts", "cd /tmp && cd \"$X\" && sh ./r.sh; "),
         ("nested", "cd \"$X/..\" && sh -c 'echo x'; "),
+        (
+            "branches",
+            "for i in 1 2; do echo x >> f; cd nope; cd ..; done; ",
+        ),
     ] {
         work::assert_linear(label, |scale| {
             let _ = script(&unit.repeat(40 * scale));
