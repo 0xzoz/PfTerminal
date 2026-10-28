@@ -270,7 +270,7 @@ fn issue_675_other_worktrees_dot_git_files_are_protected() {
         base.join("renamed/git"),
         base.join("gone/.git"),
         base.join("long/.git"),
-        common,
+        common.clone(),
     ];
     for root in [base.join("w"), base.join("main")] {
         let paths = git_persistence_paths(&root, /*user_home*/ None);
@@ -281,4 +281,26 @@ fn issue_675_other_worktrees_dot_git_files_are_protected() {
             assert!(!paths.contains(path), "{}: {paths:?}", path.display());
         }
     }
+
+    // A relative `gitdir` is relative to the admin folder's real location,
+    // also when the repository folder is reached through a link elsewhere.
+    std::fs::create_dir_all(base.join("deep").as_path()).unwrap();
+    std::os::unix::fs::symlink(
+        base.join("main").as_path(),
+        base.join("deep/alias").as_path(),
+    )
+    .unwrap();
+    let paths = worktree_admin_paths(&base.join("deep/alias/.git"));
+    assert!(paths.contains(&base.join("relative/.git")), "{paths:?}");
+
+    // Past the limit: `worktrees` whole, and the `.git` files found so far.
+    for n in 0..=MAX_MODULE_DIRS {
+        std::fs::create_dir_all(common.join(format!("worktrees/f{n}")).as_path()).unwrap();
+    }
+    let paths = worktree_admin_paths(&common);
+    assert_eq!(paths.first(), Some(&common.join("worktrees")));
+    assert!(
+        paths[1..].iter().all(|path| protected.contains(path)),
+        "{paths:?}"
+    );
 }

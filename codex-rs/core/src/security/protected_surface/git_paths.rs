@@ -147,30 +147,38 @@ fn repository_paths(
 /// rewritten to `gitdir: <planted>`, git runs there would read a planted
 /// config too. On Linux a missing `commondir` or `gitdir` is left out, and
 /// a `.git` file only while it exists (as a regular file). Past the limit,
-/// or when the folder cannot be read, `worktrees` as a whole (fail closed).
+/// or when the folder cannot be read, `worktrees` as a whole (fail closed),
+/// with the `.git` files found until then. A `.git` file whose admin
+/// folder cannot be read is not known; this process keeps the ones it found
+/// before (`REPOSITORY_PATHS`), but a later start does not.
 fn worktree_admin_paths(git_dir: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
     let worktrees = git_dir.join("worktrees");
-    let closed = || vec![worktrees.clone()];
+    let mut dot_gits = Vec::new();
+    let closed = |dot_gits: Vec<AbsolutePathBuf>| {
+        let mut paths = vec![worktrees.clone()];
+        paths.extend(dot_gits);
+        paths
+    };
     let children = match std::fs::read_dir(worktrees.as_path()) {
         Ok(children) => children,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
-        Err(_) => return closed(),
+        Err(_) => return closed(dot_gits),
     };
     let mut paths = Vec::new();
     let mut visited = 0;
     for child in children {
         let Ok(child) = child else {
-            return closed();
+            return closed(dot_gits);
         };
         let Ok(kind) = child.file_type() else {
-            return closed();
+            return closed(dot_gits);
         };
         if !kind.is_dir() {
             continue;
         }
         visited += 1;
         if visited > MAX_MODULE_DIRS {
-            return closed();
+            return closed(dot_gits);
         }
         let admin = worktrees.join(child.file_name());
         for entry in ["commondir", "config.worktree", "gitdir"] {
@@ -181,8 +189,9 @@ fn worktree_admin_paths(git_dir: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
                 paths.push(path);
             }
         }
-        paths.extend(linked_dot_git(&admin));
+        dot_gits.extend(linked_dot_git(&admin));
     }
+    paths.extend(dot_gits);
     paths
 }
 
@@ -190,7 +199,8 @@ fn worktree_admin_paths(git_dir: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
 const MAX_GITDIR_BYTES: u64 = 4096;
 
 /// #675: the `.git` file of the linked worktree whose admin folder is
-/// `admin`, as its `gitdir` names it (relative to `admin` when relative),
+/// `admin`, as its `gitdir` names it (relative to `admin`'s real location
+/// when relative, as git writes it with `worktree.useRelativePaths`),
 /// when that is an existing regular file named `.git` (or, outside Linux,
 /// may be one: it cannot be checked). Nothing when `gitdir` cannot be read
 /// as a small regular file, or names something else (a folder, such as a
@@ -201,7 +211,8 @@ fn linked_dot_git(admin: &AbsolutePathBuf) -> Option<AbsolutePathBuf> {
     if named.is_empty() {
         return None;
     }
-    let dot_git = AbsolutePathBuf::resolve_path_against_base(named, admin.as_path());
+    let base = std::fs::canonicalize(admin.as_path()).unwrap_or_else(|_| admin.to_path_buf());
+    let dot_git = AbsolutePathBuf::resolve_path_against_base(named, base);
     if dot_git.as_path().file_name() != Some(std::ffi::OsStr::new(".git")) {
         return None;
     }
