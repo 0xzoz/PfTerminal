@@ -320,3 +320,7 @@ fn data_only(words: &[PlainWord]) -> bool {
         name => DATA_ONLY.contains(&name),
     }
 }
+
+#[cfg(test)]
+#[path = "measure_tests.rs"]
+pub(super) mod measure_tests;
