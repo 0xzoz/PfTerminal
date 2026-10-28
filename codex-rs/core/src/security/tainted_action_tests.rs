@@ -9612,7 +9612,6 @@ fn issue_1276_launcher_input_as_program_or_code_asks() {
         "parallel < cmds",
         "parallel -a cmds",
         "parallel :::: cmds",
-        "parallel ::: \"$(cat f)\"",
         "xjobs < cmds",
         "xjobs -j 4 < cmds",
         "xjobs -s cmds",
@@ -9633,6 +9632,42 @@ fn issue_1276_launcher_input_as_program_or_code_asks() {
         "parallel \"python3 -c 'print({})'\" ::: a",
         // An option the reading does not know may take the next word.
         "xargs -I% --frobnicate x % < f",
+        // Review 1: replacement options attached or abbreviated; rush's own
+        // flags; input added after a command that only wraps, or to a
+        // shell's `-c` or awk without a program; evaluators, shells
+        // reading their input and variable command words in launched
+        // lines; positional parameters; fd's valued short options; rush's
+        // variables and placeholders; runners and `env -S`; launchers in
+        // a launched script.
+        "parallel -I% -j4 '% config core.pager sh' < f",
+        "parallel -I@ -- '@ x' < f",
+        "parallel --er=@ '@ x' < f",
+        "parallel --bnr=@ '@ x' < f",
+        "rush -I '{} config core.pager sh' < f",
+        "rush -r 3 '{} config core.pager sh' < f",
+        "rush -k '{} x' -j 2 < f",
+        "xargs -L1 env < cmds",
+        "xargs sudo < f",
+        "xargs awk < f",
+        "xjobs env < f",
+        "xargs -n1 sh -c < f",
+        "parallel bash -c < cmds",
+        "fd -x sh -c",
+        "fd -X env",
+        "parallel 'eval {}' < cmds",
+        "parallel 'bash <<< {}' < cmds",
+        "parallel --pipe bash < cmds",
+        r#"find . -type f -exec sh -c '"$1" config core.pager sh' _ {} \;"#,
+        "xargs sh -c 'exec \"$@\"' _ < cmds",
+        "fd -tx -x {}",
+        "fd -tx -X {}",
+        "rush -v 'p={}' '{p} config core.pager sh' < f",
+        "rush '{:} x' < f",
+        "xargs -I% strace % < f",
+        "xargs -I% chroot / % < f",
+        "xargs -I% env -S'% x' < f",
+        "xargs -I% mawk -W v 'BEGIN{system(\"%\")}' < f",
+        "xargs -I% sh -c 'find . -exec % \\;' < f",
     ] {
         assert_eq!(
             script(command),
@@ -9646,6 +9681,9 @@ fn issue_1276_launcher_input_as_program_or_code_asks() {
         "env_parallel {} ::: git",
         "cat f | parallel",
         "cat f | xargs -I% python3 -c 'print(%)'",
+        "parallel ::: \"$(cat f)\"",
+        "parallel 'echo {} | sh' < cmds",
+        "parallel 'x={}; $x' < f",
     ] {
         assert_eq!(
             script(command),
@@ -9677,6 +9715,30 @@ fn issue_1276_launcher_input_as_program_or_code_asks() {
         "xjobs gzip < f",
         "rush 'gzip {}' < f",
         "rush < f",
+        // Review 1: a launcher's name as data; options this reading does
+        // not know before an ordinary command; awk's braces; input as
+        // data to a runner, a shell's arguments or a remote host.
+        "rg -n parallel",
+        "cargo test parallel",
+        "which parallel",
+        "brew install parallel",
+        "rg parallel -t py",
+        "rg -n parallel -g '*.rs'",
+        "grep -rn xargs env",
+        "parallel --no-notice gzip ::: a.log",
+        "parallel --nice 10 gzip ::: a",
+        "parallel --env PATH cmd ::: a",
+        "parallel -j$(nproc) 'gzip {}' ::: a.log",
+        "rush -i list.txt 'gzip {}'",
+        "fd -x awk '{++n} END {print n}'",
+        "xargs sh -c 'for f; do mv \"$f\" x; done' _ < f",
+        r#"find . -exec sh -c 'echo "$1"' _ {} \;"#,
+        "xargs sudo kill < f",
+        "xargs grep foo < f",
+        "xargs wc -l < f",
+        "xargs -I% ssh % uptime < hosts",
+        "xargs -I% env -S'echo %' < f",
+        "xargs -I% env ls --sort %",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
@@ -9686,15 +9748,19 @@ fn issue_1276_launcher_input_as_program_or_code_asks() {
 /// than are read asks.
 #[test]
 fn issue_1276_launcher_input_checks_are_linear() {
-    for (label, unit) in [
-        ("finders", "find . -name x "),
-        ("exec options", "-exec echo {} ; "),
-        ("xargs", "xargs -I% -n1 "),
-        ("parallel", "parallel -j4 --unknown x "),
-        ("scripts", "sh -c 'echo %'; "),
+    for (label, prefix, unit, suffix) in [
+        ("exec options", "find . ", "-exec echo {} + ", ""),
+        ("words", "xargs -I% echo ", "% ", ""),
+        ("long replacement", "xargs -I", "%", " echo x"),
+        ("options", "xargs ", "-n1 -P2 --zz ", "echo"),
+        ("parallel options", "parallel ", "--zz x -j4 ", "gzip ::: a"),
+        ("rush flags", "rush ", "-j 2 -v a=b ", "'echo {}'"),
+        ("script", "xargs -I% sh -c '", "echo % x; ", "'"),
+        ("positional", "xargs sh -c '", "echo \"$1\"; ", "' _"),
+        ("substitutions", "xargs -I% sh -c 'echo ", "$(echo ", "%'"),
     ] {
         work::assert_linear(label, |scale| {
-            let line = format!("xargs -I% {}", unit.repeat(200 * scale));
+            let line = format!("{prefix}{}{suffix}", unit.repeat(200 * scale));
             let _ = script(&line);
         });
     }
