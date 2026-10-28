@@ -9676,3 +9676,54 @@ fn issue_1449_runner_checks_are_linear() {
         });
     }
 }
+
+/// #1159: zsh `=git` (`$(which git)`) that the command-word reading does
+/// not take for git, so its output, working-tree and other command-word
+/// checks never run: skipped by a wrapper's option loop, after a command it
+/// does not follow, or naming a dashed helper or `git.exe`. It asks. Quiet
+/// on main.
+#[test]
+fn issue_1159_equals_git_past_the_command_word_asks() {
+    for command in [
+        "nice =git log --output=$HOME/.zshrc",
+        "env =git log --output=$HOME/.zshrc",
+        "command =git log --output=$HOME/.zshrc",
+        "time =git log --output=$HOME/.zshrc",
+        "nohup =git log --output=$HOME/.zshrc",
+        "exec =git log --output=.git/hooks/pre-commit",
+        "sudo =git log --output=$HOME/.zshrc",
+        "xargs =git log --output=$HOME/.zshrc",
+        "noglob =git log --output=$HOME/.zshrc",
+        "nice =git -C ~ checkout -- .zshrc",
+        "nice =/usr/bin/git log --output=$HOME/.zshrc",
+        "nice =git-config core.pager sh",
+        "=git-log --output=$HOME/.zshrc",
+        "=git.exe log --output=$HOME/.zshrc",
+        "zsh -c 'nice =git log --output=$HOME/.zshrc'",
+    ] {
+        assert!(script(command).is_some(), "{command}");
+    }
+    // Asked on main too; kept as regressions.
+    for (command, want) in [
+        (
+            "=git log --output=$HOME/.zshrc",
+            ProtectedActionKind::Persistence,
+        ),
+        ("env =git mv a ~/.zshrc", ProtectedActionKind::Persistence),
+        (
+            "nice =git config core.pager sh",
+            ProtectedActionKind::Persistence,
+        ),
+    ] {
+        assert_eq!(script(command), Some(want), "{command}");
+    }
+    for command in [
+        "=git status",
+        "nice git log --oneline",
+        "env A=git make",
+        "echo a=git",
+        "git commit -m 'x=git'",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
