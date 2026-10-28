@@ -407,6 +407,22 @@ impl ConnectionIdentity {
         provider_headers: &ApiHeaderMap,
         api_auth: &dyn AuthProvider,
     ) -> Self {
+        Self::with_broker_required(
+            codex_model_provider::model_key_broker_required(),
+            auth,
+            provider_headers,
+            api_auth,
+        )
+    }
+
+    /// [`Self::of`] with the process's broker state passed in, so tests can
+    /// cover a brokered process without installing a process-wide broker.
+    fn with_broker_required(
+        broker_required: bool,
+        auth: Option<&CodexAuth>,
+        provider_headers: &ApiHeaderMap,
+        api_auth: &dyn AuthProvider,
+    ) -> Self {
         use sha2::Digest;
         let mut digest = sha2::Sha256::new();
         let mut field = |value: Option<&str>| match value {
@@ -425,11 +441,14 @@ impl ConnectionIdentity {
         field(account_id.as_deref());
         field(user_id.as_deref());
         field(api_key);
-        if codex_model_provider::model_key_broker_required()
-            || api_key == Some(codex_model_provider::BROKERED_KEY_PLACEHOLDER)
-        {
+        if broker_required || api_key == Some(codex_model_provider::BROKERED_KEY_PLACEHOLDER) {
             // The broker attaches the credential, so Core cannot tell two
             // brokered sign-ins apart: never reuse a connection across them.
+            // In a brokered process this holds for every provider, including
+            // unbrokered command/AWS auth, so a socket would reconnect on
+            // every turn. That relies on websockets staying off under the
+            // credential broker (`responses_websocket_enabled`); revisit this
+            // before turning them on there (#1504).
             static BROKERED: AtomicU64 = AtomicU64::new(0);
             digest.update(b"brokered");
             digest.update(BROKERED.fetch_add(1, Ordering::Relaxed).to_le_bytes());
@@ -2914,6 +2933,9 @@ impl ModelClient {
     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
     pub fn responses_websocket_enabled(&self) -> bool {
         // PF-27-S05: a websocket handshake cannot carry a signed broker frame.
+        // `ConnectionIdentity` also relies on this: brokered identities never
+        // match, so a socket under the broker would reconnect every turn
+        // (#1504).
         if !self.state.provider.info().supports_websockets
             || self.state.disable_websockets.load(Ordering::Relaxed)
             || codex_model_provider::model_key_broker_required()

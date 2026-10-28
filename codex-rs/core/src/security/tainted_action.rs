@@ -574,6 +574,7 @@ impl Classifier {
             unknown_folder: 0,
             unseen_folder: false,
             sudo_redefined: false,
+            quoted_text: false,
             launched: launched_git::Launch::default(),
             substitution_budget: Budget {
                 left: MAX_SUBSTITUTED_BYTES,
@@ -1307,6 +1308,10 @@ struct Classifier {
     /// itself may load code (`.`, `source`, `eval`, `BASH_ENV`, ...) is in
     /// its own text.
     sudo_redefined: bool,
+    /// D156: the line (or one that runs it) holds a quote or a backslash,
+    /// which the word lexer ignores: it may end a command early there
+    /// (`'a; b'`, `'a ( b'`, `a\;b`).
+    quoted_text: bool,
     /// #1065: bytes of command text, and command lines, lexed so far.
     classified_bytes: usize,
     classified_lines: usize,
@@ -1618,6 +1623,8 @@ impl Classifier {
             self.windows_text(command, cwd, depth);
         }
         let outer_sudo_redefined = self.sudo_redefined;
+        let outer_quoted_text = self.quoted_text;
+        self.quoted_text |= command.iter().any(|part| part.contains(['\'', '"', '\\']));
         self.sudo_redefined |= command
             .iter()
             .any(|part| unknown_folder::may_redefine_sudo(part));
@@ -2037,6 +2044,7 @@ impl Classifier {
         self.quoted_pass(command, cwd, depth, (lexed_seds, lexed_shells));
         self.sed_scope = outer_scope;
         self.sudo_redefined = outer_sudo_redefined;
+        self.quoted_text = outer_quoted_text;
         self.visited = outer_visited;
         self.visited_all = outer_visited_all;
     }
@@ -2289,9 +2297,18 @@ impl Classifier {
             let git_program = (is_git || helper.is_some())
                 && !std::mem::replace(&mut git_programs_read, true)
                 && rerun::git_runs_program(git_args.0, subcommand);
+            // D156: git or a dashed helper spelled by text the quote-aware
+            // reading cannot see (`$g`, braces, `$IFS`) is not checked
+            // there, and here its words may be cut inside quotes (`$g
+            // clone 'a; b' --upload-pack=./x u`): in a line with quoted text
+            // it asks.
+            let hidden_git = (is_git || helper.is_some())
+                && self.quoted_text
+                && hidden.get(index).copied().unwrap_or(false);
             if (is_git && code_variables::git_runs_code_after_git(git_args.0, git_args.1))
                 || (helper == Some(None) && code_variables::git_runs_code(git_args.0, git_args.1))
                 || git_program
+                || hidden_git
             {
                 self.note(ProtectedActionKind::UnseenCode);
             }

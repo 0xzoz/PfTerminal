@@ -710,10 +710,11 @@ async fn issue_943_left_before_the_session_holds_its_first_approval() -> anyhow:
     Ok(())
 }
 
-/// #943 item 18 (#513): while a finding stands in the project (found by any
-/// session of this process), a person's approval of a command's additional
-/// write permission doesn't reopen a persistence file (here the project's
-/// `.agents`): the run is refused. Without the finding it is written.
+/// #943 (#513): while a finding stands in the project (found by any session
+/// of this process), a person's approval of a command's additional write
+/// permission doesn't reopen a persistence file (here the project's
+/// `.agents`): the run is refused, and a note names the finding (#1503
+/// review). Without the finding it is written.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn issue_943_a_standing_finding_refuses_additional_writes() -> anyhow::Result<()> {
@@ -757,7 +758,14 @@ async fn issue_943_a_standing_finding_refuses_additional_writes() -> anyhow::Res
         let out = output(&second.requests, "call-write");
         let written = std::fs::read_to_string(worked.cwd_path().join(".agents/issue943.md"))
             .unwrap_or_default();
-        if second.asked == 0 || (written == "x") == planted || out.contains("wrote-943") == planted
+        let held_note = second.warnings.iter().any(|warning| {
+            warning.contains("doesn't let this command's additional permissions write")
+                && warning.contains(".git")
+        });
+        if second.asked == 0
+            || (written == "x") == planted
+            || out.contains("wrote-943") == planted
+            || held_note != planted
         {
             wrong.push(format!(
                 "planted={planted}: asked={} written={written:?} warnings={:?} output={out}",
