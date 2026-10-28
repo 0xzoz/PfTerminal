@@ -583,6 +583,7 @@ impl Classifier {
             windows_decoded: HashSet::new(),
             windows_budget: windows_shell::RESOLVE_BUDGET,
             backslash: false,
+            share: false,
             in_file: 0,
             reads_follow: false,
             temp: None,
@@ -1236,6 +1237,10 @@ struct Classifier {
     /// the folder `ab`), so a file a word then names may not be the one that
     /// runs: from then on no file is opened.
     backslash: bool,
+    /// #1461: under Windows path rules, whether a line read held `$\`, as
+    /// a share does (`\\host\c$\work`, which the lexer reads as
+    /// `hostc$work`, see `backslash`).
+    share: bool,
     /// #1261: judging text read from a file. Under Windows path rules such
     /// text may be cmd or PowerShell code, whose folder changes and control
     /// flow the POSIX reading does not follow, so no file it names is
@@ -1591,6 +1596,12 @@ impl Classifier {
             self.backslash = command.iter().any(|part| {
                 work::step();
                 part.contains('\\')
+            });
+        }
+        if self.homes.windows_paths() && !self.share {
+            self.share = command.iter().any(|part| {
+                work::step();
+                part.contains("$\\")
             });
         }
         // #1240: the same text as cmd and PowerShell read it.
@@ -2799,10 +2810,17 @@ impl Classifier {
     /// homes among them, substituted) holds a value it cannot see: a
     /// variable it does not know (`$ZDOTDIR`, `$1`) or a command's output.
     /// As written: a path's cleanup would drop `$X` from `$X/..`. Under
-    /// Windows path rules only output (#1261: a share's `c$` may read as a
-    /// variable there).
+    /// Windows path rules (#1461) too, but not a `$` that may be a share's
+    /// (#1261: `\\host\c$\work`): one ending a segment or, once the line
+    /// held `$\` (see `share`), one after a letter or digit.
     fn unseen_value(&self, word: &str) -> bool {
-        outputs::unseen_place(word) || (!self.homes.windows_paths() && word.contains('$'))
+        let bytes = word.as_bytes();
+        outputs::unseen_place(word)
+            || word.match_indices('$').any(|(at, _)| {
+                !(self.homes.windows_paths()
+                    && (matches!(bytes.get(at + 1), None | Some(b'/' | b'\\'))
+                        || (self.share && at > 0 && bytes[at - 1].is_ascii_alphanumeric())))
+            })
     }
 
     /// Whether `word` names a file relative to the folder it is used in.

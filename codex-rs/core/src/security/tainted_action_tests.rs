@@ -7880,10 +7880,6 @@ fn d195_git_working_tree_writes_in_an_unknown_folder_ask() {
 /// set in the action, a command's output) may go anywhere: a file then
 /// written relative to it, or git writing the working tree (D195), asks.
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "#1461: on Windows a `cd` to a variable's folder does not make the folder unknown"
-)]
 fn issue_1410_a_cd_to_an_unseen_folder_is_unknown() {
     // These were quiet before #1410.
     let quiet = [
@@ -7954,6 +7950,60 @@ fn issue_1410_a_cd_to_an_unseen_folder_is_unknown() {
         "echo \"$(cd \"$X\" && pwd)\" > log",
     ] {
         assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// #1461: under Windows path rules too, a `cd` to a variable's folder makes
+/// the folder unknown; a share's `c$` (a `$` ending a segment) is no
+/// variable. Runs on every platform.
+#[test]
+fn issue_1461_windows_rules_a_cd_to_a_variable_folder_is_unknown() {
+    let bash = |line: &str| windows_kind(&["bash", "-lc", line]);
+    let quiet = [
+        "cd \"$ZDOTDIR\" && git checkout -- .zshrc",
+        "cd \"$ZDOTDIR\" && echo x >> .zshrc",
+        "cd $ZDOTDIR && echo x >> .zshrc",
+        "cd \"$OLDPWD\" && echo x >> .zshrc",
+        "pushd \"$X\" && echo x >> .zshrc",
+        "cd \"$X\"; cd sub && echo x >> .zshrc",
+        "cd \"$REPO\" && make > log",
+        "Y=$ZDOTDIR; cd \"$Y\" && echo x >> .zshrc",
+        "export Y=\"$ZDOTDIR\"; cd \"$Y\" && git checkout -- .zshrc",
+        "Y=\"$HOME$Z\"; cd \"$Y\" && echo x >> .zshrc",
+        ": \"$(cd \"$ZDOTDIR\" && echo x >> .zshrc)\"",
+        "x=`cd $ZDOTDIR && echo x >> .zshrc`",
+        "cat <(cd \"$ZDOTDIR\" && echo x >> .zshrc)",
+        "cd $1 && echo x >> .zshrc",
+        "cd $@ && echo x >> .zshrc",
+        "cd a \"$X\" && echo x >> .zshrc",
+        "cd -- \"$X\" && echo x >> .zshrc",
+        "cd -P \"$X\" && echo x >> .zshrc",
+        "builtin cd \"$X\" && echo x >> .zshrc",
+        "(cd \"$X\" && echo x >> .zshrc)",
+        "cd \"$X/..\" && echo x >> .zshrc",
+        "cd \"$X/..\" && git checkout -- .zshrc",
+        "cd \"$1/..\" && echo x >> .zshrc",
+        "Y=\"$X/..\"; cd \"$Y\" && echo x >> .zshrc",
+        "cd ~$X/.. && echo x >> .zshrc",
+        "cd \"${X}\" && echo x >> .zshrc",
+        r#"cd '\\localhost\c$\work'; cd "$X" && echo x >> .zshrc"#,
+        r#"cd '\\localhost\c$\work'; cd "/$X" && echo x >> .zshrc"#,
+    ]
+    .into_iter()
+    .filter(|line| bash(line).is_none())
+    .collect::<Vec<_>>();
+    assert_eq!(quiet, Vec::<&str>::new());
+    // A share's `c$` keeps the folder known; values the reading knows too.
+    for line in [
+        r"cd '\\localhost\c$\work' && echo x >> .zshrc",
+        r"cd '\\localhost\c$' && echo x >> .zshrc",
+        "cd //localhost/c$/work && echo x >> .zshrc",
+        "cd \"$REPO\" && git status",
+        "d=/tmp; cd \"$d\" && echo x >> .zshrc",
+        "cd \"$PWD\" && echo x >> .zshrc",
+        "DIR=$(cd \"$X\" && pwd); make > log",
+    ] {
+        assert_eq!(bash(line), None, "{line}");
     }
 }
 
