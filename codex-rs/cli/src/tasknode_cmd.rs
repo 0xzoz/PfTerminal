@@ -820,9 +820,9 @@ async fn task_evidence(
     Ok(response)
 }
 
-/// The references Task Node returns for a recorded evidence event. Every
-/// genuine receipt carries at least one; success without any cannot be
-/// confirmed as recorded (#1280).
+/// The references Task Node returns for a recorded evidence event: the
+/// direct-write path returns all three, the signed-pointer path a txHash.
+/// Success without any cannot be confirmed as recorded (#1280).
 fn evidence_receipt_reference(receipt: &Value) -> Option<Value> {
     fn text(value: Option<&Value>) -> Option<&str> {
         value
@@ -834,12 +834,10 @@ fn evidence_receipt_reference(receipt: &Value) -> Option<Value> {
     for (key, value) in [
         (
             "eventId",
-            text(receipt.pointer("/offchainLifecycle/eventId"))
-                .or_else(|| text(receipt.get("eventId"))),
+            text(receipt.pointer("/offchainLifecycle/eventId")),
         ),
         ("txHash", text(receipt.get("txHash"))),
         ("cid", text(receipt.get("cid"))),
-        ("receiptId", text(receipt.get("receiptId"))),
     ] {
         if let Some(value) = value {
             reference.insert(key.to_string(), Value::String(value.to_string()));
@@ -854,20 +852,13 @@ fn unconfirmed_evidence_receipt(
     receipt: Value,
     refreshed_detail: Option<&TaskNodeResponse>,
 ) -> TaskNodeResponse {
-    let gate = match mode {
-        TaskEvidenceMode::InitialSubmission => "canSubmitInitialEvidence",
-        TaskEvidenceMode::VerificationResponse => "canSubmitVerificationEvidence",
-    };
-    let evidence_gate_open = refreshed_detail
-        .filter(|detail| response_is_ok(detail))
-        .and_then(|detail| detail.body.pointer(&format!("/actions/{gate}")))
-        .and_then(Value::as_bool);
+    let evidence_gate_open = evidence_gate_open(refreshed_detail, mode);
     let message = match evidence_gate_open {
         Some(true) => {
             "Task Node returned success but no event, transaction or CID reference, and the task still accepts this evidence. Nothing was confirmed as recorded; check the task before submitting again."
         }
-        _ => {
-            "Task Node returned success but no event, transaction or CID reference, so this evidence cannot be confirmed as recorded. Do not resubmit: the evidence step may already be used. Check the task; if it shows the submission without your evidence or a verification request, report the task id to Task Node operators instead of cancelling the task."
+        Some(false) | None => {
+            "Task Node returned success but no event, transaction or CID reference, so this evidence cannot be confirmed as recorded. Do not resubmit: this evidence step may already be used. Check the task; if it no longer accepts this evidence and shows no further progress, report the task id and this receipt to Task Node operators instead of cancelling the task."
         }
     };
     TaskNodeResponse {
@@ -883,6 +874,21 @@ fn unconfirmed_evidence_receipt(
             "receipt": receipt,
         }),
     }
+}
+
+/// The server-reported evidence action for `mode` in a refreshed task detail.
+fn evidence_gate_open(
+    refreshed_detail: Option<&TaskNodeResponse>,
+    mode: TaskEvidenceMode,
+) -> Option<bool> {
+    let gate = match mode {
+        TaskEvidenceMode::InitialSubmission => "canSubmitInitialEvidence",
+        TaskEvidenceMode::VerificationResponse => "canSubmitVerificationEvidence",
+    };
+    refreshed_detail
+        .filter(|detail| response_is_ok(detail))
+        .and_then(|detail| detail.body.pointer(&format!("/actions/{gate}")))
+        .and_then(Value::as_bool)
 }
 
 fn evidence_mode_preflight(
@@ -1002,11 +1008,19 @@ fn annotate_evidence_lifecycle(
             format!("corbanu tasknode task show {task_id} --json"),
             "The verification response is submitted, but completion is not confirmed until Task Node reports the reward outcome.",
         )
+    } else if evidence_gate_open(refreshed_detail, TaskEvidenceMode::InitialSubmission)
+        == Some(false)
+    {
+        (
+            "awaiting_verification",
+            format!("corbanu tasknode task show {task_id} --json"),
+            "Initial evidence is submitted and the initial evidence gate is now closed, so do not resubmit. Completion is not confirmed: Task Node creates the verification request later, so recheck in a later work cycle and answer it. If the task stays submitted with no verification request, report the task id and submission reference to Task Node operators instead of cancelling the task.",
+        )
     } else {
         (
             "awaiting_verification",
             format!("corbanu tasknode task show {task_id} --json"),
-            "Initial evidence is submitted, but completion is not confirmed and the initial evidence gate is now closed, so do not resubmit. Recheck for the verification request and answer it. If none appears, report the task id and submission reference to Task Node operators instead of cancelling the task.",
+            "Initial evidence is submitted, but Task Node has not confirmed the new task state yet, so completion and the evidence gate are unconfirmed. Do not resubmit; recheck the task in a later work cycle and answer the verification request when it appears.",
         )
     };
 
@@ -2088,14 +2102,7 @@ mod tests {
         let detail_path = "/api/terminal/tasknode/tasks/task_stub";
         Mock::given(method("GET"))
             .and(path(detail_path))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "ok": true,
-                "task": { "statusKey": "accepted" },
-                "actions": {
-                    "canSubmitInitialEvidence": true,
-                    "canSubmitVerificationEvidence": false
-                }
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(accepted_detail()))
             .up_to_n_times(1)
             .mount(&server)
             .await;
@@ -2126,8 +2133,19 @@ mod tests {
             .unwrap()
     }
 
-    /// The task view after a direct-write submission in #1280: the gate is
-    /// closed, but there are no summaries and no verification request.
+    fn accepted_detail() -> Value {
+        json!({
+            "ok": true,
+            "task": { "statusKey": "accepted" },
+            "actions": {
+                "canSubmitInitialEvidence": true,
+                "canSubmitVerificationEvidence": false
+            }
+        })
+    }
+
+    /// The task view reported in #1280 after a direct-write submission: the
+    /// gate is closed, with no summaries and no verification request (`{}`).
     fn submitted_without_review_detail() -> Value {
         json!({
             "ok": true,
@@ -2143,6 +2161,8 @@ mod tests {
         })
     }
 
+    // The reporter's real receipt carried references (see the next test);
+    // this pairs the #1280 task view with a receipt that confirms nothing.
     #[tokio::test]
     async fn evidence_success_without_a_recorded_reference_fails_loudly() {
         let response = submit_initial_evidence_against_stub(
@@ -2151,20 +2171,43 @@ mod tests {
         )
         .await;
 
-        assert!(!response_is_ok(&response), "{}", response.body);
         assert_eq!(response.status, 502);
         assert_eq!(
-            response.body["error"],
-            json!("task_evidence_receipt_unconfirmed")
+            response.body,
+            json!({
+                "ok": false,
+                "error": "task_evidence_receipt_unconfirmed",
+                "message": "Task Node returned success but no event, transaction or CID reference, so this evidence cannot be confirmed as recorded. Do not resubmit: this evidence step may already be used. Check the task; if it no longer accepts this evidence and shows no further progress, report the task id and this receipt to Task Node operators instead of cancelling the task.",
+                "taskId": "task_stub",
+                "submittedMode": "initial_submission",
+                "evidenceGateOpen": false,
+                "nextCommand": "corbanu tasknode task show task_stub --json",
+                "receipt": { "ok": true, "phase": "submitted" }
+            })
         );
-        assert_eq!(response.body["evidenceGateOpen"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_receipt_says_when_the_gate_is_still_open() {
+        let response = submit_initial_evidence_against_stub(
+            json!({ "ok": true, "cid": " ", "txHash": "" }),
+            accepted_detail(),
+        )
+        .await;
+
+        assert_eq!(response.status, 502);
         assert_eq!(
-            response.body["nextCommand"],
-            json!("corbanu tasknode task show task_stub --json")
-        );
-        assert_eq!(
-            response.body["receipt"],
-            json!({ "ok": true, "phase": "submitted" })
+            response.body,
+            json!({
+                "ok": false,
+                "error": "task_evidence_receipt_unconfirmed",
+                "message": "Task Node returned success but no event, transaction or CID reference, and the task still accepts this evidence. Nothing was confirmed as recorded; check the task before submitting again.",
+                "taskId": "task_stub",
+                "submittedMode": "initial_submission",
+                "evidenceGateOpen": true,
+                "nextCommand": "corbanu tasknode task show task_stub --json",
+                "receipt": { "ok": true, "cid": " ", "txHash": "" }
+            })
         );
     }
 
@@ -2197,13 +2240,47 @@ mod tests {
                 "phase": "awaiting_verification",
                 "completionConfirmed": false,
                 "nextCommand": "corbanu tasknode task show task_stub --json",
-                "notice": "Initial evidence is submitted, but completion is not confirmed and the initial evidence gate is now closed, so do not resubmit. Recheck for the verification request and answer it. If none appears, report the task id and submission reference to Task Node operators instead of cancelling the task.",
+                "notice": "Initial evidence is submitted and the initial evidence gate is now closed, so do not resubmit. Completion is not confirmed: Task Node creates the verification request later, so recheck in a later work cycle and answer it. If the task stays submitted with no verification request, report the task id and submission reference to Task Node operators instead of cancelling the task.",
                 "currentVerificationRequest": null,
                 "submissionRef": {
                     "eventId": "task_evt_stub",
                     "txHash": "offchain:task_evt_stub",
                     "cid": "postgres:task_evt_stub"
                 }
+            })
+        );
+    }
+
+    /// The signed-pointer path returns only a txHash, and its projection
+    /// refresh is asynchronous, so the task may still look accepted.
+    #[tokio::test]
+    async fn signed_pointer_receipt_is_confirmed_by_its_tx_hash() {
+        let response = submit_initial_evidence_against_stub(
+            json!({
+                "ok": true,
+                "phase": "submitted",
+                "message": "Task evidence published to PFT.",
+                "taskId": "task_stub",
+                "cid": "",
+                "txHash": "ABC123",
+                "engineResult": "tesSUCCESS"
+            }),
+            accepted_detail(),
+        )
+        .await;
+
+        assert!(response_is_ok(&response), "{}", response.body);
+        assert_eq!(
+            response.body["pfterminalLifecycle"],
+            json!({
+                "taskId": "task_stub",
+                "submittedMode": "initial_submission",
+                "phase": "awaiting_verification",
+                "completionConfirmed": false,
+                "nextCommand": "corbanu tasknode task show task_stub --json",
+                "notice": "Initial evidence is submitted, but Task Node has not confirmed the new task state yet, so completion and the evidence gate are unconfirmed. Do not resubmit; recheck the task in a later work cycle and answer the verification request when it appears.",
+                "currentVerificationRequest": null,
+                "submissionRef": { "txHash": "ABC123" }
             })
         );
     }
