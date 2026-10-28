@@ -180,6 +180,10 @@ pub(super) const WRAPPERS: &[(&str, &[&str], usize)] = &[
     ("exec", &["-a"], 0),
     ("command", &[], 0),
     ("builtin", &[], 0),
+    // #1309: zsh's precommand modifiers run the command after them
+    // (`noglob cd ~`, `noglob git log --output=f`).
+    ("noglob", &[], 0),
+    ("nocorrect", &[], 0),
     (
         "xargs",
         &[

@@ -359,6 +359,15 @@ impl Classifier {
             // before it left.
             found.deferred |= unknown_folder::starts_loop(&texts);
             let command_at = indirect::command_word(&texts);
+            // #1309: a command word spelled as a pattern (`c? ~`, `[c]d ~`,
+            // `{c,}d ~`) may be `cd`, `eval` or `source`.
+            if !command.substituted
+                && command_at
+                    .as_ref()
+                    .is_some_and(|(index, _)| unknown_folder::pattern_word(&texts[*index]))
+            {
+                folders.unchecked = true;
+            }
             // A substitution's `cd` does not move this line.
             if !command.substituted
                 && let Some((index, name)) = &command_at

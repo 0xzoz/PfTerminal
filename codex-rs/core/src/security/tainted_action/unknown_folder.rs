@@ -25,6 +25,9 @@ const LONG_FOLDER_FLAGS: &[&str] = &[
     "--working-dir",
     "--working-directory",
     "--base-directory",
+    // #1309: apptainer/singularity `--pwd`, buildah `--workingdir`.
+    "--pwd",
+    "--workingdir",
 ];
 
 /// Short folder options of wrappers, also in a cluster (`env -iC dir`) or
@@ -40,6 +43,27 @@ const SHORT_FOLDER_FLAGS: &[(&str, char)] = &[
     ("nerdctl", 'w'),
     ("proot", 'w'),
     ("start-stop-daemon", 'd'),
+    // #1309: `schroot -d`.
+    ("schroot", 'd'),
+    // #1309: login shells start in the target user's home: `sudo -i`,
+    // `su -l`, `runuser -l`.
+    ("sudo", 'i'),
+    ("su", 'l'),
+    ("runuser", 'l'),
+];
+
+/// #1309: wrappers whose login spelling starts the command in the target
+/// user's home (`su -`, `sudo --login`, `machinectl shell`, `systemd-run
+/// --user`), with the word that does it: `-` alone, or a prefix of the long
+/// option from its first two letters (getopt's abbreviations).
+const LOGIN_WORDS: &[(&str, &str)] = &[
+    ("su", "-"),
+    ("su", "--login"),
+    ("runuser", "-"),
+    ("runuser", "--login"),
+    ("sudo", "--login"),
+    ("machinectl", "shell"),
+    ("systemd-run", "--user"),
 ];
 
 /// Commands that run what they are given in another folder whatever their
@@ -232,6 +256,7 @@ pub(super) fn runs_elsewhere(texts: &[String], redefined: bool) -> bool {
 /// it holds for the texts before a position after it, and only those.
 pub(super) fn elsewhere_at(texts: &[String], redefined: bool) -> Option<usize> {
     let mut letters: Vec<char> = Vec::new();
+    let mut logins: Vec<&str> = Vec::new();
     let closes = sudo_close_from(texts, redefined);
     for (at, text) in texts.iter().enumerate() {
         work::step();
@@ -266,14 +291,35 @@ pub(super) fn elsewhere_at(texts: &[String], redefined: bool) -> Option<usize> {
         {
             return Some(at);
         }
+        if logins.iter().any(|word| {
+            work::step();
+            login_word(text, word)
+        }) {
+            return Some(at);
+        }
         for (wrapper, letter) in SHORT_FOLDER_FLAGS {
             work::step();
             if basename(text) == *wrapper && !letters.contains(letter) {
                 letters.push(*letter);
             }
         }
+        for (wrapper, word) in LOGIN_WORDS {
+            work::step();
+            if basename(text) == *wrapper && !logins.contains(word) {
+                logins.push(word);
+            }
+        }
     }
     None
+}
+
+/// Whether `text` is `word` (a login spelling), or for a long option an
+/// abbreviation of it from its first two letters (`--log`, `--us`).
+fn login_word(text: &str, word: &str) -> bool {
+    text == word
+        || (word.starts_with("--")
+            && text.len() > 3
+            && word.starts_with(text.split_once('=').map_or(text, |(flag, _)| flag)))
 }
 
 /// Whether `text` defines code that runs later than it is read: a
@@ -465,7 +511,11 @@ pub(super) fn searches(text: &str) -> bool {
 /// the text again (`eval 'c\d ~'`, `alias go='c""d ~'`, `eval 'c?'`,
 /// `eval '{c,}d'`).
 pub(super) fn carries_change(name: &str, args: &[String]) -> bool {
-    matches!(name, "source" | ".")
+    // #1309: zsh `zmodload` and bash `enable` load or switch builtins (a
+    // `cd` of a module, `enable -f x.so cd`, `enable -n cd`), and `fc`
+    // other than `fc -l` runs commands from the history.
+    matches!(name, "source" | "." | "zmodload" | "enable")
+        || (name == "fc" && !args.iter().any(|arg| arg.starts_with("-l")))
         || (CARRIERS.contains(&name)
             && args.iter().any(|arg| {
                 work::step();
@@ -521,6 +571,18 @@ pub(super) fn odd_change(name: &str, args: &[String]) -> bool {
         "pushd" => operands == 0,
         _ => operands > 1,
     }
+}
+
+/// #1309: whether a command word is spelled as a pattern the shell may
+/// match against file names (`c?`, `[c]d`, `e*l`) or expand (`{c,}d`), so
+/// it may be any command. `[` and `[[` are commands.
+pub(super) fn pattern_word(word: &str) -> bool {
+    if matches!(word, "[" | "[[") {
+        return false;
+    }
+    word.contains(['?', '*'])
+        || word.find('[').is_some_and(|at| word[at..].contains(']'))
+        || word.find('{').is_some_and(|at| word[at..].contains(','))
 }
 
 /// #1403: whether a folder change is named by a path (`./cd`,
