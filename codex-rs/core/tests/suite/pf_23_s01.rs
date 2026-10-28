@@ -3086,6 +3086,90 @@ async fn issue_650_other_worktrees_git_folders_stay_read_only() -> anyhow::Resul
     Ok(())
 }
 
+/// #675: a protected command with full access, working in a linked git
+/// worktree, cannot rewrite another worktree's own `.git` file (to point the
+/// person's later git runs there at a planted folder), nor move that
+/// worktree aside and leave a planted one in its place, with the paths built
+/// at run time; the main worktree's command neither. Its own worktree's
+/// files stay writable. Permissive is unchanged.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_675_other_worktrees_dot_git_files_stay_read_only() -> anyhow::Result<()> {
+    use codex_protocol::models::PermissionProfile;
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for (level, from, open) in [
+        (SecurityLevel::Moderate, "wt", false),
+        (SecurityLevel::Aggressive, "wt", false),
+        (SecurityLevel::Moderate, "main", false),
+        (SecurityLevel::Permissive, "wt", true),
+    ] {
+        let base = TempDir::new()?;
+        let x = base.path().canonicalize()?;
+        let common = x.join("main/.git");
+        std::fs::create_dir_all(common.join("hooks"))?;
+        std::fs::write(common.join("config"), "[core]\n")?;
+        for name in ["wt", "other"] {
+            let admin = common.join("worktrees").join(name);
+            std::fs::create_dir_all(&admin)?;
+            std::fs::write(admin.join("HEAD"), "ref\n")?;
+            std::fs::write(admin.join("commondir"), "../..\n")?;
+            std::fs::write(
+                admin.join("gitdir"),
+                format!("{}/.git\n", x.join(name).display()),
+            )?;
+            std::fs::create_dir_all(x.join(name))?;
+            std::fs::write(
+                x.join(name).join(".git"),
+                format!("gitdir: {}\n", admin.display()),
+            )?;
+        }
+        let original = std::fs::read_to_string(x.join("other/.git"))?;
+        let path = x.to_string_lossy().into_owned();
+        // Split inside the folder's own name: neither part names it.
+        let (head, tail) = split_home_name(&path);
+        let command = format!(
+            "x=\"$(printf '{head}%s' {tail})\"; g=\".g$(printf it)\"; \
+             printf 'gitdir: /planted\\n' > \"$x/other/$g\"; \
+             mv \"$x/other\" \"$x/moved675\" && mkdir \"$x/other\" && \
+             printf 'gitdir: /planted\\n' > \"$x/other/$g\"; \
+             echo x > \"$x/{from}/file675\"; echo ran-675"
+        );
+        let cwd = AbsolutePathBuf::from_absolute_path(x.join(from))?;
+        let (test, captured) = start_turn_in(
+            /*home*/ None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-675", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+        )
+        .await?;
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-675");
+        let changed = std::fs::read_to_string(x.join("other/.git")).unwrap_or_default() != original;
+        if !output.contains("ran-675") || changed != open || !x.join(from).join("file675").exists()
+        {
+            wrong.push(format!(
+                "{level:?} from {from}: changed {changed}: {output}"
+            ));
+        }
+        drop(test);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
 /// Issue #651: a protected command working inside a separate database
 /// folder whose path holds glob syntax runs (bubblewrap's glob scan accepts
 /// the escaped pattern) and still cannot read a database there, write the

@@ -337,18 +337,15 @@ pub(crate) fn contain(
         env,
         cwd,
         bridge_port,
-        &rules_at(
-            profile,
-            crate::security::level::aggressive_active(),
-            user_namespaces.is_some(),
-        ),
+        &rules_at(profile, keychain_denied(), user_namespaces.is_some()),
     )?;
     command.user_namespaces_denied = user_namespaces;
     Ok(command)
 }
 
 /// #891 (Travis, 2026-10-16, D12 option a): on Linux, under Moderate and
-/// Aggressive (the stricter of the active and the saved level), a contained
+/// Aggressive (the strictest of the active level, the saved level and, since
+/// #807, Core's live policy on this home), a contained
 /// pane may not create user namespaces either, as agent commands may not
 /// (#826): `unshare -Ur` could otherwise open what the sandbox hides and
 /// defeat nested-launch detection. Claude Code's own Bash sandbox
@@ -362,6 +359,14 @@ pub(crate) fn user_namespaces_denied() -> Option<&'static str> {
     }
     crate::security::level::protected_level_for_panes()
         .map(crate::security::level::ChosenLevel::name)
+}
+
+/// #758, #807: under Aggressive (the strictest of the active level, the
+/// saved level and Core's live policy, as for [`user_namespaces_denied`]) a
+/// contained pane may not reach the macOS keychain services ([`rules_at`]).
+fn keychain_denied() -> bool {
+    crate::security::level::protected_level_for_panes()
+        == Some(crate::security::level::ChosenLevel::Aggressive)
 }
 
 /// The program and arguments run inside the sandbox for `executable args`.
@@ -429,7 +434,7 @@ fn rules_at(
 pub(crate) fn level_rules(profile: PermissionProfile) -> PermissionProfile {
     rules_at(
         profile,
-        crate::security::level::aggressive_active(),
+        keychain_denied(),
         user_namespaces_denied().is_some(),
     )
 }
