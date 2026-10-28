@@ -659,8 +659,11 @@ fn pf_29_s01_symlink_at_a_corbanu_store_is_drift() {
     // included, and so does a symlinked store going away.
     std::os::unix::fs::symlink(fixture.home().join("missing"), corbanu.join("sessions"))
         .expect("dangling symlink");
-    std::os::unix::fs::symlink(fixture.home().join("elsewhere"), corbanu.join("x.sqlite"))
-        .expect("database symlink");
+    std::os::unix::fs::symlink(
+        fixture.home().join("elsewhere/codex-tui.log"),
+        corbanu.join("x.sqlite"),
+    )
+    .expect("database symlink");
     let (third, drift) = second.recheck(&sources, ALL_ON);
     assert_eq!(drift.added.len(), 2, "{drift:?}");
 
