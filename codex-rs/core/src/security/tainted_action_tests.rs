@@ -4566,6 +4566,70 @@ fn d153_git_names_in_quoted_text_do_not_end_the_git_checks() {
     }
 }
 
+/// D156: the word lexer splits a quoted value at `;`, `|` or `&` (`git -c
+/// 'user.name=a; b' -c core.pager=sh log` reads as `git -c user.name=a`
+/// and `b -c core.pager=sh log`), so its git checks ended at that value and
+/// a setting after it, which git runs, did not ask (nor on main). The same
+/// checks also read the words with quoted values kept whole.
+#[test]
+fn d156_git_settings_after_a_split_value_ask() {
+    for command in [
+        "git -c 'user.name=a; b' -c core.pager=sh log",
+        "git -c 'user.name=a;b' -c core.pager=sh log",
+        "git -c \"user.name=a; b\" -c core.pager=sh log",
+        "git -c 'user.name=a | b' -c core.pager=sh log",
+        "git -c 'user.name=a & b' -c core.pager=sh log",
+        "git -c 'user.name=a && b' -c core.pager=sh log",
+        "git -c 'user.name=a\nb' -c core.pager=sh log",
+        "git -c'user.name=a; b' -c core.pager=sh log",
+        "git --config-env 'user.name=a; b' -c core.pager=sh log",
+        "git -c 'user.name=a; b' -c 'alias.x=!sh' x",
+        "git -c 'user.name=a; b' --exec-path=/tmp/x log",
+        "git -C 'a; b' -c core.pager=sh log",
+        "git --namespace 'a | b' -c core.pager=sh log",
+        "git -c 'user.name=a; b' clone --upload-pack=./x https://example.com/r",
+        "git.exe -c 'user.name=a; b' -c core.pager=sh log",
+        "env git -c 'user.name=a; b' -c core.pager=sh log",
+        "sh -c \"git -c 'user.name=a; b' -c core.pager=sh log\"",
+        "echo x && git -c 'user.name=a; b' -c core.pager=sh log",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::UnseenCode),
+            "{command}"
+        );
+    }
+    assert_eq!(
+        kind(&["git", "-c", "user.name=a; b", "-c", "core.pager=sh", "log"]),
+        Some(ProtectedActionKind::UnseenCode)
+    );
+    // Settings that run nothing, and such text after the subcommand.
+    for command in [
+        "git -c 'user.name=a; b' log",
+        "git -c 'user.name=a; b' -c user.email=c commit -m x",
+        "git -C 'a; b' status",
+        "git log --grep 'a; b' --oneline",
+        "git commit -m 'fix: a | b & c; d'",
+    ] {
+        assert_eq!(script(command), None, "{command}");
+    }
+}
+
+/// D156: reading git's options with quoted values whole stays linear.
+#[test]
+fn d156_checks_are_linear() {
+    for (label, unit) in [
+        ("split settings", "-c 'user.name=a; git' "),
+        ("split values", "-C 'a; git -C b' "),
+        ("piped texts", "'a | git' -C x "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("git {} status", unit.repeat(100 * scale));
+            let _ = script(&line);
+        });
+    }
+}
+
 /// D153: the git checks stay linear when git names repeat in options and
 /// quoted settings.
 #[test]

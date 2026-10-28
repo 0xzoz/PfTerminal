@@ -17,6 +17,7 @@ use super::MAX_FOLDER_BYTES;
 use super::ProtectedActionKind;
 use super::WRITERS;
 use super::certain_cd;
+use super::code_variables;
 use super::git_helpers;
 use super::indirect;
 use super::invocation;
@@ -771,6 +772,10 @@ impl Classifier {
     /// core.pager sh` as a read); here each value stays one word. Git
     /// spelled by text this reading cannot see is checked there instead
     /// (`hidden_words`).
+    /// D156: git's options are read here too. The lexer splits a value at
+    /// `;`, `|` or `&` (`git -c 'user.name=a; b' -c core.pager=sh log`), so
+    /// its scan from `git` ends before the settings after that value; here
+    /// it reads to the command's end. This only adds findings.
     /// `loops`: loop variables over the positional parameters so far.
     fn judge_git(
         &self,
@@ -794,6 +799,7 @@ impl Classifier {
                 ..launched_git::Marks::default()
             },
         );
+        let mut git_programs_read = false;
         for (index, word) in lower.iter().enumerate() {
             work::step();
             // #1276: or a finder's exec option with git attached.
@@ -805,6 +811,19 @@ impl Classifier {
                 && config.persists(index + 1, subcommand)
             {
                 kinds.push(ProtectedActionKind::Persistence);
+            }
+            // D156: as `simple_command` reads them (#1142, #1159), on these
+            // words; as written, so `raw` is the same words.
+            let is_git = basename(git_word) == "git" || indirect::equals_git(git_word);
+            let args = &texts[index + 1..];
+            let git_program = (is_git || helper.is_some())
+                && !std::mem::replace(&mut git_programs_read, true)
+                && rerun::git_runs_program(args, subcommand);
+            if (is_git && code_variables::git_runs_code_after_git(args, args))
+                || (helper == Some(None) && code_variables::git_runs_code(args, args))
+                || git_program
+            {
+                kinds.push(ProtectedActionKind::UnseenCode);
             }
             kinds.extend(launched.judge(index, helper.as_ref()));
             launched.step(index);
