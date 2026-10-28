@@ -7992,6 +7992,12 @@ fn issue_1410_a_cd_to_an_unseen_folder_is_unknown() {
         "cd -P \"$X\" && echo x >> .zshrc",
         "builtin cd \"$X\" && echo x >> .zshrc",
         "(cd \"$X\" && echo x >> .zshrc)",
+        // Review 2: a path's cleanup drops the variable.
+        "cd \"$X/..\" && echo x >> .zshrc",
+        "cd \"$X/..\" && git checkout -- .zshrc",
+        "cd \"$1/..\" && echo x >> .zshrc",
+        "Y=\"$X/..\"; cd \"$Y\" && echo x >> .zshrc",
+        "cd ~$X/.. && echo x >> .zshrc",
     ]
     .into_iter()
     .filter(|command| script(command).is_none())

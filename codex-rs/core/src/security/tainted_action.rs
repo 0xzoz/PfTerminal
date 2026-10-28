@@ -2488,13 +2488,14 @@ impl Classifier {
             && self.relative_place(word)
     }
 
-    /// #1410: whether a word holds a value this reading cannot see: a
+    /// #1410: whether a word (with the variables this reading knows, the
+    /// homes among them, substituted) holds a value it cannot see: a
     /// variable it does not know (`$ZDOTDIR`, `$1`) or a command's output.
-    /// Under Windows path rules only output (#1261: a share's `c$` may
-    /// read as a variable there).
+    /// As written: a path's cleanup would drop `$X` from `$X/..`. Under
+    /// Windows path rules only output (#1261: a share's `c$` may read as a
+    /// variable there).
     fn unseen_value(&self, word: &str) -> bool {
-        outputs::unseen_place(word)
-            || (!self.homes.windows_paths() && self.homes.resolve(word, "").contains('$'))
+        outputs::unseen_place(word) || (!self.homes.windows_paths() && word.contains('$'))
     }
 
     /// Whether `word` names a file relative to the folder it is used in.
