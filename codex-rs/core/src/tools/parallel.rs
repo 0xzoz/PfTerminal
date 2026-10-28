@@ -46,6 +46,47 @@ const MAX_IDENTICAL_TOOL_RESULTS: u32 = 3;
 /// refusals and is stuck.
 const STOP_TURN_AFTER_REFUSED_REPEATS: u32 = 8;
 
+/// Direct tool calls of a turn whose output may not be recorded yet. When an
+/// interrupt hard-aborts a turn that missed the grace period, the abort path
+/// records each call's abort output from here, so the model still sees how
+/// long the call ran instead of the bare `aborted` placeholder that history
+/// normalization would insert (#1467).
+#[derive(Debug, Default)]
+pub(crate) struct PendingToolCalls {
+    calls: std::sync::Mutex<Vec<(ToolCall, Instant)>>,
+}
+
+impl PendingToolCalls {
+    fn register(&self, call: &ToolCall, started: Instant) {
+        self.lock().push((call.clone(), started));
+    }
+
+    /// Forgets a call once its output is in history.
+    pub(crate) fn complete(&self, call_id: &str) {
+        self.lock().retain(|(call, _)| call.call_id != call_id);
+    }
+
+    /// Takes the abort outputs of every remaining call, timed up to `cancelled_at`.
+    pub(crate) fn take_aborted_outputs(&self, cancelled_at: Instant) -> Vec<ResponseInputItem> {
+        std::mem::take(&mut *self.lock())
+            .into_iter()
+            .map(|(call, started)| {
+                let secs = cancelled_at
+                    .saturating_duration_since(started)
+                    .as_secs_f32()
+                    .max(0.1);
+                ToolCallRuntime::aborted_response(&call, secs).into_response()
+            })
+            .collect()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(ToolCall, Instant)>> {
+        self.calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 struct ToolCallTimingGuard {
     started_at: Instant,
     execution_started_at: Arc<OnceLock<Instant>>,
@@ -117,6 +158,10 @@ impl ToolCallRuntime {
         let call = self.router.resolve_flat_tool_call(call);
         let error_call = call.clone();
         let source = call.direct_source();
+        self.step_context
+            .turn
+            .pending_tool_calls
+            .register(&call, Instant::now());
         let future = self.handle_tool_call_with_source(call, source, cancellation_token);
         async move {
             match future.await {

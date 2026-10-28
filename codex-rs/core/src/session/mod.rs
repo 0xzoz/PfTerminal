@@ -4878,6 +4878,26 @@ impl Session {
         state.clone_history()
     }
 
+    /// Drops each tool output whose call already has an output in history.
+    pub(crate) async fn retain_unrecorded_tool_outputs(&self, outputs: &mut Vec<ResponseItem>) {
+        fn output_call_id(item: &ResponseItem) -> Option<&str> {
+            match item {
+                ResponseItem::FunctionCallOutput { call_id, .. }
+                | ResponseItem::CustomToolCallOutput { call_id, .. } => Some(call_id),
+                ResponseItem::ToolSearchOutput { call_id, .. } => call_id.as_deref(),
+                _ => None,
+            }
+        }
+        let state = self.state.lock().await;
+        let recorded: HashSet<&str> = state
+            .history
+            .raw_items()
+            .iter()
+            .filter_map(output_call_id)
+            .collect();
+        outputs.retain(|item| output_call_id(item).is_none_or(|id| !recorded.contains(id)));
+    }
+
     pub(crate) async fn current_window_id(&self) -> String {
         let state = self.state.lock().await;
         let thread_id = self.thread_id;
