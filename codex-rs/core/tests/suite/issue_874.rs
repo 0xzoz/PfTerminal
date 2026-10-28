@@ -50,7 +50,8 @@ struct Run {
     /// How many of `warnings` came before the first approval prompt.
     warned_before_asked: usize,
     asked: usize,
-    /// The approval prompts' reasons.
+    /// The approval prompts' reasons (read by the Linux-only D48 test).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     reasons: Vec<String>,
     requests: Vec<ResponsesRequest>,
 }
