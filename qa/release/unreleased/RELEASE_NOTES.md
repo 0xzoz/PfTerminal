@@ -50,6 +50,13 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   as editing a later message already did: `/cost` lists it as "Reopen
   warm-up", Corbanu says once it has been sent, and `skip_reopen_warmup = true`
   skips it (#1038).
+- **Realtime sessions show their tokens.** A realtime WebSocket session now
+  records the input, cached-input, output and total tokens OpenAI reports at
+  the end of each response, and `/cost` shows them. Its cost stays unknown
+  (`no price available`, never $0): Corbanu has no realtime price table, so
+  no rate is applied even when the session's model has a catalogue price.
+  Sessions recorded earlier, and WebRTC calls, still show their tokens as
+  unknown (#889, D223).
 - **A day with an unrecorded request says its totals may be incomplete.**
   When accounting fails to record a request (the turn already warns, for
   example with a clock far behind the ledger), Corbanu now keeps a small
