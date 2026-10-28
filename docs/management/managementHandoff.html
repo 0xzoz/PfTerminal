@@ -24,14 +24,14 @@ th{background:#f5f5f7}.warn{background:#fff4e5;border-left:4px solid #f0a020;pad
 exception for RUSTSEC-2026-0387, crypto-bigint via aws-config, D198) merged at 21:08Z on 10-27; #1401 tracks removing the exception (re-review by 2027-01-31).</li>
 <li><b>Security classifier:</b> D194 (#1404, narrowed to option B, a strict command allowlist), D195 (#1415), D191 (#1406) and the follow-ups #1354, #1356, #1418, #1421 and #1433 merged. D191 and D194
 are the owner-approved relaxations; D195 adds prompts, and the others are reviewed follow-up fixes (section 8.0f). Follow-ups #1410 and #1422 are open; D217 (<code>sudo -C</code>) is pending.</li>
-<li><b>Accounting S10 signed off</b> (#1419): the raw re-run record (#1411) is 33 passed, 0 failed, 4 blocked (ACC-04 counted by D113); with the owner decisions D207/D208 it is 35/0/2, ACC-22 and ACC-35 as
+<li><b>Accounting S10 signed off</b> (#1419): the raw record is 32 passed, 0 failed, 5 blocked; the re-run record (#1411) counts 33/0/4 with ACC-04 passed under D113; with the owner decisions D207/D208 it is 35/0/2, ACC-22 and ACC-35 as
 named limits. ACC-11 and ACC-14 stay <i>blocked</i> in the raw rows; their pass is an owner decision, listed separately.</li>
 <li><b>PF-84 Windows gate not run:</b> the Windows PC has been offline in Tailscale since 10-27 21:07Z (last poll 03:10Z: down). #1080 stays draft at <code>db6b6fa35e</code> (CI 35 passed, 0 failed).</li>
 <li><b>Installed build:</b> main <code>21db61709f</code> (#1406), installed 10-28 01:08Z (section 7).</li>
 <li><b>Waiting on Travis:</b> D217 and D218 (#1430), plus turning the Windows PC on (D212, accepted 01:54Z, not yet online). Running: ci-nightly, contrib-10, sec-fu2, sec-1428, win-gate-pf84 and this handoff-doc12 (section 10).</li>
 </ul></div>
 <div class="note"><b>Resumed 2026-10-26.</b> Travis said “Resume everything”. Opus 5.5 High is available again (smoke OK 19:02Z), so reviews are Opus again; the 2026-10-22 Astra High exception covered only that batch (#1305/#1318/#1365).
-#1305 and #1318 merged during the pause (<code>180a24b5cc</code> / <code>55ffd02770</code>) after review of their unchanged heads and green CI.
+#1305 and #1318 merged during the pause (<code>180a24b5cc</code> / <code>55ffd0277c</code>) after review of their unchanged heads and green CI.
 <b>Now running:</b> sec-recover (#1354 and #1356 conflict recovery and review), sec-d194 (D194 definite-cd handling, then D195 unknown-folder git checks), sec-d191 (bounded plain-mktemp recognition) and a contributor sweep.
 <b>Still waiting:</b> the Windows box is unreachable (powered off) and the Z.AI balance is still empty (D190 recharge unconfirmed), so the PF-84 Windows gate and the in-product GLM runs (including the accounting rerun) wait.
 Raw failed/blocked results stay separate from owner acceptance; nothing in this resume changes a raw result into a pass.
@@ -2287,7 +2287,7 @@ Running workers report through <code>$HOME/.corbanu-workers/&lt;name&gt;.result.
 <tr><td>Tracking issues</td><td>#1367 (one macOS SIGSEGV; crash reports now upload via #1417), #1401 (0387 exception, re-review by 2027-01-31), #1412 (low), #932 (D205 gap).</td><td>Close #1367 as a one-off if it doesn't recur once crash reports are collected.</td></tr>
 </table>
 <p><b>Main CI:</b> postmerge green at <code>21db61709f</code> (01:03Z, the installed build). Later merges up to #1427 (<code>0dee885a38</code>) and #1433 (<code>1a613a7e4c</code>) were not checked green in this update; the run for <code>1a613a7e4c</code> was pending at 03:15Z. Nightly is red until ci-nightly's fixes are verified.</p>
-<p><b>Raw results vs owner acceptance:</b> the S10 raw record keeps ACC-11 and ACC-14 blocked (33/0/4 with ACC-04 under D113); 35/0/2 is the owner-accepted count (D207/D208). The PF-84 Windows gate has no result yet; the earlier 24 CLI assertions on Windows (10-22) are not the gate.</p>
+<p><b>Raw results vs owner acceptance:</b> the S10 raw record keeps ACC-11 and ACC-14 blocked: 32/0/5 raw, 33/0/4 with ACC-04 passed under D113 (#1411's count); 35/0/2 is the owner-accepted count (D207/D208). The PF-84 Windows gate has no result yet; the earlier 24 CLI assertions on Windows (10-22) are not the gate.</p>
 <p><b>Evidence:</b> worker reports and reviewer outputs in <code>$HOME/.corbanu-workers/</code>; requests and grants in <code>$W</code>; the decision log is <code>$W/todo.md</code>. Don't delete unmerged worktrees (#1430's <code>worktrees/ci-1420</code> stays until it is merged or closed).</p>
 
 <h2>11. Decisions and remaining external actions</h2>
