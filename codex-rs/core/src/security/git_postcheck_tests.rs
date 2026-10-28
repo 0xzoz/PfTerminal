@@ -797,6 +797,12 @@ fn issue_874_an_empty_git_folder_replaced_by_another() {
         kinds(&check(thread, &repos)),
         vec![format!("config {}", git.join("config.worktree").display())]
     );
+    // #943 (r8 N3): the empty `config` that came with it, filled in place.
+    fill(&git.join("config"));
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("config {}", git.join("config").display())]
+    );
 }
 
 /// Review r7 (B1): a full `.git` replaced by an empty folder is reported
@@ -808,6 +814,31 @@ fn issue_874_a_full_git_folder_replaced_by_an_empty_one() {
     let (thread, repos) = baseline(&project);
     std::fs::rename(&git, project.base.join("saved-git")).expect("moved");
     std::fs::create_dir(&git).expect("empty .git");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("replaced {}", git.display())]
+    );
+    assert!(project.held().contains(&git.display().to_string()));
+}
+
+/// #943 (r8 N1): after a reported swap for an empty folder, swapping that
+/// for another empty folder is reported again, and still held: the hold
+/// doesn't lapse unreported. An empty folder never held stays quiet when
+/// swapped (the Linux sandbox's mount points, above).
+#[test]
+fn issue_943_a_held_empty_git_folder_swapped_again_is_reported() {
+    let project = Project::new();
+    let git = project.git();
+    let (thread, repos) = baseline(&project);
+    std::fs::rename(&git, project.base.join("saved-git")).expect("moved");
+    std::fs::create_dir(&git).expect("empty .git");
+    assert_eq!(
+        kinds(&check(thread, &repos)),
+        vec![format!("replaced {}", git.display())]
+    );
+    assert!(project.held().contains(&git.display().to_string()));
+    std::fs::rename(&git, project.base.join("first-empty")).expect("moved");
+    std::fs::create_dir(&git).expect("another empty .git");
     assert_eq!(
         kinds(&check(thread, &repos)),
         vec![format!("replaced {}", git.display())]

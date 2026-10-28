@@ -44,6 +44,11 @@ const OBJECT_FOLDERS_LOOKED_AT: [&str; 2] = ["info", "pack"];
 /// What a later `git rebase --continue` (or `cherry-pick`/`revert
 /// --continue`) runs, in each git folder: the steps, and the merge strategy
 /// (git runs `git merge-<strategy>`, as a path where the name holds a `/`).
+/// #943 item 5: git's other rebase and sequencer state names no program:
+/// `gpg_sign_opt` and `options.gpg-sign` only pick the signing key (the
+/// program comes from config, which is protected), `strategy_opts` and
+/// `options.strategy-option` are options to the merge strategy, and
+/// `author-script` is parsed, not run, by the C sequencer.
 const STATE_FILES: [&str; 5] = [
     "rebase-merge/git-rebase-todo",
     "rebase-apply/git-rebase-todo",
@@ -808,14 +813,17 @@ fn compare(
     cur: &Snapshot,
     first: bool,
     remembered: &HashSet<PathBuf>,
+    swap_held: bool,
 ) -> (Vec<Finding>, EmptyNew) {
     let mut findings = Vec::new();
     let mut empty = EmptyNew::default();
     // An empty `.git` folder replaced by another (the Linux sandbox's mount
     // point where there was none, removed and made again by other commands)
     // holds nothing git follows; what is put in it later is compared with
-    // that.
-    if prev.dot_git != cur.dot_git && !(empty_git_folder(repo, prev) && empty_git_folder(repo, cur))
+    // that. #943 (r8 N1): not while the last one is held as a reported swap
+    // (`swap_held`): swapped again, the hold would lapse unreported.
+    if prev.dot_git != cur.dot_git
+        && (swap_held || !(empty_git_folder(repo, prev) && empty_git_folder(repo, cur)))
     {
         findings.push(Finding::Replaced {
             dot_git: repo.dot_git.clone(),
@@ -1294,14 +1302,32 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 .cloned()
                 .collect()
         });
+        // #943 (r8 N1): the `.git` the last look saw is held as a reported
+        // swap (by any session).
+        let swap_held = prev.is_some_and(|prev| {
+            with_global(|global| {
+                global.held.iter().any(|held| {
+                    matches!(&held.what, HeldWhat::Replaced { dot_git, now }
+                        if *dot_git == repo.dot_git && *now == prev.dot_git)
+                })
+            })
+        });
         let (mut found, empty) = match prev {
-            Some(prev) => compare(repo, prev, &cur, /*first*/ false, &remembered),
+            Some(prev) => compare(
+                repo,
+                prev,
+                &cur,
+                /*first*/ false,
+                &remembered,
+                swap_held,
+            ),
             None => compare(
                 repo,
                 &Snapshot::empty(&cur.dot_git),
                 &cur,
                 /*first*/ true,
                 &remembered,
+                /*swap_held*/ false,
             ),
         };
         cur.empty_new = empty.keep.iter().cloned().collect();
