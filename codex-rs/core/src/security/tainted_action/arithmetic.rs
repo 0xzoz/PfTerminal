@@ -12,6 +12,7 @@
 use super::indirect;
 use super::shell;
 use super::work;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ops::Range;
@@ -1486,7 +1487,10 @@ fn pure_arithmetic(region: &str) -> bool {
 
 /// Text with its command substitutions (`$(...)`, `` `...` ``) blanked.
 /// Arithmetic (`$((`) is kept. Linear: each byte is visited once.
-fn without_substitutions(text: &str) -> String {
+fn without_substitutions(text: &str) -> Cow<'_, str> {
+    if !text.contains('`') && !text.contains("$(") {
+        return Cow::Borrowed(text);
+    }
     let bytes = text.as_bytes();
     let mut kept = String::with_capacity(text.len());
     let mut at = 0;
@@ -1529,7 +1533,7 @@ fn without_substitutions(text: &str) -> String {
         from = at;
     }
     kept.push_str(&text[from.min(text.len())..]);
-    kept
+    Cow::Owned(kept)
 }
 
 /// Whether every command substitution in text prints a neutral fact
@@ -1592,7 +1596,7 @@ const MAX_FLAGS: usize = 64;
 /// (`${(P)n:-x=y}`). Linear: each expansion looks at most `MAX_FLAGS`
 /// bytes ahead for its flags, and its `=` is any later one.
 fn assigns_named_variable(text: &str) -> bool {
-    let Some(last_equals) = text.rfind('=') else {
+    let Some(last_equals) = work::rfind(text, "=") else {
         return false;
     };
     text.match_indices("${").any(|(at, _)| {
@@ -1938,6 +1942,16 @@ fn flags_unsafe(region: &str, unsafe_in: &impl Fn(&str) -> bool) -> bool {
     if references(flags).any(unsafe_in) {
         return true;
     }
+    // Keep checking flags inside malformed arguments: a safe outer suffix
+    // can contain an unsafe inner argument. Remove quotes once, then map each
+    // original argument's boundaries into that shared text instead of copying
+    // every overlapping suffix. Delimiter searches and callbacks are unchanged.
+    let unquoted_flags = unquoted(flags);
+    let quotes: Vec<usize> = flags
+        .match_indices(['"', '\'', '\\'])
+        .map(|(at, _)| at)
+        .collect();
+    let unquoted_at = |at| at - quotes.partition_point(|&quote| quote < at);
     flags.char_indices().any(|(at, flag)| {
         work::step();
         if !matches!(flag, 'l' | 'r' | 'I') {
@@ -1947,11 +1961,11 @@ fn flags_unsafe(region: &str, unsafe_in: &impl Fn(&str) -> bool) -> bool {
         let Some(delimiter) = rest.chars().next().filter(|ch| !ch.is_ascii_alphanumeric()) else {
             return false;
         };
-        let argument = &rest[delimiter.len_utf8()..];
-        let argument = argument
+        let start = at + flag.len_utf8() + delimiter.len_utf8();
+        let end = flags[start..]
             .find(delimiter)
-            .map_or(argument, |end| &argument[..end]);
-        unsafe_in(&unquoted(argument))
+            .map_or(flags.len(), |end| start + end);
+        unsafe_in(&unquoted_flags[unquoted_at(start)..unquoted_at(end)])
     })
 }
 
@@ -3308,9 +3322,10 @@ fn qualifier_runs_code(list: &str) -> bool {
 /// assignments or the options of a declaring builtin.
 fn assignment_position(text: &str, at: usize) -> bool {
     let before = &text[..at];
-    let start = before
-        .rfind(|ch: char| ch.is_ascii_whitespace() || ";&|(".contains(ch))
-        .map_or(0, |space| space + 1);
+    let start = work::rfind_by(before, |ch: char| {
+        ch.is_ascii_whitespace() || ";&|(".contains(ch)
+    })
+    .map_or(0, |space| space + 1);
     let left = before[start..]
         .strip_suffix('+')
         .unwrap_or(&before[start..]);
@@ -3325,9 +3340,10 @@ fn assignment_position(text: &str, at: usize) -> bool {
         if rest.is_empty() || rest.ends_with([';', '&', '|', '(', '{', '!']) {
             return true;
         }
-        let word_start = rest
-            .rfind(|ch: char| ch.is_ascii_whitespace() || ";&|({".contains(ch))
-            .map_or(0, |space| space + 1);
+        let word_start = work::rfind_by(rest, |ch: char| {
+            ch.is_ascii_whitespace() || ";&|({".contains(ch)
+        })
+        .map_or(0, |space| space + 1);
         let word = &rest[word_start..];
         // An earlier array assignment (`a=(1 2) b=(3)`): read on from its
         // `a=`.
