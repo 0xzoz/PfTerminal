@@ -222,6 +222,13 @@ fn issue_1468_core_live_level_counts_for_panes_and_permission_changes() {
         reason.starts_with("Claude panes are off under security level Moderate"),
         "{reason}"
     );
+    // The message names the strictest level.
+    let reason = external_agent_block_reason_in(Moderate, Permissive, Aggressive)
+        .expect("a protected level refuses Claude panes");
+    assert!(
+        reason.starts_with("Claude panes are off under security level Aggressive"),
+        "{reason}"
+    );
     {
         let _levels = test_levels::set_with_live(Permissive, Permissive, Aggressive);
         assert!(external_agent_block_reason().is_some());

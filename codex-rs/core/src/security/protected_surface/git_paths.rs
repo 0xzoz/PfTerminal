@@ -320,7 +320,10 @@ fn module_paths(git_dir: &AbsolutePathBuf) -> Vec<AbsolutePathBuf> {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return closed(dot_gits),
         };
-        let in_worktrees = depth > 0 && folder.as_path().ends_with("worktrees");
+        // Also below a submodule named `worktrees`: its folders then get
+        // a `gitdir` that is not there (left out on Linux) and no `.git`,
+        // which is harmless.
+        let in_worktrees = folder.as_path().ends_with("worktrees");
         for child in children {
             let Ok(child) = child else {
                 return closed(dot_gits);

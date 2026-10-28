@@ -411,7 +411,7 @@ pub(crate) fn pane_command(
 /// rules, which allow `com.apple.SecurityServer` (Travis, 2026-10-14). Claude
 /// Code reaches the bridge over plain HTTP with the bridge's token, so it
 /// needs neither TLS nor the keychain. #891: on Linux, under Moderate and
-/// Aggressive, no user namespaces ([`user_namespaces_denied`]). Otherwise
+/// Aggressive, no user namespaces ([`user_namespaces_denied_at`]). Otherwise
 /// the profile is kept. [`contain`] applies them.
 fn rules_at(
     profile: PermissionProfile,

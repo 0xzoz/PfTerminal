@@ -230,20 +230,14 @@ pub(crate) mod test_levels {
 }
 
 /// #1468: `live` is the level in force in Core's live policy on this home,
-/// which counts as the active and saved levels do.
+/// which counts as the active and saved levels do. The message names the
+/// strictest.
 fn external_agent_block_reason_in(
     active: ChosenLevel,
     stored: ChosenLevel,
     live: ChosenLevel,
 ) -> Option<String> {
-    let level = if active != ChosenLevel::Permissive {
-        active
-    } else if stored != ChosenLevel::Permissive {
-        stored
-    } else {
-        live
-    };
-    (level != ChosenLevel::Permissive).then(|| {
+    strictest_protected([active, stored, live]).map(|level| {
         format!(
             "Claude panes are off under security level {}: Claude Code would run outside Corbanu's sandbox with your environment and network. Choose Permissive in /security and restart to use them, or turn on the contained_external_agents and secretless_agent_launch features to run them in the sandbox, asking you before every command, file edit and web request; /panes switches back to Main.",
             level.name()

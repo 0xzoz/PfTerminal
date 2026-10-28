@@ -387,9 +387,6 @@ fn evaluate(
     )
 }
 
-/// Secret-like name fragments whose variables reach agent commands: the fixed
-/// probes plus every secret-like name in `env` (this process's environment).
-/// Only names are kept.
 /// #1468: core's `unsandboxed_execution_allowed` keeps a run inside a
 /// policy that keeps the macOS keychain services away (#807): leaving it
 /// would drop that rule.
@@ -397,6 +394,9 @@ fn keychain_keeps_sandbox(file_system: &FileSystemSandboxPolicy) -> bool {
     cfg!(target_os = "macos") && file_system.denies_keychain_services()
 }
 
+/// Secret-like name fragments whose variables reach agent commands: the fixed
+/// probes plus every secret-like name in `env` (this process's environment).
+/// Only names are kept.
 fn kept_secret_kinds(
     policy: &ShellEnvironmentPolicy,
     env: impl IntoIterator<Item = (String, String)>,

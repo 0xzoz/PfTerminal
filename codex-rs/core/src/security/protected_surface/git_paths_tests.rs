@@ -381,17 +381,15 @@ fn issue_1468_submodule_worktrees_dot_git_files_are_protected() {
         "{paths:?}"
     );
 
-    // Past the limit: `modules` whole, with the `.git` file found if its
-    // admin folder was visited first.
+    // Past the limit: `modules` whole, with the `.git` file found before
+    // (the extra folders are below the admin folder, so it comes first).
     std::fs::write(
         admin.join("gitdir").as_path(),
         format!("{}\n", dot_git.display()),
     )
     .unwrap();
     for n in 0..=MAX_MODULE_DIRS {
-        std::fs::create_dir_all(git.join(format!("modules/fake/f{n}")).as_path()).unwrap();
+        std::fs::create_dir_all(admin.join(format!("x/f{n}")).as_path()).unwrap();
     }
-    let paths = module_paths(&git);
-    assert_eq!(paths.first(), Some(&git.join("modules")));
-    assert!(paths[1..].iter().all(|path| *path == dot_git), "{paths:?}");
+    assert_eq!(module_paths(&git), vec![git.join("modules"), dot_git]);
 }
