@@ -901,17 +901,26 @@ async fn catalogue_issue_128_remote_and_cached_overlays_preserve_saved_ids() {
 
 /// The explicit disposition of each #128 retained ID. Sources and dates are in
 /// `qa/release/unreleased/model128-compatibility-contract.md`; change both together.
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum RetainedIdDisposition {
-    /// Still served upstream; the catalogue carries this verified or deliberately
-    /// conservative output cap.
-    ServedWithCap(i64),
-    /// Still served upstream on the Responses wire, which never sends an output cap,
-    /// so the provider's own limit applies and the row deliberately has none.
+    /// Still served upstream; the row carries a verified or deliberately conservative cap.
+    Served,
+    /// Still served upstream on the Responses wire, which never sends an output cap, so
+    /// the provider's own limit applies and the row deliberately states none.
     ServedCapOmitted,
-    /// No longer served upstream. The row stays, with its last cap and a retirement
-    /// note, so a saved ID resolves to itself and is never swapped for another model.
-    RetiredUpstream(i64),
+    /// No longer served upstream. The row stays, keeping its last cap and carrying a
+    /// retirement note, so a saved ID resolves to itself and never to another model.
+    RetiredUpstream,
+}
+
+#[derive(Debug, PartialEq)]
+struct RetainedIdRow {
+    provider_id: String,
+    visibility: ModelVisibility,
+    disabled: bool,
+    max_output_tokens: Option<i64>,
+    reason_says_retired: bool,
+    description_says_retired: bool,
 }
 
 #[test]
@@ -922,79 +931,91 @@ fn catalogue_issue_128_retained_ids_have_explicit_dispositions() {
 
     let bundled = load_remote_models_from_file().expect("bundled models");
     let providers = built_in_model_providers(/*openai_base_url*/ None);
-    for (slug, provider_id, disposition) in [
+    for (slug, provider_id, disposition, max_output_tokens) in [
         (
             "x-ai/grok-4.6",
             "openrouter",
-            RetainedIdDisposition::ServedWithCap(128_000),
+            RetainedIdDisposition::Served,
+            Some(128_000),
         ),
         (
             "x-ai/grok-4.5",
             "openrouter",
-            RetainedIdDisposition::ServedWithCap(128_000),
+            RetainedIdDisposition::Served,
+            Some(128_000),
         ),
         (
             "deepseek/deepseek-v4-pro",
             "openrouter",
-            RetainedIdDisposition::ServedWithCap(384_000),
+            RetainedIdDisposition::Served,
+            Some(384_000),
         ),
         (
             "deepseek/deepseek-v4-flash-0731",
             "openrouter",
-            RetainedIdDisposition::ServedWithCap(384_000),
+            RetainedIdDisposition::Served,
+            Some(384_000),
         ),
         (
             "openrouter/owl-alpha",
             "openrouter",
-            RetainedIdDisposition::RetiredUpstream(262_144),
+            RetainedIdDisposition::RetiredUpstream,
+            Some(262_144),
         ),
-        ("gpt-5.5", "openai", RetainedIdDisposition::ServedCapOmitted),
+        (
+            "gpt-5.5",
+            "openai",
+            RetainedIdDisposition::ServedCapOmitted,
+            None,
+        ),
     ] {
         let row = bundled
             .iter()
             .find(|model| model.slug == slug)
             .unwrap_or_else(|| panic!("{slug} must stay in the bundled catalogue"));
-        assert_eq!(row.visibility, ModelVisibility::Hide, "{slug}");
-        let Some(ModelOrchestrationMetadata::Disabled {
-            provider_id: row_provider,
-            reason,
-            ..
-        }) = &row.orchestration
-        else {
-            panic!("{slug} must stay disabled for automatic allocation");
+        let (row_provider, reason) = match &row.orchestration {
+            Some(ModelOrchestrationMetadata::Disabled {
+                provider_id,
+                reason,
+                ..
+            }) => (provider_id.clone(), Some(reason.as_str())),
+            Some(orchestration) => (orchestration.provider_id().to_string(), None),
+            None => (String::new(), None),
         };
-        assert_eq!(row_provider, provider_id, "{slug}");
-        let retired_note = reason.starts_with("retired upstream:")
-            && row
-                .description
-                .as_deref()
-                .is_some_and(|description| description.contains("Retired:"));
-        match disposition {
-            RetainedIdDisposition::ServedWithCap(cap) => {
-                assert_eq!(row.max_output_tokens, Some(cap), "{slug}");
-                assert!(!retired_note, "{slug} is still served");
-            }
-            RetainedIdDisposition::ServedCapOmitted => {
-                assert_eq!(row.max_output_tokens, None, "{slug}");
-                assert!(!retired_note, "{slug} is still served");
-                assert_eq!(
+        let retired = disposition == RetainedIdDisposition::RetiredUpstream;
+        assert_eq!(
+            RetainedIdRow {
+                provider_id: row_provider,
+                visibility: row.visibility,
+                disabled: reason.is_some(),
+                max_output_tokens: row.max_output_tokens,
+                reason_says_retired: reason
+                    .is_some_and(|reason| reason.starts_with("retired upstream:")),
+                description_says_retired: row
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| description.contains("Retired:")),
+            },
+            RetainedIdRow {
+                provider_id: provider_id.to_string(),
+                visibility: ModelVisibility::Hide,
+                disabled: true,
+                max_output_tokens,
+                reason_says_retired: retired,
+                description_says_retired: retired,
+            },
+            "disposition of {slug}"
+        );
+        if disposition == RetainedIdDisposition::ServedCapOmitted {
+            assert_eq!(
+                (
                     providers.get(provider_id).map(|provider| provider.wire_api),
-                    Some(WireApi::Responses),
-                    "{slug}: omitting the cap is only safe on a wire that never sends one"
-                );
-                assert_eq!(
                     default_model_max_output_tokens_for_provider(provider_id, slug),
-                    None,
-                    "{slug}: no provider default may supply a cap the row deliberately omits"
-                );
-            }
-            RetainedIdDisposition::RetiredUpstream(cap) => {
-                assert_eq!(row.max_output_tokens, Some(cap), "{slug}");
-                assert!(
-                    retired_note,
-                    "{slug} needs the retirement note in its reason and description"
-                );
-            }
+                ),
+                (Some(WireApi::Responses), None),
+                "{slug}: omitting the cap is only safe on a wire that never sends one, \
+                 with no provider default supplying a cap the row deliberately omits"
+            );
         }
     }
 }

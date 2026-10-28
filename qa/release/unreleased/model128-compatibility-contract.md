@@ -6,12 +6,16 @@ request][retarget]. This regression-only change covers local compatibility for
 tests have not yet run on this main-based tree. This record does not close all of
 issue #128 or establish that a provider currently serves a retained model.
 
-Change class: **Routine** tests and QA documentation under `AGENTS.md`. Product
-basis: [Shipping MVP — LIVE][product], **Multi-provider inference**: “OpenAI,
-Anthropic/Claude Plan, Kimi, Z.AI, DeepSeek, OpenRouter, Ambient, Meta, Baseten,
-Vercel, Bedrock, Ollama, LM Studio, Corbanu Plan, and custom providers.” No
-production code, catalogue record, routing policy, credential, or output budget
-changes; no product-initiative plan or sprint is introduced.
+Change class: **Routine** tests and QA documentation under `AGENTS.md` for the
+PR #141 part. The 2026-10-28 dispositions below (PR #1486) are a **Bounded
+fix**: they edit one catalogue record's `reason` and `description` text, and
+narrow one compatibility claim to match upstream reality, as the maintainers
+directed on #128 on 2026-10-21 ([decision][direction]). Product basis: [Shipping
+MVP — LIVE][product], **Multi-provider inference**: “OpenAI, Anthropic/Claude
+Plan, Kimi, Z.AI, DeepSeek, OpenRouter, Ambient, Meta, Baseten, Vercel, Bedrock,
+Ollama, LM Studio, Corbanu Plan, and custom providers.” No routing policy,
+credential, selection state or output cap changes; no product-initiative plan
+or sprint is introduced.
 
 ## Revision and policy boundary
 
@@ -49,12 +53,13 @@ disabled for automatic allocation.
 | `deepseek/deepseek-v4-pro` | Served; cap 384,000 kept | OpenRouter [endpoints API][or-dsp]: StreamLake and DigitalOcean list 384,000; others list 16,384 to 943,718. Matches the direct DeepSeek and Vercel rows (#189). |
 | `deepseek/deepseek-v4-flash-0731` | Served; cap 384,000 kept | OpenRouter [endpoints API][or-dsf]: DeepInfra and BaseTen list 384,000; others 131,072 to 943,718. Matches the direct DeepSeek flash rows (#189). |
 | `openrouter/owl-alpha` | **Retired upstream; row kept with a retirement note** | OpenRouter's [endpoints API][or-owl] returns the model record with `"endpoints": []`, and the ID is absent from the [models list][or-list]. #189 already recorded it as retired on 2026-10-06, so this is two signals three weeks apart, not one missing feed entry. |
-| `gpt-5.5` | Served; cap deliberately omitted | OpenAI's [model page][oai-55] lists GPT-5.5 with "128,000 max output tokens" and it is still on the [Standard price page][oai-price] ($5 / $0.50 / $30, matching the catalogue). The `openai` provider uses the Responses wire, which never sends an output cap (see the core test below), so OpenAI's own limit applies. Like every other OpenAI row, the catalogue states none. |
+| `gpt-5.5` | Served; cap deliberately omitted | OpenAI's [model page][oai-55] lists GPT-5.5 with "128,000 max output tokens", and it is still on the [Standard price page][oai-price] ($5 / $0.50 / $30, matching the catalogue). The `openai` provider uses the Responses wire, which never sends an output cap (see the core test below), so OpenAI's own limit applies. The row is also the template for the Amazon Bedrock GPT rows (`model-provider/src/amazon_bedrock/catalog.rs`), also on the Responses wire, so a cap here would be copied onto Bedrock routes whose limits were not verified. The other GPT-5.x rows also state none; the GPT-6 rows state 128,000, which is metadata only on this wire. That split is left as it is. |
 
 **Retired ID behaviour (`openrouter/owl-alpha`).** A saved `model =
 "openrouter/owl-alpha"` still resolves to its own bundled row (its own 262,144
 cap, no fallback metadata, no substitution). Requests go to OpenRouter, which
-has no endpoint for it, so they fail with OpenRouter's error. There is no
+has no endpoint for it, so they are expected to fail with OpenRouter's error
+(inferred from the empty endpoint list; no live request was sent). There is no
 automatic migration: OpenRouter names no successor. The row's reason and
 description now say it is retired and point to `/model`, and the OpenRouter
 docs and example config no longer list it. The compatibility claim for this ID

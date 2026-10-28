@@ -25,8 +25,9 @@ Set OPENROUTER_API_KEY to your OpenRouter API key.
 
 ## Current Models
 
-Visible OpenRouter models are bundled in
-`codex-rs/models-manager/models.json`:
+OpenRouter models bundled in `codex-rs/models-manager/models.json`. Grok 4.6,
+Grok 4.5, DeepSeek V4 Pro, DeepSeek V4 Pro 0813 and DeepSeek V4 Flash 0731 are
+hidden from `/model` and kept for saved configs; the others are listed:
 
 | Slug                              | Display name                      | Listed pricing text                                            |
 | --------------------------------- | --------------------------------- | -------------------------------------------------------------- |
@@ -43,9 +44,9 @@ Visible OpenRouter models are bundled in
 Grok 4.6's listed rates double when the prompt exceeds 200,000 tokens.
 
 `openrouter/owl-alpha` is retired: OpenRouter lists no endpoints for it
-(checked 2026-10-28), so requests to it fail. The hidden catalogue row stays
-only so a saved config resolves to its own entry instead of another model;
-pick a current model with `/model`.
+(checked 2026-10-28), so requests to it are expected to fail. The hidden
+catalogue row stays only so a saved config resolves to its own entry instead
+of another model; pick a current model with `/model`.
 
 DeepSeek V4 Flash is intentionally pinned to the exact
 `deepseek/deepseek-v4-flash-0731` slug. Direct DeepSeek uses provider
