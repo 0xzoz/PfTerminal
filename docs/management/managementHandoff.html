@@ -24,7 +24,7 @@ and GitHub re-checked at about 21:30Z. Main is at <code>bb05734780</code> (#1498
 (#1471, D225, merged at 15:45Z and is in 8.0g.)</li>
 <li><b>No owner answers since 10:27Z.</b> <b>Pending: D219 and D235–D255</b> (22 decisions, section 9, each with options and a recommendation). D253 (the D156 fix as its own PR before W3) was started as decision-free because
 the fix only adds prompts (sec-932h); Travis can still say no.</li>
-<li><b>Main postmerge was red from 17:30Z to 20:50Z.</b> #1376 (D226) made the Linux database scan tests require ripgrep; the rust-ci-full Linux test shards had no <code>rg</code>, so every postmerge run from <code>bd494990aa</code> (#1376) through
+<li><b>Main postmerge was red from the 17:30Z run to 20:50Z.</b> #1376 (D226) made the Linux database scan tests require ripgrep; the rust-ci-full Linux test shards had no <code>rg</code>, so every postmerge run from <code>bd494990aa</code> (#1376) through
 <code>fbbe725af5</code> (#1497) failed there. ci-rg's #1500 installs the release's pinned ripgrep 15.2.0 in those shards and in the nightly Bazel Linux job; the run on <code>c8d56d89d3</code> was green (shards 5148/5148 and 4939/4939), as were #1501's and #1374's.</li>
 <li><b>Nightly:</b> #636 is closed: scheduled run 40722950171 on <code>0f19feaf08</code> was green, the first green scheduled nightly since 10-07. Tonight's scheduled nightly must show <code>ripgrep 15.2.0</code> in “Bazel test on ubuntu-24.04” (#1500's second step).</li>
 <li><b>Installed build:</b> main <code>c8d56d89d3</code> (#1500), installed 21:17Z per <code>todo.md</code>; earlier today <code>e344afbab7</code> (#1483) at 17:58Z (section 7).</li>
@@ -2465,7 +2465,7 @@ about 48 → 330 qualifying lines; bash/dash users already have this through D85
 Recommended: yes; a “no” would mean holding that PR.</td><td>#932, D156</td></tr>
 <tr><td>10-28</td><td>(D254) <b>Pending.</b> Order of the later widenings: W2 (exact redirections <code>2&gt;&amp;1</code> and <code>&gt;/dev/null</code>) → W3 (git subcommand certain when the grammar proves the words before it; covers D104/D157's accepted prompts) → W4 (D230's array subscripts).
 Recommended: approve the order only; each widening still gets its own approval and security sign-off.</td><td>#932</td></tr>
-<tr><td>10-28</td><td>(D255) <b>Pending; security sign-off.</b> #943 items 16 and 22c (remove a duplicate report) and 22b (skip an early check on runs that get refused) would make reports quieter. Recommended: leave all three as they are.</td><td>#943</td></tr>
+<tr><td>10-28</td><td>(D255) <b>Pending</b> (changing them would need security sign-off). #943 items 16 and 22c (remove a duplicate report) and 22b (skip an early check on runs that get refused) would make reports quieter. Recommended: leave all three as they are.</td><td>#943</td></tr>
 </table>
 
 <h2>10. Current state</h2>
@@ -2501,7 +2501,7 @@ The PRs above are code changes with their own fail-before evidence, not mileston
 <p><b>Evidence:</b> worker reports and reviewer outputs in <code>$HOME/.corbanu-workers/</code>; requests and grants in <code>$W</code>; decision log <code>$W/todo.md</code>; #932's W1 proposal on #932 (sec-932p2).</p>
 
 <h2>11. Decisions and remaining external actions</h2>
-<p><b>Pending numbered decisions: D219 and D235–D255</b> (22; section 9, with options and recommendations). If approved as recommended, D250, D251 and D255 (quieter reports or fewer prompts) and D245 (b) (changes Permissive behaviour) need security sign-off, and D246 (a) and D247 a security review.
+<p><b>Pending numbered decisions: D219 and D235–D255</b> (22; section 9, with options and recommendations). If approved as recommended, D250 and D251 (quieter reports or fewer prompts) and D245 (b) (changes Permissive behaviour) need security sign-off, and D246 (a) and D247 a security review; D255 needs sign-off only if Travis picks the quieter option.
 D253 is already being done as decision-free. Repeat the pending ones in every check-in until answered.</p>
 <p><b>Owner action:</b> bring the Windows PC online in Tailscale and keep it awake 2–3 hours (D212). Not re-checked in this update: D178b (point <code>provider/zai_api_key</code> at the new key in <code>/vault</code>) and D18 (delete the malformed <code>kimi_api</code> label).</p>
 <p><b>Coordinator-owned follow-ups:</b> answer #1492; #1284 around 11-04; #368's Sol re-read before 11-21 and DeepSeek 2027 holidays before 12-01; tonight's nightly ripgrep check; D215's probe limit at the next three-platform re-measurement; #1401's exception review by 2027-01-31.</p>
