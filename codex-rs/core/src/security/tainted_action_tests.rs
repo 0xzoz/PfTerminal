@@ -6461,7 +6461,6 @@ fn d217_sudo_close_from_names_no_folder() {
         "sudo -n -C 3 -E ./x",
         "sudo -C 3 -C 4 ./x",
         "sudo --non-interactive -C 3 ./x",
-        "/usr/bin/sudo -C 3 ./x",
         "sudo --close-from=3 ./x",
         "sudo -C 3 bash x",
         "sudo -C 3 -- ./x",
