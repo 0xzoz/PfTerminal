@@ -381,10 +381,14 @@ fn recorded_entries(setup: &Setup) -> usize {
 }
 
 #[test]
-fn placeholders_mounted_over_use_up_the_sweeps_mount_reads() {
+fn placeholders_mounted_over_do_not_hold_up_the_ones_after_them() {
     let mut setup = Setup::new();
-    let paths = ended_with_placeholders(&setup, "mounted", /*count*/ 80);
-    let points = paths
+    // One record, in this order (same depth; the sort is stable).
+    let (mounted, mut entries) = placeholders(&setup, "mounted", /*count*/ 70);
+    let (removable, more) = placeholders(&setup, "removable", /*count*/ 3);
+    entries.extend(more);
+    setup.write(ended(), entries);
+    let points = mounted
         .iter()
         .map(|path| path.as_os_str().as_bytes().to_vec())
         .collect();
@@ -392,18 +396,43 @@ fn placeholders_mounted_over_use_up_the_sweeps_mount_reads() {
 
     setup.sweep();
 
-    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 64);
-    assert!(paths.iter().all(|path| path.is_file()));
-    assert_eq!(recorded_entries(&setup), 80);
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 73);
+    assert!(mounted.iter().all(|path| path.is_file()));
+    assert!(removable.iter().all(|path| !path.exists()));
+    assert_eq!(recorded_entries(&setup), 70);
     assert_eq!(setup.report(), "");
 
-    // Once nothing mounts over them, later sweeps remove them all.
-    let reads = read_mounts_as(&mut setup, Some(HashSet::new()));
+    read_mounts_as(&mut setup, Some(HashSet::new()));
     setup.sweep();
     setup.sweep();
 
-    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 80);
-    assert!(paths.iter().all(|path| !path.exists()));
+    assert!(mounted.iter().all(|path| !path.exists()));
+    assert_eq!(setup.records(), Vec::<String>::new());
+    assert_eq!(setup.report(), "");
+}
+
+#[test]
+fn a_parent_that_fails_after_its_children_keeps_the_identity_they_left() {
+    let mut setup = Setup::new();
+    let folder = setup.left_folder_with_children(/*children*/ 3);
+    // The children's reads succeed; the parent's cannot be made.
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = reads.clone();
+    setup.journal.mount_points = Box::new(move || {
+        (counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 3).then(HashSet::new)
+    });
+
+    setup.sweep();
+
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 4);
+    assert!(folder.is_dir());
+    assert_eq!(std::fs::read_dir(&folder).expect("folder").count(), 0);
+    assert_eq!(recorded_entries(&setup), 1);
+
+    read_mounts_as(&mut setup, Some(HashSet::new()));
+    setup.sweep();
+
+    assert!(!folder.exists(), "{}", setup.report());
     assert_eq!(setup.records(), Vec::<String>::new());
     assert_eq!(setup.report(), "");
 }

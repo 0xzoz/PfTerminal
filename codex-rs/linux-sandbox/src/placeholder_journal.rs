@@ -54,11 +54,9 @@ const REPORT_LIMIT: u64 = 1 << 20;
 const TEMPORARY_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 /// The largest record file read.
 const RECORD_LIMIT: u64 = 16 << 20;
-/// Leave large cleanup backlogs for later sweeps rather than working through
-/// them all while holding the record folder's lock: a sweep reads the mount
-/// points of every process of this user at most this many times, once per
-/// placeholder it tries to remove, whether or not that removes it.
-const SWEEP_MOUNT_READ_LIMIT: usize = 64;
+/// Leave large cleanup backlogs for later sweeps rather than removing them
+/// all while holding the record folder's lock.
+const SWEEP_REMOVAL_LIMIT: usize = 64;
 /// How long a run waits for the record folder's lock (a backstop: the lock
 /// is a write lock, which a command that sees the folder read-only cannot
 /// take). Then the run goes on without the record, as before (nothing
@@ -1082,21 +1080,21 @@ impl Journal {
         let in_use = |path: &Path, real: &Path| {
             live.iter().any(|(_, record)| uses(record, path, real)) || used_by_registry(path, real)
         };
-        // Every read of the mount points counts. Once they cannot be read,
-        // every later placeholder would fail the same way, after reading
-        // them again: the rest is left for a later sweep.
+        let mut removals_left = SWEEP_REMOVAL_LIMIT;
+        // Once the mount points cannot be read, every later placeholder would
+        // fail the same way, each after reading them all again while the lock
+        // is held: the rest is left for a later sweep.
         let reader = &self.mount_points;
-        let mount_reads = std::cell::Cell::new(0_usize);
         let unreadable = std::cell::Cell::new(false);
         let read_mounts = || {
-            mount_reads.set(mount_reads.get() + 1);
             let points = reader();
-            unreadable.set(unreadable.get() || points.is_none());
+            if points.is_none() {
+                unreadable.set(true);
+            }
             points
         };
-        let exhausted = || mount_reads.get() >= SWEEP_MOUNT_READ_LIMIT || unreadable.get();
         for (stem, record) in ended {
-            if exhausted() {
+            if removals_left == 0 || unreadable.get() {
                 break;
             }
             let mut kept = Vec::new();
@@ -1110,7 +1108,7 @@ impl Journal {
                 if matches!(entry, Entry::Uses { .. }) {
                     continue;
                 }
-                if exhausted() {
+                if removals_left == 0 || unreadable.get() {
                     // A child removed in this sweep can change a deferred
                     // parent. Keep only the identity change already checked
                     // below, so the next sweep can still check it exactly.
@@ -1150,6 +1148,7 @@ impl Journal {
                                 folder_before,
                                 folder_after,
                             } => {
+                                removals_left -= 1;
                                 // Only the change an unlink makes: times and
                                 // size, never its mode or owner (a chmod or
                                 // chown in between). Both readings come from
@@ -1171,7 +1170,14 @@ impl Journal {
                             Removal::Kept(Kept::Changed)
                                 if self.made_by_another_record(&stem, real) => {}
                             Removal::Kept(why) => self.report(real, why),
-                            Removal::Failed => kept.push(entry.clone()),
+                            // Kept as the identity checked now, as when
+                            // deferred above.
+                            Removal::Failed => kept.push(Entry::Made {
+                                kind: *kind,
+                                path: path.clone(),
+                                real: real.clone(),
+                                identity: *identity,
+                            }),
                         }
                     }
                 }
