@@ -191,6 +191,7 @@ fn issue_807_keychain_rule_alone_keeps_the_run_sandboxed_on_macos() {
 fn deny_read_blocks_explicit_escalation_and_policy_bypass() {
     let file_system_policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
         path: FileSystemPath::GlobPattern {
+            scan: None,
             pattern: "**/*.env".to_string(),
         },
         access: FileSystemAccessMode::Deny,

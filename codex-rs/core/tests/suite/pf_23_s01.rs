@@ -1234,7 +1234,10 @@ async fn issue_442_env_file_matched_by_name_is_denied_and_explained() -> anyhow:
                 .entries
                 .extend(credential_file_globs(&cwd).into_iter().map(|pattern| {
                     FileSystemSandboxEntry::new(
-                        FileSystemPath::GlobPattern { pattern },
+                        FileSystemPath::GlobPattern {
+                            pattern,
+                            scan: None,
+                        },
                         FileSystemAccessMode::Deny,
                     )
                 }));
@@ -3231,6 +3234,139 @@ async fn issue_651_a_database_folder_with_glob_syntax_is_protected() -> anyhow::
         }
         drop(test);
         drop(base);
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #732 (D226): the outputs of one command run at each level in a
+/// separate database folder holding its working folder (`work`), a database
+/// at the folder's top level (`canary.sqlite`), Corbanu's own runtime
+/// databases (made at session start) and a project database below it
+/// (`work/fixture.sqlite`); with `unreadable`, also a `systemd-private-*`
+/// subfolder the user cannot read (as in `/tmp`). `None` when the user can
+/// read it anyway (root), which cannot reproduce the issue.
+#[cfg(target_os = "linux")]
+async fn issue_732_database_folder_outputs(
+    unreadable: bool,
+) -> anyhow::Result<Option<Vec<(SecurityLevel, bool, String)>>> {
+    use codex_protocol::models::PermissionProfile;
+    use std::os::unix::fs::PermissionsExt;
+    let mut outputs = Vec::new();
+    for (level, open) in [
+        (SecurityLevel::Moderate, false),
+        (SecurityLevel::Aggressive, false),
+        (SecurityLevel::Permissive, true),
+    ] {
+        let base = TempDir::new()?;
+        let folder = base.path().canonicalize()?.join("databases");
+        let work = folder.join("work");
+        let private = folder.join("systemd-private-732-systemd-resolved.service-x");
+        std::fs::create_dir_all(&work)?;
+        std::fs::create_dir_all(&private)?;
+        std::fs::write(private.join("inside.sqlite"), "private")?;
+        std::fs::write(work.join("fixture.sqlite"), "project-732")?;
+        // Every top-level database: their first bytes, or the canary.
+        let command = "for f in ../*.sqlite*; do head -c 16 \"$f\"; echo; done; \
+                       cat fixture.sqlite; echo; echo ran-732";
+        let sqlite_home = AbsolutePathBuf::from_absolute_path(&folder)?;
+        let cwd = AbsolutePathBuf::from_absolute_path(&work)?;
+        let canary = folder.join("canary.sqlite");
+        let locked = private.clone();
+        let (test, captured) = start_turn_after(
+            /*home*/ None,
+            level,
+            AskForApproval::Never,
+            vec![
+                call("call-732", "shell_command", json!({ "command": command })),
+                done_step(),
+            ],
+            move |config| {
+                config.cwd = cwd.clone();
+                config.sqlite = codex_state::SqliteConfig::from_sqlite_home(sqlite_home.clone());
+                config
+                    .permissions
+                    .set_permission_profile(PermissionProfile::Disabled)
+                    .expect("full access");
+            },
+            move |_| {
+                std::fs::write(&canary, CANARY).expect("canary database");
+                if unreadable {
+                    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+                        .expect("lock the private folder");
+                }
+            },
+        )
+        .await?;
+        let readable = std::fs::read_dir(&private).is_ok();
+        assert!(next_exec_approval(&test).await.is_none());
+        let requests = captured.requests();
+        let output = output_text(&requests[requests.len() - 1], "call-732");
+        drop(test);
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755))?;
+        drop(base);
+        if unreadable && readable {
+            return Ok(None);
+        }
+        outputs.push((level, open, output));
+    }
+    Ok(Some(outputs))
+}
+
+/// Issue #732 (D226): a subfolder the user cannot read (`systemd-private-*`
+/// in `/tmp`, say) in a separate database folder that holds the command's
+/// folder no longer makes every protected command fail: the database scan
+/// stays at the folder's top level. Before, ripgrep's error on that
+/// subfolder refused the command under Moderate and Aggressive.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_732_an_unreadable_subfolder_does_not_stop_protected_commands() -> anyhow::Result<()>
+{
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let Some(outputs) = issue_732_database_folder_outputs(/*unreadable*/ true).await? else {
+        eprintln!("skipping: this user can read a 0o000 folder (root), so #732 cannot occur");
+        return Ok(());
+    };
+    let wrong: Vec<String> = outputs
+        .into_iter()
+        .filter(|(_, _, output)| !output.contains("ran-732"))
+        .map(|(level, _, output)| format!("{level:?}: {output}"))
+        .collect();
+    assert_eq!(wrong, Vec::<String>::new());
+    Ok(())
+}
+
+/// Issue #732 (D226): with the scan at the top level, Corbanu's own runtime
+/// databases there (and the canary database) stay unreadable to protected
+/// commands, also beside an unreadable subfolder; a project's database
+/// below the folder is no longer hidden. Permissive is unchanged.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_732_top_level_runtime_databases_stay_hidden() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    let mut wrong = Vec::new();
+    for unreadable in [false, true] {
+        let Some(outputs) = issue_732_database_folder_outputs(unreadable).await? else {
+            eprintln!("skipping the unreadable case: this user can read a 0o000 folder (root)");
+            continue;
+        };
+        for (level, open, output) in outputs {
+            // `head -c 16` prints the canary's first 16 bytes.
+            let achieved = [
+                output.contains("SQLite format 3"),
+                output.contains(&CANARY[..16]),
+            ];
+            if !output.contains("ran-732")
+                || !output.contains("project-732")
+                || achieved != [open; 2]
+            {
+                wrong.push(format!(
+                    "{level:?} unreadable={unreadable}: {achieved:?}: {output}"
+                ));
+            }
+        }
     }
     assert_eq!(wrong, Vec::<String>::new());
     Ok(())
