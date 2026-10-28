@@ -54,6 +54,9 @@ const REPORT_LIMIT: u64 = 1 << 20;
 const TEMPORARY_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 /// The largest record file read.
 const RECORD_LIMIT: u64 = 16 << 20;
+/// Leave large cleanup backlogs for later sweeps rather than removing them
+/// all while holding the record folder's lock.
+const SWEEP_REMOVAL_LIMIT: usize = 64;
 /// How long a run waits for the record folder's lock (a backstop: the lock
 /// is a write lock, which a command that sees the folder read-only cannot
 /// take). Then the run goes on without the record, as before (nothing
@@ -401,8 +404,8 @@ pub(crate) fn leave() {
 }
 
 /// After this run's cleanup: keeps the placeholders it made that are still
-/// in place as made (a live run holds them), for a later sweep, and removes
-/// the rest of its record.
+/// there (a live run holds them, or they changed since: #745), for a later
+/// sweep, and removes the rest of its record.
 pub(crate) fn finish() {
     with_journal(Journal::finish);
 }
@@ -424,6 +427,38 @@ pub(crate) fn used_by_live_run(path: &Path, real: &Path) -> bool {
     let mut used = false;
     with_journal(|journal| used = journal.used_by_live_run(path, real));
     used
+}
+
+/// #745: whether another run's record names `path` (as spelled, or where it
+/// is) as a placeholder it made or was about to make. A run holds such a
+/// folder read-only instead of making placeholders of its own in it, which
+/// would change it, so that its maker could no longer remove it.
+pub(crate) fn recorded_by_another_run(path: &Path) -> bool {
+    let real = crate::placeholder_registry::real_placeholder_path(path);
+    let mut recorded = false;
+    with_journal(|journal| recorded = journal.recorded_by_another_run(path, real.as_deref()));
+    recorded
+}
+
+/// #607: whether a record (this run's or another's) names a placeholder made
+/// at `real` (or `path`) and what is there now (`status`) is none of those:
+/// the person replaced it, or (another run's, which must still be exactly
+/// what was made) changed it. It is then not removed. `false` when no record
+/// names one made there (or there is no record).
+pub(crate) fn recorded_otherwise(path: &Path, real: &Path, status: &libc::stat) -> bool {
+    let mut otherwise = false;
+    with_journal(|journal| otherwise = journal.recorded_otherwise(path, real, status));
+    otherwise
+}
+
+/// Whether `identity` is `found`: exactly (`exact`), or the same file or
+/// folder (device, inode and type).
+fn same_made(identity: &Identity, found: &libc::stat, exact: bool) -> bool {
+    if exact {
+        return *identity == Identity::of(found);
+    }
+    (identity.dev, identity.ino, identity.mode & libc::S_IFMT)
+        == (found.st_dev, found.st_ino, found.st_mode & libc::S_IFMT)
 }
 
 /// The identity `record` gives the folder placeholder it made at `real`.
@@ -535,26 +570,37 @@ fn mounted_anywhere(paths: &[&Path]) -> bool {
 /// The mount points in the mount namespaces of this user's processes, or
 /// `None` when they cannot all be read.
 fn mount_points() -> Option<HashSet<Vec<u8>>> {
-    let processes = std::fs::read_dir("/proc").ok()?;
+    mount_points_for_processes(
+        std::fs::read_dir("/proc")
+            .ok()?
+            .flatten()
+            .map(|process| process.path()),
+    )
+}
+
+fn mount_points_for_processes(
+    processes: impl Iterator<Item = PathBuf>,
+) -> Option<HashSet<Vec<u8>>> {
     // SAFETY: `geteuid` has no preconditions.
     let euid = unsafe { libc::geteuid() };
     let mut seen = HashSet::new();
     let mut points = HashSet::new();
-    for process in processes.flatten() {
-        if !process
+    for dir in processes {
+        if !dir
             .file_name()
-            .to_str()
+            .and_then(|name| name.to_str())
             .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
         {
             continue;
         }
-        let dir = process.path();
         if !std::fs::metadata(&dir).is_ok_and(|metadata| metadata.uid() == euid) {
             continue;
         }
-        if let Ok(namespace) = std::fs::read_link(dir.join("ns/mnt"))
-            && !seen.insert(namespace)
-        {
+        // mountinfo paths are relative to the process's root. Processes in
+        // one mount namespace can have different roots (for example, chroot).
+        // When either identity is unavailable, read the view without deduping.
+        let view = view_identity(&dir);
+        if view.as_ref().is_some_and(|view| seen.contains(view)) {
             continue;
         }
         let mounts = match std::fs::read(dir.join("mountinfo")) {
@@ -569,6 +615,15 @@ fn mount_points() -> Option<HashSet<Vec<u8>>> {
             }
             Err(_) => return None,
         };
+        // A view counts as seen only once it has been read, and only if the
+        // process still has it (its pid was not reused by a process with
+        // another view while it was read): a process that ends before its
+        // view is read must not hide the same view of the others.
+        if let Some(view) = view
+            && view_identity(&dir).is_some_and(|now| now == view)
+        {
+            seen.insert(view);
+        }
         points.extend(
             mounts
                 .split(|byte| *byte == b'\n')
@@ -577,6 +632,14 @@ fn mount_points() -> Option<HashSet<Vec<u8>>> {
         );
     }
     Some(points)
+}
+
+/// The mount namespace and root of the process at `dir`, which together
+/// decide what its `mountinfo` lists, or `None` when either is unavailable.
+fn view_identity(dir: &Path) -> Option<(PathBuf, u64, u64)> {
+    let namespace = std::fs::read_link(dir.join("ns/mnt")).ok()?;
+    let root = std::fs::metadata(dir.join("root")).ok()?;
+    Some((namespace, root.dev(), root.ino()))
 }
 
 /// A mount point as `mountinfo` writes it (space, tab, newline and
@@ -599,13 +662,6 @@ fn unescape_mount_point(point: &[u8]) -> Vec<u8> {
         }
     }
     out
-}
-
-fn is_still_made(real: &Path, kind: Kind, identity: &Identity) -> bool {
-    matches!(
-        crate::placeholder_registry::find_without_links(real),
-        Ok(Some(found)) if matches_made(&found, kind, identity)
-    )
 }
 
 fn matches_made(
@@ -870,6 +926,79 @@ impl Journal {
                 .any(|(_, record)| uses(record, path, real))
     }
 
+    fn recorded_by_another_run(&mut self, path: &Path, real: Option<&Path>) -> bool {
+        let Ok(_lock) = self.lock() else {
+            return false;
+        };
+        let (records, _) = self.other_records();
+        records
+            .iter()
+            .flat_map(|(_, record)| record.entries.iter())
+            .filter(|entry| matches!(entry, Entry::Made { .. } | Entry::Pending { .. }))
+            .any(|entry| {
+                let (made, made_real) = entry.paths();
+                [made, made_real]
+                    .iter()
+                    .any(|made| *made == path || Some(*made) == real)
+            })
+    }
+
+    fn recorded_otherwise(&mut self, path: &Path, real: &Path, status: &libc::stat) -> bool {
+        let Ok(_lock) = self.lock() else {
+            return false;
+        };
+        let (records, _) = self.other_records();
+        // This run's own placeholder: the same file or folder; another
+        // run's: exactly as made.
+        let own = self.record.entries.iter().map(|entry| (entry, false));
+        let others = records
+            .iter()
+            .flat_map(|(_, record)| record.entries.iter())
+            .map(|entry| (entry, true));
+        let mut named = false;
+        for (entry, exact) in own.chain(others) {
+            let Entry::Made {
+                path: made,
+                real: made_real,
+                identity,
+                ..
+            } = entry
+            else {
+                continue;
+            };
+            if made_real != real && made != path {
+                continue;
+            }
+            if same_made(identity, status, exact) {
+                return false;
+            }
+            named = true;
+        }
+        named
+    }
+
+    /// Whether a record other than the one named `stem` made exactly what is
+    /// at `real` now (a placeholder another run made there since).
+    fn made_by_another_record(&self, stem: &str, real: &Path) -> bool {
+        let Ok(Some(found)) = crate::placeholder_registry::find_without_links(real) else {
+            return false;
+        };
+        let (records, _) = self.other_records();
+        self.record
+            .entries
+            .iter()
+            .chain(
+                records
+                    .iter()
+                    .filter(|(name, _)| name != stem)
+                    .flat_map(|(_, record)| record.entries.iter()),
+            )
+            .any(|entry| {
+                matches!(entry, Entry::Made { real: made, identity, .. }
+                    if made == real && same_made(identity, &found.status, /*exact*/ true))
+            })
+    }
+
     fn leave(&mut self) {
         if !self.written {
             self.record.entries.clear();
@@ -899,13 +1028,16 @@ impl Journal {
         let Ok(_lock) = self.lock() else {
             return;
         };
+        // #745: also one changed or replaced since (a folder that was not
+        // empty when this run's cleanup came to it): a sweep reports it once
+        // and leaves it, instead of it being forgotten here.
         self.record.entries.retain(|entry| match entry {
-            Entry::Made {
-                kind,
-                real,
-                identity,
-                ..
-            } => is_still_made(real, *kind, identity),
+            // One that cannot be looked at now is kept too: dropping it
+            // would leave only the temporary folder's looser rules for it.
+            Entry::Made { real, .. } => !matches!(
+                crate::placeholder_registry::find_without_links(real),
+                Ok(None)
+            ),
             Entry::Uses { .. } | Entry::Pending { .. } => false,
         });
         if self.record.entries.is_empty() {
@@ -936,7 +1068,11 @@ impl Journal {
         let in_use = |path: &Path, real: &Path| {
             live.iter().any(|(_, record)| uses(record, path, real)) || used_by_registry(path, real)
         };
+        let mut removals_left = SWEEP_REMOVAL_LIMIT;
         for (stem, record) in ended {
+            if removals_left == 0 {
+                break;
+            }
             let mut kept = Vec::new();
             // Deepest first, so a placeholder in a placeholder folder of the
             // same run goes before the folder; the folder is then expected
@@ -944,8 +1080,20 @@ impl Journal {
             let mut entries = record.entries.clone();
             entries.sort_by_key(|entry| std::cmp::Reverse(entry.paths().1.components().count()));
             let mut expected: HashMap<PathBuf, Identity> = HashMap::new();
-            for entry in entries {
+            for mut entry in entries {
                 if matches!(entry, Entry::Uses { .. }) {
+                    continue;
+                }
+                if removals_left == 0 {
+                    // A child removed in this sweep can change a deferred
+                    // parent. Keep only the identity change already checked
+                    // below, so the next sweep can still check it exactly.
+                    if let Entry::Made { real, identity, .. } = &mut entry
+                        && let Some(after) = expected.get(real)
+                    {
+                        *identity = *after;
+                    }
+                    kept.push(entry);
                     continue;
                 }
                 let (path, real) = entry.paths();
@@ -976,6 +1124,7 @@ impl Journal {
                                 folder_before,
                                 folder_after,
                             } => {
+                                removals_left -= 1;
                                 // Only the change an unlink makes: times and
                                 // size, never its mode or owner (a chmod or
                                 // chown in between). Both readings come from
@@ -992,6 +1141,10 @@ impl Journal {
                                 }
                             }
                             Removal::Missing => {}
+                            // #745: not when another run made what is there
+                            // now (its own record has it).
+                            Removal::Kept(Kept::Changed)
+                                if self.made_by_another_record(&stem, real) => {}
                             Removal::Kept(why) => self.report(real, why),
                             Removal::Failed => kept.push(entry.clone()),
                         }

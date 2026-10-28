@@ -30,6 +30,7 @@ use crate::tools::sandboxing::default_exec_approval_requirement;
 use crate::tools::sandboxing::sandbox_override_for_first_attempt;
 use crate::tools::sandboxing::unsandboxed_execution_allowed;
 use codex_otel::ToolDecisionSource;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::exec_output::ExecToolCallOutput;
@@ -42,6 +43,26 @@ use std::time::Instant;
 
 pub(crate) struct ToolOrchestrator {
     sandbox: SandboxManager,
+    handler_basis: Option<HandlerBasis>,
+}
+
+/// #1057: the policy a tool's handler read its `request_permissions` grants
+/// (and made its exec-policy decision) under, taken just before the grants
+/// were read, so a transition committed before the run reached the
+/// orchestrator is noticed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HandlerBasis {
+    marker: crate::state::AuthorityMarker,
+    aggressive: bool,
+}
+
+impl HandlerBasis {
+    pub(crate) fn now(session: &crate::session::session::Session) -> Self {
+        Self {
+            marker: session.services.authority_marker(),
+            aggressive: session.services.model_client().live_level_is_aggressive(),
+        }
+    }
 }
 
 pub(crate) struct OrchestratorRunResult<Out> {
@@ -53,7 +74,14 @@ impl ToolOrchestrator {
     pub fn new() -> Self {
         Self {
             sandbox: SandboxManager::new(),
+            handler_basis: None,
         }
+    }
+
+    /// #1057: the run was prepared by a handler under `basis`.
+    pub(crate) fn with_handler_basis(mut self, basis: Option<HandlerBasis>) -> Self {
+        self.handler_basis = basis;
+        self
     }
 
     async fn run_attempt<Rq, Out, T>(
@@ -104,9 +132,11 @@ impl ToolOrchestrator {
                 .as_ref()
                 .map(ActiveNetworkApproval::execution_proxy),
         };
+        let unlabelled_mark = codex_windows_sandbox::unlabelled_roots_mark();
         let run_result = tool
             .run(req, &attempt_with_network_approval, &attempt_tool_ctx)
             .await;
+        warn_unlabelled_writable_roots(tool, req, tool_ctx, attempt, unlabelled_mark).await;
 
         let Some(network_approval) = network_approval else {
             return (run_result, None);
@@ -144,7 +174,9 @@ impl ToolOrchestrator {
     /// Aggressive on, the run's exec-policy decision (made by the tool's
     /// handler) is stale too, so it is refused instead: a new call is decided
     /// under Aggressive. A retry outside the sandbox approved (or due) before
-    /// a transition is not run.
+    /// a transition is not run. #1057: a run whose handler read its grants
+    /// before a transition is handled the same way before anyone is asked,
+    /// as if its first round had gone stale.
     pub async fn run<Rq, Out, T>(
         &mut self,
         tool: &mut T,
@@ -156,13 +188,41 @@ impl ToolOrchestrator {
     where
         T: ToolRuntime<Rq, Out>,
     {
-        let aggressive_at_start = tool_ctx
-            .session
-            .services
-            .model_client()
-            .live_level_is_aggressive();
+        let aggressive_at_start = match self.handler_basis {
+            Some(basis) => basis.aggressive,
+            None => tool_ctx
+                .session
+                .services
+                .model_client()
+                .live_level_is_aggressive(),
+        };
+        // The first round is decided under the handler's policy, so a
+        // transition committed from here on is noticed by it too. A basis
+        // without a marker (the policy not initialized then; not in real
+        // sessions) notices nothing, as before.
+        let mut first_under = self.handler_basis.and_then(|basis| basis.marker);
+        if tool_ctx.session.services.transition_since(first_under) {
+            tracing::info!(
+                target: "codex_core::security::transition",
+                call_id = %tool_ctx.call_id,
+                "security transition after the handler read its grants"
+            );
+            stale_refusal(
+                tool,
+                req,
+                tool_ctx,
+                aggressive_at_start,
+                /*before_decided*/ true,
+            )
+            .await?;
+            first_under = None;
+        }
         let mut asked_again = false;
         for _ in 0..MAX_STALE_APPROVAL_ROUNDS {
+            // D50: the policy this round is decided under.
+            let decided_under = first_under
+                .take()
+                .or_else(|| tool_ctx.session.services.authority_marker());
             match Box::pin(self.run_round(
                 tool,
                 req,
@@ -170,6 +230,7 @@ impl ToolOrchestrator {
                 turn_ctx,
                 approval_policy,
                 asked_again,
+                decided_under,
             ))
             .await?
             {
@@ -180,24 +241,14 @@ impl ToolOrchestrator {
                         call_id = %tool_ctx.call_id,
                         "approval answered after a security transition; not used"
                     );
-                    if tool_ctx
-                        .session
-                        .services
-                        .model_client()
-                        .live_level_is_aggressive()
-                        != aggressive_at_start
-                    {
-                        warn(tool_ctx, STALE_AGGRESSIVE_REFUSAL).await;
-                        return Err(ToolError::Rejected(STALE_AGGRESSIVE_REFUSAL.to_string()));
-                    }
-                    // D51 (#1001): the permissions this request carries were
-                    // read (from grants, by the tool's handler) before the
-                    // transition, which ended those grants: refused, so a
-                    // new call reads them again.
-                    if tool.additional_permissions(req).is_some() {
-                        warn(tool_ctx, STALE_PERMISSIONS_REFUSAL).await;
-                        return Err(ToolError::Rejected(STALE_PERMISSIONS_REFUSAL.to_string()));
-                    }
+                    stale_refusal(
+                        tool,
+                        req,
+                        tool_ctx,
+                        aggressive_at_start,
+                        /*before_decided*/ false,
+                    )
+                    .await?;
                     // The note is for a person who saw the earlier prompt.
                     asked_again = person_asked;
                 }
@@ -208,7 +259,9 @@ impl ToolOrchestrator {
     }
 
     /// One decision and run; [`Round::Stale`] when a security transition was
-    /// committed before its first attempt started.
+    /// committed before its first attempt started. `decided_under`: the
+    /// policy marker this round is decided under (D50, #1057).
+    #[expect(clippy::too_many_arguments)]
     async fn run_round<Rq, Out, T>(
         &mut self,
         tool: &mut T,
@@ -217,12 +270,11 @@ impl ToolOrchestrator {
         turn_ctx: &crate::session::turn_context::TurnContext,
         approval_policy: AskForApproval,
         asked_again: bool,
+        decided_under: crate::state::AuthorityMarker,
     ) -> Result<Round<Out>, ToolError>
     where
         T: ToolRuntime<Rq, Out>,
     {
-        // D50: the policy this run is decided under.
-        let decided_under = tool_ctx.session.services.authority_marker();
         let otel = turn_ctx.session_telemetry.clone();
         let otel_tn = flat_tool_name(&tool_ctx.tool_name).into_owned();
         let otel_ci = &tool_ctx.call_id;
@@ -408,6 +460,69 @@ impl ToolOrchestrator {
             persistence_note = liftable
                 .map(|path| protected_additional::persistence_note(&path.display().to_string()));
         }
+        // #943 item 17: under Moderate or Aggressive, a repository this
+        // session hasn't looked at yet, whose git folder this run may write,
+        // gets its first look before anyone decides the run: what was left
+        // there before (before Corbanu started, say) is told first and holds
+        // the approval (`git_refresh`). Judged before the protected-file rules
+        // apply (they only narrow what the run may write), and anywhere the
+        // run may leave the sandbox.
+        let git_first_look_failed =
+            match crate::security::protected_additional::protected_level(&tool_ctx.session) {
+                Some(level)
+                    if level != codex_security_policy::SecurityLevel::Permissive
+                        && !matches!(requirement, ExecApprovalRequirement::Forbidden { .. }) =>
+                {
+                    let effective =
+                        codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
+                            &file_system_sandbox_policy,
+                            tool.additional_permissions(req),
+                        );
+                    // Where the rules apply and no approval lifts them (Aggressive),
+                    // their denied reads keep the run in the sandbox (#540); under
+                    // Moderate it never leaves it (#747).
+                    let rules_kept = tool_ctx
+                        .session
+                        .services
+                        .model_client()
+                        .post_taint_state()
+                        .is_some_and(|state| {
+                            state.protected_paths_apply() && !state.moderate_bound()
+                        });
+                    let may_leave = !moderate_keeps_sandbox
+                        && !rules_kept
+                        && ((tool
+                            .sandbox_permissions(req)
+                            .requires_escalated_permissions()
+                            && matches!(
+                                sandbox_override_for_first_attempt(
+                                    tool.sandbox_permissions(req),
+                                    &requirement,
+                                    &file_system_sandbox_policy,
+                                ),
+                                SandboxOverride::BypassSandboxFirstAttempt
+                            ))
+                            || unsandboxed_execution_allowed(&file_system_sandbox_policy));
+                    let unsandboxed = may_leave
+                        || self.sandbox.select_initial(
+                            &permissions,
+                            tool.sandbox_preference(),
+                            turn_ctx.windows_sandbox_level,
+                            turn_ctx.network.is_some(),
+                        ) == SandboxType::None;
+                    GitCheck::first_look(
+                        tool_ctx,
+                        level,
+                        git_check_folders(tool, req, turn_ctx, &materialized_workspace_roots),
+                        tool.command_cwd(req).map(|cwd| cwd.to_path_buf()),
+                        effective,
+                        unsandboxed,
+                    )
+                    .await
+                    .is_err()
+                }
+                _ => false,
+            };
         if let Some(action) = &post_taint {
             if let Some(refusal) = action.refused_up_front() {
                 post_taint_outcome(
@@ -471,7 +586,7 @@ impl ToolOrchestrator {
                     [
                         Some(action.approval_reason()),
                         protected_read_note.clone(),
-                        kept_read_note.map(str::to_string),
+                        kept_read_note,
                         stays_sandboxed.map(str::to_string),
                         user_namespaces_note,
                     ]
@@ -802,12 +917,16 @@ impl ToolOrchestrator {
         // #874 (D6): the git folders this session watches, looked at again
         // before deciding whether an approval lifts the rules (text typed
         // into a running shell or a process left running may have changed
-        // them).
-        let git_held = git_refresh(
-            tool_ctx,
-            resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots),
-        )
-        .await;
+        // them). #943 item 11: the folder the command runs in (its
+        // `workdir`) counts too.
+        let mut git_folders =
+            resolution_folders(tool, req, &turn_cwd, &materialized_workspace_roots);
+        git_folders.extend(tool.command_cwd(req));
+        let mut git_held = git_refresh(tool_ctx, git_folders).await;
+        // A failed first look (above) holds it too.
+        if git_first_look_failed {
+            git_held.push("(the check failed)".to_string());
+        }
         let mut git_held_back = false;
         let denied = post_taint_read_denials(
             tool_ctx,
@@ -1068,19 +1187,8 @@ impl ToolOrchestrator {
         let git_check =
             match crate::security::protected_additional::protected_level(&tool_ctx.session) {
                 Some(level) if level != codex_security_policy::SecurityLevel::Permissive => {
-                    // The sandbox's working folder first: the probes resolve
-                    // against it, as the sandbox does.
-                    let mut folders = Vec::new();
-                    if let Ok(policy_cwd) = sandbox_policy_cwd.to_abs_path() {
-                        folders.push(policy_cwd.to_path_buf());
-                    }
-                    #[allow(deprecated)]
-                    folders.push(turn_ctx.cwd.to_path_buf());
-                    folders.extend(
-                        materialized_workspace_roots
-                            .iter()
-                            .map(codex_utils_absolute_path::AbsolutePathBuf::to_path_buf),
-                    );
+                    let folders =
+                        git_check_folders(tool, req, turn_ctx, &materialized_workspace_roots);
                     let effective =
                         codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
                             &file_system_sandbox_policy,
@@ -1088,7 +1196,18 @@ impl ToolOrchestrator {
                         );
                     let unsandboxed =
                         initial_sandbox == SandboxType::None || policy_allows_no_sandbox;
-                    GitCheck::begin(tool_ctx, level, folders, effective, unsandboxed).await
+                    // #943 item 11: and the folder the command runs in (its
+                    // `workdir`), which may be another repository.
+                    let command_cwd = tool.command_cwd(req).map(|cwd| cwd.to_path_buf());
+                    GitCheck::begin(
+                        tool_ctx,
+                        level,
+                        folders,
+                        command_cwd,
+                        effective,
+                        unsandboxed,
+                    )
+                    .await
                 }
                 _ => None,
             };
@@ -1439,24 +1558,44 @@ struct GitCheck {
 }
 
 impl GitCheck {
-    /// The repositories of `folders` whose git folder the run may write
+    /// The repositories of `folders` and of `command_cwd` (the folder the
+    /// command runs in, #943 item 11) whose git folder the run may write
     /// (through `policy`, or anywhere where it may run unsandboxed), with
     /// this session's first look at each taken.
     async fn begin(
         tool_ctx: &ToolCtx,
         level: codex_security_policy::SecurityLevel,
         folders: Vec<std::path::PathBuf>,
+        command_cwd: Option<std::path::PathBuf>,
         policy: codex_protocol::permissions::FileSystemSandboxPolicy,
         unsandboxed: bool,
     ) -> Option<Self> {
+        let repos = Self::first_look(tool_ctx, level, folders, command_cwd, policy, unsandboxed)
+            .await
+            .ok()?;
+        (!repos.is_empty()).then_some(Self { repos, level })
+    }
+
+    /// Those repositories, with this session's first look at each taken
+    /// where it has none yet; `Err` (the person told) where the look failed.
+    async fn first_look(
+        tool_ctx: &ToolCtx,
+        level: codex_security_policy::SecurityLevel,
+        folders: Vec<std::path::PathBuf>,
+        command_cwd: Option<std::path::PathBuf>,
+        policy: codex_protocol::permissions::FileSystemSandboxPolicy,
+        unsandboxed: bool,
+    ) -> Result<Vec<crate::security::git_postcheck::Repo>, ()> {
         use crate::security::git_postcheck;
         let thread = tool_ctx.session.thread_id();
-        let cwd = folders.first()?.clone();
+        let Some(cwd) = folders.first().cloned() else {
+            return Ok(Vec::new());
+        };
         let level_name = format!("{level:?}");
         // Issue #524: reading folders stays off the async thread.
         let looked = tokio::task::spawn_blocking(move || {
             let folders: Vec<&std::path::Path> = folders.iter().map(AsRef::as_ref).collect();
-            let repos: Vec<_> = git_postcheck::repos(&folders)
+            let repos: Vec<_> = git_postcheck::repos_and(&folders, command_cwd.as_deref())
                 .into_iter()
                 .filter(|repo| {
                     unsandboxed
@@ -1474,14 +1613,14 @@ impl GitCheck {
         // the person is told, and the next command looks again.
         let Ok((repos, message)) = looked else {
             warn(tool_ctx, GIT_CHECK_FAILED).await;
-            return None;
+            return Err(());
         };
         // What a session's first look finds there already (planted before,
         // or by a process left running) is told too.
         if let Some(message) = message {
             warn(tool_ctx, &message).await;
         }
-        (!repos.is_empty()).then_some(Self { repos, level })
+        Ok(repos)
     }
 
     /// After an attempt: tell the person what is new there.
@@ -1569,6 +1708,46 @@ enum Round<Out> {
     },
 }
 
+/// D50 (#1001): `Err` when a run whose approval (or, #1057, whose handler's
+/// grant read) went stale must not be decided again: the transition switched
+/// Aggressive on, so its exec-policy decision is stale, or (D51) it carries
+/// permissions read from grants the transition ended. A new call reads them
+/// again. `before_decided`: the transition came before anyone was asked.
+async fn stale_refusal<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    tool_ctx: &ToolCtx,
+    aggressive_at_start: bool,
+    before_decided: bool,
+) -> Result<(), ToolError>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    let refusal = if tool_ctx
+        .session
+        .services
+        .model_client()
+        .live_level_is_aggressive()
+        != aggressive_at_start
+    {
+        if before_decided {
+            PREPARED_BEFORE_AGGRESSIVE_REFUSAL
+        } else {
+            STALE_AGGRESSIVE_REFUSAL
+        }
+    } else if tool.additional_permissions(req).is_some() {
+        if before_decided {
+            PREPARED_PERMISSIONS_REFUSAL
+        } else {
+            STALE_PERMISSIONS_REFUSAL
+        }
+    } else {
+        return Ok(());
+    };
+    warn(tool_ctx, refusal).await;
+    Err(ToolError::Rejected(refusal.to_string()))
+}
+
 /// D50 (#1001): how often a run whose approval went stale is decided again.
 const MAX_STALE_APPROVAL_ROUNDS: usize = 3;
 
@@ -1583,6 +1762,17 @@ pub(crate) const STALE_AGGRESSIVE_REFUSAL: &str = "Not run: the security policy 
 pub(crate) const STALE_PERMISSIONS_REFUSAL: &str = "Not run: the security policy changed while \
      this was being approved, and the permissions it asked for or was granted were for the \
      earlier policy, so the approval was not used. Ask again if it is still needed.";
+
+/// #1057: why a run prepared before Aggressive was switched on did not run.
+pub(crate) const PREPARED_BEFORE_AGGRESSIVE_REFUSAL: &str = "Not run: security level \
+     Aggressive was switched on while this was being prepared, before it was decided. Ask \
+     again if it is still needed; it will be decided under Aggressive.";
+
+/// #1057: why a run carrying permissions read before a transition did not
+/// run.
+pub(crate) const PREPARED_PERMISSIONS_REFUSAL: &str = "Not run: the security policy changed \
+     while this was being prepared, and the permissions it asked for or was granted were for \
+     the earlier policy. Ask again if it is still needed.";
 
 /// D50: why a retry outside the sandbox did not happen.
 const STALE_RETRY_NOTE: &str = "The security level changed while this command ran or its \
@@ -1658,10 +1848,19 @@ where
             // Classification may look at the filesystem: keep it off the
             // async workers and bounded in time; a stall fails closed.
             let codex_home = tool_ctx.turn.config.codex_home.to_path_buf();
+            // D85: the zsh exec bridge runs any shell tool `-c` script under
+            // zsh, whatever shell the argv names.
+            let features = tool_ctx.session.features();
+            let as_named = !features.enabled(codex_features::Feature::ShellZshFork)
+                && !features.enabled(codex_features::Feature::UnifiedExecZshFork);
             let classified = tokio::time::timeout(
                 POST_TAINT_CLASSIFY_TIMEOUT,
                 tokio::task::spawn_blocking(move || {
-                    crate::security::tainted_action::classify(&action, &codex_home)
+                    if as_named {
+                        crate::security::tainted_action::classify_as_named(&action, &codex_home)
+                    } else {
+                        crate::security::tainted_action::classify(&action, &codex_home)
+                    }
                 }),
             )
             .await;
@@ -1683,6 +1882,57 @@ where
         "post-taint protected action needs fresh human approval"
     );
     Some(crate::security::tainted_action::PostTaintAction { kind, state })
+}
+
+/// #734: after a run in the non-admin Windows sandbox, tells the person
+/// (once per thread) about each writable root of the run that it couldn't
+/// label Low during the run (since `mark`), so left read-only to its
+/// commands. Display only.
+async fn warn_unlabelled_writable_roots<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    tool_ctx: &ToolCtx,
+    attempt: &SandboxAttempt<'_>,
+    mark: u64,
+) where
+    T: ToolRuntime<Rq, Out>,
+{
+    // The elevated backend labels nothing; a run it took (by level, or for
+    // the network proxy) records no failure after `mark` but another
+    // thread's concurrent run might, so it is left out where known.
+    if attempt.sandbox != SandboxType::WindowsRestrictedToken
+        || attempt.windows_sandbox_level != WindowsSandboxLevel::RestrictedToken
+    {
+        return;
+    }
+    let failed = codex_windows_sandbox::unlabelled_roots_since(mark);
+    if failed.is_empty() {
+        return;
+    }
+    let Ok(cwd) = attempt.sandbox_cwd.to_abs_path() else {
+        return;
+    };
+    let Ok(workspace_roots) = attempt
+        .workspace_roots
+        .iter()
+        .map(PathUri::to_abs_path)
+        .collect::<std::io::Result<Vec<_>>>()
+    else {
+        return;
+    };
+    let effective = codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy(
+        &attempt.permissions.file_system_sandbox_policy(),
+        tool.additional_permissions(req),
+    );
+    let writable =
+        codex_windows_sandbox::legacy_writable_roots(&effective, &workspace_roots, cwd.as_path());
+    for message in crate::tools::writable_root_notices::unlabelled_writable_root_warnings(
+        tool_ctx.session.thread_id(),
+        &failed,
+        &writable,
+    ) {
+        warn(tool_ctx, &message).await;
+    }
 }
 
 /// #739: tells the person `message` (a warning in the transcript).
@@ -1967,17 +2217,18 @@ where
         .map(|note| (note, justification))
 }
 
-/// #841: under Moderate, for a protected action after untrusted content that
-/// reads files the secretless launch contract keeps unreadable at every
-/// level (Corbanu's sign-in, vault, config, history): approving cannot
-/// unlock them, and the person is told so before answering.
+/// #841, #1077: under Moderate, for a protected action after untrusted
+/// content that reads a file the secretless launch contract keeps unreadable
+/// at every level (a CLI token, the keychains, or Corbanu's sign-in, vault,
+/// config or history): approving cannot unlock it, and the person is told
+/// which file and what it is before answering.
 async fn moderate_kept_read_note<Rq, Out, T>(
     tool: &T,
     req: &Rq,
     tool_ctx: &ToolCtx,
     turn_ctx: &crate::session::turn_context::TurnContext,
     action: &crate::security::tainted_action::PostTaintAction,
-) -> Option<&'static str>
+) -> Option<String>
 where
     T: ToolRuntime<Rq, Out>,
 {
@@ -2006,14 +2257,13 @@ where
         _ => return None,
     };
     let cwd = cwd.to_abs_path().ok()?;
-    crate::security::protected_reads::moderate_kept_read_in_command(
+    crate::security::protected_reads::moderate_kept_read_note_for_command(
         &tool_ctx.session,
         turn_ctx,
         &command,
         cwd.as_path(),
     )
     .await
-    .then_some(crate::security::protected_reads::MODERATE_KEPT_READ_NOTE)
 }
 
 /// PF-25-S01: offer the human a grant for this exact command while its
@@ -2250,6 +2500,35 @@ fn deny_user_namespaces(
         &file_system,
         network,
     )
+}
+
+/// #874: the folders whose repositories the git check watches for a run:
+/// the sandbox's working folder first (the probes resolve against it, as the
+/// sandbox does), the turn's folder and the workspace roots.
+fn git_check_folders<Rq, Out, T>(
+    tool: &T,
+    req: &Rq,
+    turn_ctx: &crate::session::turn_context::TurnContext,
+    workspace_roots: &[codex_utils_absolute_path::AbsolutePathBuf],
+) -> Vec<std::path::PathBuf>
+where
+    T: ToolRuntime<Rq, Out>,
+{
+    #[allow(deprecated)]
+    let turn_cwd = turn_ctx.cwd.to_path_buf();
+    let mut folders = Vec::new();
+    match tool.sandbox_cwd(req).map(PathUri::to_abs_path) {
+        Some(Ok(cwd)) => folders.push(cwd.to_path_buf()),
+        Some(Err(_)) => {}
+        None => folders.push(turn_cwd.clone()),
+    }
+    folders.push(turn_cwd);
+    folders.extend(
+        workspace_roots
+            .iter()
+            .map(codex_utils_absolute_path::AbsolutePathBuf::to_path_buf),
+    );
+    folders
 }
 
 /// Issue #245: every folder the sandbox may resolve a relative or

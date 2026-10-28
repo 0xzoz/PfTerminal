@@ -88,8 +88,10 @@ use tracing::error;
 use tracing::field::Empty;
 use url::Url;
 
+mod post_taint;
 mod telemetry;
 
+use post_taint::McpCallContext;
 use telemetry::McpCallMetricOutcome;
 use telemetry::emit_mcp_call_metrics;
 use telemetry::mcp_call_metric_outcome;
@@ -387,6 +389,16 @@ fn aggressive_record_scope(
     scoped.then_some(key)
 }
 
+/// D52: whether "always allow" for this tool, chosen now, lasts only the
+/// session under Aggressive: Aggressive is on and the answer would not be
+/// recorded (`record_key`, see [`aggressive_record_scope`]).
+fn always_allow_lasts_only_the_session(
+    aggressive: bool,
+    record_key: Option<&McpToolApprovalKey>,
+) -> bool {
+    aggressive && record_key.is_none()
+}
+
 /// Whether a project config layer mentions `server` under `mcp_servers`, as
 /// a whole definition or only some fields (layers merge deeply), or has an
 /// `mcp_servers` value that is not a table.
@@ -462,8 +474,9 @@ async fn decide_mcp_tool_call(
     let config = &step_context.turn.config;
     let record_key =
         aggressive_record_scope(config, invocation, metadata, prepared_call.plugin_id());
+    let aggressive = sess.services.model_client().live_level_is_aggressive();
     let always_allow_suspended = approval_mode.configured == AppToolApproval::Approve
-        && sess.services.model_client().live_level_is_aggressive()
+        && aggressive
         && !match &record_key {
             Some(key) => aggressive::approved(config.codex_home.as_path(), key).await,
             None => false,
@@ -485,7 +498,11 @@ async fn decide_mcp_tool_call(
         McpToolApprovalPolicy::for_selected_plugin(approval_mode)
     } else {
         McpToolApprovalPolicy::for_server(approval_mode)
-    };
+    }
+    .session_only_under_aggressive(always_allow_lasts_only_the_session(
+        aggressive,
+        record_key.as_ref(),
+    ));
     // #945: the policy the approval prompt is shown under. A "for session"
     // or remembered answer is stored only while it is still in force.
     let approval_shown_under = sess.services.authority_marker();
@@ -544,32 +561,18 @@ async fn post_taint_mcp_check(
     use crate::security::protected_surface;
     let turn_context = step_context.turn.as_ref();
     let codex_home = turn_context.config.codex_home.to_path_buf();
-    #[allow(deprecated)]
-    let cwd = step_context.environments.primary().map_or_else(
-        || codex_utils_path_uri::PathUri::from_abs_path(&turn_context.cwd),
-        |environment| environment.cwd().clone(),
-    );
-    let acts_outside = requires_mcp_tool_approval(metadata.annotations.as_ref());
-    let (server, tool, title, arguments) = (
-        invocation.server.clone(),
-        invocation.tool.clone(),
-        metadata.tool_title.clone(),
-        invocation.arguments.clone(),
-    );
+    let context = McpCallContext::new(step_context, metadata);
+    let classification_invocation = invocation.clone();
     let admission = protected_surface::admit(
         sess,
         turn_context.approval_policy.value(),
         protected_surface::Route::McpTool,
         call_id,
         move || {
-            let call = protected_surface::McpCall {
-                server: &server,
-                tool: &tool,
-                title: title.as_deref(),
-                acts_outside,
-                arguments: arguments.as_ref(),
-                cwd: &cwd,
-            };
+            let call = context.call(
+                &classification_invocation,
+                classification_invocation.arguments.as_ref(),
+            );
             protected_surface::classify_mcp(&call, &codex_home)
         },
     )
@@ -1323,6 +1326,10 @@ enum McpToolApprovalDecision {
 struct McpToolApprovalPolicy {
     mode: AppToolApproval,
     allow_persistent: bool,
+    /// D52 (#1001): Aggressive is on and this tool is outside the Aggressive
+    /// record's scope (see [`aggressive_record_scope`]), so an "always allow"
+    /// answer lasts only this session there; the prompt says so.
+    session_only_under_aggressive: bool,
 }
 
 enum McpToolApprovalApplication {
@@ -1343,6 +1350,7 @@ impl McpToolApprovalPolicy {
         Self {
             mode,
             allow_persistent: true,
+            session_only_under_aggressive: false,
         }
     }
 
@@ -1350,6 +1358,14 @@ impl McpToolApprovalPolicy {
         Self {
             mode,
             allow_persistent: false,
+            session_only_under_aggressive: false,
+        }
+    }
+
+    fn session_only_under_aggressive(self, session_only_under_aggressive: bool) -> Self {
+        Self {
+            session_only_under_aggressive,
+            ..self
         }
     }
 }
@@ -1578,23 +1594,14 @@ fn mcp_tool_needs_fresh_approval_after_taint(
     let Some(state) = sess.services.model_client().post_taint_state() else {
         return false;
     };
+    // This level/taint predicate also determines whether lasting MCP approvals
+    // can apply; it does not inspect any path in this tool-only check.
     if !state.protected_paths_apply() {
         return false;
     }
     let turn_context = step_context.turn.as_ref();
-    #[allow(deprecated)]
-    let cwd = step_context.environments.primary().map_or_else(
-        || PathUri::from_abs_path(&turn_context.cwd),
-        |environment| environment.cwd().clone(),
-    );
-    let call = protected_surface::McpCall {
-        server: &invocation.server,
-        tool: &invocation.tool,
-        title: metadata.tool_title.as_deref(),
-        acts_outside: requires_mcp_tool_approval(metadata.annotations.as_ref()),
-        arguments: None,
-        cwd: &cwd,
-    };
+    let context = McpCallContext::new(step_context, metadata);
+    let call = context.call(invocation, /*arguments*/ None);
     protected_surface::classify_mcp(&call, turn_context.config.codex_home.as_path()).is_some()
 }
 
@@ -1770,10 +1777,23 @@ async fn maybe_request_mcp_tool_approval(
             .map(|rendered_template| rendered_template.question.as_str()),
     );
     // D50, D52 (#1001): a prompt asked again, or about a tool whose "always
-    // approve" setting is suspended, says why.
-    let with_note = |text: &str| match note {
-        Some(note) => format!("{note} {text}"),
-        None => text.to_string(),
+    // approve" setting is suspended, says why. One that offers "always
+    // allow" where that lasts only this session (D52) says so.
+    let note = [
+        note,
+        (policy.session_only_under_aggressive && prompt_options.allow_persistent_approval)
+            .then_some(aggressive::SESSION_ONLY_NOTE),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" ");
+    let with_note = |text: &str| {
+        if note.is_empty() {
+            text.to_string()
+        } else {
+            format!("{note} {text}")
+        }
     };
     question.question = with_note(&question.question);
     let message_override = rendered_template

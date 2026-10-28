@@ -5,8 +5,11 @@
 //! Substitutions are read as commands of their own; here-documents and
 //! here-strings are kept as the text fed to their command.
 
+use super::certain_cd;
+use super::certain_cd::Joint;
 use super::shell::UNSEEN_OUTPUT;
 use super::shell::ansi_c;
+use super::work;
 
 #[derive(Clone, Debug, Default)]
 pub(super) struct Word {
@@ -49,6 +52,8 @@ pub(super) struct Command {
     pub(super) other_text: Vec<Word>,
     /// It runs inside a substitution, in a shell of its own.
     pub(super) substituted: bool,
+    /// D194: what joins it to the command before it.
+    pub(super) after: Joint,
 }
 
 impl Command {
@@ -106,6 +111,7 @@ fn read(text: &str, nesting: usize, body: bool, arithmetic: bool) -> Reading {
     } else {
         let mut index = 0;
         while index < chars.len() {
+            work::step();
             index = reader.list(index, /*nested*/ false);
         }
     }
@@ -113,6 +119,7 @@ fn read(text: &str, nesting: usize, body: bool, arithmetic: bool) -> Reading {
     let mut kept = Vec::with_capacity(reader.out.len());
     let mut next = 0;
     for command in &reader.out {
+        work::step();
         kept.push((!command.is_empty()).then(|| {
             next += 1;
             next - 1
@@ -120,6 +127,7 @@ fn read(text: &str, nesting: usize, body: bool, arithmetic: bool) -> Reading {
     }
     let mut out: Vec<Command> = Vec::with_capacity(next);
     for mut command in reader.out {
+        work::step();
         if command.is_empty() {
             continue;
         }
@@ -183,6 +191,8 @@ struct List {
     case_at: Option<usize>,
     /// The list is a substitution's, which a `)` closes.
     nested: bool,
+    /// D194: the operators since the last word (`None`: a word).
+    joint: Option<Joint>,
 }
 
 /// Reserved words after which `case` is still a command's first word.
@@ -233,7 +243,13 @@ impl Reader<'_> {
             list.keyword = false;
         }
         match redirect {
-            Redirect::None => command.words.push(word),
+            Redirect::None => {
+                let joint = list.joint.take();
+                if command.words.is_empty() {
+                    command.after = joint.unwrap_or_default();
+                }
+                command.words.push(word);
+            }
             Redirect::Stdin | Redirect::Descriptor => command.other_text.push(word),
             Redirect::Stdout => command.writes_to.push(word),
             Redirect::HereString => command.input.push(Word {
@@ -304,10 +320,16 @@ impl Reader<'_> {
             keyword: true,
             case_at: None,
             nested,
+            joint: Some(if nested || self.nesting > 0 {
+                Joint::Other
+            } else {
+                Joint::Start
+            }),
         };
         // The `case` counts of the brackets around the text being read.
         let mut opened: Vec<usize> = Vec::new();
         while index < chars.len() {
+            work::step();
             let ch = chars[index];
             let next = chars.get(index + 1).copied();
             let previous = index.checked_sub(1).map(|at| chars[at]);
@@ -324,14 +346,17 @@ impl Reader<'_> {
                         }
                     }
                     self.finish_command(&mut list);
+                    list.joint = Some(Joint::Other);
                 }
                 '(' => {
                     self.finish_command(&mut list);
                     opened.push(std::mem::take(&mut list.cases));
+                    list.joint = Some(Joint::Other);
                 }
                 ' ' | '\t' => self.finish_word(&mut list),
                 '\n' => {
                     self.finish_command(&mut list);
+                    list.joint = Some(Joint::then(list.joint, Joint::Seq));
                     index = self.here_documents(index + 1, &mut list.pending);
                     continue;
                 }
@@ -346,12 +371,20 @@ impl Reader<'_> {
                     };
                     continue;
                 }
-                ';' | '&' => self.finish_command(&mut list),
+                ';' | '&' => {
+                    self.finish_command(&mut list);
+                    if let Some(op) = certain_cd::operator(previous, ch, next) {
+                        list.joint = Some(Joint::then(list.joint, op));
+                    }
+                }
                 '|' => {
                     self.finish_word(&mut list);
                     let from = list.command;
                     let pipe = next != Some('|') && previous != Some('|');
                     self.finish_command(&mut list);
+                    if let Some(op) = certain_cd::operator(previous, ch, next) {
+                        list.joint = Some(Joint::then(list.joint, op));
+                    }
                     if pipe {
                         // After a group (`( ... ) | tee f`) the piped
                         // command is the group's empty one.
@@ -364,11 +397,13 @@ impl Reader<'_> {
                 }
                 '{' if !list.has_word && next.is_none_or(char::is_whitespace) => {
                     self.finish_command(&mut list);
+                    list.joint = Some(Joint::Other);
                 }
                 '}' if !list.has_word
                     && next.is_none_or(|next| next.is_whitespace() || ";|&)".contains(next)) =>
                 {
                     self.finish_command(&mut list);
+                    list.joint = Some(Joint::Other);
                 }
                 // A comment is judged too (the word lexer reads it as words).
                 '#' if !list.has_word => {
@@ -378,6 +413,7 @@ impl Reader<'_> {
                     };
                     index += 1;
                     while index < chars.len() && chars[index] != '\n' {
+                        work::step();
                         comment.text.push(chars[index]);
                         index += 1;
                     }
@@ -390,6 +426,7 @@ impl Reader<'_> {
                     index += 1;
                     let from = index;
                     while index < chars.len() && chars[index] != '\'' {
+                        work::step();
                         list.word.text.push(chars[index]);
                         index += 1;
                     }
@@ -476,6 +513,7 @@ impl Reader<'_> {
     fn double_quoted(&mut self, mut index: usize, word: &mut Word) -> usize {
         let chars = self.chars;
         while index < chars.len() {
+            work::step();
             match chars[index] {
                 '"' => return index + 1,
                 '\\' => match chars.get(index + 1) {
@@ -528,6 +566,7 @@ impl Reader<'_> {
             let mut inner = String::new();
             let mut at = index + 1;
             while at < chars.len() && chars[at] != '`' {
+                work::step();
                 if chars[at] == '\\'
                     && let Some(escaped @ ('`' | '\\' | '$')) = chars.get(at + 1)
                 {
@@ -560,6 +599,7 @@ impl Reader<'_> {
                 let mut at = index + 2;
                 let mut open = 1usize;
                 while at < chars.len() {
+                    work::step();
                     match chars[at] {
                         '$' if !in_double && chars.get(at + 1) == Some(&'\'') => {
                             at = ansi_c(chars, at + 2, &mut scratch.text);
@@ -582,6 +622,7 @@ impl Reader<'_> {
                         '\'' => {
                             at += 1;
                             while at < chars.len() && chars[at] != '\'' {
+                                work::step();
                                 if chars[at] == '`'
                                     || (chars[at] == '$'
                                         && matches!(chars.get(at + 1), Some('(' | '{')))
@@ -616,6 +657,7 @@ impl Reader<'_> {
                     .get(at)
                     .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
                 {
+                    work::step();
                     at += 1;
                 }
                 word.text.extend(&chars[index..at]);
@@ -662,6 +704,7 @@ impl Reader<'_> {
         let mut scratch = Word::default();
         let mut index = 0;
         while index < chars.len() {
+            work::step();
             match chars[index] {
                 '\\' => index += 2,
                 '$' | '`' => index = self.expansion(index, &mut scratch, /*in_double*/ true),
@@ -681,8 +724,10 @@ impl Reader<'_> {
             command,
         } in std::mem::take(pending)
         {
+            work::step();
             let mut body = String::new();
             while index < chars.len() {
+                work::step();
                 let end = chars[index..]
                     .iter()
                     .position(|ch| *ch == '\n')
@@ -913,14 +958,11 @@ mod tests {
             assert!(!commands(sure).unsure, "{sure:?}");
         }
         // Reserved words before a `case` are tracked as they come: a line
-        // of them takes linear time.
-        let started = std::time::Instant::now();
-        let keywords = format!("echo \"$({}case x in a) :;; esac)\"", "! ".repeat(200_000));
-        assert!(!commands(&keywords).unsure);
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(5),
-            "{:?}",
-            started.elapsed()
-        );
+        // of them takes linear work (#1102).
+        work::assert_linear("reserved words", |scale| {
+            let words = "! ".repeat(50_000 * scale);
+            let keywords = format!("echo \"$({words}case x in a) :;; esac)\"");
+            assert!(!commands(&keywords).unsure);
+        });
     }
 }
