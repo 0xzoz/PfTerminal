@@ -77,7 +77,7 @@ pub(super) enum Runs {
 /// group or the next word; a long one's value is attached (`=`) or the
 /// next word. `tar --checkpoint-action=exec=CMD` runs CMD; old-style `tar
 /// xIf CMD a.tar` takes the values in the order of its letters.
-const OPERAND_RUNNERS: &[(&[&str], &[(&str, usize, Runs)])] = &[
+const OPERAND_RUNNERS: &[(&[&str], RunnerOptions)] = &[
     (
         &["su", "runuser"],
         &[
@@ -119,6 +119,10 @@ const OPERAND_RUNNERS: &[(&[&str], &[(&str, usize, Runs)])] = &[
         ],
     ),
 ];
+
+/// #1449: a runner's options: each spelling, its shortest prefix and how
+/// it runs the value.
+type RunnerOptions = &'static [(&'static str, usize, Runs)];
 
 /// #1449: GNU tar's names.
 const TARS: &[&str] = &["tar", "gtar"];
