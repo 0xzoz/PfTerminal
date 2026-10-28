@@ -1584,7 +1584,7 @@ impl Classifier {
         let mut loops = launched_git::PositionalLoops::default();
         // #1405: a `mapfile` was found, by any spelling.
         let mut mapfile = false;
-        let aliases = aliases::Aliases::of(&lexed.commands);
+        let mut aliases = aliases::Aliases::of(&lexed.commands);
         for (index, simple) in lexed.commands.iter().enumerate() {
             work::step();
             let (words, unseen, skipped) =
@@ -1651,7 +1651,7 @@ impl Classifier {
             );
             // #1422: an alias the line defines runs text neither reading
             // reads as the shell does (`alias b=bash` then `b run.sh`).
-            if aliases.used(&words) {
+            if aliases.read(&words) {
                 self.note(ProtectedActionKind::UnseenCode);
             }
             self.simple_command(
