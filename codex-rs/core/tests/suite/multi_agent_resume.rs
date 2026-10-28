@@ -266,15 +266,19 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         )
         .await;
     }
-    // When the grandchild's final answer reaches the worker after the
-    // worker's own turn has finished, it starts one more worker turn. Without
-    // a response for it the worker ends `Errored` on a 404 (#1448). Match only
-    // a request that ends with that message, so this spare mock cannot answer
-    // later worker requests whose history merely contains it.
+    // If the grandchild's final answer is queued after the worker's
+    // continuation request was built but while that turn still accepts queued
+    // messages, the worker sends one more request in the same turn, ending
+    // with that answer. Without a response for it the worker ends `Errored` on
+    // a 404 (#1448). Match only a request that ends with the answer (and is
+    // not a later follow-up), so this spare mock cannot answer later worker
+    // requests whose history merely contains it.
     mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
-            request_has_model(request, ROLE_MODEL) && ends_with_grandchild_final_answer(request)
+            request_has_model(request, ROLE_MODEL)
+                && ends_with_grandchild_final_answer(request)
+                && !body_contains(request, FOLLOWUP_TASK)
         },
         sse(vec![ev_completed("resp-worker-grandchild-answer")]),
     )
