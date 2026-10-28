@@ -198,3 +198,122 @@ async fn api_only_rotation_reconnects_a_prewarmed_socket_and_keeps_same_key_reus
     );
     server.shutdown().await;
 }
+
+/// #1343 case 2: under `broker_model_auth` Core holds only the placeholder key
+/// and the brokered auth attaches no header (the broker adds the credential),
+/// so two different brokered credentials give the same identity. Websockets
+/// are off under the broker (`tests/issue_1343_broker_websocket.rs`), so no
+/// cached socket can be reused across them.
+#[test]
+fn issue_1343_brokered_credentials_are_invisible_to_the_identity_digest() {
+    struct BrokeredAuth;
+    impl AuthProvider for BrokeredAuth {
+        fn add_auth_headers(&self, _headers: &mut HeaderMap) {}
+    }
+    let placeholder = CodexAuth::from_api_key(codex_model_provider::BROKERED_KEY_PLACEHOLDER);
+    let removed_account = ConnectionIdentity::of(Some(&placeholder), &BrokeredAuth);
+    let other_account = ConnectionIdentity::of(Some(&placeholder), &BrokeredAuth);
+
+    assert_eq!(removed_account, other_account);
+}
+
+/// #1343 case 1: a sign-in supplied through configured provider headers
+/// (`http_headers`), not `client_setup.auth`/`api_auth`. The rotated header is
+/// not part of the connection identity, so the cached socket opened with the
+/// old header is reused. This pins that known gap: when #1343 is fixed, the
+/// expected values become `["old-1", "old-2", "new-3"]`, two handshakes (old,
+/// new) and connections `[2, 1]`, as in the bearer test above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn issue_1343_header_sign_in_rotation_reuses_the_prewarmed_socket() {
+    skip_if_no_network!();
+    let server = start_websocket_server(vec![
+        vec![
+            vec![ev_response_created("old-1"), ev_completed("old-1")],
+            vec![ev_response_created("old-2"), ev_completed("old-2")],
+            vec![ev_response_created("stale-3"), ev_completed("stale-3")],
+        ],
+        vec![vec![ev_response_created("new-3"), ev_completed("new-3")]],
+    ])
+    .await;
+    let thread_id = ThreadId::new();
+    let client_with_header = |key: &str| {
+        let mut provider =
+            create_oss_provider_with_base_url(&format!("{}/v1", server.uri()), WireApi::Responses);
+        provider.supports_websockets = true;
+        provider.http_headers = Some(std::collections::HashMap::from([(
+            "x-api-key".to_string(),
+            key.to_string(),
+        )]));
+        test_model_client_with_provider(thread_id, SessionSource::Cli, provider)
+    };
+    let mut session = client_with_header("synthetic-old-key").new_session();
+    let telemetry = test_session_telemetry();
+    let model = test_model_info();
+    let setup = session.client.current_client_setup().await.expect("setup");
+    assert!(setup.auth.is_none());
+    assert!(setup.api_auth.to_auth_headers().is_empty());
+    let metadata = test_responses_metadata_for_client(
+        &session.client,
+        /*turn_id*/ None,
+        "identity-test".to_string(),
+        /*parent_thread_id*/ None,
+        TestCodexResponsesRequestKind::WebsocketConnection,
+    );
+    session
+        .preconnect_websocket(&telemetry, &metadata)
+        .await
+        .expect("preconnect");
+
+    let mut completions = Vec::new();
+    for (turn, key) in [
+        ("one", "synthetic-old-key"),
+        ("two", "synthetic-old-key"),
+        ("three", "synthetic-new-key"),
+    ] {
+        session.client = client_with_header(key);
+        let metadata = test_responses_metadata_for_client(
+            &session.client,
+            Some(turn),
+            "identity-test".to_string(),
+            /*parent_thread_id*/ None,
+            TestCodexResponsesRequestKind::Turn,
+        );
+        let mut stream = session
+            .stream(
+                &Prompt::default(),
+                &model,
+                &telemetry,
+                /*effort*/ None,
+                ReasoningSummary::None,
+                /*service_tier*/ None,
+                &metadata,
+                &InferenceTraceContext::disabled(),
+            )
+            .await
+            .expect("stream");
+        while let Some(event) = stream.next().await {
+            if let ResponseEvent::Completed { response_id, .. } = event.expect("event") {
+                completions.push(response_id);
+                break;
+            }
+        }
+    }
+    assert_eq!(completions, vec!["old-1", "old-2", "stale-3"]);
+    assert_eq!(
+        server
+            .handshakes()
+            .iter()
+            .map(|handshake| handshake.header("x-api-key"))
+            .collect::<Vec<_>>(),
+        vec![Some("synthetic-old-key".to_string())]
+    );
+    assert_eq!(
+        server
+            .connections()
+            .iter()
+            .map(Vec::len)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+    server.shutdown().await;
+}
