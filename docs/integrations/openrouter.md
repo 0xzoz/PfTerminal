@@ -37,11 +37,15 @@ Visible OpenRouter models are bundled in
 | `moonshotai/kimi-k3`              | OpenRouter Kimi K3                | `$3.00/M input`, `$0.30/M cached input`, `$15.00/M output`     |
 | `x-ai/grok-4.5`                   | OpenRouter Grok 4.5               | `$2.00/M input`, `$6.00/M output`                              |
 | `minimax/minimax-m3`              | OpenRouter MiniMax M3             | `$0.60/M input`, `$2.40/M output`                              |
-| `openrouter/owl-alpha`            | OpenRouter Owl Alpha              | `$0/M input`, `$0/M output`                                    |
 | `google/gemini-3.5-flash`         | OpenRouter Gemini 3.5 Flash       | `$1.50/M input`, `$9.00/M output`                              |
 | `tencent/hy3:free`                | OpenRouter Tencent Hy3 Free       | `$0/M input`, `$0/M output`                                    |
 
 Grok 4.6's listed rates double when the prompt exceeds 200,000 tokens.
+
+`openrouter/owl-alpha` is retired: OpenRouter lists no endpoints for it
+(checked 2026-10-28), so requests to it fail. The hidden catalogue row stays
+only so a saved config resolves to its own entry instead of another model;
+pick a current model with `/model`.
 
 DeepSeek V4 Flash is intentionally pinned to the exact
 `deepseek/deepseek-v4-flash-0731` slug. Direct DeepSeek uses provider
@@ -103,7 +107,6 @@ corbanu -m moonshotai/kimi-k3
 corbanu -m x-ai/grok-4.6
 corbanu -m x-ai/grok-4.5
 corbanu -m minimax/minimax-m3
-corbanu -m openrouter/owl-alpha
 corbanu -m google/gemini-3.5-flash
 ```
 
