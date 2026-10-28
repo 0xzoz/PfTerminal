@@ -39,8 +39,10 @@ pub(super) fn parse<'a>(name: &str, args: &'a [String]) -> Option<Invocation<'a>
     // #1422: a shell running a script file reads `--rcfile`/`--init-file`
     // only when interactive (`-i`). Any `i` letter in an option word
     // counts, wherever it is. With `-c`, bash also reads it when it seems
-    // to run under sshd, and from its input it may be interactive.
-    if !start_up.is_empty() && (!matches!(invocation.code, Code::File(_)) || interactive(args)) {
+    // to run under sshd, and from its input it may be interactive. An `o`
+    // or `O` in an option word takes the next word (bash `-ov vi`), which
+    // `Family::option` reads as the script, so then it is judged too.
+    if !start_up.is_empty() && (!matches!(invocation.code, Code::File(_)) || may_start_up(args)) {
         invocation.preloads.extend(start_up);
     }
     Some(invocation)
@@ -350,18 +352,20 @@ fn normalized(key: &str) -> String {
         .collect()
 }
 
-/// #1422: whether a shell invoked with `args` may be interactive: an option
-/// word with an `i` letter (`-i`, `-il`, `-rcfile`), or a long one
-/// yash may read as `--interactive` (`--in`). Read loosely, so a start-up
-/// file is judged: any word counts, operands too.
-fn interactive(args: &[String]) -> bool {
+/// #1422: whether a shell invoked with `args` and a script file may read
+/// its start-up file: it may be interactive (an option word with an `i`
+/// letter, `-i`, `-il`, `-rcfile`, or a long one yash may read as
+/// `--interactive`, `--in`), or an option word holds `o`/`O`, whose value
+/// may be the word read as the script. Read loosely, so the file is
+/// judged: any word counts, operands too.
+fn may_start_up(args: &[String]) -> bool {
     args.iter().any(|arg| {
         work::step();
         if let Some(long) = arg.strip_prefix("--") {
             let key = normalized(long.split_once('=').map_or(long, |(key, _)| key));
             key.len() >= 2 && "interactive".starts_with(key.as_str())
         } else {
-            arg.starts_with(['-', '+']) && arg.contains('i')
+            arg.starts_with(['-', '+']) && arg.contains(['i', 'o', 'O'])
         }
     })
 }

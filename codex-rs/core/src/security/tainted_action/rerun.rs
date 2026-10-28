@@ -225,15 +225,21 @@ pub(super) fn quoted_mapfile_callback(text: &str, strict: bool) -> bool {
 }
 
 /// #1422: the command strings `compgen -C cmd` runs as shell code, from its
-/// words after `compgen` (`args`), read as bash reads its options: up to
-/// the first operand or `--`, a letter that takes a value taking the rest
-/// of its word or the next word (`-W '-C x'` is a word list).
-pub(super) fn compgen_commands(args: &[String]) -> Vec<String> {
+/// words after `compgen` (`args`, from the quote-aware reading), read as
+/// bash reads its options: up to the first operand or `--`, a letter that
+/// takes a value taking the rest of its word or the next word (`-W '-C
+/// x'` is a word list). `None` when an option's place holds a value or a
+/// brace expression (`"$o"`, `{-C,cmd}`), which may be `-C`.
+pub(super) fn compgen_commands(args: &[quoted::Word]) -> Option<Vec<String>> {
     let mut commands = Vec::new();
     let mut at = 0;
     while let Some(word) = args.get(at) {
         work::step();
         at += 1;
+        if word.dynamic || word.text.contains(UNSEEN_OUTPUT) || brace_expression(&word.text) {
+            return None;
+        }
+        let word = &word.text;
         if word == "--" || word == "-" || !word.starts_with('-') {
             break;
         }
@@ -245,7 +251,7 @@ pub(super) fn compgen_commands(args: &[String]) -> Vec<String> {
             let rest = &word[offset + letter.len_utf8()..];
             let value = if rest.is_empty() {
                 at += 1;
-                args.get(at - 1).map(String::as_str)
+                args.get(at - 1).map(|word| word.text.as_str())
             } else {
                 Some(rest)
             };
@@ -255,7 +261,7 @@ pub(super) fn compgen_commands(args: &[String]) -> Vec<String> {
             break;
         }
     }
-    commands
+    Some(commands)
 }
 
 /// #1405: whether `words` (a command's, values filled in) may run `mapfile`

@@ -605,9 +605,14 @@ impl Classifier {
                 }
                 // #1422: `compgen -C cmd` runs `cmd` as shell code.
                 if resolved_name == "compgen" {
-                    for code in rerun::compgen_commands(&texts[at + 1..]) {
-                        work::step();
-                        push_script(found, folders, code, replaced(launches[at]), unknown);
+                    match rerun::compgen_commands(command.words.get(at + 1..).unwrap_or_default()) {
+                        Some(codes) => {
+                            for code in codes {
+                                work::step();
+                                push_script(found, folders, code, replaced(launches[at]), unknown);
+                            }
+                        }
+                        None => found.unreadable = true,
                     }
                 }
                 let shell = SHELLS.contains(&resolved_name.as_str());

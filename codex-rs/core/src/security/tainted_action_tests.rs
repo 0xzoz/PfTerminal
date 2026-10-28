@@ -9032,11 +9032,23 @@ fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
         "shopt -s expand_aliases; BASH_ALIASES[e]=eval\ne \"$1\"",
         "shopt -s expand_aliases; BASH_ALIASES=([e]=eval)\ne \"$1\"",
         "shopt -s expand_aliases; alias b=bash\neval 'b evil.sh'",
+        // Review 2: a use read before the definition but run after it,
+        // and other changes to the alias tables.
+        "f() { eval 'b evil.sh'; }\nalias b=bash\nf",
+        "shopt -s expand_aliases\ntrap 'b evil.sh' EXIT\nalias b=bash",
+        "aliases=(e eval)\ne \"$1\"",
+        "aliases+=(e eval)\ne \"$1\"",
+        "galiases[X]='| sh'\necho X",
+        "saliases[sh]=bash\n./run.sh",
+        "alias -s sh=bash\n./run.sh",
+        "declare -n r=BASH_ALIASES; r[e]=eval\ne \"$1\"",
         // `compgen -C` runs its command.
         "compgen -C 'bash evil.sh' x",
         "compgen -A file -C 'bash evil.sh' x",
         "compgen -Wfoo -C'bash evil.sh' x",
         "bash -c \"compgen -C 'bash evil.sh' x\"",
+        "o=-C; compgen \"$o\" 'bash evil.sh' x",
+        "compgen {-C,'bash evil.sh'} x",
         // A folder change that runs a program.
         "CD sub; bash run.sh",
         "Cd sub && bash run.sh",
@@ -9071,6 +9083,7 @@ fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
         ("sub/run.sh", "true\n"),
         ("notes", "a\nb\n"),
         ("tool.py", "msg = 'don\\'t'\nmapfile = load()\n"),
+        ("vi", "true\n"),
     ];
     for line in [
         "cd sub; bash run.sh",
@@ -9078,6 +9091,7 @@ fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
         "command cd sub; bash run.sh",
         "time cd sub; bash run.sh",
         "alias ll='ls -l'; ls",
+        "grep BASH_ALIASES notes",
         "compgen -c git",
         "compgen -W 'a b' -- a",
         "compgen -W '-C x' -- a",
@@ -9099,6 +9113,9 @@ fn issue_1422_mapfile_spellings_aliases_compgen_and_external_cd_ask() {
         "bash --rcfile missing.rc -c 'ls'",
         "bash --init-file missing.rc -c 'ls'",
         "bash --rcfile missing.rc -i run.sh",
+        // Review 2: bash's `-ov vi` is `-o vi -v`, not a script `vi`.
+        "bash --rcfile missing.rc -ov vi",
+        "bash --rcfile missing.rc -Ov vi -c true",
         "bash --rcfile missing.rc -ic 'ls'",
         "bash --rcfile missing.rc -c -i 'ls'",
         "bash --rcfile missing.rc",
