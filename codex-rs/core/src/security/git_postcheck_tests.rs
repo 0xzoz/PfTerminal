@@ -1755,3 +1755,47 @@ fn issue_943_a_git_folder_copied_up_on_overlay_isnt_replaced() {
     assert_eq!(held_for(&[git]), Vec::<String>::new());
     drop(mounts);
 }
+
+/// #943 (#1502 review): past `MAX_SWAPPED` different reported swaps, every
+/// `.git` folder counts as swapped (reports more, never less); a `.git` that
+/// isn't a folder is neither remembered nor counted.
+#[test]
+fn issue_943_past_the_swapped_cap_every_git_folder_counts_as_swapped() {
+    use super::unix::DotGit;
+    use super::unix::Global;
+    use super::unix::MAX_SWAPPED;
+    let folder = |ino: u64| DotGit::Folder {
+        dev: 1,
+        ino,
+        born: None,
+    };
+    let file = DotGit::File {
+        dev: 1,
+        ino: 0,
+        born: None,
+        text: None,
+    };
+    let mut global = Global::default();
+    global.note_swapped(&file);
+    assert!(!global.is_swapped(&file));
+    for ino in 1..=MAX_SWAPPED as u64 {
+        global.note_swapped(&folder(ino));
+    }
+    // Full, but a repeated report doesn't overflow it.
+    global.note_swapped(&folder(1));
+    let never = folder(u64::MAX);
+    assert_eq!(
+        (global.is_swapped(&folder(1)), global.is_swapped(&never)),
+        (true, false)
+    );
+    global.note_swapped(&folder(MAX_SWAPPED as u64 + 1));
+    assert_eq!(
+        (
+            global.is_swapped(&folder(1)),
+            global.is_swapped(&never),
+            global.is_swapped(&file),
+            global.is_swapped(&DotGit::Missing),
+        ),
+        (true, true, false, false)
+    );
+}

@@ -28,7 +28,7 @@ const MAX_THREADS: usize = 64;
 /// New, empty config files and hooks folders remembered (`Global::empty_new`).
 const MAX_EMPTY_NEW: usize = 1024;
 /// `.git` folders reported as swaps remembered (`Global::swapped`).
-const MAX_SWAPPED: usize = 1024;
+pub(super) const MAX_SWAPPED: usize = 1024;
 const SHOWN_FINDINGS: usize = 20;
 /// Links followed per chain, like the kernel's limit.
 const MAX_LINK_HOPS: usize = 40;
@@ -433,7 +433,7 @@ struct StateRead {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum DotGit {
+pub(super) enum DotGit {
     Missing,
     Folder {
         dev: u64,
@@ -1076,7 +1076,7 @@ struct ThreadState {
 }
 
 #[derive(Default)]
-struct Global {
+pub(super) struct Global {
     threads: HashMap<ThreadId, ThreadState>,
     held: HashSet<Held>,
     /// `.git` folders (by identity) any session reported as a swap: not
@@ -1085,7 +1085,8 @@ struct Global {
     swapped: HashSet<DotGit>,
     /// `swapped` was full when another was reported: from then on every
     /// `.git` folder counts as one (fails closed; dropping entries would
-    /// reopen the gap they close).
+    /// reopen the gap they close). Never cleared while the process runs:
+    /// clearing it would drop all of them at once.
     swapped_full: bool,
     /// New config files and hooks folders that were empty when a session
     /// looked (`is_empty_stub`): any session's later look reports one once
@@ -1099,6 +1100,26 @@ struct Global {
     /// Looks started, for `incomplete`: a look that started earlier doesn't
     /// clear what a later one recorded.
     looks: u64,
+}
+
+impl Global {
+    /// `dot_git` (a folder; nothing else needs it) was reported as a swap.
+    pub(super) fn note_swapped(&mut self, dot_git: &DotGit) {
+        if !matches!(dot_git, DotGit::Folder { .. }) {
+            return;
+        }
+        if self.swapped.len() < MAX_SWAPPED || self.swapped.contains(dot_git) {
+            self.swapped.insert(dot_git.clone());
+        } else {
+            self.swapped_full = true;
+        }
+    }
+
+    /// `dot_git` counts as reported as a swap (by any session).
+    pub(super) fn is_swapped(&self, dot_git: &DotGit) -> bool {
+        (self.swapped_full && matches!(dot_git, DotGit::Folder { .. }))
+            || self.swapped.contains(dot_git)
+    }
 }
 
 static GLOBAL: LazyLock<Mutex<Global>> = LazyLock::new(Default::default);
@@ -1327,8 +1348,7 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         let swap_held = prev.is_some_and(|prev| {
             prev.swap_held
                 || with_global(|global| {
-                    (global.swapped_full && matches!(prev.dot_git, DotGit::Folder { .. }))
-                        || global.swapped.contains(&prev.dot_git)
+                    global.is_swapped(&prev.dot_git)
                         || global.held.iter().any(|held| {
                             matches!(&held.what, HeldWhat::Replaced { dot_git, now }
                             if *dot_git == repo.dot_git && *now == prev.dot_git)
@@ -1357,14 +1377,8 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         let swapped = found
             .iter()
             .any(|finding| matches!(finding, Finding::Replaced { .. }));
-        if swapped && matches!(cur.dot_git, DotGit::Folder { .. }) {
-            with_global(|global| {
-                if global.swapped.len() < MAX_SWAPPED || global.swapped.contains(&cur.dot_git) {
-                    global.swapped.insert(cur.dot_git.clone());
-                } else {
-                    global.swapped_full = true;
-                }
-            });
+        if swapped {
+            with_global(|global| global.note_swapped(&cur.dot_git));
         }
         cur.swap_held =
             swapped || (swap_held && prev.is_some_and(|prev| prev.dot_git == cur.dot_git));
