@@ -997,12 +997,12 @@ impl ToolOrchestrator {
                     let cwds: Vec<&std::path::Path> = cwds.iter().map(AsRef::as_ref).collect();
                     let opened =
                         crate::security::protected_additional::opened(check, additional, &cwds);
-                    // #943 (#1503 review): where the person's approval was
-                    // discounted only because the findings stand, the
-                    // refusal alone would read as if no approval was given:
-                    // the person is told why (unless the note above was).
+                    // #943 (#1503 review): where the run is refused only
+                    // because the findings discount the person's approval,
+                    // the refusal alone would read as if none was given: the
+                    // person is told why (unless the rules note above was).
                     if opened.is_some()
-                        && !git_held_back
+                        && !rules_held_back
                         && !git_held.is_empty()
                         && approved_by == Some(ApprovalResolutionSource::User)
                     {
@@ -1014,7 +1014,7 @@ impl ToolOrchestrator {
                             ..check
                         };
                         if crate::security::protected_additional::opened(counted, additional, &cwds)
-                            != opened
+                            .is_none()
                         {
                             warn(tool_ctx, &git_held_note(&git_held, Withheld::Writes)).await;
                         }

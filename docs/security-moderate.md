@@ -203,8 +203,8 @@ The kill switch (`/security` → `g`) works under every level.
   mentions only user namespaces. An additional permission you approve to
   write to a protected file is refused, and its note says so.) If the
   repository's own git folder was unreadable at its first look, config files
-  or hooks added before the first complete look may not be reported as new. Check that config and those hooks yourself
-  before you run git there. Some setups of your own hold them too until you
+  or hooks added before the first complete look may not be reported as new.
+  Check that config and those hooks yourself before you run git there. Some setups of your own hold them too until you
   remove them: a layout made of links (`git new-workdir`, Android's `repo`), a
   `config.worktree` that `git sparse-checkout` adds, or a hooks folder a hook
   installer creates where there was none. On Linux the sandbox leaves empty
