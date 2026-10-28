@@ -4609,6 +4609,12 @@ fn d156_git_settings_after_a_split_value_ask() {
         "g=git; $g clone -b 'a ) b' --upload-pack=./x URL",
         "g=git; $g clone -b 'a { b' --upload-pack=./x URL",
         "g=git; $g clone -b 'a } b' --upload-pack=./x URL",
+        // Review 3: an option spelled by braces after the cut.
+        "git clone -b 'a; b' {--upload-pack=./x,} URL",
+        "git -c 'user.name=a; b' {--no-pager,-c} 'alias.x=!./x' x",
+        "git clone -b 'a; b' {\"--upload-pack=./x\",} URL",
+        "git clone -b 'a; b' {--upload-pack=./x,--quiet} URL",
+        "git clone -b 'a; b' --upload-pack{=./x,} URL",
     ] {
         assert_eq!(
             script(command),
@@ -4642,6 +4648,8 @@ fn d156_git_settings_after_a_split_value_ask() {
         "git -c 'color.ui=a; b' config --get sequence.editor",
         "g=git; $g status",
         "g=git; $g log --oneline -3 && $g diff --stat",
+        "git add src/{a,b}.rs && git commit -m x",
+        "git commit -m 'fix {x}: a; b'",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
@@ -4657,6 +4665,7 @@ fn d156_checks_are_linear() {
         // Review 1: zsh's `=git` names git too.
         ("=git words", "=git -c user.name=x "),
         ("hidden gits", "$g -c 'user.name=a; b' "),
+        ("brace words", "git 'a; b' {--x,} "),
     ] {
         work::assert_linear(label, |scale| {
             let line = format!("git {} status", unit.repeat(100 * scale));

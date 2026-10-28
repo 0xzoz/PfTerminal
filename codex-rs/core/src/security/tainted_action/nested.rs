@@ -803,6 +803,25 @@ impl Classifier {
         let mut git_programs_read = false;
         let mut local_config = git_config::Writes::new(texts);
         let command_at = indirect::command_word(texts);
+        // D156: whether a word from here on may be a brace expansion, which
+        // the shell may expand into options (`{--upload-pack=./x,}`): in a
+        // line with quoted text the lexer may have cut git's command before
+        // it, and this reading keeps it as written. Only a `,` or `..`
+        // between braces expands (not `{x}`).
+        let mut braced_from = vec![false; texts.len() + 1];
+        for at in (0..texts.len()).rev() {
+            work::step();
+            let text = &texts[at];
+            let expands = text.find('{').is_some_and(|open| {
+                work::rfind(text, "}").is_some_and(|close| {
+                    open < close && {
+                        let inside = &text[open..close];
+                        inside.contains(',') || inside.contains("..")
+                    }
+                })
+            });
+            braced_from[at] = braced_from[at + 1] || expands;
+        }
         for (index, word) in lower.iter().enumerate() {
             work::step();
             // #1276: or a finder's exec option with git attached.
@@ -825,6 +844,7 @@ impl Classifier {
             if (is_git && code_variables::git_runs_code_after_git(args, args))
                 || (helper == Some(None) && code_variables::git_runs_code(args, args))
                 || git_program
+                || ((is_git || helper.is_some()) && self.quoted_text && braced_from[index + 1])
             {
                 kinds.push(ProtectedActionKind::UnseenCode);
             }
