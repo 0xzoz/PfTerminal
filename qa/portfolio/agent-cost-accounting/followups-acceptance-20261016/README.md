@@ -4,9 +4,19 @@ PF-60-S10 (#404) runs the acceptance of PF-60-S06 to S09 inside the
 [isolated execution gate](../../../code-blind-functional/isolated-execution.md), discharging PF-60-S05's waiver (b).
 Owner decisions (Travis, 2026-10-15): S06–S09 accepted; S10 may run code-blind on all four before they are archived,
 on VM "macOS 3"; #824 (realtime) is included only if merged before the freeze — it was not, so realtime is the tracked
-known gap. **Not accepted: S10 needs Travis's acceptance.**
+known gap. **Signed off by Travis on 2026-10-27 (D208)**, with ACC-22 and ACC-35 as named limits.
 
-## Current status (2026-10-27)
+## Final disposition (2026-10-27, D207–D209)
+
+- **35 passed, 0 failed, 2 blocked** of 37. Blocked: ACC-22 (advisory; starting condition not met) and ACC-35
+  (optional; needs real Moonshot spend, D3 not granted). These are S10's named limits (D208).
+- Three of the 35 are **passed by owner decision**, not on the record: ACC-04 (D113) and ACC-11 and ACC-14 (D207).
+  Owner acceptance is not a clean pass. On the record those three stay **blocked** ([dispositions.md](dispositions.md),
+  [results.json](results.json) `cases`); the decisions are listed separately (dispositions.md's last section,
+  results.json `owner_decisions`).
+- On the record alone: 32 passed, 0 failed, 5 blocked.
+
+## Status before D207–D209 (2026-10-27)
 
 - **33 passed, 0 failed, 4 blocked** of 37 cases. Two dated results after the first run, below, produced this count:
   - **Re-run R1 (2026-10-27):** ACC-06, ACC-15 and ACC-18 passed. ACC-11 and ACC-14 stay blocked, each on one result
@@ -22,7 +32,7 @@ known gap. **Not accepted: S10 needs Travis's acceptance.**
     ACC-14, and exactly later, in ACC-18.
 - [dispositions.md](dispositions.md) and [results.json](results.json) carry the R1 dispositions for the five re-run
   cases. Each keeps its first-run entry under `prior_run`. Their totals read 32 passed and 5 blocked, because ACC-04
-  stays blocked there and D113 is recorded only in the addendum below.
+  stays blocked there and D113 is recorded only in the addendum below (and, since D207, in their owner-decision parts).
 
 ## Result (first run, 2026-10-16)
 
@@ -177,3 +187,15 @@ renames the result heading, and adds one note to a named limit.
   - C-R1 attempt 1 (the tester's stream stalled mid-ACC-14).
 - The expired synthetic mediation CA was re-issued.
 - Details, evidence and integrator checks: [rerun-r1-20261022/README.md](rerun-r1-20261022/README.md).
+
+## After this record: owner decisions D207–D209 (2026-10-27)
+
+Dated addendum; the record above is unchanged except the opening status and the final-disposition section.
+
+- **D207:** ACC-11 and ACC-14 are recorded as passed by owner decision, as D113 did for ACC-04. Their recorded
+  disposition stays **blocked**, each on one result not captured in the case's own screens.
+- **D208:** Travis signed off S10 with ACC-22 (advisory) and ACC-35 (needs real Moonshot spend, not granted) as named
+  limits. Final disposition: 35 passed, 0 failed, 2 blocked, with ACC-04, ACC-11 and ACC-14 passed by owner decision.
+- **D209:** this README, [dispositions.md](dispositions.md), [results.json](results.json), the
+  [S10 sprint page](../../../../docs/sprints/archive/portfolio-agent-cost-accounting-followups/pf-60-s10-isolated-code-blind-acceptance.md)
+  and the [sprint index](../../../../docs/sprints/index.md) carry these counts.
