@@ -43,7 +43,11 @@ impl AgentControl {
                             ))
                         })?;
                 }
-                AgentMailboxPhase::Submitted => {
+                // #1058's order writes Submitted before the hand-off, so a Submitting row is an
+                // attempt that was reserved but never handed over. It is requeued like an unapplied
+                // Submitted row, unless the recipient's rollout already applied it (a row written
+                // by an older build that marked Submitted only after the hand-off).
+                AgentMailboxPhase::Submitting | AgentMailboxPhase::Submitted => {
                     if thread
                         .session
                         .has_applied_agent_message_id(&message_id)
@@ -52,7 +56,7 @@ impl AgentControl {
                         let _ = state_db
                             .transition_agent_message(
                                 &message_id,
-                                AgentMailboxPhase::Submitted,
+                                message.phase,
                                 AgentMailboxPhase::UnknownOutcome,
                                 crate::turn_timing::now_unix_timestamp_ms(),
                             )
@@ -74,7 +78,7 @@ impl AgentControl {
                     let _ = state_db
                         .transition_agent_message(
                             &message_id,
-                            AgentMailboxPhase::Submitted,
+                            message.phase,
                             AgentMailboxPhase::Ready,
                             crate::turn_timing::now_unix_timestamp_ms(),
                         )
@@ -85,11 +89,11 @@ impl AgentControl {
                             ))
                         })?;
                 }
-                AgentMailboxPhase::Submitting | AgentMailboxPhase::ProviderRunning => {
+                AgentMailboxPhase::ProviderRunning => {
                     let _ = state_db
                         .transition_agent_message(
                             &message_id,
-                            message.phase,
+                            AgentMailboxPhase::ProviderRunning,
                             AgentMailboxPhase::UnknownOutcome,
                             crate::turn_timing::now_unix_timestamp_ms(),
                         )
