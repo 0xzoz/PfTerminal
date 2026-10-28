@@ -20,6 +20,7 @@ use super::indirect;
 use super::quoted;
 use super::shell::SimpleCommand;
 use super::shell::UNSEEN_OUTPUT;
+use super::shell::basename;
 use super::work;
 
 /// Commands that run, or keep as code, their operands. Without a command
@@ -196,25 +197,83 @@ pub(super) fn mapfile_callback(simple: &SimpleCommand, words: &[String], unseen:
 /// word. A reading that is unsure where a quote or substitution ends asks
 /// too. `coproc` runs the command after it. Called only for a line the
 /// word lexer found a `mapfile` in, whatever its spelling (`ma''pfile`,
-/// `$m`).
-pub(super) fn quoted_mapfile_callback(text: &str) -> bool {
+/// `$m`). #1422: a command word holding a brace expression
+/// (`{,mapfile}`) may be it too. Text that may not be shell (`strict`
+/// false) is read loosely, as `nested.rs` reads it: a quote it leaves open
+/// does not ask.
+pub(super) fn quoted_mapfile_callback(text: &str, strict: bool) -> bool {
     let reading = quoted::commands(text);
-    if reading.too_deep || reading.unterminated || reading.unsure {
+    if reading.too_deep || reading.unsure || (strict && reading.unterminated) {
         return true;
     }
     reading.commands.iter().any(|command| {
         let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
         // The word lexer found a `mapfile` in this line: a command named by
-        // a value (`$m`) may be it.
+        // a value (`$m`) or a brace expression (`{,mapfile}`) may be it.
+        // One that may expand to an option too (`{mapfile,-C}`) asks.
+        let braced = |at: usize| {
+            command
+                .words
+                .get(at)
+                .is_some_and(|word| brace_expression(&word.text))
+        };
         let dynamic = |at: usize| command.words.get(at).is_some_and(|word| word.dynamic);
-        mapfile_word(&texts, dynamic).is_some_and(|at| quoted_callback(&command.words[at + 1..]))
+        mapfile_word(&texts, |at| dynamic(at) || braced(at)).is_some_and(|at| {
+            (braced(at) && texts[at].contains('-')) || quoted_callback(&command.words[at + 1..])
+        })
     })
 }
 
-/// #1405: whether `words` (a command's, values filled in) run `mapfile` or
-/// `readarray`.
+/// #1422: the command strings `compgen -C cmd` runs as shell code, from its
+/// words after `compgen` (`args`, from the quote-aware reading), read as
+/// bash reads its options: up to the first operand or `--`, a letter that
+/// takes a value taking the rest of its word or the next word (`-W '-C
+/// x'` is a word list). `None` when an option's place holds a value or a
+/// brace expression (`"$o"`, `{-C,cmd}`), which may be `-C`.
+pub(super) fn compgen_commands(args: &[quoted::Word]) -> Option<Vec<String>> {
+    let mut commands = Vec::new();
+    let mut at = 0;
+    while let Some(word) = args.get(at) {
+        work::step();
+        at += 1;
+        if word.dynamic || word.text.contains(UNSEEN_OUTPUT) || brace_expression(&word.text) {
+            return None;
+        }
+        let word = &word.text;
+        if word == "--" || word == "-" || !word.starts_with('-') {
+            break;
+        }
+        for (offset, letter) in word.char_indices().skip(1) {
+            work::step();
+            if !"oAGWFCXPSV".contains(letter) {
+                continue;
+            }
+            let rest = &word[offset + letter.len_utf8()..];
+            let value = if rest.is_empty() {
+                at += 1;
+                args.get(at - 1).map(|word| word.text.as_str())
+            } else {
+                Some(rest)
+            };
+            if letter == 'C' {
+                commands.extend(value.map(str::to_string));
+            }
+            break;
+        }
+    }
+    Some(commands)
+}
+
+/// #1405: whether `words` (a command's, values filled in) may run `mapfile`
+/// or `readarray`. #1422: any word of that name counts, in any case: the
+/// word lexer ignores quotes, so a quoted blank or separator in an
+/// assignment before it (`x='a b' mapfile`) moves the command word.
 pub(super) fn names_mapfile(words: &[String]) -> bool {
-    mapfile_word(words, |_| false).is_some()
+    words.iter().any(|word| {
+        work::step();
+        let name = basename(word);
+        name.eq_ignore_ascii_case("mapfile") || name.eq_ignore_ascii_case("readarray")
+    })
 }
 
 /// #1405: the index of a `mapfile`/`readarray` command word in `words`,
@@ -257,7 +316,8 @@ fn quoted_callback(args: &[quoted::Word]) -> bool {
         if text == "--" {
             return false;
         }
-        if globbed(text) {
+        // #1422: a brace expression may expand to an option (`{-C,eval}`).
+        if globbed(text) || brace_expression(text) {
             return true;
         }
         if let Some(cluster) = text.strip_prefix('-')
@@ -272,6 +332,25 @@ fn quoted_callback(args: &[quoted::Word]) -> bool {
                 value_next = at + 1 == cluster.len();
             }
         }
+    }
+    false
+}
+
+/// #1422: whether `text` holds a brace expression (`{,mapfile}`, `{a..c}`),
+/// not a parameter expansion (`${PY:-python3.11}`).
+fn brace_expression(text: &str) -> bool {
+    let mut open = false;
+    let mut before = None;
+    for ch in text.chars() {
+        work::step();
+        match ch {
+            '{' => open = before != Some('$'),
+            '}' => open = false,
+            ',' if open => return true,
+            '.' if open && before == Some('.') => return true,
+            _ => {}
+        }
+        before = Some(ch);
     }
     false
 }
