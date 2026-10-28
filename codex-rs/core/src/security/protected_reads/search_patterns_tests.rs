@@ -328,3 +328,91 @@ fn control_flow_search_paths_remain_paths() {
         assert_eq!(patterns(script), ["token"], "{script}");
     }
 }
+
+/// #1480 item 1: a program word shaped like an assignment is one: the shell
+/// runs the word after it (`.env` here), so `.env` is no grep pattern.
+#[test]
+fn assignment_shaped_program_words_do_not_start_searches() {
+    for script in [
+        "X=1/grep .env logs",
+        "LC_ALL=C X=1/grep .env logs",
+        "sudo X=1/rg .env logs",
+        "env X=1/grep .env logs",
+        "cat logs; X=1/grep .env logs",
+        // After these the word is the program, which is not taken either,
+        // also quoted or escaped (as on main).
+        "nohup X=1/grep .env logs",
+        "command X=1/grep .env logs",
+        "nohup \"X=1/grep\" .env logs",
+        "command 'X=1/grep' .env logs",
+        "exec X\\=1/grep .env logs",
+        "nohup \"X\"=1/rg .env logs",
+        // A search it declines still ends where the command ends: no later
+        // word of it starts another one.
+        "X=1/grep rg .env logs",
+        "X=1/grep sh -c rg .env logs",
+        "'X=1' grep sh -c rg .env logs",
+    ] {
+        assert_eq!(patterns(script), Vec::<String>::new(), "{script}");
+    }
+    // Run directly, without a shell: `X=1/grep` is a program path then.
+    let command = ["X=1/grep", "rg", ".env", "logs"].map(String::from);
+    let words = super::super::command_words(&command, /*windows*/ false);
+    let marked: Vec<&String> = search_pattern_indices(&command, &words, /*windows*/ false)
+        .into_iter()
+        .map(|index| &words[index])
+        .collect();
+    assert!(!marked.iter().any(|word| *word == ".env"), "{marked:?}");
+    // A program path that only contains `=` past a slash is no assignment.
+    assert_eq!(patterns("./X=1/grep .env logs"), [".env"]);
+}
+
+/// #1480 item 2: an assignment whose name or `=` is quoted or escaped is a
+/// program name to the shell, so the search after it is an argument.
+#[test]
+fn quoted_or_escaped_assignment_words_are_not_prefixes() {
+    for script in [
+        "'X=1' grep .env logs",
+        "\"X=1\" grep .env logs",
+        "X\\=1 grep .env logs",
+        "\"X\"=1 grep .env logs",
+        "X'='1 grep .env logs",
+        "LC_ALL=C 'X=1' rg .env logs",
+    ] {
+        assert_eq!(patterns(script), Vec::<String>::new(), "{script}");
+    }
+    // Only the value is quoted: still an assignment.
+    for script in [
+        "X='1' grep .env logs",
+        "X=\"a b\" grep .env logs",
+        "X=a\\ b rg .env logs",
+    ] {
+        assert_eq!(patterns(script), [".env"], "{script}");
+    }
+}
+
+/// #1480 item 3: the `nohup`/`command`/`exec` exception reaches only the
+/// word right after them.
+#[test]
+fn program_prefix_exception_reaches_only_the_next_word() {
+    for script in [
+        "nohup env X=1 grep .env logs",
+        "X=1 nohup grep .env logs",
+        "X=1 command grep .env logs",
+        "exec env LC_ALL=C rg .env logs",
+    ] {
+        assert_eq!(patterns(script), [".env"], "{script}");
+    }
+}
+
+/// #1480 item 5: a long chain of assignments costs one walk back, at the
+/// search program, and is still recognised.
+#[test]
+fn long_assignment_chains_before_a_search_are_recognised() {
+    let chain = (0..5_000).map(|n| format!("A{n}=1 ")).collect::<String>();
+    assert_eq!(patterns(&format!("{chain}grep .env logs")), [".env"]);
+    assert_eq!(
+        patterns(&format!("{chain}cat grep .env logs")),
+        Vec::<String>::new()
+    );
+}
