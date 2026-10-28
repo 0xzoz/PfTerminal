@@ -38,6 +38,7 @@ mod indirect;
 mod invocation;
 mod launched_git;
 mod loader_variables;
+mod mktemp;
 mod named_shell;
 mod nested;
 mod outbound;
@@ -539,6 +540,12 @@ fn judged(action: &ApprovalAction, homes: Homes, as_named: bool) -> Classifier {
     if classifier.homes.exhausted() {
         classifier.note(ProtectedActionKind::UnseenCode);
     }
+    // D191: an action that asks anyway asks as on main.
+    if classifier.found.is_some()
+        && let Some(kind) = classifier.held.take()
+    {
+        classifier.note(kind);
+    }
     classifier
 }
 
@@ -571,6 +578,8 @@ impl Classifier {
             backslash: false,
             in_file: 0,
             reads_follow: false,
+            temp: None,
+            held: None,
             workspace: String::new(),
             cut_values: HashSet::new(),
             sets_env: false,
@@ -1186,6 +1195,11 @@ struct Classifier {
     /// #1240: bytes of words and folders the Windows view may still
     /// resolve; past it the action fails closed.
     windows_budget: usize,
+    /// D191: the action's own line's variables that hold a `mktemp` path.
+    temp: Option<mktemp::Scope>,
+    /// D191: prompts only a temp path raised, dropped only when the action
+    /// asks for nothing else (else it asks as on main, for the strongest).
+    held: Option<ProtectedActionKind>,
 }
 
 /// #841 (MOD-06): the word classifier splits quoted text into commands on
@@ -1399,6 +1413,20 @@ impl Classifier {
         }
     }
 
+    /// D191: a prompt that only a temp path raised is held back until the
+    /// line is read (`temp`); any other is noted.
+    fn note_or_hold(&mut self, kind: ProtectedActionKind, temp: bool) {
+        match &mut self.temp {
+            Some(scope) if temp => scope.hold(kind),
+            _ => self.note(kind),
+        }
+    }
+
+    /// D191: a word naming a file at a temp path of this line.
+    fn temp_place(&self, word: &str) -> bool {
+        self.temp.is_some() && mktemp::temp_place(word)
+    }
+
     fn path(&mut self, path: &str) {
         if let Some(kind) = self.homes.classify_resolved(path) {
             self.note(kind);
@@ -1460,6 +1488,13 @@ impl Classifier {
         // #841: this line's own sed programs (nested lines have theirs).
         let outer_scope = std::mem::replace(&mut self.sed_scope, SedScope::of(command));
         let lexed = shell::simple_commands(command);
+        // D191: only the action's own line, judged under POSIX path rules.
+        let outer_temp = std::mem::replace(
+            &mut self.temp,
+            (depth == 0 && !self.homes.windows_paths())
+                .then(|| mktemp::Scope::of(command, &lexed.commands))
+                .flatten(),
+        );
         // #1064: whether the line may build shell text at run time (another
         // language's `chr(64)`, `printf '\x40' | bash`); see
         // `shell::prompt_expansion`. Text rebuilt from joined literals is
@@ -1542,6 +1577,9 @@ impl Classifier {
             work::step();
             let (words, unseen, skipped) =
                 substitute(simple, &variables, &mut self.substitution_budget);
+            if let Some(scope) = &mut self.temp {
+                scope.read(simple, &words);
+            }
             if self.substitution_budget.left == 0 {
                 self.note(ProtectedActionKind::UnseenCode);
             }
@@ -1569,7 +1607,15 @@ impl Classifier {
             {
                 self.note(ProtectedActionKind::UnseenCode);
             }
-            arithmetic.note(simple, &words);
+            // D191: a trap that only removes temp paths reads no arithmetic;
+            // its prompt is held back below.
+            if !self
+                .temp
+                .as_ref()
+                .is_some_and(|scope| scope.removal_trap(&words))
+            {
+                arithmetic.note(simple, &words);
+            }
             lexed_seds += sed::positions(&words).len();
             lexed_shells += nested::shell_commands(&words);
             let feeds_pipe = pipe_sources.contains(&index);
@@ -1649,6 +1695,17 @@ impl Classifier {
         {
             self.note(ProtectedActionKind::UnseenCode);
         }
+        // D191: the prompts only a temp path raised, kept now unless its
+        // variable kept that path (see `release_held`).
+        if let Some(scope) = std::mem::replace(&mut self.temp, outer_temp) {
+            match scope.finish(arithmetic.assigns_unseen_name(command)) {
+                (Some(kind), true) => self.note(kind),
+                (Some(kind), false) => {
+                    self.held = Some(self.held.map_or(kind, |held| held.strongest(kind)));
+                }
+                (None, _) => {}
+            }
+        }
         self.path(&folders.cwd);
         // Strings assembled from literals by inline code (`'~/.co' + 'dex'`).
         let outer_foreign = std::mem::replace(&mut self.rebuilt_foreign, foreign);
@@ -1719,7 +1776,13 @@ impl Classifier {
                     // is kept as written.
                     // Once unseen, a variable stays unseen for the action
                     // (a later assignment may not run).
-                    let value = if value.contains(shell::UNSEEN_OUTPUT)
+                    let temp = self
+                        .temp
+                        .as_ref()
+                        .and_then(|scope| scope.value(name, value, !variables.contains_key(name)));
+                    let value = if let Some(temp) = temp {
+                        temp.to_string()
+                    } else if value.contains(shell::UNSEEN_OUTPUT)
                         || variables
                             .get(name)
                             .is_some_and(|old| old.contains(shell::UNSEEN_OUTPUT))
@@ -1763,7 +1826,15 @@ impl Classifier {
                 && unseen[index + 1..].iter().any(|unseen| *unseen))
                 || rerun::runs_unseen(name, words, unseen, *index);
             if self.rebuilt == 0 && (unseen[*index] || inline_unseen || eval_unseen) {
-                self.note(ProtectedActionKind::UnseenCode);
+                // D191: a trap that only removes temp paths.
+                let removes = name == "trap"
+                    && !unseen[*index]
+                    && !inline_unseen
+                    && self
+                        .temp
+                        .as_ref()
+                        .is_some_and(|scope| scope.removes_temp(args));
+                self.note_or_hold(ProtectedActionKind::UnseenCode, removes);
             }
             folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
                 && unchecked[index + 1..].iter().any(|word| *word);
@@ -2009,7 +2080,7 @@ impl Classifier {
                     && simple.here_string != Some(position)))
                 && outputs::unseen_place(word)
             {
-                self.note(ProtectedActionKind::Persistence);
+                self.note_or_hold(ProtectedActionKind::Persistence, self.temp_place(word));
             }
             // Attached, assigned and volume forms (`-o/path`, `f=@/path`,
             // `~/.aws:/c`) are paths too.
@@ -2037,7 +2108,8 @@ impl Classifier {
                         && (self.homes.is_persistence(&resolved)
                             || self.unknown_place(folders, candidate))
                     {
-                        self.note(ProtectedActionKind::Persistence);
+                        let temp = self.temp_place(candidate);
+                        self.note_or_hold(ProtectedActionKind::Persistence, temp);
                     }
                     if recursive && !folder_value && self.homes.holds_a_home(&resolved) {
                         self.note(ProtectedActionKind::Credentials);
@@ -2049,7 +2121,8 @@ impl Classifier {
                     let resolved = self.homes.resolve(candidate, base);
                     self.word_path(&resolved, candidate, depth);
                     if self.homes.is_persistence(&resolved) {
-                        self.note(ProtectedActionKind::Persistence);
+                        let temp = self.temp_place(candidate);
+                        self.note_or_hold(ProtectedActionKind::Persistence, temp);
                     }
                 }
             }
@@ -2082,7 +2155,7 @@ impl Classifier {
         for file in outputs.iter().flatten().chain(&wrapper_outputs) {
             work::step();
             if outputs::unseen_place(file) {
-                self.note(ProtectedActionKind::Persistence);
+                self.note_or_hold(ProtectedActionKind::Persistence, self.temp_place(file));
             }
             for base in bases.iter().chain(other_bases.iter()) {
                 work::step();
@@ -2094,7 +2167,7 @@ impl Classifier {
                     || (file.ends_with('/') && self.homes.holds_a_home(&resolved))
                     || self.unknown_place(folders, file)
                 {
-                    self.note(ProtectedActionKind::Persistence);
+                    self.note_or_hold(ProtectedActionKind::Persistence, self.temp_place(file));
                 }
             }
         }
