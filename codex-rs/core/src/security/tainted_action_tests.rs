@@ -8996,11 +8996,8 @@ fn issue_1405_checks_are_linear() {
 /// nested script after `cd "$X/.."`, a `cd` that `CDPATH`, `OLDPWD` or
 /// `cdable_vars` sends elsewhere, a loop's later pass, and a script named
 /// relative to such a folder.
+#[cfg(unix)]
 #[test]
-#[cfg_attr(
-    windows,
-    ignore = "Unix fixtures (POSIX paths and shell syntax); Windows coverage is #691"
-)]
 fn issue_1436_unseen_folders_ask() {
     let many = format!(
         "{}for i in 1 2; do echo x >> .zshrc; cd ~; done",
@@ -9027,6 +9024,18 @@ fn issue_1436_unseen_folders_ask() {
         "cd /home/fixture/a/b; for i in 1 2 3; do echo x >> .zshrc; cd ..; done",
         // Past `MAX_REPLAYED_LOOPS`, a loop with a change starts unknown.
         &many,
+        // Review 1: a change that may fail, a variable, `cd -` or the
+        // stack a pass leaves, a deeper pass that climbs back.
+        "for i in 1 2; do echo x >> .zshrc; cd ~; cd nope; done",
+        "D=.; for i in 1 2; do cd \"$D\"; echo x >> .zshrc; D=~; done",
+        "cd /tmp; for i in 1 2; do cd -; echo x >> .zshrc; cd ~; cd /tmp; done",
+        "pushd ~; pushd /tmp; pushd /var; for i in 1 2; do popd; echo x >> .zshrc; cd /var; done",
+        "cd /home/fixture/w; for i in 1 2 3 4; do cd d; echo x >> ../../../../../.zshrc; done",
+        // Review 1: `cd -` after a change that may not have happened.
+        "cd /nonexistent; cd - && echo x >> .zshrc",
+        "(cd /tmp); cd - && echo x >> .zshrc",
+        "x=$(cd /tmp); cd - && echo x >> .zshrc",
+        "cd ~- && echo x >> .zshrc",
     ]
     .into_iter()
     .filter(|command| script(command).is_none())
@@ -9034,7 +9043,12 @@ fn issue_1436_unseen_folders_ask() {
     assert_eq!(quiet, Vec::<&str>::new());
     // A script named relative to a folder the reading cannot see: a
     // harmless file of that name here does not keep the line quiet.
-    let here = [("run.sh", "true\n"), ("tool.py", "print(1)\n")];
+    let here = [
+        ("run.sh", "true\n"),
+        ("tool.py", "print(1)\n"),
+        ("prog.sed", "p\n"),
+        ("notes", "a\n"),
+    ];
     let mut wrong = Vec::new();
     for line in [
         "cd \"$X\" && sh ./run.sh",
@@ -9046,12 +9060,21 @@ fn issue_1436_unseen_folders_ask() {
         "cd \"$(cat f)\" && python3 tool.py",
         "cd \"$X/..\" && bash run.sh",
         "x=$(cd \"$X\" && sh ./run.sh)",
+        // Review 1: a decoded payload, a sed program file.
+        "cd \"$X/..\" && echo YmFzaCBydW4uc2g= | base64 -d | sh",
+        "cd \"$X/..\" && sed -n -f prog.sed notes",
     ] {
         if in_workspace(&here, line).is_none() {
             wrong.push(line);
         }
     }
     assert_eq!(wrong, Vec::<&str>::new());
+    // Review 1: what the file here holds is still found.
+    let vault = [("run.sh", "corbanu vault get k\n")];
+    assert_eq!(
+        in_workspace(&vault, "cd \"$X/..\" && bash run.sh"),
+        Some(ProtectedActionKind::Vault)
+    );
     // Ordinary lines stay quiet.
     for line in [
         "cd \"$PWD\" && sh ./run.sh",
@@ -9070,6 +9093,11 @@ fn issue_1436_unseen_folders_ask() {
         "cd /tmp && cd - && make > log",
         "while read -r l; do echo \"$l\"; done < notes > out.txt",
         "cd ~/proj && make > log",
+        // Review 1: naming a search name does not set it; a loop's later
+        // passes do not count its commands again.
+        "echo \"$OLDPWD\"; cd sub && make > log",
+        "for i in 1 2; do cd /tmp/w; sed -n 1p f; done",
+        "for i in 1 2; do cd ~/proj; bash -c 'make'; done",
     ] {
         if script(command).is_some() {
             wrong.push(command);

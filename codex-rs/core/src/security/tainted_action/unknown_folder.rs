@@ -148,15 +148,34 @@ pub(super) fn starts_loop(texts: &[String]) -> bool {
     })
 }
 
-/// #1436: the outermost loops of `commands` (their first and last command)
-/// that hold a folder change (`cd`, `eval 'cd ~'`, `source f`). A loop
-/// starts at a command whose first word, past keywords (`do for`), is a
-/// loop keyword, and ends at a `done`; one left open ends with the text.
-pub(super) fn changing_loops(commands: &[SimpleCommand]) -> Vec<(usize, usize)> {
+/// #1436: a loop that holds a folder change.
+pub(super) struct ChangingLoop {
+    /// Its first and last command.
+    pub(super) start: usize,
+    pub(super) end: usize,
+    /// The variables its changes name (`cd "$D"`, `cd ${D}/x`).
+    pub(super) names: Vec<String>,
+    /// A word in it climbs (`..`).
+    pub(super) climbs: bool,
+    /// A change in it goes back (`cd -`, `~-`) or uses the folder stack
+    /// (`pushd`, `popd`).
+    pub(super) back: bool,
+    pub(super) stack: bool,
+}
+
+/// #1436: the outermost loops of `commands` that hold a folder change
+/// (`cd`, `eval 'cd ~'`, `source f`). A loop starts at a command whose
+/// first word, past keywords (`do for`), is a loop keyword, and ends at a
+/// `done`; one left open ends with the text.
+pub(super) fn changing_loops(commands: &[SimpleCommand]) -> Vec<ChangingLoop> {
     let mut found = Vec::new();
     let mut open = 0usize;
     let mut start = 0;
     let mut changes = false;
+    let mut names = Vec::new();
+    let mut climbs = false;
+    let mut back = false;
+    let mut stack = false;
     for (at, command) in commands.iter().enumerate() {
         work::step();
         let words = &command.words;
@@ -171,27 +190,100 @@ pub(super) fn changing_loops(commands: &[SimpleCommand]) -> Vec<(usize, usize)> 
             if open == 0 {
                 start = at;
                 changes = false;
+                names.clear();
+                climbs = false;
+                back = false;
+                stack = false;
             }
             open += 1;
         }
-        if open > 0
-            && !changes
-            && let Some((index, name)) = indirect::command_word(words)
-        {
-            changes =
-                CHANGERS.contains(&name.as_str()) || carries_change(&name, &words[index + 1..]);
+        if open > 0 {
+            climbs |= words.iter().any(|word| word.contains(".."));
+            if let Some((index, name)) = indirect::command_word(words)
+                && (CHANGERS.contains(&name.as_str()) || carries_change(&name, &words[index + 1..]))
+            {
+                changes = true;
+                stack |= matches!(name.as_str(), "pushd" | "popd");
+                for word in &words[index + 1..] {
+                    work::step();
+                    back |= word == "-" || word.starts_with("~-");
+                    names.extend(variable_names(word));
+                }
+            }
         }
         if open > 0 && words.first().is_some_and(|word| word == "done") {
             open -= 1;
             if open == 0 && changes {
-                found.push((start, at));
+                found.push(ChangingLoop {
+                    start,
+                    end: at,
+                    names: std::mem::take(&mut names),
+                    climbs,
+                    back,
+                    stack,
+                });
             }
         }
     }
     if open > 0 && changes {
-        found.push((start, commands.len() - 1));
+        found.push(ChangingLoop {
+            start,
+            end: commands.len() - 1,
+            names,
+            climbs,
+            back,
+            stack,
+        });
     }
     found
+}
+
+/// The names of the variables `word` expands (`$D`, `${D}`, `${D:-x}`).
+fn variable_names(word: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = word;
+    while let Some(at) = rest.find('$') {
+        work::step();
+        rest = &rest[at + 1..];
+        let inner = rest.strip_prefix('{').unwrap_or(rest);
+        let end = inner
+            .find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+            .unwrap_or(inner.len());
+        if end > 0 {
+            names.push(inner[..end].to_string());
+        }
+    }
+    names
+}
+
+/// #1436: whether a simple command (`words`, its command word `command`)
+/// sets a name that changes where `cd` goes ([`searches`]): an assignment
+/// on its own, declared, or before a folder change; a name it reads into
+/// (`read CDPATH`); or an option (`shopt -s cdable_vars`, zsh `setopt
+/// auto_cd`).
+pub(super) fn sets_search(words: &[String], command: Option<&(usize, String)>) -> bool {
+    let name = command.map(|(_, name)| name.as_str());
+    let named = matches!(
+        name,
+        Some("shopt" | "setopt" | "set" | "read" | "mapfile" | "readarray" | "printf")
+    );
+    let assigns = matches!(
+        name,
+        None | Some(
+            "export" | "declare" | "typeset" | "local" | "readonly" | "cd" | "pushd" | "popd"
+        )
+    );
+    words.iter().any(|word| {
+        work::step();
+        if named {
+            return searches(word);
+        }
+        assigns
+            && word.split_once('=').is_some_and(|(assigned, _)| {
+                let assigned = assigned.trim_end_matches('+');
+                searches(assigned.split('[').next().unwrap_or(assigned))
+            })
+    })
 }
 
 /// Whether `text` names something that changes where `cd` goes.
