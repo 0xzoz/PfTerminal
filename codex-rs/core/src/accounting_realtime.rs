@@ -76,8 +76,9 @@ impl RealtimeSessionRecord {
 
     /// Record the tokens one finished response reported (#889 D223): the
     /// session's running sums, as one cumulative observation. A report the
-    /// sums cannot take is left out (see `SessionUsage::add`); a write the
-    /// ledger refuses ends recording for the session, logged as a gap.
+    /// sums cannot take is left out, logged as a gap (`SessionUsage::add`). A
+    /// write the ledger refuses closes the sampling, logged as a gap: nothing
+    /// more is recorded for the session, its end included.
     pub(crate) async fn observe_response(&mut self, usage: &RealtimeResponseUsage) {
         if self.stopped {
             return;
@@ -99,7 +100,8 @@ impl RealtimeSessionRecord {
     }
 
     /// Record that the session ended at `ended_at_ms` (Unix ms), after every
-    /// usage report. The write waits only while the state DB lock is held by
+    /// usage report; nothing, logged as a gap, once a usage write was refused
+    /// (`observe_response`). The write waits only while the state DB lock is held by
     /// another connection; a busy DB defers it and the close goes ahead.
     pub(crate) async fn end(self, ended_at_ms: i64) {
         let ended = match ended_at_ms.try_into() {
@@ -125,81 +127,84 @@ impl RealtimeSessionRecord {
 }
 
 /// Running sums of the token counts a session's responses reported
-/// (#889 D223), in the order input, cached input, output, total.
+/// (#889 D223), in the order input, cached input, output.
 ///
-/// The first response that reports any count fixes which counts the session
+/// The first response that reports any of them fixes which ones the session
 /// states. A later response that leaves one of them out, or whose cached
-/// input exceeds its input, is not counted, so every recorded sum covers the
-/// same responses. A total that disagrees with the response's own input plus
-/// output is read as not stated.
+/// input exceeds its input, is not counted (logged as a gap), so every
+/// recorded sum covers the same responses. The total is input plus output,
+/// recorded when both are stated: the ledger holds no other total for this
+/// arithmetic, so a provider total that disagrees cannot drop a response.
 #[derive(Debug, Default)]
 struct SessionUsage {
-    stated: Option<[bool; 4]>,
-    sums: [i64; 4],
+    stated: Option<[bool; 3]>,
+    sums: [i64; 3],
 }
 
 impl SessionUsage {
     /// Add one response's report; the cumulative patch to record, or `None`
     /// when this report changes nothing that is recorded.
     fn add(&mut self, usage: &RealtimeResponseUsage) -> Option<Patch> {
+        let not_counted = |why: &str| {
+            super::gap(
+                "record realtime response usage",
+                format_args!("{why}; this response is not counted"),
+            );
+            None
+        };
         let as_count = |value: Option<u64>| value.map(i64::try_from).transpose().ok();
-        let mut counts = [
-            as_count(usage.input_tokens)?,
-            as_count(usage.cached_input_tokens)?,
-            as_count(usage.output_tokens)?,
-            as_count(usage.total_tokens)?,
-        ];
-        let [input, cached, output, total] = counts;
+        let (Some(input), Some(cached), Some(output)) = (
+            as_count(usage.input_tokens),
+            as_count(usage.cached_input_tokens),
+            as_count(usage.output_tokens),
+        ) else {
+            return not_counted("a count is beyond the ledger's range");
+        };
         if cached
             .zip(input)
             .is_some_and(|(cached, input)| cached > input)
         {
-            tracing::debug!(
-                target: "codex_core::accounting",
-                "realtime response reported more cached input than input; not counted"
-            );
-            return None;
+            return not_counted("cached input above input");
         }
-        if let (Some(total), Some(input), Some(output)) = (total, input, output)
-            && input.checked_add(output) != Some(total)
-        {
-            counts[3] = None;
-        }
-        let stated = *self
-            .stated
-            .get_or_insert(counts.map(|count| count.is_some()));
+        let counts = [input, cached, output];
+        let stated = match self.stated {
+            Some(stated) => stated,
+            None if counts.iter().any(Option::is_some) => counts.map(|count| count.is_some()),
+            // A report of a total alone: nothing to sum yet.
+            None => return None,
+        };
         let mut sums = self.sums;
         for ((sum, count), stated) in sums.iter_mut().zip(counts).zip(stated) {
             if !stated {
                 continue;
             }
             let Some(count) = count else {
-                tracing::debug!(
-                    target: "codex_core::accounting",
-                    "realtime response left out a count earlier responses stated; not counted"
-                );
-                return None;
+                return not_counted("a count earlier responses stated is missing");
             };
-            *sum = sum.checked_add(count)?;
+            let Some(next) = sum.checked_add(count) else {
+                return not_counted("the session's sum overflows");
+            };
+            *sum = next;
         }
-        if !stated.contains(&true) {
-            // Nothing stated yet: let a later report fix the shape.
-            self.stated = None;
-            return None;
-        }
+        let total = if stated[0] && stated[2] {
+            let Some(total) = sums[0].checked_add(sums[2]) else {
+                return not_counted("the session's total overflows");
+            };
+            Some(total)
+        } else {
+            None
+        };
+        self.stated = Some(stated);
         self.sums = sums;
-        let presence = |index: usize| {
-            if stated[index] {
-                Count::try_from(sums[index]).map_or(Presence::Missing, Presence::Number)
-            } else {
-                Presence::Missing
-            }
+        let presence = |stated: bool, sum: Option<i64>| match sum {
+            Some(sum) if stated => Count::try_from(sum).map_or(Presence::Missing, Presence::Number),
+            _ => Presence::Missing,
         };
         Some(Patch {
-            input: presence(0),
-            read: presence(1),
-            output: presence(2),
-            total: presence(3),
+            input: presence(stated[0], Some(sums[0])),
+            read: presence(stated[1], Some(sums[1])),
+            output: presence(stated[2], Some(sums[2])),
+            total: presence(true, total),
             ..Patch::default()
         })
     }

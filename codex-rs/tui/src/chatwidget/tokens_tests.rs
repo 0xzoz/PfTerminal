@@ -3731,7 +3731,7 @@ fn accounting_realtime_session_shows_reported_tokens_and_no_cost() {
         .expect("a realtime request link");
     assert!(
         pages[*index].text.iter().any(|line| line
-            == "Kind: Realtime session — started 1970-01-01T00:00:01.000Z, ended 1970-01-01T00:01:01.000Z; its tokens are those the provider reported at the end of each response (a response cut short by the session's end reports none); its cost is unknown, not zero: Corbanu has no realtime prices."),
+            == "Kind: Realtime session — started 1970-01-01T00:00:01.000Z, ended 1970-01-01T00:01:01.000Z; its tokens are those the provider reported at the end of each response, so they may be low: a response cut short by the session's end reports none, and one whose report could not be read is not counted; its cost is unknown, not zero: Corbanu has no realtime prices."),
         "{:#?}",
         pages[*index].text
     );

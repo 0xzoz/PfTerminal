@@ -1738,7 +1738,7 @@ const REALTIME_UNKNOWN: &str =
 
 /// #889 D223: what a realtime session's recorded tokens are, and why it has
 /// no cost figure.
-const REALTIME_REPORTED: &str = "its tokens are those the provider reported at the end of each response (a response cut short by the session's end reports none); its cost is unknown, not zero: Corbanu has no realtime prices";
+const REALTIME_REPORTED: &str = "its tokens are those the provider reported at the end of each response, so they may be low: a response cut short by the session's end reports none, and one whose report could not be read is not counted; its cost is unknown, not zero: Corbanu has no realtime prices";
 
 /// Whether a realtime attempt recorded any token count (#889 D223).
 fn realtime_tokens_recorded(quote: &ObservationQuote) -> bool {
