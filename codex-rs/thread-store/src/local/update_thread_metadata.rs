@@ -2379,7 +2379,8 @@ mod tests {
         .await
         .expect("an update put off is not an error");
         assert!(
-            started.elapsed() < codex_state::QUICK_BUSY_TIMEOUT + std::time::Duration::from_secs(1),
+            // Well under SQLite's 5 s busy timeout, with room for a loaded runner.
+            started.elapsed() < codex_state::QUICK_BUSY_TIMEOUT + std::time::Duration::from_secs(3),
             "waited {:?}",
             started.elapsed()
         );

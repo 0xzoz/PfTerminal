@@ -421,7 +421,8 @@ mod bounded_operation_tests {
     #[test]
     fn bounded_operation_returns_its_result() {
         let gate = Arc::new(KeyringOperationGate::default());
-        let result = run_bounded_keyring_operation(gate, "load", Duration::from_secs(1), || {
+        // 10s, not 1s: a no-op worker took over 1s on a loaded Windows runner.
+        let result = run_bounded_keyring_operation(gate, "load", Duration::from_secs(10), || {
             Ok("stored-value".to_string())
         });
 
