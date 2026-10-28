@@ -6597,12 +6597,12 @@ fn d217_sudo_close_from_names_no_folder() {
         ("sudo --login -C 3 ./x", vec![]),
     ] {
         assert_eq!(
-            unknown_folder::sudo_close_from(&words(line), false),
+            unknown_folder::sudo_close_from(&words(line), /*redefined*/ false),
             closes,
             "{line}"
         );
         assert_eq!(
-            unknown_folder::sudo_close_from(&words(line), true),
+            unknown_folder::sudo_close_from(&words(line), /*redefined*/ true),
             Vec::<usize>::new()
         );
     }
