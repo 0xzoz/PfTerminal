@@ -105,13 +105,14 @@ pub(super) const VALUE_RUNNERS: &[&str] = &["rsync", "rg", "sort", "tar"];
 /// #1449: for the [`OPERAND_RUNNERS`] command at `at` in `words`, its
 /// option values that are commands: the word holding each, the value and
 /// how it runs. Options are looked for among the next `limit` words.
-pub(super) fn runner_values(words: &[String], at: usize, limit: usize) -> Vec<(usize, String, Runs)> {
+pub(super) fn runner_values(
+    words: &[String],
+    at: usize,
+    limit: usize,
+) -> Vec<(usize, String, Runs)> {
     let lower = words[at].to_lowercase();
     let name = basename(&lower);
-    let Some((_, options)) = OPERAND_RUNNERS
-        .iter()
-        .find(|(command, _)| *command == name)
-    else {
+    let Some((_, options)) = OPERAND_RUNNERS.iter().find(|(command, _)| *command == name) else {
         return Vec::new();
     };
     let mut values = Vec::new();

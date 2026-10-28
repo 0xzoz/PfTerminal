@@ -9337,7 +9337,6 @@ fn issue_1422_checks_are_linear() {
     });
 }
 
-
 /// #1449 (and the add-prompt parts of #1064/#1159): commands that run an
 /// option's value (`flock -c`, `su -c`, `script -c` with a command's
 /// output; `rg --pre`, `tar --to-command`/`-I`/`-F`/`--info-script`/
@@ -9394,7 +9393,10 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
         ("rustc --out-dir ~/.config/autostart x.rs", Persistence),
         ("rustc --out-dir=.git/hooks x.rs", Persistence),
         ("rustc --emit=link=~/.zshrc x.rs", Persistence),
-        ("rustc --emit link=.git/hooks/pre-commit,obj=o.o x.rs", Persistence),
+        (
+            "rustc --emit link=.git/hooks/pre-commit,obj=o.o x.rs",
+            Persistence,
+        ),
     ];
     let mut wrong = Vec::new();
     for (line, expected) in cases {
@@ -9438,7 +9440,10 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
             wrong.push(format!("quiet: {line}"));
         }
     }
-    for line in ["rsync -av -e ssh src/ host:dst/", "rsync -e 'ssh -p 2222' a h:b"] {
+    for line in [
+        "rsync -av -e ssh src/ host:dst/",
+        "rsync -e 'ssh -p 2222' a h:b",
+    ] {
         if in_workspace(&files, line) != Some(Disclosure) {
             wrong.push(format!("as before: {line}"));
         }
@@ -9457,7 +9462,10 @@ fn issue_1449_runner_checks_are_linear() {
         ("runners", "tar -I zstd -xf a --to-command=wc -F x; "),
         ("runner words", "flock f su -c x tar -I y rsync -e z "),
         ("split aliases", "x='a b' alias k=v "),
-        ("outputs", "gcc -MF d -c x.c; rustc --emit=link=a,obj=b --out-dir t x.rs; "),
+        (
+            "outputs",
+            "gcc -MF d -c x.c; rustc --emit=link=a,obj=b --out-dir t x.rs; ",
+        ),
     ] {
         work::assert_linear(label, |scale| {
             let _ = script(&unit.repeat(40 * scale));

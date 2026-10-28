@@ -112,8 +112,8 @@ impl Aliases {
                 named = false;
                 // A command named by a value defines only `name=value`
                 // words (`$PYTHON "$f"` is not `alias "$f"`).
-                commanding = valued != Some(at)
-                    && (position == Some(at) || (as_written && self.split));
+                commanding =
+                    valued != Some(at) && (position == Some(at) || (as_written && self.split));
                 continue;
             }
             if !defining {
