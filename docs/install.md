@@ -360,6 +360,10 @@ just test -p codex-tui
 Avoid `--all-features` for routine local runs because it increases build time
 and `target/` disk usage by compiling additional feature combinations.
 
+Plain `cargo test -p codex-core` in a debug build needs
+`RUST_MIN_STACK=8388608` (8 MiB, as `just test`, CI and Bazel set); many tests
+overflow the default 2 MiB test-thread stack without it.
+
 ## Tracing
 
 The TUI records diagnostics in bounded local stores by default. Set `log_dir`
