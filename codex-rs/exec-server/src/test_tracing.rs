@@ -15,6 +15,10 @@ use tracing::subscriber::NoSubscriber;
 /// silently disabling that span for this test (#1413). Registering a second,
 /// inert dispatcher for the guard's lifetime makes tracing-core consult every
 /// live dispatcher, including this one, whenever it computes interest.
+///
+/// A first registration that another thread already started before this
+/// guard registered can still finish afterwards with its earlier result; that
+/// window is limited to a callsite's first use and is microseconds wide.
 pub(crate) struct ScopedTestSubscriber {
     _default: DefaultGuard,
     _second_dispatcher: Dispatch,
@@ -35,23 +39,6 @@ impl ScopedTestSubscriber {
     }
 }
 
-mod tests {
-    use super::ScopedTestSubscriber;
-
-    fn shared_span_enabled() -> bool {
-        !tracing::info_span!("scoped-test-subscriber-shared").is_disabled()
-    }
-
-    #[test]
-    fn span_stays_enabled_when_another_thread_registers_callsite_first() {
-        let _subscriber = ScopedTestSubscriber::set_default(tracing_subscriber::registry());
-
-        // Like a concurrent test without a subscriber, this thread hits the
-        // callsite first and so registers it.
-        std::thread::spawn(shared_span_enabled)
-            .join()
-            .expect("other thread should finish");
-
-        assert!(shared_span_enabled());
-    }
-}
+#[cfg(test)]
+#[path = "test_tracing_tests.rs"]
+mod tests;
