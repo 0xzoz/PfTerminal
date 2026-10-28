@@ -293,14 +293,16 @@ fn issue_675_other_worktrees_dot_git_files_are_protected() {
     let paths = worktree_admin_paths(&base.join("deep/alias/.git"));
     assert!(paths.contains(&base.join("relative/.git")), "{paths:?}");
 
-    // Past the limit: `worktrees` whole, and the `.git` files found so far.
+    // Past the limit: `worktrees` whole, and the `.git` files found so far
+    // (which ones depends on the listing order).
     for n in 0..=MAX_MODULE_DIRS {
         std::fs::create_dir_all(common.join(format!("worktrees/f{n}")).as_path()).unwrap();
     }
     let paths = worktree_admin_paths(&common);
     assert_eq!(paths.first(), Some(&common.join("worktrees")));
+    let found = [&protected[..], &[base.join("w/.git")]].concat();
     assert!(
-        paths[1..].iter().all(|path| protected.contains(path)),
+        paths[1..].iter().all(|path| found.contains(path)),
         "{paths:?}"
     );
 }
