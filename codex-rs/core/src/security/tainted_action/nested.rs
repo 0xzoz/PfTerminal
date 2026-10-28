@@ -444,7 +444,7 @@ impl Classifier {
             // (after `cd "$d"`, or a wrapper's: `env -C "$d" sh -c`).
             // #1309: in any of a wrapper's spellings (`env -C"$d"`, `sudo
             // -D`, `nsenter --wd=`, `find -execdir`).
-            let elsewhere = unknown_folder::runs_elsewhere(&texts);
+            let elsewhere = unknown_folder::runs_elsewhere(&texts, self.sudo_unsure());
             let unknown = folders.unchecked || elsewhere;
             for (word, script) in replaced_shell_scripts(&texts, &launches, &mut found.unreadable) {
                 work::step();
@@ -823,13 +823,22 @@ impl Classifier {
         const MAX_BASES: usize = 8;
         let mut bases = vec![cwd.to_string()];
         let mut previous: Option<&str> = None;
-        for word in words {
+        // D217: sudo's `-C N` names no folder.
+        let closes = unknown_folder::sudo_close_from(words, self.sudo_unsure());
+        for (at, word) in words.iter().enumerate() {
             work::step();
             let value = match previous {
-                Some(flag) if super::FOLDER_FLAGS.contains(&flag) => Some(word.as_str()),
+                Some(flag)
+                    if super::FOLDER_FLAGS.contains(&flag)
+                        && !(at > 0 && closes.binary_search(&(at - 1)).is_ok()) =>
+                {
+                    Some(word.as_str())
+                }
                 _ => word
                     .split_once('=')
-                    .filter(|(flag, _)| super::FOLDER_FLAGS.contains(flag))
+                    .filter(|(flag, _)| {
+                        super::FOLDER_FLAGS.contains(flag) && closes.binary_search(&at).is_err()
+                    })
                     .map(|(_, value)| value),
             };
             previous = Some(word);

@@ -6316,7 +6316,11 @@ fn in_workspace(files: &[(&str, &str)], line: &str) -> Option<ProtectedActionKin
     let work = root.path();
     std::fs::create_dir_all(work.join("sub")).expect("sub");
     for (name, text) in files {
-        std::fs::write(work.join(name), text).expect("file");
+        let path = work.join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("folder");
+        }
+        std::fs::write(path, text).expect("file");
     }
     let cwd = work.to_string_lossy().into_owned();
     classify_with(
@@ -6435,6 +6439,198 @@ fn folder_stack_and_wrapper_folders_ask() {
         "env -C sub bash \"$PWD/run.sh\"",
     ] {
         assert_eq!(in_workspace(&quiet, line), None, "{line}");
+    }
+}
+
+/// D217 (#1403, owner-approved): sudo's `-C N` closes file descriptors from
+/// N and names no folder, so `sudo -C 3 ./x` runs (and is judged by) `./x`
+/// here. sudo's folder options (`-D`, `--chdir`), every other `-C`, a `-C`
+/// whose value is not a number, and a `sudo` the action may make other than
+/// sudo still ask as before.
+#[cfg(unix)]
+#[test]
+fn d217_sudo_close_from_names_no_folder() {
+    let evil = "echo x >> ~/.zshenv\n";
+    let harmless = [("x", "true\n")];
+    let mut wrong = Vec::new();
+    for line in [
+        "sudo -C 3 ./x",
+        "sudo -C3 ./x",
+        "sudo -nC 3 ./x",
+        "sudo -nC3 ./x",
+        "sudo -n -C 3 -E ./x",
+        "sudo -C 3 -C 4 ./x",
+        "sudo --non-interactive -C 3 ./x",
+        "sudo --close-from=3 ./x",
+        "sudo -C 3 bash x",
+        "sudo -C 3 -- ./x",
+        // Quiet stays quiet.
+        "sudo ./x",
+        "sudo -u root ./x",
+        "sudo bash x",
+    ] {
+        if in_workspace(&harmless, line).is_some() {
+            wrong.push(line);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new(), "should be quiet");
+    // The script that runs is still judged.
+    for line in ["sudo -C 3 ./x", "sudo -C3 bash x", "sudo -C 3 sh -c 'sh x'"] {
+        if in_workspace(&[("x", evil)], line).is_none() {
+            wrong.push(line);
+        }
+    }
+    // A folder option of sudo or of another program, a `-C` that may not
+    // be sudo's, or a `sudo` that may not be sudo, still asks.
+    let defs = ("defs.sh", "sudo() { env \"$@\"; }\n");
+    let there = [("run.sh", "true\n"), ("sub/run.sh", evil), defs];
+    for line in [
+        "sudo -D sub ./run.sh",
+        "sudo -Dsub ./run.sh",
+        "sudo --chdir=sub ./run.sh",
+        "sudo -C 3 -D sub ./run.sh",
+        "sudo -D sub -C 3 ./run.sh",
+        "sudo -C 3 --chdir=sub ./run.sh",
+        "sudo -C 3 env -C sub ./run.sh",
+        "sudo -u root env -C sub ./run.sh",
+        "sudo -- env -C sub ./run.sh",
+        "sudo X=1 env -C sub ./run.sh",
+        "env -C sub sudo -C 3 ./run.sh",
+        "env -u sudo -C sub ./run.sh",
+        "env -a sudo -C sub ./run.sh",
+        "nice sudo -C sub ./run.sh",
+        "sudo -C sub ./run.sh",
+        "sudo -C=sub ./run.sh",
+        "sudo -u root -C sub ./run.sh",
+        "sudo -h host -C sub ./run.sh",
+        "sudo -X -C sub ./run.sh",
+        "alias sudo=env; sudo -C sub ./run.sh",
+        "sudo() { env \"$@\"; }; sudo -C sub ./run.sh",
+        "function sudo { env \"$@\"; }; sudo -C sub ./run.sh",
+        "bash -c 'sudo() { env \"$@\"; }; export -f sudo; bash -c \"sudo -C sub ./run.sh\"'",
+        "env 'BASH_FUNC_sudo%%=() { env \"$@\"; }' bash -c 'sudo -C sub ./run.sh'",
+        ". ./defs.sh; sudo -C sub ./run.sh",
+        "bash -c '. ./defs.sh; sudo -C sub ./run.sh'",
+        "BASH_ENV=./defs.sh bash -c 'sudo -C sub ./run.sh'",
+    ] {
+        if in_workspace(&there, line).is_none() {
+            wrong.push(line);
+        }
+    }
+    // A number names a folder too when `sudo` may be another program.
+    let numbered = [("run.sh", "true\n"), ("3/run.sh", evil), defs];
+    for line in [
+        "hash -p /usr/bin/env sudo; sudo -C 3 ./run.sh",
+        "BASH_CMDS[sudo]=/usr/bin/env; sudo -C 3 ./run.sh",
+        "zsh -c 'hash sudo=/usr/bin/env; sudo -C 3 ./run.sh'",
+        "zsh -c 'commands[sudo]=/usr/bin/env; sudo -C 3 ./run.sh'",
+        "zsh -c \"functions[sudo]='env $@'; sudo -C 3 ./run.sh\"",
+        "PATH=./bin:$PATH; sudo -C 3 ./run.sh",
+        "PATH=./bin:$PATH sudo -C 3 ./run.sh",
+        "enable -f ./sudo.so sudo; sudo -C 3 ./run.sh",
+        "sudo() { env \"$@\"; }; sudo -C 3 ./run.sh",
+        "alias sudo=env; sudo -C 3 ./run.sh",
+        ". ./defs.sh; sudo -C 3 ./run.sh",
+        "source defs.sh; sudo -C 3 ./run.sh",
+        "env 'BASH_FUNC_sudo%%=() { env \"$@\"; }' bash -c 'sudo -C 3 ./run.sh'",
+        "/tmp/w/sudo -C 3 ./run.sh",
+        "./bin/sudo -C 3 ./run.sh",
+        // Review 2: names spelled another way, a definition read after the
+        // command in a loop, words before sudo, substituted words, and
+        // options that run something else or move the command.
+        r"ha\sh -p /usr/bin/e\nv sudo; sudo -C 3 ./run.sh",
+        "h''ash -p /usr/bin/env sudo; sudo -C 3 ./run.sh",
+        "a=ha; b=sh; $a$b -p /usr/bin/env sudo; sudo -C 3 ./run.sh",
+        "touch hash; ha?h -p /usr/bin/env sudo; sudo -C 3 ./run.sh",
+        "'.' ./defs.sh; sudo -C 3 ./run.sh",
+        r"\. ./defs.sh; sudo -C 3 ./run.sh",
+        "for i in 1 2; do sudo -C 3 ./run.sh; '.' ./defs.sh; done",
+        "for i in 1 2; do sudo -C 3 ./run.sh; . ./defs.sh; done",
+        "=make sudo -C 3 ./run.sh",
+        "./m=k sudo -C 3 ./run.sh",
+        "X=1 sudo -C 3 ./run.sh",
+        "O=make; false && O=-n; sudo $O -C 3 ./run.sh",
+        "sudo -i -C 3 ./run.sh",
+        "sudo -s -C 3 ./run.sh",
+        "sudo -A -C 3 ./run.sh",
+        "sudo -e -C 3 ./run.sh",
+        "sudo --login -C 3 ./run.sh",
+    ] {
+        if in_workspace(&numbered, line).is_none() {
+            wrong.push(line);
+        }
+    }
+    assert_eq!(wrong, Vec::<&str>::new(), "should ask");
+    for command in [
+        "sudo git -C ~ config -f .zshenv a.b v",
+        "sudo -C 3 git -C ~ config -f .zshenv a.b v",
+        "sudo -C 3 env -C ~ sh -c 'echo x >> .zshenv'",
+        "sudo -C 3 -D ~ sh -c 'echo x >> .zshenv'",
+        "sudo -C 3 tar -C ~ -xf a.tar .zshenv",
+        "sudo -C ~ sh -c 'echo x >> .zshenv'",
+        "sudo -C ~ git config -f .zshenv a.b v",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
+            "{command}"
+        );
+    }
+    let words = |line: &str| line.split(' ').map(str::to_string).collect::<Vec<_>>();
+    for (line, closes) in [
+        ("sudo -C 3 ./x", vec![1]),
+        ("/usr/bin/sudo -n -C3 -nC 4 ./x -C 5", vec![2, 3]),
+        ("sudo --non-interactive -C 3 ./x", vec![2]),
+        ("sudo -u root -C 3 ./x", vec![]),
+        ("sudo -C=3 ./x", vec![]),
+        ("sudo -C sub ./x", vec![]),
+        ("sudo -DC ./x", vec![]),
+        ("sudo -h -C 3 ./x", vec![]),
+        ("sudo --chr -C 3 ./x", vec![]),
+        ("sudo -- -C 3 ./x", vec![]),
+        ("env sudo -C 3 ./x", vec![]),
+        ("./sudo -C 3 ./x", vec![]),
+        ("/tmp/sudo -C 3 ./x", vec![]),
+        ("X=1 sudo -C 3 ./x", vec![]),
+        ("sudo -i -C 3 ./x", vec![]),
+        ("sudo -s -C 3 ./x", vec![]),
+        ("sudo --login -C 3 ./x", vec![]),
+    ] {
+        assert_eq!(
+            unknown_folder::sudo_close_from(&words(line), /*redefined*/ false),
+            closes,
+            "{line}"
+        );
+        assert_eq!(
+            unknown_folder::sudo_close_from(&words(line), /*redefined*/ true),
+            Vec::<usize>::new()
+        );
+    }
+    assert!(!unknown_folder::may_redefine_sudo(
+        "sudo -C 3 ./x; bash run.sh"
+    ));
+    for text in [
+        "Set-Alias sudo env",
+        "sal sudo env",
+        "x() { :; }",
+        "hash -p /usr/bin/env sudo",
+        "unhash sudo",
+        "BASH_CMDS[sudo]=/usr/bin/env",
+        "commands[sudo]=env",
+        "functions[sudo]=env",
+        "path=(./bin $path)",
+        "BASH_FUNC_sudo%%=x",
+        ". ./defs.sh",
+        "cd x;. f",
+        "h''ash -p /usr/bin/env sudo",
+        r"ha\sh -p /usr/bin/env sudo",
+        "$a$b -p /usr/bin/env sudo",
+        "ha?h -p /usr/bin/env sudo",
+        "ZDOTDIR=. zsh",
+        "sudo -C 3 ./x >log",
+        "sudo -C 3 ~/x",
+    ] {
+        assert!(unknown_folder::may_redefine_sudo(text), "{text}");
     }
 }
 

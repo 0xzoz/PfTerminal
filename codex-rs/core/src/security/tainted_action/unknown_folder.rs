@@ -69,23 +69,178 @@ pub(super) const CHANGERS: &[&str] = &["cd", "pushd", "popd", "chdir"];
 /// underscores removed (zsh option spelling).
 const SEARCHES: &[&str] = &["cdpath", "cdablevars", "oldpwd", "autocd"];
 
+/// sudo's short options that take no value and run nothing else (not
+/// `-A`, `-e`, `-s`: an askpass helper, an editor, `$SHELL`) nor move the
+/// command (`-i`: to the target user's home).
+const SUDO_LETTERS: &str = "bBEHkKlnNPSVv";
+
+/// sudo's long options that take no value (`--preserve-env` may have one
+/// attached).
+const SUDO_LONG: &[&str] = &[
+    "background",
+    "bell",
+    "non-interactive",
+    "preserve-env",
+    "preserve-groups",
+    "remove-timestamp",
+    "reset-timestamp",
+    "set-home",
+    "stdin",
+];
+
+/// sudo by the names it is installed under, besides a bare `sudo`.
+const SUDO_PATHS: &[&str] = &[
+    "/usr/bin/sudo",
+    "/bin/sudo",
+    "/usr/sbin/sudo",
+    "/run/wrappers/bin/sudo",
+];
+
+/// Names that may make `sudo` run something other than sudo: a function,
+/// alias or trap (also zsh `functions[sudo]=`, PowerShell `Set-Alias`),
+/// the command hash (bash `hash -p`, `BASH_CMDS`, zsh `commands[sudo]=`),
+/// the search path, loadable builtins, start-up files and code loaded or
+/// run from elsewhere.
+const SUDO_REDEFINERS: &[&str] = &[
+    "trap",
+    "hash",
+    "unhash",
+    "bash_cmds",
+    "commands",
+    "path",
+    "fpath",
+    "enable",
+    "disable",
+    "autoload",
+    "zmodload",
+    "emulate",
+    "source",
+    "eval",
+    "bash_env",
+    "env",
+    "zdotdir",
+    "rcfile",
+    "init",
+    "sal",
+    "nal",
+];
+
+/// D217: the only characters a text may hold for `sudo` to be read as
+/// sudo: none that the shell expands or removes (quotes, backslashes, `$`,
+/// `~`, patterns, braces, `=word` aside), groups, redirections or comments,
+/// so the words judged are the words that run and the names
+/// [`SUDO_REDEFINERS`] lists cannot be spelled another way.
+fn plain_for_sudo(ch: char) -> bool {
+    ch.is_ascii_alphanumeric()
+        || matches!(
+            ch,
+            ' ' | '\t' | '\n' | '-' | '_' | '.' | '/' | '=' | ';' | '&' | '|'
+        )
+}
+
+/// D217: whether `text`, a text the action holds or reads, may make `sudo`
+/// other than sudo (see [`SUDO_REDEFINERS`]), imports a function
+/// (`BASH_FUNC_sudo%%`) or sources a file (`. ./f`), or is not plain
+/// ([`plain_for_sudo`]).
+pub(super) fn may_redefine_sudo(text: &str) -> bool {
+    !text.chars().all(|ch| {
+        work::step();
+        plain_for_sudo(ch)
+    }) || defines(text)
+        || tokens(text).any(|token| {
+            work::step();
+            let token = token.to_ascii_lowercase();
+            token.contains("function")
+                || token.contains("alias")
+                || token.contains("bash_func")
+                || SUDO_REDEFINERS.contains(&token.as_str())
+        })
+        || text
+            .split(|ch: char| ch.is_whitespace() || ";&|(){}`".contains(ch))
+            .any(|word| {
+                work::step();
+                word == "."
+            })
+}
+
+/// D217 (#1403): the positions of `words` that are sudo's own `-C N`
+/// (`-C N`, `-CN`, `-nC N`, N a number): it closes file descriptors from N
+/// and names no folder. Only sudo as the command's first word (no
+/// assignment before it), by a bare `sudo` or one of [`SUDO_PATHS`],
+/// counts, and only options before it that take no value
+/// ([`SUDO_LETTERS`], [`SUDO_LONG`]): any other word ends them, so any
+/// other `-C` still reads as a folder. `redefined`: the action may make `sudo` other than sudo
+/// ([`may_redefine_sudo`]), or Windows path rules apply: none counts.
+/// Sorted.
+pub(super) fn sudo_close_from(words: &[String], redefined: bool) -> Vec<usize> {
+    let mut closes = Vec::new();
+    if redefined {
+        return closes;
+    }
+    let Some(word) = words.first() else {
+        return closes;
+    };
+    if !(word == "sudo" || SUDO_PATHS.contains(&word.as_str())) {
+        return closes;
+    }
+    let number = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+    let mut index = 1;
+    while let Some(word) = words.get(index) {
+        work::step();
+        if let Some(long) = word.strip_prefix("--") {
+            if !SUDO_LONG.contains(&long) && !long.starts_with("preserve-env=") {
+                break;
+            }
+            index += 1;
+            continue;
+        }
+        let Some(letters) = word.strip_prefix('-').filter(|letters| !letters.is_empty()) else {
+            break;
+        };
+        let Some(close) = letters.find(|letter: char| !SUDO_LETTERS.contains(letter)) else {
+            index += 1;
+            continue;
+        };
+        if !letters[close..].starts_with('C') {
+            break;
+        }
+        // The value is the rest of the word, or the next word.
+        let attached = &letters[close + 1..];
+        let value = if attached.is_empty() {
+            words.get(index + 1).map_or("", String::as_str)
+        } else {
+            attached
+        };
+        if !number(value) {
+            break;
+        }
+        closes.push(index);
+        index += 1 + usize::from(attached.is_empty());
+    }
+    closes
+}
+
 /// Whether a command with these words runs the scripts it is given in a
 /// folder other than the line's: a wrapper's folder option in any
 /// spelling, `find -execdir`, `chroot` or a systemd `WorkingDirectory=`.
-pub(super) fn runs_elsewhere(texts: &[String]) -> bool {
-    elsewhere_at(texts).is_some()
+/// `redefined`: see [`sudo_close_from`].
+pub(super) fn runs_elsewhere(texts: &[String], redefined: bool) -> bool {
+    elsewhere_at(texts, redefined).is_some()
 }
 
 /// The position of the first of `texts` that makes `runs_elsewhere` true:
 /// it holds for the texts before a position after it, and only those.
-pub(super) fn elsewhere_at(texts: &[String]) -> Option<usize> {
+pub(super) fn elsewhere_at(texts: &[String], redefined: bool) -> Option<usize> {
     let mut letters: Vec<char> = Vec::new();
+    let closes = sudo_close_from(texts, redefined);
     for (at, text) in texts.iter().enumerate() {
         work::step();
         let flag = text.split_once('=').map_or(text.as_str(), |(flag, _)| flag);
-        if FOLDER_FLAGS.contains(&flag)
+        // D217: sudo's `-C N` names no folder.
+        let close = closes.binary_search(&at).is_ok();
+        if (!close && FOLDER_FLAGS.contains(&flag))
             // `env -C"$d"`: the folder attached.
-            || text.starts_with("-C")
+            || (!close && text.starts_with("-C"))
             || IN_FOUND_FOLDER.contains(&text.as_str())
             || ELSEWHERE.contains(&basename(text))
             || (flag.len() > 2

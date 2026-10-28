@@ -572,6 +572,7 @@ impl Classifier {
             nested_scripts: 0,
             unknown_folder: 0,
             unseen_folder: false,
+            sudo_redefined: false,
             launched: launched_git::Launch::default(),
             substitution_budget: Budget {
                 left: MAX_SUBSTITUTED_BYTES,
@@ -1298,6 +1299,13 @@ struct Classifier {
     launched: launched_git::Launch,
     /// #1065: bytes of variable values left to substitute.
     substitution_budget: Budget,
+    /// D217: the text being read, or one it is read in, may make `sudo`
+    /// other than sudo ([`unknown_folder::may_redefine_sudo`]), so its `-C`
+    /// reads as a folder again. A text run in a child shell cannot change
+    /// what `sudo` is in the line that runs it, and every way the line
+    /// itself may load code (`.`, `source`, `eval`, `BASH_ENV`, ...) is in
+    /// its own text.
+    sudo_redefined: bool,
     /// #1065: bytes of command text, and command lines, lexed so far.
     classified_bytes: usize,
     classified_lines: usize,
@@ -1608,6 +1616,10 @@ impl Classifier {
         if self.homes.is_windows_view() {
             self.windows_text(command, cwd, depth);
         }
+        let outer_sudo_redefined = self.sudo_redefined;
+        self.sudo_redefined |= command
+            .iter()
+            .any(|part| unknown_folder::may_redefine_sudo(part));
         // #841: this line's own sed programs (nested lines have theirs).
         let outer_scope = std::mem::replace(&mut self.sed_scope, SedScope::of(command));
         let lexed = shell::simple_commands(command);
@@ -2023,6 +2035,7 @@ impl Classifier {
         // #885: nested shells' scripts and sed programs, read with quotes.
         self.quoted_pass(command, cwd, depth, (lexed_seds, lexed_shells));
         self.sed_scope = outer_scope;
+        self.sudo_redefined = outer_sudo_redefined;
         self.visited = outer_visited;
         self.visited_all = outer_visited_all;
     }
@@ -2387,6 +2400,8 @@ impl Classifier {
         // folder the line may be in, after the folder flags given so far.
         let mut flags: Vec<&str> = Vec::new();
         let mut other_bases = std::borrow::Cow::Borrowed(folders.others.as_slice());
+        // D217: sudo's `-C N` names no folder.
+        let closes = unknown_folder::sudo_close_from(words, self.sudo_unsure());
         for (position, word) in words.iter().enumerate() {
             work::step();
             let written = simple.writes_to.contains(&position)
@@ -2395,6 +2410,7 @@ impl Classifier {
             let mut folder_value = false;
             if let Some(flag) = previous
                 && FOLDER_FLAGS.contains(&flag)
+                && !(position > 0 && closes.binary_search(&(position - 1)).is_ok())
             {
                 folder = self.homes.resolve(word, &cwd);
                 self.chain_folder(&mut chained, word, &cwd);
@@ -2402,6 +2418,7 @@ impl Classifier {
                 flags.push(word);
             } else if let Some((flag, value)) = word.split_once('=')
                 && FOLDER_FLAGS.contains(&flag)
+                && closes.binary_search(&position).is_err()
             {
                 folder = self.homes.resolve(value, &cwd);
                 self.chain_folder(&mut chained, value, &cwd);
@@ -2539,7 +2556,7 @@ impl Classifier {
         let read = command
             .filter(|_| indirect::invocation(words).is_none())
             .map(|(index, _)| *index);
-        let elsewhere = unknown_folder::elsewhere_at(words);
+        let elsewhere = unknown_folder::elsewhere_at(words, self.sudo_unsure());
         for at in indirect::programs(words) {
             work::step();
             let word = &words[at];
@@ -2655,6 +2672,12 @@ impl Classifier {
         (hidden, unchecked)
     }
 
+    /// D217: whether `sudo` may not be sudo, or its options are not
+    /// sudo's: see [`unknown_folder::sudo_close_from`].
+    fn sudo_unsure(&self) -> bool {
+        self.sudo_redefined || self.homes.windows_paths()
+    }
+
     /// Follow a relative `-C` from the folder before it. Past
     /// `MAX_CHAINED_FOLDERS` folders, or a folder name past
     /// `MAX_FOLDER_BYTES`, the chain is not followed (#1102: `-C a -C a ...`
@@ -2690,7 +2713,7 @@ impl Classifier {
         let elsewhere = if self.homes.windows_paths() {
             None
         } else {
-            unknown_folder::elsewhere_at(words)
+            unknown_folder::elsewhere_at(words, self.sudo_unsure())
         };
         let Some(invocation) = indirect::invocation(words) else {
             let word = &words[*index];
