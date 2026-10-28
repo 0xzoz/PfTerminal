@@ -197,6 +197,8 @@ pub struct ManifestEntry {
     pub finding_id: String,
     pub path: PathBuf,
     pub scope: Scope,
+    /// The path itself is a symlink, a dangling one included.
+    pub symlink: bool,
     pub symlink_target: Option<PathBuf>,
     /// `(device, inode)` on Unix.
     pub identity: Option<(u64, u64)>,
@@ -423,6 +425,7 @@ fn has_url_password(text: &str) -> bool {
 
 /// File facts gathered without following a symlink silently.
 struct Probe {
+    is_symlink: bool,
     symlink_target: Option<PathBuf>,
     identity: Option<(u64, u64)>,
     len: Option<u64>,
@@ -433,7 +436,8 @@ struct Probe {
 
 fn probe(path: &Path) -> Option<Probe> {
     let link = std::fs::symlink_metadata(path).ok()?;
-    let (symlink_target, metadata) = if link.file_type().is_symlink() {
+    let is_symlink = link.file_type().is_symlink();
+    let (symlink_target, metadata) = if is_symlink {
         match (std::fs::canonicalize(path), std::fs::metadata(path)) {
             (Ok(target), Ok(metadata)) => (Some(target), Ok(metadata)),
             (_, Err(err)) | (Err(err), _) => (None, Err(err)),
@@ -442,6 +446,7 @@ fn probe(path: &Path) -> Option<Probe> {
         (None, Ok(link))
     };
     let mut probe = Probe {
+        is_symlink,
         symlink_target,
         identity: None,
         len: None,
@@ -623,6 +628,7 @@ impl<'a> Collector<'a> {
             finding_id: id,
             path: spec.path.to_path_buf(),
             scope: spec.scope,
+            symlink: probe.is_symlink,
             symlink_target: probe.symlink_target,
             identity: probe.identity,
             len: probe.len,

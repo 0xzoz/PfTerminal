@@ -451,6 +451,31 @@ mod pf_29_s01 {
         assert_eq!(saved_level(&picker), Some(ChosenLevel::Aggressive));
     }
 
+    /// #802: Corbanu's own start-up writes to its databases and history
+    /// between the review and the confirmation do not refuse the save.
+    #[test]
+    #[cfg_attr(
+        windows,
+        ignore = "PF-27-S06: protected launch is not available on Windows yet, so readiness is never clean (#691)"
+    )]
+    fn pf_29_s01_corbanu_own_writes_after_review_still_save() {
+        let machine = Machine::new();
+        let corbanu = machine.corbanu();
+        std::fs::write(corbanu.join("pfterminal_logs_2.sqlite"), "one").unwrap();
+        let mut picker = machine.picker(/*flags_on*/ true, ChosenLevel::Permissive);
+        review_aggressive(&mut picker);
+        std::fs::write(corbanu.join("pfterminal_logs_2.sqlite"), "one, two").unwrap();
+        std::fs::write(corbanu.join("pfterminal_state_5.sqlite"), "state").unwrap();
+        std::fs::create_dir_all(corbanu.join("sessions/2026")).unwrap();
+        picker.handle_key_event(key(KeyCode::Enter));
+        assert_eq!(
+            saved_level(&picker),
+            Some(ChosenLevel::Aggressive),
+            "{}",
+            text(&picker)
+        );
+    }
+
     /// Toggling nested agents on a saved Aggressive skips the preflight only
     /// while a receipt is on record (review 3).
     #[test]
