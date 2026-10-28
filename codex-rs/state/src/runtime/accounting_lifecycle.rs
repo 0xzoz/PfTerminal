@@ -648,6 +648,7 @@ impl Journal<'_> {
             unknown_parent_requests: BTreeMap::new(),
             other_conversations: None,
             empty_day: None,
+            recording_gap: false,
             totals,
             requests,
         }))

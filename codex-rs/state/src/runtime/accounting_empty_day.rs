@@ -73,7 +73,47 @@ pub(super) async fn started_ms(
     .bind(owner.to_string())
     .fetch_one(&mut *conn)
     .await?;
-    Ok(Some(recorded.map_or(started, |ms| started.min(ms))))
+    // #314: a day a request of the tree went unrecorded is a day it sent one.
+    let unrecorded: Option<i64> = if super::super::gap_days::installed(conn).await? {
+        sqlx::query_scalar(concat!(
+            tree!(),
+            "SELECT min(utc_day) * 86400000 FROM draft_accounting_gap_days
+             WHERE thread_id IN (SELECT id FROM tree)"
+        ))
+        .bind(owner.to_string())
+        .fetch_one(&mut *conn)
+        .await?
+    } else {
+        None
+    };
+    Ok(Some(
+        [recorded, unrecorded]
+            .into_iter()
+            .flatten()
+            .fold(started, i64::min),
+    ))
+}
+
+/// #314 (D228): whether accounting failed to record a request of this
+/// conversation or a thread of its spawn tree on `day`. `false` on a ledger
+/// before format 7, which can hold no marker.
+pub(super) async fn gap_recorded(
+    conn: &mut SqliteConnection,
+    owner: ThreadId,
+    day: i64,
+) -> anyhow::Result<bool> {
+    if !super::super::gap_days::installed(conn).await? {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar(concat!(
+        tree!(),
+        "SELECT EXISTS(SELECT 1 FROM draft_accounting_gap_days
+         WHERE utc_day = ?2 AND thread_id IN (SELECT id FROM tree))"
+    ))
+    .bind(owner.to_string())
+    .bind(day)
+    .fetch_one(&mut *conn)
+    .await?)
 }
 
 fn v7_ms(id: &str) -> Option<i64> {

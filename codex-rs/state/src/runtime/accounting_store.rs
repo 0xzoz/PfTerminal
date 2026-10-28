@@ -77,6 +77,11 @@ pub struct Inspection {
     /// means when neither this conversation nor a resolved subagent has a
     /// recorded attempt there. `None` when they have one.
     pub empty_day: Option<EmptyDay>,
+    /// #314 (D228): accounting failed to record at least one model request of
+    /// this conversation or a thread of its spawn tree on this UTC day
+    /// (`AccountingStore::record_gap`), so the totals above may be
+    /// incomplete: that request was sent and billed but has no record.
+    pub recording_gap: bool,
 }
 
 /// A day on which neither the conversation nor a resolved subagent has a
@@ -446,6 +451,40 @@ impl<'a> AccountingStore<'a> {
     /// Refuse a ledger written in a newer format (`NewerLedgerFormat`); a
     /// missing ledger or one this build can read is fine. Read-only and cheap:
     /// it reads the applied migrations only.
+    /// #314 (D228): durably mark that accounting failed to record at least one
+    /// of `owner`'s model requests on the UTC day containing `at_ms`, so
+    /// `/cost` says that day's totals may be incomplete. Upgrades the ledger
+    /// to format 7 in the same transaction; it runs no retention or clock
+    /// check, since the failure it marks may be one (a clock far behind the
+    /// ledger). Marking a day twice is one marker. A home with no ledger is
+    /// left without one: its `/cost` already reads unavailable, never
+    /// complete, and an unrecorded request does not install a ledger.
+    pub async fn record_gap(
+        runtime: &StateRuntime,
+        owner: ThreadId,
+        at_ms: i64,
+    ) -> anyhow::Result<()> {
+        ensure!(at_ms >= 0, "negative gap time");
+        let mut tx = crate::runtime::db_lock::begin_immediate(&runtime.pool).await?;
+        let result = async {
+            if !ledger_exists(&mut tx).await? {
+                return Ok(());
+            }
+            validate_on_connection(&mut tx).await?;
+            require_format_on_connection(&mut tx, super::gap_days::FORMAT).await?;
+            super::gap_days::mark_on_connection(&mut tx, owner, at_ms).await
+        }
+        .await;
+        match result {
+            Ok(()) => tx.commit().await?,
+            Err(error) => {
+                tx.rollback().await?;
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn check_format(runtime: &StateRuntime) -> anyhow::Result<()> {
         let mut conn = runtime.pool.acquire().await?;
         if !ledger_exists(&mut conn).await? {
@@ -1032,6 +1071,8 @@ async fn inspect_tree_window(
         view.other_conversations =
             Some(scope::other_conversations(conn, unrelated, day, read_at_ms, work).await);
     }
+    // #314 (D228): a request of this tree that day went unrecorded.
+    view.recording_gap = empty_day::gap_recorded(conn, owner, day).await?;
     // Last, so the start's scan never takes budget the rest of the view needs.
     // #1196: a range bucket's part of the day is classified the same way.
     if view.totals.attempts == 0 {

@@ -235,6 +235,8 @@ pub(crate) struct TurnScopes {
     /// The ledger and conversation this turn records under, to notice records
     /// the ledger writer refused after their request stopped waiting.
     ledger: Option<(Arc<StateRuntime>, ThreadId)>,
+    /// #314 (D228): this unit's gap marker is written or on its way.
+    gap_marked: AtomicBool,
     _anthropic_scope: SamplingScope,
     _responses_scope: responses::Scope,
     _chat_scope: chat::Scope,
@@ -257,6 +259,21 @@ impl TurnScopes {
             || self.chat.as_ref().is_some_and(|value| value.is_closed())
     }
 
+    /// #314 (D228): durably mark today (UTC) as a day on which accounting
+    /// failed to record one of this conversation's requests, once per unit,
+    /// so `/cost` says that day's totals may be incomplete. Nothing when the
+    /// ledger was never reached; a failed mark is logged.
+    pub(crate) async fn mark_gap(&self) {
+        if let Some((db, owner)) = self.claim_gap_mark() {
+            write_gap_mark(&db, owner).await;
+        }
+    }
+
+    fn claim_gap_mark(&self) -> Option<(Arc<StateRuntime>, ThreadId)> {
+        let (db, owner) = self.ledger.as_ref()?;
+        (!self.gap_marked.swap(true, Ordering::AcqRel)).then(|| (Arc::clone(db), *owner))
+    }
+
     /// Whether a collector stopped this turn (`Sampling::halt`).
     pub(crate) fn halted(&self) -> bool {
         self.anthropic
@@ -267,6 +284,34 @@ impl TurnScopes {
                 .as_ref()
                 .is_some_and(|value| value.is_halted())
             || self.chat.as_ref().is_some_and(|value| value.is_halted())
+    }
+}
+
+/// #314 (D228): a unit that ends with requests unrecorded and no turn-end
+/// check (a startup warm-up, a completion assessment, a memory extraction, a
+/// realtime session) still marks its day; the write is handed to the runtime
+/// as the unit's scopes are dropped.
+impl Drop for TurnScopes {
+    fn drop(&mut self) {
+        if !self.stopped() {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if let Some((db, owner)) = self.claim_gap_mark() {
+            handle.spawn(async move { write_gap_mark(&db, owner).await });
+        }
+    }
+}
+
+async fn write_gap_mark(db: &StateRuntime, owner: ThreadId) {
+    if let Err(error) = AccountingStore::record_gap(db, owner, now()).await {
+        tracing::warn!(
+            target: LOG_TARGET,
+            cause = %format_args!("{error:#}"),
+            "accounting: could not mark this day's totals as incomplete"
+        );
     }
 }
 
@@ -283,7 +328,11 @@ pub(crate) async fn warn_if_unrecorded(
     // Always read, so a refusal this turn already reports is not reported
     // again by the next one.
     let refused = session.services.accounting_notices.refused_since(ledger);
-    if (scopes.is_none_or(TurnScopes::stopped) || refused)
+    let unrecorded = scopes.is_none_or(TurnScopes::stopped) || refused;
+    if unrecorded && let Some(scopes) = scopes {
+        scopes.mark_gap().await;
+    }
+    if unrecorded
         && !turn_context
             .accounting_gap_warning_emitted
             .swap(true, Ordering::Relaxed)
@@ -631,6 +680,7 @@ pub(crate) async fn attach_scopes(
             .count_refusals_from(db, *owner);
     }
     Ok(TurnScopes {
+        gap_marked: AtomicBool::new(false),
         ledger,
         anthropic,
         responses,
