@@ -1,7 +1,7 @@
 //! #1343 case 2: the credential broker (`broker_model_auth`) attaches the
 //! provider credential itself, so the websocket connection identity cannot
-//! see it (`client_connection_identity_tests.rs`). A cached websocket is never
-//! reused across brokered credentials because websockets are off once a
+//! see it and brokered identities never match
+//! (`client_connection_identity_tests.rs`). Websockets are also off once a
 //! broker is installed: a handshake cannot carry a signed broker frame
 //! (PF-27-S05).
 //!
