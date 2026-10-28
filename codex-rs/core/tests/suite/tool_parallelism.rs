@@ -161,11 +161,11 @@ async fn shell_tools_run_in_parallel() -> anyhow::Result<()> {
     let mut builder = test_codex().with_model("gpt-5.4");
     let test = builder.build(&server).await?;
 
-    // `exec_command` is the model-visible shell tool for this model. The
-    // legacy `shell_command` stays registered hidden, and hidden tools run
-    // serially, so the old wall-clock check on it only passed because two
-    // short sleeps fit inside the bound (#1448). Assert the overlap directly,
-    // as upstream does (openai/codex#56006).
+    // Unified exec is on by default off Windows, so `exec_command` is the
+    // model-visible shell tool. The legacy `shell_command` stays registered
+    // hidden, and hidden tools run serially, so the old wall-clock check on
+    // it only passed because two short sleeps fit inside the bound (#1448).
+    // Assert the overlap directly, as upstream does (openai/codex#56006).
     let shell_args = |call_id: &str| {
         json!({
             "cmd": format!(": > {call_id}.started; while [ ! -f release ]; do sleep 0.01; done; echo {call_id}"),
@@ -190,7 +190,9 @@ async fn shell_tools_run_in_parallel() -> anyhow::Result<()> {
     let responses = mount_sse_sequence(&server, vec![first_response, second_response]).await;
 
     let release_commands = async {
-        let overlap = tokio::time::timeout(Duration::from_secs(5), async {
+        // Longer than upstream's 5 s: a loaded runner can be slow to start
+        // both shells, and the wait ends as soon as both have.
+        let overlap = tokio::time::timeout(Duration::from_secs(20), async {
             while !test.cwd.path().join("call-1.started").exists()
                 || !test.cwd.path().join("call-2.started").exists()
             {
@@ -241,7 +243,9 @@ async fn mixed_parallel_tools_run_in_parallel() -> anyhow::Result<()> {
         "cmd": "sleep 0.25",
         // Avoid user-specific shell startup cost in timing assertions.
         "login": false,
-        "yield_time_ms": 1_000,
+        // The call returns when the process exits; a short yield could
+        // return "still running" under load and fail the exit-code check.
+        "yield_time_ms": 10_000,
     }))?;
 
     let first_response = sse(vec![
