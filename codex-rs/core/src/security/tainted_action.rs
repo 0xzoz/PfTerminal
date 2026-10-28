@@ -2287,9 +2287,19 @@ impl Classifier {
             let git_program = (is_git || helper.is_some())
                 && !std::mem::replace(&mut git_programs_read, true)
                 && rerun::git_runs_program(git_args.0, subcommand);
+            // D156: git spelled by text the quote-aware reading cannot see
+            // (`$g`, braces, `$IFS`) is not checked there, and here its
+            // options may be cut at a quoted `;` (`$g -c 'user.name=a; b'
+            // -c core.pager=sh log`): options after such a git ask.
+            let hidden_git = (is_git || helper == Some(None))
+                && hidden.get(index).copied().unwrap_or(false)
+                && words
+                    .get(index + 1)
+                    .is_some_and(|next| next.starts_with('-'));
             if (is_git && code_variables::git_runs_code_after_git(git_args.0, git_args.1))
                 || (helper == Some(None) && code_variables::git_runs_code(git_args.0, git_args.1))
                 || git_program
+                || hidden_git
             {
                 self.note(ProtectedActionKind::UnseenCode);
             }

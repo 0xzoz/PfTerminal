@@ -18,6 +18,7 @@ use super::ProtectedActionKind;
 use super::WRITERS;
 use super::certain_cd;
 use super::code_variables;
+use super::git_config;
 use super::git_helpers;
 use super::indirect;
 use super::invocation;
@@ -800,6 +801,8 @@ impl Classifier {
             },
         );
         let mut git_programs_read = false;
+        let mut local_config = git_config::Writes::new(texts);
+        let command_at = indirect::command_word(texts);
         for (index, word) in lower.iter().enumerate() {
             work::step();
             // #1276: or a finder's exec option with git attached.
@@ -825,7 +828,20 @@ impl Classifier {
             {
                 kinds.push(ProtectedActionKind::UnseenCode);
             }
-            kinds.extend(launched.judge(index, helper.as_ref()));
+            // D156: and local config writes (#1161), with the same
+            // exemption for wrappers that only inspect the command.
+            let inspecting = command_at.as_ref().is_some_and(|(at, _)| {
+                *at == index && git_config::inspection_only_prefix(&texts[..index])
+            });
+            let launched_kind = launched.judge(index, helper.as_ref());
+            if (basename(git_word) == "git" || helper.is_some())
+                && !inspecting
+                && launched_kind != Some(ProtectedActionKind::UnseenCode)
+                && local_config.writes_code_setting(index + 1, subcommand)
+            {
+                kinds.push(ProtectedActionKind::Persistence);
+            }
+            kinds.extend(launched_kind);
             launched.step(index);
             for kind in kinds {
                 work::step();

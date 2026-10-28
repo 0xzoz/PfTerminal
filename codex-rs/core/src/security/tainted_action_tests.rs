@@ -4592,10 +4592,25 @@ fn d156_git_settings_after_a_split_value_ask() {
         "env git -c 'user.name=a; b' -c core.pager=sh log",
         "sh -c \"git -c 'user.name=a; b' -c core.pager=sh log\"",
         "echo x && git -c 'user.name=a; b' -c core.pager=sh log",
+        // Review 1: git spelled by text the quote-aware reading cannot see.
+        "g=git; $g -c 'user.name=a; b' -c core.pager=sh log",
+        "{git,} -c 'user.name=a; b' -c core.pager=sh log",
     ] {
         assert_eq!(
             script(command),
             Some(ProtectedActionKind::UnseenCode),
+            "{command}"
+        );
+    }
+    // Review 1: local config writes (#1161) after a split value.
+    for command in [
+        "git -c 'color.ui=a; b' config sequence.editor ./x",
+        "git -C 'a; b' config diff.x.textconv ./x",
+        "git -c 'user.name=a; b' config include.path /tmp/evil.cfg",
+    ] {
+        assert_eq!(
+            script(command),
+            Some(ProtectedActionKind::Persistence),
             "{command}"
         );
     }
@@ -4610,6 +4625,8 @@ fn d156_git_settings_after_a_split_value_ask() {
         "git -C 'a; b' status",
         "git log --grep 'a; b' --oneline",
         "git commit -m 'fix: a | b & c; d'",
+        "git -c 'color.ui=a; b' config --get sequence.editor",
+        "g=git; $g status",
     ] {
         assert_eq!(script(command), None, "{command}");
     }
@@ -4622,6 +4639,9 @@ fn d156_checks_are_linear() {
         ("split settings", "-c 'user.name=a; git' "),
         ("split values", "-C 'a; git -C b' "),
         ("piped texts", "'a | git' -C x "),
+        // Review 1: zsh's `=git` names git too.
+        ("=git words", "=git -c user.name=x "),
+        ("hidden gits", "$g -c 'user.name=a; b' "),
     ] {
         work::assert_linear(label, |scale| {
             let line = format!("git {} status", unit.repeat(100 * scale));
