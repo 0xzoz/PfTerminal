@@ -210,7 +210,9 @@ pub(super) fn quoted_assignment_alias(text: &str) -> bool {
         }
         match (quote, ch) {
             (None | Some('"'), '\\') => {
+                // The word lexer splits `x=a\ b` as it splits `x='a b'`.
                 escaped = true;
+                quoted |= quote.is_none();
                 continue;
             }
             (None, '\'' | '"') => {
@@ -235,6 +237,7 @@ pub(super) fn quoted_assignment_alias(text: &str) -> bool {
         // A word ends.
         if !word.is_empty() || quoted {
             let assignment = word.split_once('=').is_some_and(|(name, _)| {
+                let name = name.strip_suffix('+').unwrap_or(name);
                 !name.is_empty()
                     && name
                         .chars()

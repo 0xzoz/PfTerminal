@@ -145,7 +145,8 @@ pub(super) struct RunnerValue {
 /// #1449: for the [`OPERAND_RUNNERS`] command at `at` in `words`, its
 /// option values that are commands, for the options among the words
 /// before `end`; and whether those words go past `limit`, unread (the
-/// line asks).
+/// line asks). The command word's own options are all read: only a
+/// wrapper before it (`flock F …`) is held to the limit ([`limit_for`]).
 pub(super) fn runner_values(
     words: &[String],
     at: usize,
@@ -161,7 +162,7 @@ pub(super) fn runner_values(
         return (Vec::new(), false);
     };
     let end = end.min(words.len());
-    let read_end = end.min(at + 1 + limit);
+    let read_end = end.min(at.saturating_add(1).saturating_add(limit));
     let mut values = Vec::new();
     // Old-style tar: a first word of letters without a dash.
     if TARS.contains(&name)
@@ -196,8 +197,12 @@ pub(super) fn runner_values(
     for index in at + 1..read_end {
         work::step();
         let word = &words[index];
-        // Options end at `--`.
-        if word == "--" {
+        // Options end at `--`, unless it is an option's value (`tar -cf
+        // --`, old-style `tar xf --`).
+        if word == "--"
+            && !words[index - 1].starts_with('-')
+            && !(TARS.contains(&name) && index == at + 2)
+        {
             return (values, false);
         }
         // An option's value may be the word after the last one read.
@@ -251,6 +256,18 @@ pub(super) fn runner_values(
     (values, end > read_end)
 }
 
+/// #1449: how many words after a runner at `at` are read for its
+/// options, for a line whose command word is at `command`: all for the
+/// command itself (one runner, read once), `MAX_JUDGED_POSITIONS` for a
+/// wrapper before it.
+pub(super) fn limit_for(at: usize, command: usize) -> usize {
+    if at < command {
+        super::outbound::MAX_JUDGED_POSITIONS
+    } else {
+        usize::MAX
+    }
+}
+
 /// #1449: where the options of the runner at `at` may be, for a line
 /// whose command word is at `command`: `flock`'s end at the command it
 /// runs (`flock F grep -c "$p"`); the others' (`su bob -c CMD`) at the end.
@@ -271,7 +288,7 @@ pub(super) fn runner_unseen(words: &[String], unseen: &[bool], index: usize) -> 
     (0..=index.min(words.len().saturating_sub(1))).any(|at| {
         work::step();
         let end = options_end(words, at, index);
-        let (values, cut) = runner_values(words, at, end, super::outbound::MAX_JUDGED_POSITIONS);
+        let (values, cut) = runner_values(words, at, end, limit_for(at, index));
         cut || values
             .iter()
             .any(|value| unseen.get(value.holder).copied().unwrap_or(true))

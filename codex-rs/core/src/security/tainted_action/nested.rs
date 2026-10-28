@@ -517,8 +517,8 @@ impl Classifier {
                     );
                     for (word, script, whole) in runs {
                         work::step();
-                        // #1449: a value in part of a word leaves the word
-                        // read as code too.
+                        // #1449: `rerun::OPERAND_RUNNERS` values stay read
+                        // as code too.
                         if whole {
                             roles[word] = Role::Script;
                         }
@@ -1493,7 +1493,7 @@ fn runner_scripts(
         // #1449: an option's command, given what it runs on: a file it
         // names, or data on its input (a shell runs either as code).
         name if rerun::VALUE_RUNNERS.contains(&name) => {
-            runner_option_scripts(texts, at, texts.len(), cut)
+            runner_option_scripts(texts, at, texts.len(), rerun::limit_for(at, last), cut)
         }
         "su" | "runuser" | "flock" | "script" | "env" => {
             let (letter, long) = if wrapper == "env" {
@@ -1549,7 +1549,8 @@ fn runner_scripts(
             // command it runs when it wraps one.
             if wrapper != "env" {
                 let end = rerun::options_end(texts, at, last);
-                for found in runner_option_scripts(texts, at, end, cut) {
+                for found in runner_option_scripts(texts, at, end, rerun::limit_for(at, last), cut)
+                {
                     work::step();
                     if !scripts
                         .iter()
@@ -1566,28 +1567,29 @@ fn runner_scripts(
 }
 
 /// #1449: the option values `rerun::runner_values` finds for the runner
-/// at `at` (options before `end`), as shell lines: a program is given a
-/// file and a filter data, neither of which the classifier sees. Each with
-/// its word and whether the value is all of it (else that word is still
-/// read as code: `tar "-x;…;Igzip"`). More words than are read: `cut`.
+/// at `at` (options before `end`, `limit` words read), as shell lines: a
+/// program is given a file and a filter data, neither of which the
+/// classifier sees. Each with its word, which stays read as code too (its
+/// commands count as main counts them; `tar "-x;…;Igzip"`). More words
+/// than are read: `cut`.
 fn runner_option_scripts(
     texts: &[String],
     at: usize,
     end: usize,
+    limit: usize,
     cut: &mut bool,
 ) -> Vec<(usize, String, bool)> {
-    let (values, unread) = rerun::runner_values(texts, at, end, outbound::MAX_JUDGED_POSITIONS);
+    let (values, unread) = rerun::runner_values(texts, at, end, limit);
     *cut |= unread;
     values
         .into_iter()
         .map(|found| {
-            let whole = texts[found.holder] == found.value;
             let script = match found.runs {
                 rerun::Runs::Line => found.value,
                 rerun::Runs::Program => format!("{} {UNSEEN_OUTPUT}", found.value),
                 rerun::Runs::Filter => format!("{} < {UNSEEN_OUTPUT}", found.value),
             };
-            (found.holder, script, whole)
+            (found.holder, script, /*script role*/ false)
         })
         .collect()
 }

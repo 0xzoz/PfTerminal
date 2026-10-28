@@ -9416,6 +9416,15 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
         ("gcc -Wp,-MD,.git/hooks/pre-commit -c x.c", Persistence),
         ("gcc -Wp,-MMD,~/.zshrc -c x.c", Persistence),
         ("cc -Wl,-o,.git/hooks/post-merge x.o", Persistence),
+        // Review 2: `--` as an option's value, backslash and `+=` splits,
+        // `-Wl` spellings.
+        ("tar -cf -- -I ./x.sh d", Vault),
+        ("rg -e -- --pre=./x.sh .", Vault),
+        ("sort -o -- --compress-program=./x.sh f", Vault),
+        ("tar xf -- --to-command=./x.sh", Vault),
+        ("x=a\\ b alias $1", UnseenCode),
+        ("x+='a b' alias $1", UnseenCode),
+        ("cc -Wl,-Map=.git/hooks/pre-push x.o", Persistence),
     ];
     let mut wrong = Vec::new();
     for (line, expected) in cases {
@@ -9463,6 +9472,9 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
         "flock /tmp/l grep -c pat f",
         "flock /tmp/l cc -c x.c",
         "m='a b'; grep -n alias notes",
+        "runuser -u bob -- grep -c pat f",
+        &format!("tar -czf a.tgz {}", "f ".repeat(70)),
+        &format!("rg -l foo {}", "f ".repeat(70)),
     ] {
         if in_workspace(&files, line).is_some() {
             wrong.push(format!("quiet: {line}"));
@@ -9483,6 +9495,18 @@ fn issue_1449_runners_aliases_and_output_files_ask() {
     ] {
         if in_workspace(&files, line).is_none() {
             wrong.push(format!("group: {line}"));
+        }
+    }
+    // Review 2: a runner's value stays read as code (its sed and shell
+    // commands count as on main).
+    for line in [
+        "rg --pre 'sed p' foo; S=sed; $S '1e id' f",
+        "tar -I 'sed p' -cf a.tar d; sed${IFS}'1e id' f",
+        "rg --pre 'bash -c true' foo; S=bash; $S -c \"sh -c ./missing.sh\"",
+        "su -s 'sed p' bob; S=sed; $S '1e id' f",
+    ] {
+        if in_workspace(&files, line).is_none() {
+            wrong.push(format!("counted: {line}"));
         }
     }
     assert_eq!(wrong, Vec::<String>::new());

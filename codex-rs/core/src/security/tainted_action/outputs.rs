@@ -169,6 +169,9 @@ fn other_output_files(name: &str, args: &[String]) -> Option<Vec<String>> {
                     parts.get(at + 1).copied()
                 } else {
                     part.strip_prefix("--output=")
+                        .or_else(|| part.strip_prefix("-Map="))
+                        .or_else(|| part.strip_prefix("-MF").filter(|file| !file.is_empty()))
+                        .or_else(|| part.strip_prefix("-o").filter(|file| !file.is_empty()))
                 };
                 if let Some(file) = file {
                     found = true;
