@@ -171,7 +171,6 @@ pub(crate) mod onboarding;
 mod orchestrate;
 mod oss_selection;
 mod pager_overlay;
-mod quit_thread_record;
 mod permission_compat;
 mod provider_account_auth_host;
 mod provider_account_feedback;
@@ -181,6 +180,7 @@ mod provider_management_host;
 mod provider_named_accounts;
 mod provider_status_host;
 pub(crate) mod public_widgets;
+mod quit_thread_record;
 mod render;
 mod resize_reflow_cap;
 mod resume_launch;
@@ -832,16 +832,14 @@ async fn lookup_latest_session_target_with_app_server(
     cwd_filter: Option<&Path>,
     include_non_interactive: bool,
 ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
-    Ok(
-        lookup_latest_session_thread_with_app_server(
-            app_server,
-            config,
-            cwd_filter,
-            include_non_interactive,
-        )
-        .await?
-        .map(|(target, _updated_at)| target),
+    Ok(lookup_latest_session_thread_with_app_server(
+        app_server,
+        config,
+        cwd_filter,
+        include_non_interactive,
     )
+    .await?
+    .map(|(target, _updated_at)| target))
 }
 
 /// The newest thread in scope and its `updated_at`.
@@ -3591,7 +3589,14 @@ mod tests {
         app_server.shutdown().await?;
 
         assert_eq!(
-            [no_record, alpha_on_screen, fork_last, turn_after_quit, out_of_scope, missing],
+            [
+                no_record,
+                alpha_on_screen,
+                fork_last,
+                turn_after_quit,
+                out_of_scope,
+                missing
+            ],
             [
                 Some(charlie),
                 Some(alpha),
