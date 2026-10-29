@@ -27,6 +27,12 @@ non-admin sandbox, Corbanu Terminal tells you once per session:
 
 The warning never blocks a command.
 
+**Project folders created while a command runs.** If a project's `.codex`
+or `.agents` folder doesn't exist when a non-admin sandbox command starts and
+exists when it ends, a command may have planted it. Corbanu Terminal then
+doesn't load its config, hooks or skills, warns you at startup, and asks in
+the TUI whether to load it. Check its contents before you choose to load it.
+
 **Files a profile protects from reading.** The non-admin sandbox can't stop a
 command from reading a file. So if your permission profile denies reading some
 files (`deny` entries in your config, or the protected paths a security level

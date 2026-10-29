@@ -2112,6 +2112,63 @@ fn legacy_delete_child_denies_follow_live_sessions() {
     );
 }
 
+/// #1506 item 2 (D262): a `.codex` folder that appears while a session runs
+/// counts as planted at once (the session may still be running), stays
+/// recorded after that session crashes, and stops counting once confirmed.
+#[test]
+fn legacy_planted_project_metadata_survives_a_crash() {
+    use std::io::BufRead as _;
+    let _guard = legacy_process_test_guard();
+    let test_root = user_owned_test_root();
+    let root = test_root.path().join("root");
+    fs::create_dir_all(&root).expect("create root");
+    let canonical_root = dunce::canonicalize(&root).expect("canonical");
+    let dot_codex = canonical_root.join(".codex");
+    let dot_agents = canonical_root.join(".agents");
+    let planted = || {
+        let all = crate::planted_project_metadata().expect("planted records");
+        (all.contains(&dot_codex), all.contains(&dot_agents))
+    };
+
+    let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"))
+        .args([
+            "--exact",
+            CRASH_CHILD_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(CRASH_ROOTS_ENV, &root)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("start the crash child");
+    let stdout = child.stdout.take().expect("child stdout");
+    let ready = std::io::BufReader::new(stdout)
+        .lines()
+        .map_while(Result::ok)
+        .any(|line| line.trim() == CRASH_CHILD_READY);
+    let before = planted();
+    fs::create_dir(&dot_codex).expect("plant .codex");
+    let live = planted();
+    child.kill().expect("kill the crash child");
+    child.wait().expect("wait for the crash child");
+    crate::repair_stale_integrity_labels().expect("repair");
+    let crashed = planted();
+    let confirmed = crate::confirm_planted_project_metadata(&dot_codex).expect("confirm");
+    let after_confirming = planted();
+
+    assert_eq!(
+        (ready, before, live, crashed, confirmed, after_confirming),
+        (
+            true,
+            (false, false),
+            (true, false),
+            (true, false),
+            true,
+            (false, false),
+        )
+    );
+}
+
 #[test]
 fn legacy_capture_cancellation_terminates_descendants_without_timeout() {
     let Some(pwsh) = pwsh_path() else {
