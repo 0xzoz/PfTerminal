@@ -368,10 +368,14 @@ fn sweep(registry: &Path, labels: &mut Labels, log_dir: Option<&Path>) -> Result
             .ok()
             .and_then(|bytes| serde_json::from_slice::<SessionRecord>(&bytes).ok());
         // D262: record what the session saw appear before its file can go
-        // (live or not). If the records can't be written, they can't be read
-        // either, most likely, and Core then loads no project metadata.
-        if let Some(record) = &record {
-            let _ = record_planted(registry, &record.absent_metadata, log_dir);
+        // (live or not). If that fails (a full disk, say), keep the file and
+        // count the session as live: its folders that appeared still count as
+        // planted, and a later sweep tries again.
+        if let Some(record) = &record
+            && record_planted(registry, &record.absent_metadata, log_dir).is_err()
+        {
+            live.extend(record.roots.iter().cloned());
+            continue;
         }
         match std::fs::remove_file(&path) {
             // Its session ended without releasing the lease.
@@ -489,14 +493,19 @@ pub fn planted_project_metadata() -> Result<Vec<PathBuf>> {
     let Some(registry) = registry_dir() else {
         return Ok(Vec::new());
     };
-    if std::fs::symlink_metadata(&registry).is_err() {
-        return Ok(Vec::new());
+    match std::fs::symlink_metadata(&registry) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err).with_context(|| format!("inspect {}", registry.display())),
+        Ok(_) => {}
     }
+    // Session files first: a session that ends meanwhile records what it
+    // saw before its file goes, so nothing falls between the two reads.
+    let records = session_records(&registry)?;
     let PlantedMetadata {
         entries: mut planted,
         confirmed,
     } = load_planted(&registry)?;
-    for record in session_records(&registry)? {
+    for record in records {
         planted.extend(
             record.absent_metadata.into_iter().filter(|path| {
                 !confirmed.contains(path) && std::fs::symlink_metadata(path).is_ok()
@@ -532,7 +541,8 @@ pub fn confirm_planted_project_metadata(path: &Path) -> Result<bool> {
     }
     let mut planted = load_planted(&registry)?;
     let removed = planted.entries.remove(path);
-    // A session still running that saw it appear must not record it again.
+    // Not recorded again by a sweep that finds a session file recording
+    // failed for earlier.
     planted.confirmed.insert(path.to_path_buf());
     save_json(&registry, PLANTED_FILE, &planted)?;
     drop(lock);
