@@ -10171,6 +10171,13 @@ fn issue_1276_follow_ups_ask() {
         "trap 'parallel < cmds' EXIT",
         "trap -- 'xargs env < f' EXIT",
         "sh -c \"eval 'parallel < f'\"",
+        // Review 1: `eval --`, `command eval`, quoted `eval` in `trap` text.
+        "eval -- 'xargs env < f'",
+        "eval command eval xargs env < f",
+        "eval builtin eval xargs env < f",
+        "eval \"eval -- 'xargs env < f'\"",
+        "trap \"eval 'xargs env < f'\" EXIT",
+        "trap \"trap 'xargs env < f' INT\" EXIT",
         // An `S` in another env option's value is no split.
         "xargs -I% env -uSSH_AUTH_SOCK python3 -c 'print(%)' < f",
         "xargs -I% env -CSrc sh -c '% x' < f",
@@ -10187,7 +10194,9 @@ fn issue_1276_follow_ups_ask() {
         "rush -Q x 'python3 -c \"print({})\"' < f",
         "rush --escape-symbols x '{}' < f",
         "rush -kQ x '{}' < f",
-        // A program after a wrapper's operands and `--`.
+        // A program after a wrapper's operands and `--` (GNU tools run a
+        // program named `--`; one that reads options after operands runs
+        // the words after it).
         "xargs -I% flock l -- % < f",
         "xargs -I% flock -w 5 l -- % config < f",
         "xargs -I% timeout 5 -- % < f",
@@ -10205,6 +10214,8 @@ fn issue_1276_follow_ups_ask() {
         "eval 'echo hi'",
         "eval \"git status\"",
         "eval eval eval echo x",
+        "eval -- echo hi",
+        "trap \"eval 'echo bye'\" EXIT",
         "trap 'echo bye' EXIT",
         "xargs -I% env -uFOO echo % < f",
         "xargs -I% env -uSSH_AUTH_SOCK echo % < f",
@@ -10223,6 +10234,8 @@ fn issue_1276_follow_ups_ask() {
 fn issue_1276_follow_up_checks_are_linear() {
     for (label, prefix, unit, suffix) in [
         ("eval words", "eval ", "eval ", "echo x"),
+        ("eval ends", "eval ", "eval -- ", "echo x"),
+        ("quoted evals", "trap \"", "eval ", "'echo x'\" EXIT"),
         ("eval line", "eval '", "echo x; ", "'"),
         ("trap operands", "trap ", "'echo x' ", "EXIT"),
         ("xargs readings", "xargs ", "--zz x ", "-I% echo %"),

@@ -237,32 +237,63 @@ pub(super) fn input_runs(texts: &[String], data: bool) -> bool {
 }
 
 /// #1276 follow-up: whether a launcher's input may run as a program or as
-/// code in the text `eval` (its words joined) or `trap` (each operand) runs
-/// as a shell line, read with its program positions: such text is walked
-/// as quoted data when it holds no quotes of its own (`eval 'xargs env <
-/// f'`, `trap 'parallel < cmds' EXIT`). Text with quotes is judged as the
-/// script `eval` runs. Each line is read once: leading `eval` words of its
-/// commands are skipped (`eval eval xargs env`).
+/// code in the text `eval` (its words joined, past a `--`) or `trap` (each
+/// operand) runs as a shell line, read with its program positions: such
+/// text is walked as quoted data when it holds no quotes of its own (`eval
+/// 'xargs env < f'`, `trap 'parallel < cmds' EXIT`).
 pub(super) fn evaluated_input_runs(name: &str, args: &[String]) -> bool {
+    evaluated(name, args, /*depth*/ 0)
+}
+
+/// `evaluated_input_runs`, `depth` evaluations deep; deeper than
+/// `MAX_DEPTH` asks.
+fn evaluated(name: &str, args: &[String], depth: usize) -> bool {
     let lines = match name {
-        "eval" => vec![args.join(" ")],
+        "eval" => vec![
+            args.strip_prefix(&["--".to_string()])
+                .unwrap_or(args)
+                .join(" "),
+        ],
         // A signal name read as a command only over-matches.
         "trap" => args.to_vec(),
         _ => return false,
     };
+    if depth > MAX_DEPTH {
+        return true;
+    }
     lines.iter().any(|line| {
         work::step();
         quoted::commands(line).commands.iter().any(|command| {
             work::step();
             let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
-            let start = texts
-                .iter()
-                .position(|text| {
+            // `eval`s at its command word (behind `command` or `builtin`,
+            // with a `--`) run the rest: skipped in one pass (`eval eval --
+            // xargs env`).
+            let mut start = 0;
+            let mut evals = false;
+            while let Some((index, word)) = indirect::command_word(&texts[start..])
+                && word == "eval"
+            {
+                work::step();
+                start += index + 1;
+                if texts.get(start).is_some_and(|text| text == "--") {
+                    start += 1;
+                }
+                evals = true;
+            }
+            let rest = &texts[start..];
+            // Text those `eval`s parse again (`trap "eval 'xargs env < f'"
+            // EXIT`), and a `trap` in the text.
+            let parsed_again = evals
+                && rest.iter().any(|text| {
                     work::step();
-                    text != "eval"
+                    text.contains(|ch: char| ch.is_whitespace() || "'\"\\;|&<>`$(".contains(ch))
+                });
+            input_runs(rest, /*data*/ false)
+                || (parsed_again && evaluated("eval", rest, depth + 1))
+                || indirect::command_word(rest).is_some_and(|(index, name)| {
+                    name == "trap" && evaluated("trap", &rest[index + 1..], depth + 1)
                 })
-                .unwrap_or(texts.len());
-            input_runs(&texts[start..], /*data*/ false)
         })
     })
 }
@@ -893,7 +924,8 @@ fn fd_exec(word: &str) -> (bool, Option<&str>) {
 /// wrapper, or the word after a finder's exec option. Not after `--`,
 /// which ends options (`xargs -I{} git checkout -- {}`), unless the `--`
 /// is where the command word was read to be: after a wrapper's operands
-/// (#1276 follow-up: `xargs -I% flock l -- %`). `None` past
+/// (#1276 follow-up: `xargs -I% flock l -- %`, where a wrapper that reads
+/// options after operands skips the `--`). `None` past
 /// `outbound::MAX_JUDGED_POSITIONS` starts.
 fn launched_programs(words: &[String]) -> Option<Vec<bool>> {
     let wrapped = indirect::command_word(words)
@@ -1010,8 +1042,10 @@ fn words_run(words: &[String], fills: &Fills, depth: usize) -> bool {
         }
     }
     // #1276 follow-up: a `--` read as the command word after a wrapper's
-    // operands ends its options; the command is after it (`xargs -I% flock
-    // l -- python3 -c '…%…'`).
+    // operands (`xargs -I% flock l -- python3 -c '…%…'`). GNU tools stop
+    // reading options at their first operand and run a program named
+    // `--`; one that reads options after operands skips it and runs the
+    // words after it. Judged as those words too: this only adds prompts.
     if let Some((index, name)) = &command
         && name == "--"
         && *index > 0
