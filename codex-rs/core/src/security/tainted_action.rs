@@ -2247,13 +2247,13 @@ impl Classifier {
                 || unknown_folder::external_change(words, *index, name)
             {
                 #[cfg(test)]
-                named_shell::measure_tests::unfollowed_reason(
+                named_shell::measure_tests::unfollowed_reason(|| {
                     if unknown_folder::stack_change(name, args) {
                         "stack_change"
                     } else {
                         "external_change"
-                    },
-                );
+                    }
+                });
                 folders.unfollowed = true;
             } else {
                 // #1309: this reading knows the words of `cd "$d"`; it loses
@@ -3132,7 +3132,7 @@ impl Classifier {
                 || (name == "pushd" && folders.stack.len() >= MAX_FOLDER_STACK)
             {
                 #[cfg(test)]
-                named_shell::measure_tests::unfollowed_reason("folder_limits");
+                named_shell::measure_tests::unfollowed_reason(|| "folder_limits");
                 folders.unfollowed = true;
                 return false;
             }

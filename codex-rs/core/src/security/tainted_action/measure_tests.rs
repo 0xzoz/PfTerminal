@@ -78,8 +78,9 @@ pub(in crate::security::tainted_action) fn detail(tag: impl FnOnce() -> String) 
 }
 
 /// Why a folder change was not followed.
-pub(in crate::security::tainted_action) fn unfollowed_reason(tag: &'static str) {
+pub(in crate::security::tainted_action) fn unfollowed_reason(tag: impl FnOnce() -> &'static str) {
     if dumping() {
+        let tag = tag();
         UNFOLLOWED.with(|reasons| reasons.borrow_mut().push(tag));
     }
 }
@@ -614,7 +615,6 @@ fn measure_line(
     }
 }
 
-/// One corpus line: a JSON string, or an object with `cmd` (and `cwd`).
 /// #932: whether a line is judged from `/` for want of an absolute
 /// working folder (`action` falls back to `/`). A corpus whose lines lack
 /// the folder each command ran in misjudges every relative path; the noise
@@ -623,6 +623,7 @@ fn judged_from_root(cwd: &Path) -> bool {
     !cwd.is_absolute() || cwd.parent().is_none()
 }
 
+/// One corpus line: a JSON string, or an object with `cmd` (and `cwd`).
 fn parse_line(line: &str) -> Option<(String, PathBuf)> {
     match serde_json::from_str::<serde_json::Value>(line).ok()? {
         serde_json::Value::String(script) => Some((script, PathBuf::from("/"))),
@@ -858,9 +859,8 @@ fn measuring_harness_runs_on_the_grammar_corpus() {
     );
 }
 
-/// The measurement over a local corpus (see the module docs). A line whose
-/// judgment panics is counted; the panic hook is silenced meanwhile, since
-/// some panic messages quote the text involved.
+/// The event dump tags each finding with the reading that noted it, and
+/// costs nothing when not dumping.
 #[test]
 fn events_name_the_reading_that_asked() {
     let homes = MeasureHomes {
@@ -885,6 +885,9 @@ fn events_name_the_reading_that_asked() {
     assert!(!judged_from_root(&fixture("/work")));
 }
 
+/// The measurement over a local corpus (see the module docs). A line whose
+/// judgment panics is counted; the panic hook is silenced meanwhile, since
+/// some panic messages quote the text involved.
 #[test]
 #[ignore = "measures a local corpus named by CORBANU_CLASSIFIER_CORPUS"]
 fn measure_classifier_corpus() {
@@ -934,7 +937,8 @@ fn line_events(homes: &MeasureHomes, shell: &str, script: &str, cwd: &Path) -> (
 
 /// #932: dumps, for each corpus line, each finding with the details of
 /// the check that noted it, for a local breakdown of where prompts come
-/// from. `CORBANU_CLASSIFIER_EVENTS=<file>` receives one tab-separated row
+/// from. `CORBANU_CLASSIFIER_EVENTS=<file>` (without it the test does
+/// nothing) receives one tab-separated row
 /// per line and shell (`CORBANU_CLASSIFIER_SHELLS`, comma-separated,
 /// `/bin/zsh,/bin/bash` by default): the line's index, the shell, the
 /// finding and the events. Unlike the report, the details hold pieces of
@@ -946,7 +950,9 @@ fn dump_classifier_events() {
     let Ok(corpus) = std::env::var("CORBANU_CLASSIFIER_CORPUS") else {
         return;
     };
-    let out = std::env::var("CORBANU_CLASSIFIER_EVENTS").expect("CORBANU_CLASSIFIER_EVENTS");
+    let Ok(out) = std::env::var("CORBANU_CLASSIFIER_EVENTS") else {
+        return;
+    };
     let shells: Vec<String> = std::env::var("CORBANU_CLASSIFIER_SHELLS")
         .unwrap_or_else(|_| "/bin/zsh,/bin/bash".to_string())
         .split(',')
