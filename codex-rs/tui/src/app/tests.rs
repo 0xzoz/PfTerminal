@@ -261,8 +261,9 @@ async fn accounting_inspect_app_day_after_clock_names_the_clock() -> anyhow::Res
     let path = tempdir()?;
     let (mut app, mut rx, _ops) = make_test_app_with_channels().await;
     accounting_fixture(&mut app, path.path()).await?;
-    let tomorrow = chrono::Utc::now().timestamp_millis() / 86_400_000 + 1;
-    let loaded = accounting_load(&mut app, &mut rx, tomorrow).await;
+    // Two days ahead, so the test holds even if it runs across UTC midnight.
+    let ahead = chrono::Utc::now().timestamp_millis() / 86_400_000 + 2;
+    let loaded = accounting_load(&mut app, &mut rx, ahead).await;
     let AppEvent::AccountingInspectorLoaded {
         result: Err(message),
         ..

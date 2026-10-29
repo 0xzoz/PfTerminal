@@ -141,12 +141,12 @@ pub(super) fn clock_behind_ledger_message(behind_ms: i64) -> String {
 }
 
 /// #1522: the view's UTC day starts after the system clock (the view was
-/// opened while the clock read ahead, then the clock was set back). The data is
-/// fine; Refresh rereads the same day, so say so instead of suggesting damage.
+/// opened while the clock read ahead, then the clock was set back). Refused
+/// before the ledger is read, so claim only that, not that the data is sound.
 pub(super) fn clock_before_day_message(behind_ms: i64) -> String {
     let behind = clock_lag(behind_ms);
     format!(
-        "Unavailable — your system clock reads earlier than the day this view shows ({behind} before it starts). The accounting data is not damaged and nothing was changed. Next step: check your system date and time, then select Refresh, or close this view and run {cost} again for the clock's current day.",
+        "Unavailable — your system clock reads earlier than the day this view shows ({behind} before it starts). This is not a sign of damage; nothing was read or changed. Next step: check your system date and time, then select Refresh, or close this view and run {cost} again for the clock's current day.",
         cost = crate::chatwidget::cost_command()
     )
 }
