@@ -24,6 +24,7 @@ use super::indirect;
 use super::invocation;
 use super::invocation::Code;
 use super::launched_git;
+use super::launched_input;
 use super::outbound;
 use super::outputs;
 use super::quoted;
@@ -449,11 +450,19 @@ impl Classifier {
             // D153: a git setting whose quoted text names git.
             found.unreadable |= git_helpers::setting_holds_git_name(&command.words);
             loops.read(&texts);
-            self.judge_git(&texts, &loops, found);
+            self.judge_git(&texts, &command.words, &loops, found);
             // #1268: where a launcher's input reaches the words, and the
             // scripts of shells it puts input into, wherever the command
             // word is read to be (`xargs --replace sh -c '... {}'`).
             let launches = launched_git::launches(&texts, found.braces, self.launched);
+            // #1276: a launcher's input as the program it runs (`xargs -I%
+            // % config`), as an interpreter's code (`xargs -I% python3 -c
+            // '...%...'`), or as whole command lines (`parallel < f`). In
+            // quoted text read as code (`level` > 0), only where input is
+            // put in place.
+            if launched_input::input_runs(&texts, level > 0) {
+                note_git(found, ProtectedActionKind::UnseenCode);
+            }
             // #1283: scripts run in a folder this reading does not follow
             // (after `cd "$d"`, or a wrapper's: `env -C "$d" sh -c`).
             // #1309: in any of a wrapper's spellings (`env -C"$d"`, `sudo
@@ -793,6 +802,7 @@ impl Classifier {
     fn judge_git(
         &self,
         texts: &[String],
+        words: &[Word],
         loops: &launched_git::PositionalLoops,
         found: &mut Found,
     ) {
@@ -801,6 +811,12 @@ impl Classifier {
         }
         let lower: Vec<String> = texts.iter().map(|text| text.to_lowercase()).collect();
         let looped = loops.marks(texts);
+        // #1276 item 3: values this reading does not know.
+        let splits: Vec<bool> = words
+            .iter()
+            .map(|word| word.dynamic && word.splits)
+            .collect();
+        let dynamic: Vec<bool> = words.iter().map(|word| word.dynamic).collect();
         let mut config = GitConfigWrites::new(&lower, &[], &[]);
         let mut launched = launched_git::LaunchedGit::new(
             texts,
@@ -809,6 +825,8 @@ impl Classifier {
             self.launched,
             launched_git::Marks {
                 looped: &looped,
+                splits: &splits,
+                dynamic: &dynamic,
                 ..launched_git::Marks::default()
             },
         );
