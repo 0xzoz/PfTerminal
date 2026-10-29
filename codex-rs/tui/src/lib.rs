@@ -171,6 +171,7 @@ pub(crate) mod onboarding;
 mod orchestrate;
 mod oss_selection;
 mod pager_overlay;
+mod quit_thread_record;
 mod permission_compat;
 mod provider_account_auth_host;
 mod provider_account_feedback;
@@ -831,6 +832,25 @@ async fn lookup_latest_session_target_with_app_server(
     cwd_filter: Option<&Path>,
     include_non_interactive: bool,
 ) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
+    Ok(
+        lookup_latest_session_thread_with_app_server(
+            app_server,
+            config,
+            cwd_filter,
+            include_non_interactive,
+        )
+        .await?
+        .map(|(target, _updated_at)| target),
+    )
+}
+
+/// The newest thread in scope and its `updated_at`.
+async fn lookup_latest_session_thread_with_app_server(
+    app_server: &mut AppServerSession,
+    config: &Config,
+    cwd_filter: Option<&Path>,
+    include_non_interactive: bool,
+) -> color_eyre::Result<Option<(resume_picker::SessionTarget, i64)>> {
     let uses_remote_workspace = app_server.uses_remote_workspace();
     for lookup_mode in [
         LatestSessionLookupMode::StateDbOnly,
@@ -845,17 +865,95 @@ async fn lookup_latest_session_target_with_app_server(
                 lookup_mode,
             ))
             .await?;
-        let target = response
-            .data
-            .into_iter()
-            .find_map(session_target_from_app_server_thread);
-        if target.as_ref().is_some_and(|target| {
-            uses_remote_workspace || target.path.as_deref().is_some_and(std::path::Path::exists)
-        }) {
+        let target = response.data.into_iter().find_map(|thread| {
+            let updated_at = thread.updated_at;
+            session_target_from_app_server_thread(thread).map(|target| (target, updated_at))
+        });
+        if target
+            .as_ref()
+            .is_some_and(|(target, _)| session_target_is_usable(uses_remote_workspace, target))
+        {
             return Ok(target);
         }
     }
     Ok(None)
+}
+
+fn session_target_is_usable(
+    uses_remote_workspace: bool,
+    target: &resume_picker::SessionTarget,
+) -> bool {
+    uses_remote_workspace || target.path.as_deref().is_some_and(std::path::Path::exists)
+}
+
+/// Most threads `resume --last` scans per lookup mode (in pages of 100) for
+/// the thread on screen at the last quit before falling back to the newest turn.
+const QUIT_THREAD_SCAN_LIMIT: usize = 1000;
+
+/// D243 (#1412): `resume --last` reopens the thread on screen at the last quit
+/// when it is in scope (same cwd, provider, sources, not archived) and no
+/// thread in scope was updated after that quit; otherwise the newest turn.
+async fn lookup_resume_last_target_with_app_server(
+    app_server: &mut AppServerSession,
+    config: &Config,
+    cwd_filter: Option<&Path>,
+    include_non_interactive: bool,
+) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
+    let newest = lookup_latest_session_thread_with_app_server(
+        app_server,
+        config,
+        cwd_filter,
+        include_non_interactive,
+    )
+    .await?;
+    let Some(record) = quit_thread_record::read_quit_thread_record(config.codex_home.as_ref())
+    else {
+        return Ok(newest.map(|(target, _)| target));
+    };
+    if !quit_thread_record::quit_record_is_current(
+        &record,
+        newest.as_ref().map(|(_, updated_at)| *updated_at),
+    ) || newest
+        .as_ref()
+        .is_some_and(|(target, _)| target.thread_id == record.thread_id)
+    {
+        return Ok(newest.map(|(target, _)| target));
+    }
+
+    let uses_remote_workspace = app_server.uses_remote_workspace();
+    let record_id = record.thread_id.to_string();
+    for lookup_mode in [
+        LatestSessionLookupMode::StateDbOnly,
+        LatestSessionLookupMode::ScanAndRepair,
+    ] {
+        let mut params = latest_session_lookup_params(
+            uses_remote_workspace,
+            config,
+            cwd_filter,
+            include_non_interactive,
+            lookup_mode,
+        );
+        params.limit = Some(100);
+        let mut scanned = 0usize;
+        loop {
+            let response = app_server.thread_list(params.clone()).await?;
+            scanned += response.data.len();
+            if let Some(target) = response
+                .data
+                .into_iter()
+                .filter(|thread| thread.id == record_id)
+                .find_map(session_target_from_app_server_thread)
+                .filter(|target| session_target_is_usable(uses_remote_workspace, target))
+            {
+                return Ok(Some(target));
+            }
+            match response.next_cursor {
+                Some(cursor) if scanned < QUIT_THREAD_SCAN_LIMIT => params.cursor = Some(cursor),
+                _ => break,
+            }
+        }
+    }
+    Ok(newest.map(|(target, _)| target))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3404,6 +3502,105 @@ mod tests {
 
         assert_eq!(scoped_target.thread_id, project_thread_id);
         assert_eq!(show_all_target.thread_id, other_thread_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resume_last_prefers_thread_on_screen_at_quit() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let project_cwd = temp_dir.path().join("project");
+        let other_cwd = temp_dir.path().join("other-project");
+        std::fs::create_dir_all(&project_cwd)?;
+        std::fs::create_dir_all(&other_cwd)?;
+        let config = ConfigBuilder::default()
+            .codex_home(temp_dir.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(project_cwd.clone()),
+                ..Default::default()
+            })
+            .build()
+            .await?;
+        let model_provider = config.model_provider_id.as_str();
+        let alpha = write_session_rollout(
+            temp_dir.path(),
+            "2025-01-02T10-00-00",
+            "2025-01-02T10:00:00Z",
+            "alpha",
+            model_provider,
+            &project_cwd,
+        )?;
+        let charlie = write_session_rollout(
+            temp_dir.path(),
+            "2025-01-02T12-00-00",
+            "2025-01-02T12:00:00Z",
+            "charlie",
+            model_provider,
+            &project_cwd,
+        )?;
+        let elsewhere = write_session_rollout(
+            temp_dir.path(),
+            "2025-01-02T09-00-00",
+            "2025-01-02T09:00:00Z",
+            "elsewhere",
+            model_provider,
+            &other_cwd,
+        )?;
+        let mut app_server = AppServerSession::new(
+            codex_app_server_client::AppServerClient::InProcess(
+                start_test_embedded_app_server(config.clone()).await?,
+            ),
+            ThreadParamsMode::Embedded,
+        );
+        let codex_home = config.codex_home.as_ref();
+        let scope = Some(project_cwd.as_path());
+        let after_every_turn = i64::MAX;
+        async fn resume_last(
+            app_server: &mut AppServerSession,
+            config: &Config,
+            scope: Option<&Path>,
+        ) -> color_eyre::Result<Option<ThreadId>> {
+            Ok(lookup_resume_last_target_with_app_server(
+                app_server, config, scope, /*include_non_interactive*/ false,
+            )
+            .await?
+            .map(|target| target.thread_id))
+        }
+
+        // No quit record: upstream newest-turn semantics.
+        let no_record = resume_last(&mut app_server, &config, scope).await?;
+        // ALPHA was on screen at quit, after CHARLIE's last turn.
+        quit_thread_record::record_quit_thread(codex_home, alpha, after_every_turn);
+        let alpha_on_screen = resume_last(&mut app_server, &config, scope).await?;
+        let fork_last = lookup_latest_session_target_with_app_server(
+            &mut app_server,
+            &config,
+            scope,
+            /*include_non_interactive*/ false,
+        )
+        .await?
+        .map(|target| target.thread_id);
+        // A turn landed after the quit: newest turn wins again.
+        quit_thread_record::record_quit_thread(codex_home, alpha, /*quit_at*/ 0);
+        let turn_after_quit = resume_last(&mut app_server, &config, scope).await?;
+        // The quit thread is outside the cwd scope.
+        quit_thread_record::record_quit_thread(codex_home, elsewhere, after_every_turn);
+        let out_of_scope = resume_last(&mut app_server, &config, scope).await?;
+        // The quit thread no longer exists.
+        quit_thread_record::record_quit_thread(codex_home, ThreadId::new(), after_every_turn);
+        let missing = resume_last(&mut app_server, &config, scope).await?;
+        app_server.shutdown().await?;
+
+        assert_eq!(
+            [no_record, alpha_on_screen, fork_last, turn_after_quit, out_of_scope, missing],
+            [
+                Some(charlie),
+                Some(alpha),
+                Some(charlie),
+                Some(charlie),
+                Some(charlie),
+                Some(charlie)
+            ]
+        );
         Ok(())
     }
 
