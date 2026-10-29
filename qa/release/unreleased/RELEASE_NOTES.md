@@ -5,10 +5,14 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
 
 ## Protocol change: `turn.completed` usage can be `null`
 
-- **`corbanu exec --json` reports `"usage": null` when the provider reported
-  no usage for the turn** (#290). Unknown usage is no longer reported as an
+- **`corbanu exec --json` reports `"usage": null` when exec receives no
+  matching usage report** (#290). Unknown usage is no longer reported as an
   all-zero usage object, so consumers can distinguish "not reported" from a
   measured zero. When usage is reported, the object is unchanged.
+- **A non-null usage does not prove the provider reported this turn.** On a
+  resumed thread, if this turn's response reports no usage, `usage` still
+  holds the thread's earlier totals. When only some of a turn's requests report
+  usage, the totals include only those.
 - **The usage is still the completing thread's own total.** It does not add
   usage from spawned subagents and is not a difference from the start of the
   invocation.
@@ -19,7 +23,7 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   null check** will fail on turns with no reported usage and must be updated.
   The TypeScript SDK in `sdk/typescript` handles `null` from this release:
   `TurnCompletedEvent.usage` is `Usage | null`, and `Thread.run()` returns
-  `usage: null` for such turns.
+  `usage: null` when exec receives no usage report.
 
 ## Protocol change: `refused` command status
 
