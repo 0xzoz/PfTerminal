@@ -4,8 +4,16 @@ async fn accounting_fixture(
     app: &mut App,
     path: &std::path::Path,
 ) -> anyhow::Result<(ThreadId, i64)> {
+    accounting_fixture_at(app, path, chrono::Utc::now().timestamp_millis()).await
+}
+
+/// `accounting_fixture`, with the ledger written at `now` rather than the clock.
+async fn accounting_fixture_at(
+    app: &mut App,
+    path: &std::path::Path,
+    now: i64,
+) -> anyhow::Result<(ThreadId, i64)> {
     use codex_state::accounting::*;
-    let now = chrono::Utc::now().timestamp_millis();
     let owner = ThreadId::new();
     let db = codex_state::StateRuntime::init(
         codex_state::SqliteConfig::from_sqlite_home(path.abs()),
@@ -211,6 +219,54 @@ async fn accounting_inspect_app_thread_switch_stale_reply() -> anyhow::Result<()
     } if id == other));
     app.state_db.as_ref().unwrap().close().await;
     Ok(())
+}
+
+/// #1518: a ledger written while the clock read ahead (here, three hours) is
+/// intact once the clock is set right, yet newer than it. `/cost` names the
+/// clock rather than calling the evidence corrupt.
+#[tokio::test]
+async fn accounting_inspect_app_clock_behind_ledger_names_the_clock() -> anyhow::Result<()> {
+    let path = tempdir()?;
+    let (mut app, mut rx, _ops) = make_test_app_with_channels().await;
+    let ahead = chrono::Utc::now().timestamp_millis() + 3 * 3_600_000;
+    accounting_fixture_at(&mut app, path.path(), ahead).await?;
+    let day = chrono::Utc::now().timestamp_millis() / 86_400_000;
+    let loaded = accounting_load(&mut app, &mut rx, day).await;
+    let AppEvent::AccountingInspectorLoaded {
+        result: Err(message),
+        ..
+    } = &loaded
+    else {
+        panic!("expected a refused read, got {loaded:?}");
+    };
+    assert_eq!(
+        message,
+        &super::event_dispatch::clock_behind_ledger_message(3 * 3_600_000)
+    );
+    app.handle_accounting_inspector_event(loaded);
+    let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 80);
+    assert!(
+        rendered.contains("your system clock is behind the newest recorded usage"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("corrupt"), "{rendered}");
+    app.state_db.as_ref().unwrap().close().await;
+    Ok(())
+}
+
+#[test]
+fn accounting_clock_behind_message_states_the_lag() {
+    let rendered = [
+        30_000,
+        89_000,
+        58 * 60_000,
+        3 * 3_600_000 - 5_000,
+        47 * 3_600_000,
+        6 * 86_400_000,
+    ]
+    .map(super::event_dispatch::clock_behind_ledger_message)
+    .join("\n");
+    insta::assert_snapshot!("accounting_clock_behind_ledger_messages", rendered);
 }
 
 #[tokio::test]

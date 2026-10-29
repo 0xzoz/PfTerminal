@@ -38,6 +38,7 @@ mod grammar;
 mod indirect;
 mod invocation;
 mod launched_git;
+mod launched_input;
 mod loader_variables;
 mod mktemp;
 mod named_shell;
@@ -2239,6 +2240,7 @@ impl Classifier {
                 hidden: &hidden,
                 unchecked: &unchecked,
                 looped: &looped,
+                ..launched_git::Marks::default()
             },
         );
         let mut later = LaterWords::new(&lower);

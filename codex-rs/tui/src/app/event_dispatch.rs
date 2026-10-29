@@ -119,10 +119,35 @@ pub(super) async fn accounting_inspector_read_result(
         Ok(Ok(value)) => Ok(value),
         Ok(Err(error)) => {
             tracing::warn!(error = %format!("{error:#}"), "accounting inspection failed");
+            if let Some(clock) = codex_state::accounting::clock_behind_ledger(&error) {
+                return Err(clock_behind_ledger_message(clock.behind_ms));
+            }
             Err("Unavailable — accounting evidence is corrupt, incompatible or could not be read. Refresh to retry; no repair performed. Next step: if Refresh fails again, check your provider's bill; the log names the cause.".into())
         }
         Err(_) => Err("Unavailable — inspection timed out. Next step: select Refresh; another Corbanu process may be holding the ledger.".into()),
     }
+}
+
+/// #1518: the ledger is intact but newer than the system clock, so the read is
+/// refused until the clock catches up. Says so instead of suggesting damage.
+pub(super) fn clock_behind_ledger_message(behind_ms: i64) -> String {
+    const MINUTE: i64 = 60_000;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    let rounded = |unit: i64| behind_ms.saturating_add(unit / 2) / unit;
+    let about = |n: i64, unit: &str| format!("about {n} {unit}{}", if n == 1 { "" } else { "s" });
+    let behind = if behind_ms < MINUTE {
+        "less than a minute".to_string()
+    } else if rounded(MINUTE) < 60 {
+        about(rounded(MINUTE), "minute")
+    } else if rounded(HOUR) < 48 {
+        about(rounded(HOUR), "hour")
+    } else {
+        about(rounded(DAY), "day")
+    };
+    format!(
+        "Unavailable — your system clock is behind the newest recorded usage ({behind}). The accounting data is not damaged and nothing was changed. Next step: check your system date and time, then select Refresh; totals show again once the clock passes the newest record."
+    )
 }
 
 fn resolve_shared_provider_selection_model(
