@@ -460,10 +460,28 @@ const TMUX_FOLDERS: &[(&str, &str, char, &str)] = &[
     ("new-session", "new", 'c', "ceFfnstxy"),
     ("new-window", "neww", 'c', "ceFnt"),
     ("split-window", "splitw", 'c', "ceFlpt"),
+    ("new-pane", "newp", 'c', "ceFlpt"),
     ("respawn-pane", "respawnp", 'c', "cet"),
     ("respawn-window", "respawnw", 'c', "cet"),
+    ("run-shell", "run", 'c', "cdt"),
     ("display-popup", "popup", 'd', "bcdehsStTwxy"),
 ];
+
+/// Shortest prefix of a tmux command name read as that command (tmux
+/// takes any unambiguous one: `new-w`, `split-w`); a shorter or ambiguous
+/// one only over-matches.
+const TMUX_PREFIX: usize = 3;
+
+/// The `TMUX_FOLDERS` entry `word` names: its alias, or a prefix of its
+/// name.
+fn tmux_folder_command(
+    word: &str,
+) -> Option<&'static (&'static str, &'static str, char, &'static str)> {
+    TMUX_FOLDERS.iter().find(|(name, alias, _, _)| {
+        work::step();
+        word == *alias || (word.len() >= TMUX_PREFIX && name.starts_with(word))
+    })
+}
 
 /// tmux's options that take a value, before its command.
 const TMUX_VALUED: &str = "cfLST";
@@ -510,10 +528,7 @@ pub(super) fn tmux_commands(texts: &[String], at: usize) -> Vec<(usize, String)>
         work::step();
         let word = &texts[index];
         index += 1;
-        let Some((_, _, _, valued)) = TMUX_FOLDERS
-            .iter()
-            .find(|(name, alias, _, _)| word == name || word == alias)
-        else {
+        let Some((_, _, _, valued)) = tmux_folder_command(word) else {
             continue;
         };
         while index < end && texts[index].starts_with('-') && texts[index].len() > 1 {
@@ -523,11 +538,10 @@ pub(super) fn tmux_commands(texts: &[String], at: usize) -> Vec<(usize, String)>
             if option == "--" {
                 break;
             }
-            if let Some((offset, letter)) = option
-                .char_indices()
-                .skip(1)
-                .find(|(_, letter)| valued.contains(*letter))
-            {
+            if let Some((offset, letter)) = option.char_indices().skip(1).find(|(_, letter)| {
+                work::step();
+                valued.contains(*letter)
+            }) {
                 index += usize::from(offset + letter.len_utf8() == option.len());
             }
         }
@@ -590,12 +604,10 @@ impl Tmux {
         if self.options.is_some() {
             return;
         }
-        if basename(text) == "tmux" {
+        if basename(text).eq_ignore_ascii_case("tmux") {
             self.seen = true;
         } else if self.seen
-            && let Some((_, _, folder, valued)) = TMUX_FOLDERS
-                .iter()
-                .find(|(name, alias, _, _)| text == *name || text == *alias)
+            && let Some((_, _, folder, valued)) = tmux_folder_command(text)
         {
             self.options = Some((*folder, valued));
         }
@@ -896,7 +908,7 @@ pub(super) fn pattern_word(word: &str) -> bool {
         || (word.contains('(') && !word.ends_with("()"))
         // #1309 follow-up: zsh extendedglob `cdd#`, `cd##`, `^x`, `cd~x`.
         || word.contains('^')
-        || word.get(1..).is_some_and(|rest| rest.contains(['#', '~']))
+        || word.bytes().skip(1).any(|byte| byte == b'#' || byte == b'~')
 }
 
 /// #1309: zsh's precommand modifiers, which run the command after them:

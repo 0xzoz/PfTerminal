@@ -2249,14 +2249,49 @@ impl Classifier {
         // never judged (`=$X log --output=~/.zshrc`, `echo x | =tee -a
         // ~/.zshrc`, `nice =sort -o ~/.zshrc f`): before the command word,
         // or right after a precommand modifier (`noglob =tee …`), it asks.
-        let skipped_to = command.as_ref().map_or(lower.len(), |(at, _)| *at);
-        if lower.iter().enumerate().any(|(at, word)| {
-            work::step();
-            word.len() > 1
-                && word.starts_with('=')
-                && (at < skipped_to
-                    || (at > 0 && unknown_folder::MODIFIERS.contains(&lower[at - 1].as_str())))
-        }) {
+        // Also before the command after precommand modifiers (`noglob
+        // command =tee`), and right after an exec marker or an exec wrapper
+        // (`find . -exec =curl`, `strace =curl`); not in a comment.
+        //
+        // #1159 follow-up: the command after zsh's precommand modifiers
+        // (`noglob git log --output=~/.zshrc`, `noglob tee -a ~/.zshrc`)
+        // writes too. The modifier stays the command word, as before (a
+        // function may have its name): this only adds what it writes.
+        let after_modifiers = command
+            .as_ref()
+            .filter(|(_, name)| unknown_folder::MODIFIERS.contains(&name.as_str()))
+            .map(|(index, _)| {
+                words[index + 1..]
+                    .iter()
+                    .position(|word| {
+                        work::step();
+                        !unknown_folder::MODIFIERS.contains(&word.as_str())
+                    })
+                    .map_or(words.len(), |offset| index + 1 + offset)
+            });
+        let modified = after_modifiers.and_then(|after| {
+            indirect::command_word(&words[after..]).map(|(at, name)| (after + at, name))
+        });
+        let skipped_to = match (after_modifiers, &modified, &command) {
+            (Some(_), Some((at, _)), _) | (None, _, Some((at, _))) => *at,
+            _ => lower.len(),
+        };
+        let runs_next = |word: &str| {
+            matches!(word, "-exec" | "-execdir" | "-ok" | "-okdir")
+                || outbound::EXEC_WRAPPERS.contains(&basename(word))
+                || unknown_folder::MODIFIERS.contains(&word)
+        };
+        if lower
+            .iter()
+            .take_while(|word| !word.starts_with('#'))
+            .enumerate()
+            .any(|(at, word)| {
+                work::step();
+                word.len() > 1
+                    && word.starts_with('=')
+                    && (at < skipped_to || (at > 0 && runs_next(&lower[at - 1])))
+            })
+        {
             self.note(ProtectedActionKind::UnseenCode);
         }
         let mut later = LaterWords::new(&lower);
@@ -2424,23 +2459,6 @@ impl Classifier {
                 hidden[*index] || folders.unchecked || unchecked.iter().any(|word| *word);
             outputs::output_files(name, &words[index + 1..], unchecked)
         });
-        // #1159 follow-up: the command after zsh's precommand modifiers
-        // (`noglob git log --output=~/.zshrc`, `noglob tee -a ~/.zshrc`)
-        // writes too. The modifier stays the command word, as before (a
-        // function may have its name): this only adds what it writes.
-        let modified = command
-            .as_ref()
-            .filter(|(_, name)| unknown_folder::MODIFIERS.contains(&name.as_str()))
-            .and_then(|(index, _)| {
-                let after = words[index + 1..]
-                    .iter()
-                    .position(|word| {
-                        work::step();
-                        !unknown_folder::MODIFIERS.contains(&word.as_str())
-                    })
-                    .map_or(words.len(), |offset| index + 1 + offset);
-                indirect::command_word(&words[after..]).map(|(at, name)| (after + at, name))
-            });
         let modified_outputs = modified.as_ref().and_then(|(index, name)| {
             let unchecked =
                 hidden[*index] || folders.unchecked || unchecked.iter().any(|word| *word);

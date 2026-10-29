@@ -10159,93 +10159,43 @@ fn issue_1309_login_and_modifier_checks_are_linear() {
 /// line was quiet on main.
 #[test]
 fn issue_1159_equals_words_and_modified_outputs_ask() {
-    for (shell, command, expected) in [
-        (
-            "bash",
-            "=$X log --output=~/.zshrc",
-            ProtectedActionKind::UnseenCode,
-        ),
-        (
-            "zsh",
-            "=$X log --output=~/.zshrc",
-            ProtectedActionKind::UnseenCode,
-        ),
-        (
-            "bash",
-            "echo x | =tee -a ~/.zshrc",
-            ProtectedActionKind::UnseenCode,
-        ),
-        (
-            "zsh",
-            "echo x | =tee -a ~/.zshrc",
-            ProtectedActionKind::UnseenCode,
-        ),
-        (
-            "zsh",
-            "noglob =tee -a ~/.zshrc",
-            ProtectedActionKind::UnseenCode,
-        ),
-        (
-            "bash",
-            "- =tee -a ~/.zshrc",
-            ProtectedActionKind::UnseenCode,
-        ),
-        (
-            "bash",
-            "=$(printf tee) -a ~/.zshrc",
-            ProtectedActionKind::UnseenCode,
-        ),
-        (
-            "zsh",
-            "=sort -o ~/.zshrc f",
-            ProtectedActionKind::UnseenCode,
-        ),
-        (
-            "bash",
-            "noglob git log --output=~/.zshrc",
-            ProtectedActionKind::Persistence,
-        ),
-        (
-            "zsh",
-            "noglob git log --output=~/.zshrc",
-            ProtectedActionKind::Persistence,
-        ),
-        (
-            "zsh",
-            "nocorrect git log --output=~/.zshrc",
-            ProtectedActionKind::Persistence,
-        ),
-        (
-            "zsh",
-            "noglob nocorrect git log --output=~/.zshrc",
-            ProtectedActionKind::Persistence,
-        ),
-        (
-            "bash",
-            "noglob nice git log --output=~/.zshrc",
-            ProtectedActionKind::Persistence,
-        ),
-        (
-            "zsh",
-            "noglob tee -a ~/.zshrc",
-            ProtectedActionKind::Persistence,
-        ),
-        (
-            "zsh",
-            "noglob sort -o ~/.zshrc f",
-            ProtectedActionKind::Persistence,
-        ),
-        (
-            "bash",
-            "cd \"$d\"; noglob git log --output=.zshenv",
-            ProtectedActionKind::Persistence,
-        ),
+    let unseen = [
+        ("bash", "=$X log --output=~/.zshrc"),
+        ("zsh", "=$X log --output=~/.zshrc"),
+        ("bash", "echo x | =tee -a ~/.zshrc"),
+        ("zsh", "echo x | =tee -a ~/.zshrc"),
+        ("zsh", "noglob =tee -a ~/.zshrc"),
+        ("bash", "- =tee -a ~/.zshrc"),
+        ("bash", "=$(printf tee) -a ~/.zshrc"),
+        ("zsh", "=sort -o ~/.zshrc f"),
+        // Review 1: behind a modifier and a wrapper, after an exec marker
+        // or an exec wrapper.
+        ("zsh", "noglob command =tee -a ~/.zshrc"),
+        ("zsh", "noglob nice =sort -o ~/.zshrc f"),
+        ("zsh", r"find . -exec =tee -a ~/.zshrc \;"),
+        ("zsh", "strace =tee -a ~/.zshrc"),
+    ];
+    let persistence = [
+        ("bash", "noglob git log --output=~/.zshrc"),
+        ("zsh", "noglob git log --output=~/.zshrc"),
+        ("zsh", "nocorrect git log --output=~/.zshrc"),
+        ("zsh", "noglob nocorrect git log --output=~/.zshrc"),
+        ("bash", "noglob nice git log --output=~/.zshrc"),
+        ("zsh", "noglob tee -a ~/.zshrc"),
+        ("zsh", "noglob sort -o ~/.zshrc f"),
+        ("bash", "cd \"$d\"; noglob git log --output=.zshenv"),
+    ];
+    for (lines, expected) in [
+        (&unseen[..], ProtectedActionKind::UnseenCode),
+        (&persistence[..], ProtectedActionKind::Persistence),
     ] {
-        assert_eq!(
-            kind(&[shell, "-c", command]),
-            Some(expected),
-            "{shell}: {command}"
-        );
+        for (shell, command) in lines {
+            assert_eq!(
+                kind(&[shell, "-c", command]),
+                Some(expected),
+                "{shell}: {command}"
+            );
+        }
     }
     for command in [
         "noglob git log --output=out.txt",
@@ -10253,6 +10203,8 @@ fn issue_1159_equals_words_and_modified_outputs_ask() {
         "noglob tee out.txt",
         "echo =x",
         "[ \"$a\" = \"$b\" ]",
+        "# ===== setup =====",
+        "# a == b",
     ] {
         assert_eq!(kind(&["zsh", "-c", command]), None, "{command}");
     }
@@ -10295,6 +10247,13 @@ fn issue_1309_follow_ups_ask() {
         ("bash", "tmux popup -d ~ \"echo x >> .zshenv\""),
         ("bash", "tmux new -c ~ 'sh -c \"echo x >> .zshenv\"'"),
         ("bash", "tmux new -c ~ 'git log --output=.zshenv'"),
+        // Review 1: run-shell, name prefixes, tmux in another case.
+        ("bash", "tmux run -c ~ \"echo x >> .zshenv\""),
+        ("bash", "tmux run-shell -c ~ \"echo x >> .zshenv\""),
+        ("bash", "tmux new-w -c ~ \"echo x >> .zshenv\""),
+        ("bash", "tmux split-w -c ~ \"echo x >> .zshenv\""),
+        ("bash", "tmux respawn-p -c ~ \"echo x >> .zshenv\""),
+        ("bash", "TMUX new -c ~ \"echo x >> .zshenv\""),
         ("zsh", "cdd# ~; sh -c 'echo x >> .zshenv'"),
         ("zsh", "cd## ~; sh -c 'echo x >> .zshenv'"),
         ("zsh", "^x ~; sh -c 'echo x >> .zshenv'"),
@@ -10316,6 +10275,7 @@ fn issue_1309_follow_ups_ask() {
         "tmux new -s c \"echo x > out.txt\"",
         "tmux new -d sh -c 'echo x > out.txt'",
         "tmux send-keys -t x 'new' Enter",
+        "tmux new -c /tmp 'echo x > /tmp/out'",
         "cd ~/w; sh -c 'echo x > out.txt'",
     ] {
         assert_eq!(script(command), None, "{command}");
