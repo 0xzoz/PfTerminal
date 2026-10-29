@@ -2747,3 +2747,7 @@ mod launch_paths;
 /// D259 (#1507): each legacy command's own identity in its default DACL.
 #[path = "command_identity_tests.rs"]
 mod command_identity;
+
+/// D285: what the per-command ACL work costs on a large workspace.
+#[path = "acl_cost_tests.rs"]
+mod acl_cost;

@@ -1674,6 +1674,16 @@ impl Classifier {
             || lexed.too_deep
             || indirect::opaque_execution(&lexed.commands)
         {
+            #[cfg(test)]
+            named_shell::measure_tests::detail(|| {
+                format!(
+                    "lexed incomplete={} prompt={} too_deep={} opaque={}",
+                    lexed.incomplete && self.not_shell == 0 && self.rebuilt == 0,
+                    shell::prompt_expansion_why(command, foreign),
+                    lexed.too_deep,
+                    indirect::opaque_execution_why(&lexed.commands),
+                )
+            });
             self.note(ProtectedActionKind::UnseenCode);
         }
         let mut folders = Folders {
@@ -2023,6 +2033,35 @@ impl Classifier {
                         || arithmetic.uses_glob_substitution(command)))))
             || folders.unfollowed
         {
+            #[cfg(test)]
+            named_shell::measure_tests::detail(|| {
+                let gated = self.rebuilt == 0 && self.not_shell == 0;
+                let zsh = gated && zsh_possible;
+                let runs = gated && arithmetic.runs_unseen(command);
+                format!(
+                    "arith ru={runs} why={} an={} qc={} gs={} uf={} unf={} qcw={:?} gsw={}",
+                    if runs {
+                        arithmetic.runs_unseen_why(command)
+                    } else {
+                        "-".to_string()
+                    },
+                    gated && arithmetic.assigns_unseen_name(command),
+                    zsh && arithmetic.runs_qualifier_code(command),
+                    zsh && arithmetic.uses_glob_substitution(command),
+                    folders.unfollowed,
+                    named_shell::measure_tests::unfollowed_reasons(),
+                    if zsh {
+                        arithmetic.qualifier_trigger(command)
+                    } else {
+                        None
+                    },
+                    if zsh {
+                        arithmetic.glob_subst_why(command)
+                    } else {
+                        "-".to_string()
+                    },
+                )
+            });
             self.note(ProtectedActionKind::UnseenCode);
         }
         // D191: the prompts only a temp path raised, kept now unless its
@@ -2179,6 +2218,22 @@ impl Classifier {
                         .temp
                         .as_ref()
                         .is_some_and(|scope| scope.removes_temp(args));
+                #[cfg(test)]
+                if !(removes && self.temp.is_some()) {
+                    named_shell::measure_tests::detail(|| {
+                        format!(
+                            "cmd word_unseen={} inline={inline_unseen} evaltrap={} runs={} \
+                             runner={} mapfile={} name={name:?} word={:?}",
+                            unseen[*index],
+                            matches!(name.as_str(), "eval" | "trap")
+                                && unseen[index + 1..].iter().any(|unseen| *unseen),
+                            rerun::runs_unseen(name, words, unseen, *index),
+                            rerun::runner_unseen(words, unseen, *index),
+                            rerun::mapfile_callback(simple, words, unseen),
+                            words[*index],
+                        )
+                    });
+                }
                 self.note_or_hold(ProtectedActionKind::UnseenCode, removes);
             }
             folders.unchecked |= matches!(name.as_str(), "cd" | "pushd")
@@ -2191,6 +2246,14 @@ impl Classifier {
             if unknown_folder::stack_change(name, args)
                 || unknown_folder::external_change(words, *index, name)
             {
+                #[cfg(test)]
+                named_shell::measure_tests::unfollowed_reason(|| {
+                    if unknown_folder::stack_change(name, args) {
+                        "stack_change"
+                    } else {
+                        "external_change"
+                    }
+                });
                 folders.unfollowed = true;
             } else {
                 // #1309: this reading knows the words of `cd "$d"`; it loses
@@ -2424,6 +2487,15 @@ impl Classifier {
         });
         // #1142: setting a variable whose value git or a pager runs.
         if code_variables::sets_code_variable(simple, words, command.as_ref()) {
+            #[cfg(test)]
+            named_shell::measure_tests::detail(|| {
+                code_variables::sets_code_variable_why(
+                    simple,
+                    words,
+                    command.as_ref(),
+                    self.not_shell > 0 || self.rebuilt > 0,
+                )
+            });
             self.note(ProtectedActionKind::UnseenCode);
         }
         // #1064: a variable that makes a later program load code, set to a
@@ -2914,6 +2986,9 @@ impl Classifier {
     }
 
     /// A script the command certainly runs: read in full or fail closed.
+    /// (#932 measuring: in test builds a finding noted here is sited at
+    /// the caller, which tells the kinds of script apart.)
+    #[cfg_attr(test, track_caller)]
     fn required_script(&mut self, file: &str, cwd: &str, depth: usize, shell: bool) {
         if file.contains('$') || file.contains(shell::UNSEEN_OUTPUT) {
             self.ran_unknown = true;
@@ -3056,6 +3131,8 @@ impl Classifier {
             if next.len() > MAX_FOLDER_BYTES
                 || (name == "pushd" && folders.stack.len() >= MAX_FOLDER_STACK)
             {
+                #[cfg(test)]
+                named_shell::measure_tests::unfollowed_reason(|| "folder_limits");
                 folders.unfollowed = true;
                 return false;
             }
@@ -3094,6 +3171,7 @@ impl Classifier {
     /// large, past the file limit, or where lookups are not allowed) fails
     /// closed; an optional one is skipped when it is not there. `file` is
     /// `word` resolved in `cwd`.
+    #[cfg_attr(test, track_caller)]
     fn script_file(&mut self, file: &str, word: &str, cwd: &str, depth: usize, need: Script) {
         // #1240: the first judgment reads script files; the Windows view's
         // paths are not ones to open (and where it may not look a missing
@@ -3102,8 +3180,35 @@ impl Classifier {
             return;
         }
         self.ran.push(file.to_string());
+        // #932 measuring: the line that asked for this script (in test
+        // builds this function and `required_script` track their caller).
+        #[cfg(test)]
+        let caller = std::panic::Location::caller().line();
         let unreadable = |classifier: &mut Self, missing: bool| {
             if need == Script::Required || !missing {
+                #[cfg(test)]
+                named_shell::measure_tests::detail(|| {
+                    let why = if !classifier.homes.lookups_allowed(file) {
+                        "no_lookup"
+                    } else {
+                        match std::fs::metadata(file) {
+                            Err(_) => "missing",
+                            Ok(metadata) if !metadata.is_file() => "not_file",
+                            Ok(_) if classifier.scripts_read >= MAX_SCRIPT_FILES => "too_many",
+                            Ok(_) => "read_fail",
+                        }
+                    };
+                    let need = if need == Script::Required {
+                        "req"
+                    } else {
+                        "opt"
+                    };
+                    format!(
+                        "script why={why} need={need} caller={caller} depth={depth} in_file={} \
+                         word={word:?} file={file:?} cwd={cwd:?}",
+                        classifier.in_file
+                    )
+                });
                 classifier.note(ProtectedActionKind::UnseenCode);
             }
         };
