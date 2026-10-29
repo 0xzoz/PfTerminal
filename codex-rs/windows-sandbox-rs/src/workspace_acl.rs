@@ -1,8 +1,7 @@
 use crate::acl::add_deny_delete_ace;
-use crate::acl::add_deny_delete_child_ace;
 use crate::acl::add_deny_write_ace;
+use crate::integrity_leases::DeleteChildDeny;
 use crate::path_normalization::canonicalize_path;
-use crate::token::world_sid;
 use anyhow::Result;
 use std::ffi::c_void;
 use std::path::Path;
@@ -12,57 +11,80 @@ pub fn is_command_cwd_root(root: &Path, canonical_command_cwd: &Path) -> bool {
     canonicalize_path(root) == canonical_command_cwd
 }
 
+/// Adds to `denies` the Everyone denies the caller must add (tracked, #1506
+/// item 1) to close the delete-child route.
+///
 /// # Safety
 /// Caller must ensure `psid` is a valid SID pointer.
-pub unsafe fn protect_workspace_codex_dir(cwd: &Path, psid: *mut c_void) -> Result<bool> {
-    protect_workspace_subdir(cwd, psid, ".codex")
+pub unsafe fn protect_workspace_codex_dir(
+    cwd: &Path,
+    psid: *mut c_void,
+    denies: &mut Vec<DeleteChildDeny>,
+) -> Result<bool> {
+    protect_workspace_subdir(cwd, psid, ".codex", denies)
 }
 
+/// As [`protect_workspace_codex_dir`], for `.agents`.
+///
 /// # Safety
 /// Caller must ensure `psid` is a valid SID pointer.
-pub unsafe fn protect_workspace_agents_dir(cwd: &Path, psid: *mut c_void) -> Result<bool> {
-    protect_workspace_subdir(cwd, psid, ".agents")
+pub unsafe fn protect_workspace_agents_dir(
+    cwd: &Path,
+    psid: *mut c_void,
+    denies: &mut Vec<DeleteChildDeny>,
+) -> Result<bool> {
+    protect_workspace_subdir(cwd, psid, ".agents", denies)
 }
 
-unsafe fn protect_workspace_subdir(cwd: &Path, psid: *mut c_void, subdir: &str) -> Result<bool> {
+unsafe fn protect_workspace_subdir(
+    cwd: &Path,
+    psid: *mut c_void,
+    subdir: &str,
+    denies: &mut Vec<DeleteChildDeny>,
+) -> Result<bool> {
     let path = cwd.join(subdir);
     if path.is_dir() {
         let added = add_deny_write_ace(&path, psid)?;
-        deny_delete_child_route(&path)?;
+        denies.extend(delete_child_route_denies(&path));
         Ok(added)
     } else {
         Ok(false)
     }
 }
 
-/// Closes the `FILE_DELETE_CHILD` route to deleting or moving a protected path
-/// from a legacy (WRITE_RESTRICTED) sandbox, which capability-SID deny ACEs do
-/// not cover (#158): denies Everyone `FILE_DELETE_CHILD` on the path's parent
-/// (that directory only) and on the path and its subdirectories.
+/// The denies that close the `FILE_DELETE_CHILD` route to deleting or moving a
+/// protected path from a legacy (WRITE_RESTRICTED) sandbox, which
+/// capability-SID deny ACEs do not cover (#158): Everyone `FILE_DELETE_CHILD`
+/// on the path's parent (that directory only) and on the path and its
+/// subdirectories. The caller adds them with
+/// [`crate::integrity_leases::add_tracked_delete_child_denies`], which
+/// removes them again once no session needs them (#1506 item 1).
 ///
 /// Everyone is in every sandbox token's normal groups, so the deny applies no
 /// matter which user or group ACE grants the right. Unsandboxed deletes keep
 /// working because they use the object's own `DELETE` right.
-///
-/// # Safety
-/// Calls Win32 ACL APIs; `path` should exist.
-pub unsafe fn deny_delete_child_route(path: &Path) -> Result<()> {
+pub fn delete_child_route_denies(path: &Path) -> Vec<DeleteChildDeny> {
     // The sandbox may have planted a junction or symlink here; never follow it
     // and write a persistent deny onto whatever it points at.
     if is_reparse_point(path) {
-        return Ok(());
+        return Vec::new();
     }
-    let mut everyone = world_sid()?;
-    let psid = everyone.as_mut_ptr() as *mut c_void;
+    let mut denies = Vec::new();
     if let Some(parent) = path.parent()
         && parent.is_dir()
     {
-        add_deny_delete_child_ace(parent, psid, /*inherit_to_subdirs*/ false)?;
+        denies.push(DeleteChildDeny {
+            path: parent.to_path_buf(),
+            inherit_to_subdirs: false,
+        });
     }
     if path.is_dir() {
-        add_deny_delete_child_ace(path, psid, /*inherit_to_subdirs*/ true)?;
+        denies.push(DeleteChildDeny {
+            path: path.to_path_buf(),
+            inherit_to_subdirs: true,
+        });
     }
-    Ok(())
+    denies
 }
 
 /// Folders strictly between `root` and `path`, nearest to `root` first. Both
@@ -88,10 +110,11 @@ pub(crate) fn ancestors_below_root(path: &Path, root: &Path) -> Vec<PathBuf> {
 /// `path`, which would carry the carve-out away from its deny entries and let
 /// the command recreate it. Each such folder denies `cap_sids` `DELETE` on
 /// itself, and its parent denies Everyone `FILE_DELETE_CHILD` (that directory
-/// only), so neither route to a rename is open. Writes inside those folders
-/// keep working; the sandbox just can't delete or rename the folders
-/// themselves. Unsandboxed renames keep working through the user's own
-/// `DELETE` right. Links are never followed.
+/// only; added to `denies` for the caller to add tracked), so neither route
+/// to a rename is open. Writes inside those folders keep working; the
+/// sandbox just can't delete or rename the folders themselves. Unsandboxed
+/// renames keep working through the user's own `DELETE` right. Links are
+/// never followed.
 ///
 /// # Safety
 /// Caller must ensure every pointer in `cap_sids` is a valid SID.
@@ -99,14 +122,9 @@ pub unsafe fn deny_moving_ancestors(
     path: &Path,
     root: &Path,
     cap_sids: &[*mut c_void],
+    denies: &mut Vec<DeleteChildDeny>,
 ) -> Result<()> {
-    let ancestors = ancestors_below_root(path, root);
-    if ancestors.is_empty() {
-        return Ok(());
-    }
-    let mut everyone = world_sid()?;
-    let everyone = everyone.as_mut_ptr() as *mut c_void;
-    for ancestor in &ancestors {
+    for ancestor in &ancestors_below_root(path, root) {
         if is_reparse_point(ancestor) || !ancestor.is_dir() {
             continue;
         }
@@ -117,7 +135,10 @@ pub unsafe fn deny_moving_ancestors(
             && !is_reparse_point(parent)
             && parent.is_dir()
         {
-            add_deny_delete_child_ace(parent, everyone, /*inherit_to_subdirs*/ false)?;
+            denies.push(DeleteChildDeny {
+                path: parent.to_path_buf(),
+                inherit_to_subdirs: false,
+            });
         }
     }
     Ok(())

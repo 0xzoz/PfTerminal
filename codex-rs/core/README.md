@@ -182,12 +182,23 @@ recreate the read-only path (#1506 item 3, D263). Commands can still write
 inside those folders but can't delete or rename the folders themselves; the
 default `.git`, `.codex` and `.agents` protections sit directly in the root
 and don't add these. Not covered (#1506): `.codex` or `.agents` folders that
-don't exist when the session starts (a command can create them). The deny entries are persistent and visible in the folder's
-security settings. Unsandboxed deletes normally keep working because they use each
+don't exist when the session starts (a command can create them). The
+Everyone deny entries are visible in the folder's security settings while a
+session needs them. Each one a session adds is recorded first, in
+`delete-child-denies.json` next to the integrity-label records (#1506 item 1,
+D261), and removed by the sweep that puts labels back once no live session's
+writable root holds its folder; a session that crashed has its entries
+removed by the next sweep (a later legacy command, or the next TUI or
+app-server start). An entry that was already there and isn't recorded (one
+the user made, or one left by a version before this change) is never
+removed. Without usable records the entries are added untracked and stay, as
+before. Unsandboxed deletes normally keep working because they use each
 object's own `DELETE` right; only a delete that relies on the parent's
-`FILE_DELETE_CHILD` is affected. To remove the entries, run
+`FILE_DELETE_CHILD` is affected. To remove leftover entries, run
 `icacls <dir> /remove:d *S-1-1-0` on the affected directories. That command
-also removes any other Everyone deny entries on them.
+also removes any other Everyone deny entries on them. The sandbox `DELETE`
+denies on folders above nested read-only paths (D263) name the sandbox's own
+capability SIDs, like its other deny entries, and stay.
 
 New `[permissions]` / split filesystem policies remain supported on Windows
 only when they can be enforced directly by the selected Windows backend or

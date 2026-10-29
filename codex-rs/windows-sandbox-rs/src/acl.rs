@@ -692,6 +692,56 @@ pub unsafe fn add_deny_delete_child_ace(
     add_deny_ace(path, psid, DenyAceKind::DeleteChild { inherit_to_subdirs })
 }
 
+/// Whether `path`'s DACL denies `psid` `FILE_DELETE_CHILD` as
+/// [`add_deny_delete_child_ace`] would leave it (so that call would add nothing).
+///
+/// # Safety
+/// Caller must ensure `psid` points to a valid SID.
+pub unsafe fn has_deny_delete_child_ace(
+    path: &Path,
+    psid: *mut c_void,
+    inherit_to_subdirs: bool,
+) -> Result<bool> {
+    let (p_dacl, p_sd) = fetch_dacl_handle(path)?;
+    let present = dacl_has_deny_for_sid(p_dacl, psid, FILE_DELETE_CHILD, inherit_to_subdirs);
+    if !p_sd.is_null() {
+        LocalFree(p_sd as HLOCAL);
+    }
+    Ok(present)
+}
+
+/// #1506 item 1 (D261): removes the explicit entry denying `psid` exactly
+/// `FILE_DELETE_CHILD`, with the inheritance [`add_deny_delete_child_ace`]
+/// gives it, and the copies subdirectories inherited. An entry with other
+/// rights merged in is left as it is. Returns whether an entry was removed.
+///
+/// # Safety
+/// Caller must ensure `psid` points to a valid SID and `path` exists.
+pub unsafe fn remove_deny_delete_child_ace(
+    path: &Path,
+    psid: *mut c_void,
+    inherit_to_subdirs: bool,
+) -> Result<bool> {
+    remove_matching_aces(path, |_, ace| {
+        is_exact_delete_child_deny(ace, psid, inherit_to_subdirs)
+    })
+}
+
+unsafe fn is_exact_delete_child_deny(
+    ace: *const c_void,
+    psid: *mut c_void,
+    inherit_to_subdirs: bool,
+) -> bool {
+    let hdr = &*(ace as *const ACE_HEADER);
+    let flags = DenyAceKind::DeleteChild { inherit_to_subdirs }.inheritance();
+    if hdr.AceType != ACCESS_DENIED_ACE_TYPE || u32::from(hdr.AceFlags) != flags {
+        return false;
+    }
+    let sid = (ace as usize + std::mem::size_of::<ACE_HEADER>() + std::mem::size_of::<u32>())
+        as *mut c_void;
+    (*(ace as *const ACCESS_DENIED_ACE)).Mask == FILE_DELETE_CHILD && EqualSid(sid, psid) != 0
+}
+
 /// Denies `psid` `DELETE` on `path` itself (not inherited), so a sandbox
 /// whose token carries `psid` can't delete, rename or move it through its own
 /// `DELETE` right (#1506 item 3).

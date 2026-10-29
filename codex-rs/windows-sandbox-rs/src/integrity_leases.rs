@@ -19,6 +19,9 @@
 //!   without delete sharing for the session's lifetime. A file that can be
 //!   deleted belongs to a session that ended without releasing its lease (a
 //!   crash): its roots no longer count;
+//! - `delete-child-denies.json`: each Everyone `FILE_DELETE_CHILD` deny a
+//!   legacy session added on a protected path or its parent (#1506 item 1,
+//!   D261), recorded before it is added;
 //! - `registry.lock`, held exclusively while the registry changes.
 //!
 //! A lease ends when the command's last process exits, so processes it
@@ -26,8 +29,13 @@
 //!
 //! Every acquire, every release and the startup sweep
 //! ([`repair_stale_integrity_labels`]) put back the label of each recorded
-//! root that no live session holds.
+//! root that no live session holds, and remove each recorded deny that lies
+//! in no live session's root. A deny that was there before and isn't
+//! recorded is not ours: it is never removed.
 
+use crate::acl::add_deny_delete_child_ace;
+use crate::acl::has_deny_delete_child_ace;
+use crate::acl::remove_deny_delete_child_ace;
 use crate::integrity::LabelAce;
 use crate::integrity::effective_label_is_low;
 use crate::integrity::label_private_dir_medium;
@@ -60,6 +68,7 @@ const REGISTRY_PARENT: &str = "CorbanuTerminalSandbox";
 const REGISTRY_DIR: &str = "integrity-labels";
 const LOCK_FILE: &str = "registry.lock";
 const LABELS_FILE: &str = "labels.json";
+const DENIES_FILE: &str = "delete-child-denies.json";
 const SESSION_PREFIX: &str = "session-";
 const SESSION_SUFFIX: &str = ".json";
 /// Labelling a large tree under the lock can take a while.
@@ -73,6 +82,20 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 #[derive(Default, Serialize, Deserialize)]
 struct Labels {
     roots: BTreeMap<PathBuf, Vec<LabelAce>>,
+}
+
+/// An Everyone `FILE_DELETE_CHILD` deny on `path` (canonical), as
+/// [`crate::acl::add_deny_delete_child_ace`] adds it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) struct DeleteChildDeny {
+    pub(crate) path: PathBuf,
+    pub(crate) inherit_to_subdirs: bool,
+}
+
+/// The denies legacy sessions added and a sweep removes again.
+#[derive(Default, Serialize, Deserialize)]
+struct DeleteChildDenies {
+    entries: BTreeSet<DeleteChildDeny>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -346,7 +369,142 @@ fn sweep(registry: &Path, labels: &mut Labels, log_dir: Option<&Path>) -> Result
         }
     }
     save_labels(registry, labels)?;
+    remove_unneeded_denies(registry, &live, log_dir);
     Ok(restored)
+}
+
+/// #1506 item 1 (D261): removes each recorded deny that lies in no live
+/// session's root. One that can't be removed stays recorded for a later
+/// sweep; a path that is gone, or is a link now, is dropped untouched.
+fn remove_unneeded_denies(registry: &Path, live: &BTreeSet<PathBuf>, log_dir: Option<&Path>) {
+    let mut denies = match load_denies(registry) {
+        Ok(denies) => denies,
+        Err(err) => {
+            log_note(&format!("delete-child denies: {err:#}"), log_dir);
+            return;
+        }
+    };
+    // SAFETY: builds the well-known Everyone SID.
+    let Ok(mut everyone) = (unsafe { crate::token::world_sid() }) else {
+        return;
+    };
+    let everyone = everyone.as_mut_ptr() as *mut std::ffi::c_void;
+    let before = denies.entries.len();
+    denies.entries.retain(|deny| {
+        if live.iter().any(|root| deny.path.starts_with(root)) {
+            return true;
+        }
+        match std::fs::symlink_metadata(&deny.path) {
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return false,
+            Ok(meta) if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 => {
+                return false;
+            }
+            _ => {}
+        }
+        // SAFETY: `everyone` is a valid SID; the path is a folder, not a link.
+        match unsafe { remove_deny_delete_child_ace(&deny.path, everyone, deny.inherit_to_subdirs) }
+        {
+            Ok(_) => false,
+            Err(err) => {
+                log_note(
+                    &format!(
+                        "delete-child denies: could not remove the Everyone deny on {}: {err:#}",
+                        deny.path.display()
+                    ),
+                    log_dir,
+                );
+                true
+            }
+        }
+    });
+    if denies.entries.len() != before
+        && let Err(err) = save_denies(registry, &denies)
+    {
+        log_note(&format!("delete-child denies: {err:#}"), log_dir);
+    }
+}
+
+/// #1506 item 1 (D261): adds each Everyone `FILE_DELETE_CHILD` deny in
+/// `denies` that isn't there yet, recording it first, so a sweep removes it
+/// once it lies in no live session's root, even after a crash. Links are
+/// never followed. Without usable records the denies are added untracked,
+/// as before, so protection never depends on the records.
+pub(crate) fn add_tracked_delete_child_denies(denies: &[DeleteChildDeny], log_dir: Option<&Path>) {
+    let denies: Vec<DeleteChildDeny> = denies
+        .iter()
+        .filter(|deny| {
+            std::fs::symlink_metadata(&deny.path).is_ok_and(|meta| {
+                meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+            })
+        })
+        .filter_map(|deny| {
+            Some(DeleteChildDeny {
+                path: dunce::canonicalize(&deny.path).ok()?,
+                inherit_to_subdirs: deny.inherit_to_subdirs,
+            })
+        })
+        .collect();
+    if denies.is_empty() {
+        return;
+    }
+    // SAFETY: builds the well-known Everyone SID.
+    let Ok(mut everyone) = (unsafe { crate::token::world_sid() }) else {
+        return;
+    };
+    let everyone = everyone.as_mut_ptr() as *mut std::ffi::c_void;
+    let tracked = ensure_registry().and_then(|registry| {
+        let lock = lock(&registry)?;
+        // SAFETY: `everyone` is a valid SID.
+        let result = unsafe { add_tracked_locked(&registry, &denies, everyone) };
+        drop(lock);
+        result
+    });
+    if let Err(err) = tracked {
+        log_note(
+            &format!(
+                "delete-child denies: adding them untracked, so they stay after the session: {err:#}"
+            ),
+            log_dir,
+        );
+        for deny in &denies {
+            // SAFETY: as above; the path is an existing folder.
+            let _ =
+                unsafe { add_deny_delete_child_ace(&deny.path, everyone, deny.inherit_to_subdirs) };
+        }
+    }
+}
+
+/// # Safety
+/// `everyone` must be a valid SID.
+unsafe fn add_tracked_locked(
+    registry: &Path,
+    denies: &[DeleteChildDeny],
+    everyone: *mut std::ffi::c_void,
+) -> Result<()> {
+    let mut records = load_denies(registry)?;
+    let mut missing = Vec::new();
+    for deny in denies {
+        if !has_deny_delete_child_ace(&deny.path, everyone, deny.inherit_to_subdirs)? {
+            missing.push(deny);
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let before = records.entries.len();
+    records
+        .entries
+        .extend(missing.iter().map(|deny| (*deny).clone()));
+    // Recorded before they change, so a crash cannot lose them.
+    if records.entries.len() != before {
+        save_denies(registry, &records)?;
+    }
+    for deny in missing {
+        if !add_deny_delete_child_ace(&deny.path, everyone, deny.inherit_to_subdirs)? {
+            anyhow::bail!("could not add the Everyone deny on {}", deny.path.display());
+        }
+    }
+    Ok(())
 }
 
 fn restore(root: &Path, original: &[LabelAce]) -> Result<()> {
@@ -471,6 +629,41 @@ fn save_labels(registry: &Path, labels: &Labels) -> Result<()> {
         .with_context(|| format!("write {}", tmp.display()))?;
     drop(file);
     std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))
+}
+
+fn load_denies(registry: &Path) -> Result<DeleteChildDenies> {
+    let path = registry.join(DENIES_FILE);
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
+            format!(
+                "{} is damaged, so the Windows sandbox can't tell which Everyone delete-child denies it added; remove it (the denies stay; icacls <dir> /remove:d *S-1-1-0 removes them)",
+                path.display()
+            )
+        }),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(DeleteChildDenies::default()),
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+fn save_denies(registry: &Path, denies: &DeleteChildDenies) -> Result<()> {
+    let path = registry.join(DENIES_FILE);
+    let tmp = registry.join(format!("{DENIES_FILE}.tmp"));
+    let mut file = File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    file.write_all(&serde_json::to_vec_pretty(denies)?)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("write {}", tmp.display()))?;
+    drop(file);
+    std::fs::rename(&tmp, &path).with_context(|| format!("replace {}", path.display()))
+}
+
+/// Tests only: the recorded denies.
+#[cfg(test)]
+pub(crate) fn recorded_delete_child_denies() -> Result<Vec<DeleteChildDeny>> {
+    let registry = ensure_registry()?;
+    let lock = lock(&registry)?;
+    let denies = load_denies(&registry)?;
+    drop(lock);
+    Ok(denies.entries.into_iter().collect())
 }
 
 /// Tests only: the recorded roots.
