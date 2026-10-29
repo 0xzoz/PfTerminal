@@ -248,6 +248,56 @@ fn command_execution_started_and_completed_translate_to_thread_events() {
     );
 }
 
+/// #873: a policy refusal keeps its own JSONL status and its reason, so it
+/// is never reported as a declined approval or a failed run.
+#[test]
+fn command_execution_refused_maps_to_refused_status() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+    let completed = processor.collect_thread_events(ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            item: ThreadItem::CommandExecution {
+                id: "cmd-refused".to_string(),
+                command: "echo blocked".to_string(),
+                cwd: test_path_buf("/tmp/project").abs().into(),
+                process_id: None,
+                plugin_id: None,
+                script_path: None,
+                source: CommandExecutionSource::Agent,
+                status: ApiCommandExecutionStatus::Refused,
+                command_actions: Vec::<CommandAction>::new(),
+                aggregated_output: Some("policy forbids commands starting with `echo`".to_string()),
+                exit_code: Some(-1),
+                duration_ms: Some(0),
+            },
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+        },
+    ));
+    let item = ExecThreadItem {
+        id: "item_0".to_string(),
+        details: ThreadItemDetails::CommandExecution(CommandExecutionItem {
+            command: "echo blocked".to_string(),
+            aggregated_output: "policy forbids commands starting with `echo`".to_string(),
+            exit_code: Some(-1),
+            status: CommandExecutionStatus::Refused,
+        }),
+    };
+    assert_eq!(
+        completed,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::ItemCompleted(ItemCompletedEvent {
+                item: item.clone(),
+            })],
+            status: CodexStatus::Running,
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(&item).expect("serialize item")["status"],
+        json!("refused")
+    );
+}
+
 #[test]
 fn empty_reasoning_items_are_ignored() {
     let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
@@ -734,6 +784,7 @@ fn collab_spawn_begin_and_end_emit_item_events() {
                 prompt: Some("draft a plan".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: None,
+                provider_account: None,
                 agents_states: std::collections::HashMap::new(),
             },
             thread_id: "thread-parent".to_string(),
@@ -751,6 +802,7 @@ fn collab_spawn_begin_and_end_emit_item_events() {
                 prompt: Some("draft a plan".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: None,
+                provider_account: None,
                 agents_states: std::collections::HashMap::from([(
                     "thread-child".to_string(),
                     ApiCollabAgentState {
@@ -1155,9 +1207,7 @@ fn plan_update_emits_started_then_updated_then_completed() {
                         }),
                     },
                 }),
-                ThreadEvent::TurnCompleted(TurnCompletedEvent {
-                    usage: Usage::default(),
-                }),
+                ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: None }),
             ],
             status: CodexStatus::InitiateShutdown,
         }
@@ -1254,6 +1304,7 @@ fn token_usage_update_is_emitted_on_turn_completion() {
                     },
                     model_context_window: Some(128_000),
                 },
+                account_usage: None,
             },
         ));
     assert_eq!(
@@ -1283,13 +1334,13 @@ fn token_usage_update_is_emitted_on_turn_completion() {
         completed,
         CollectedThreadEvents {
             events: vec![ThreadEvent::TurnCompleted(TurnCompletedEvent {
-                usage: Usage {
+                usage: Some(Usage {
                     input_tokens: 10,
                     cached_input_tokens: 3,
                     cache_write_input_tokens: 4,
                     output_tokens: 29,
                     reasoning_output_tokens: 7,
-                },
+                }),
             })],
             status: CodexStatus::InitiateShutdown,
         }
@@ -1325,7 +1376,7 @@ fn turn_completion_recovers_final_message_from_turn_items() {
         completed,
         CollectedThreadEvents {
             events: vec![ThreadEvent::TurnCompleted(TurnCompletedEvent {
-                usage: Usage::default(),
+                usage: None,
             })],
             status: CodexStatus::InitiateShutdown,
         }
@@ -1419,9 +1470,7 @@ fn turn_completion_reconciles_started_items_from_turn_items() {
                         }),
                     },
                 }),
-                ThreadEvent::TurnCompleted(TurnCompletedEvent {
-                    usage: Usage::default(),
-                }),
+                ThreadEvent::TurnCompleted(TurnCompletedEvent { usage: None }),
             ],
             status: CodexStatus::InitiateShutdown,
         }
@@ -1470,7 +1519,7 @@ fn turn_completion_overwrites_stale_final_message_from_turn_items() {
         completed,
         CollectedThreadEvents {
             events: vec![ThreadEvent::TurnCompleted(TurnCompletedEvent {
-                usage: Usage::default(),
+                usage: None,
             })],
             status: CodexStatus::InitiateShutdown,
         }
@@ -1515,7 +1564,7 @@ fn turn_completion_preserves_streamed_final_message_when_turn_items_are_empty() 
         completed,
         CollectedThreadEvents {
             events: vec![ThreadEvent::TurnCompleted(TurnCompletedEvent {
-                usage: Usage::default(),
+                usage: None,
             })],
             status: CodexStatus::InitiateShutdown,
         }
@@ -1595,7 +1644,7 @@ fn turn_completion_falls_back_to_final_plan_text() {
         completed,
         CollectedThreadEvents {
             events: vec![ThreadEvent::TurnCompleted(TurnCompletedEvent {
-                usage: Usage::default(),
+                usage: None,
             })],
             status: CodexStatus::InitiateShutdown,
         }
@@ -1680,5 +1729,106 @@ fn model_reroute_surfaces_as_error_item() {
         ThreadItemDetails::Error(ErrorItem {
             message: "model rerouted: gpt-5 -> gpt-5-mini (HighRiskCyberActivity)".to_string(),
         })
+    );
+}
+
+fn completed_turn(thread_id: &str, turn_id: &str) -> ServerNotification {
+    ServerNotification::TurnCompleted(codex_app_server_protocol::TurnCompletedNotification {
+        thread_id: thread_id.to_string(),
+        turn: Turn {
+            id: turn_id.to_string(),
+            items_view: codex_app_server_protocol::TurnItemsView::Full,
+            items: Vec::new(),
+            status: TurnStatus::Completed,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+        },
+    })
+}
+
+fn usage_update(thread_id: &str, turn_id: &str, input_tokens: i64) -> ServerNotification {
+    ServerNotification::ThreadTokenUsageUpdated(
+        codex_app_server_protocol::ThreadTokenUsageUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: turn_id.to_string(),
+            token_usage: ThreadTokenUsage {
+                total: TokenUsageBreakdown {
+                    total_tokens: input_tokens,
+                    input_tokens,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_output_tokens: 0,
+                },
+                last: TokenUsageBreakdown {
+                    total_tokens: input_tokens,
+                    input_tokens,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_output_tokens: 0,
+                },
+                model_context_window: None,
+            },
+            account_usage: None,
+        },
+    )
+}
+
+#[test]
+fn issue290_turn_completion_without_usage_update_reports_no_usage() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let completed = processor.collect_thread_events(completed_turn("thread-1", "turn-1"));
+
+    assert_eq!(
+        completed,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::TurnCompleted(TurnCompletedEvent {
+                usage: None,
+            })],
+            status: CodexStatus::InitiateShutdown,
+        }
+    );
+    let serialized = serde_json::to_value(&completed.events[0]).expect("serialize event");
+    assert_eq!(serialized["usage"], serde_json::Value::Null);
+}
+
+#[test]
+fn issue290_usage_update_for_another_thread_is_not_reported_for_this_thread() {
+    let mut processor = EventProcessorWithJsonOutput::new(/*last_message_path*/ None);
+
+    let _ = processor.collect_thread_events(usage_update(
+        "thread-2", "turn-2", /*input_tokens*/ 58_128,
+    ));
+
+    let completed = processor.collect_thread_events(completed_turn("thread-1", "turn-1"));
+    assert_eq!(
+        completed,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::TurnCompleted(TurnCompletedEvent {
+                usage: None,
+            })],
+            status: CodexStatus::InitiateShutdown,
+        }
+    );
+
+    let completed_other = processor.collect_thread_events(completed_turn("thread-2", "turn-2"));
+    assert_eq!(
+        completed_other,
+        CollectedThreadEvents {
+            events: vec![ThreadEvent::TurnCompleted(TurnCompletedEvent {
+                usage: Some(Usage {
+                    input_tokens: 58_128,
+                    cached_input_tokens: 0,
+                    cache_write_input_tokens: 0,
+                    output_tokens: 0,
+                    reasoning_output_tokens: 0,
+                }),
+            })],
+            status: CodexStatus::InitiateShutdown,
+        }
     );
 }

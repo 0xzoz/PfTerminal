@@ -1,4 +1,5 @@
 mod find_up;
+mod glob_scan;
 
 use bytes::Bytes;
 use codex_protocol::config_types::WindowsSandboxLevel;
@@ -7,6 +8,7 @@ use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::permissions::FileSystemAccessMode;
+use codex_protocol::permissions::FileSystemGlobScan;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
 use codex_protocol::permissions::FileSystemSandboxEntryMissingPathBehavior;
@@ -20,6 +22,7 @@ pub use find_up::FindUpErrorPolicy;
 pub use find_up::find_nearest_ancestor_with_markers;
 pub use find_up::find_nearest_native_ancestor_with_markers;
 use futures::Stream;
+pub use glob_scan::ExecFileSystemGlobScan;
 use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashSet;
@@ -127,9 +130,17 @@ pub struct WalkOutcome {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecFileSystemPath {
-    Path { path: PathUri },
-    GlobPattern { pattern: String },
-    Special { value: FileSystemSpecialPath },
+    Path {
+        path: PathUri,
+    },
+    GlobPattern {
+        pattern: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scan: Option<ExecFileSystemGlobScan>,
+    },
+    Special {
+        value: FileSystemSpecialPath,
+    },
 }
 
 impl From<FileSystemPath> for ExecFileSystemPath {
@@ -138,7 +149,10 @@ impl From<FileSystemPath> for ExecFileSystemPath {
             FileSystemPath::Path { path } => Self::Path {
                 path: PathUri::from_abs_path(&path),
             },
-            FileSystemPath::GlobPattern { pattern } => Self::GlobPattern { pattern },
+            FileSystemPath::GlobPattern { pattern, scan } => Self::GlobPattern {
+                pattern,
+                scan: scan.map(Into::into),
+            },
             FileSystemPath::Special { value } => Self::Special { value },
         }
     }
@@ -152,7 +166,10 @@ impl TryFrom<ExecFileSystemPath> for FileSystemPath {
             ExecFileSystemPath::Path { path } => Self::Path {
                 path: path.to_abs_path()?,
             },
-            ExecFileSystemPath::GlobPattern { pattern } => Self::GlobPattern { pattern },
+            ExecFileSystemPath::GlobPattern { pattern, scan } => Self::GlobPattern {
+                pattern,
+                scan: scan.map(FileSystemGlobScan::try_from).transpose()?,
+            },
             ExecFileSystemPath::Special { value } => Self::Special { value },
         })
     }
@@ -346,8 +363,16 @@ impl FileSystemSandboxContext {
             return true;
         };
         let file_system_policy = permissions.file_system_sandbox_policy();
+        // #506: a directory that may not be listed needs the sandbox too, and
+        // so does a path that may not be moved (#598), and keeping the
+        // keychain services away on macOS (#758), and denying user
+        // namespaces on Linux (#826), as for commands.
         matches!(file_system_policy.kind, FileSystemSandboxKind::Restricted)
-            && !file_system_policy.has_full_disk_write_access()
+            && (!file_system_policy.has_full_disk_write_access()
+                || !file_system_policy.get_unlistable_directories().is_empty()
+                || !file_system_policy.get_unmovable_paths().is_empty()
+                || (cfg!(target_os = "macos") && file_system_policy.denies_keychain_services())
+                || (cfg!(target_os = "linux") && file_system_policy.denies_user_namespaces()))
     }
 
     pub fn has_cwd_dependent_permissions(&self) -> bool {
@@ -356,7 +381,9 @@ impl FileSystemSandboxContext {
                 file_system: ExecManagedFileSystemPermissions::Restricted { entries, .. },
                 ..
             } => entries.iter().any(|entry| match &entry.path {
-                ExecFileSystemPath::GlobPattern { pattern } => !Path::new(pattern).is_absolute(),
+                ExecFileSystemPath::GlobPattern { pattern, .. } => {
+                    !Path::new(pattern).is_absolute()
+                }
                 ExecFileSystemPath::Special {
                     value: FileSystemSpecialPath::ProjectRoots { .. },
                 } => true,

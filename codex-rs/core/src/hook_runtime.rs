@@ -180,6 +180,7 @@ pub(crate) async fn run_pre_tool_use_hooks(
         matcher_aliases: tool_name.matcher_aliases().to_vec(),
         tool_use_id,
         tool_input: tool_input.clone(),
+        block_if_hook_cannot_start: turn_context.environments.may_run_remotely(),
     };
     let hooks = sess.hooks();
     let preview_runs = hooks.preview_pre_tool_use(&request);
@@ -634,8 +635,14 @@ pub(crate) async fn record_additional_contexts(
         return;
     }
 
-    sess.record_conversation_items(turn_context, developer_messages.as_slice())
-        .await;
+    sess.record_conversation_items_from(
+        turn_context,
+        developer_messages.as_slice(),
+        Some(crate::security::ingress::MessageOrigin::External(
+            codex_protocol::provenance::SourceKind::Hook,
+        )),
+    )
+    .await;
 }
 
 fn additional_context_messages(additional_contexts: Vec<String>) -> Vec<ResponseItem> {

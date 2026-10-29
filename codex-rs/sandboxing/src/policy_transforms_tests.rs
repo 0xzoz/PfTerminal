@@ -44,6 +44,32 @@ fn full_access_restricted_policy_skips_platform_sandbox_when_network_is_enabled(
     );
 }
 
+/// #826: denying user namespaces needs the Linux sandbox, which enforces it,
+/// also for a profile that otherwise writes everywhere with network on.
+/// Other systems ignore the entry.
+#[test]
+fn issue_826_user_namespace_denial_needs_the_linux_sandbox() {
+    let policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry {
+            path: FileSystemPath::Special {
+                value: FileSystemSpecialPath::Root,
+            },
+            access: FileSystemAccessMode::Write,
+            missing_path_behavior: None,
+        },
+        FileSystemSandboxEntry::deny_user_namespaces(),
+    ]);
+
+    assert_eq!(
+        should_require_platform_sandbox(
+            &policy,
+            NetworkSandboxPolicy::Enabled,
+            /*has_managed_network_requirements*/ false
+        ),
+        cfg!(target_os = "linux")
+    );
+}
+
 #[test]
 fn root_write_policy_with_carveouts_still_uses_platform_sandbox() {
     let blocked = AbsolutePathBuf::resolve_path_against_base(
@@ -167,6 +193,7 @@ fn normalize_additional_permissions_rejects_glob_read_grants() {
         file_system: Some(FileSystemPermissions {
             entries: vec![FileSystemSandboxEntry {
                 path: FileSystemPath::GlobPattern {
+                    scan: None,
                     pattern: "**/*.env".to_string(),
                 },
                 access: FileSystemAccessMode::Read,
@@ -190,6 +217,7 @@ fn normalize_additional_permissions_preserves_deny_globs() {
         file_system: Some(FileSystemPermissions {
             entries: vec![FileSystemSandboxEntry {
                 path: FileSystemPath::GlobPattern {
+                    scan: None,
                     pattern: "**/*.env".to_string(),
                 },
                 access: FileSystemAccessMode::Deny,
@@ -207,6 +235,7 @@ fn normalize_additional_permissions_preserves_deny_globs() {
             file_system: Some(FileSystemPermissions {
                 entries: vec![FileSystemSandboxEntry {
                     path: FileSystemPath::GlobPattern {
+                        scan: None,
                         pattern: "**/*.env".to_string(),
                     },
                     access: FileSystemAccessMode::Deny,
@@ -571,6 +600,7 @@ fn intersect_permission_profiles_rejects_concrete_grants_matched_by_requested_de
                 },
                 FileSystemSandboxEntry {
                     path: FileSystemPath::GlobPattern {
+                        scan: None,
                         pattern: "**/*.env".to_string(),
                     },
                     access: FileSystemAccessMode::Deny,
@@ -611,6 +641,7 @@ fn intersect_permission_profiles_materializes_relative_deny_globs_for_reuse() {
     };
     let deny_env_files = FileSystemSandboxEntry {
         path: FileSystemPath::GlobPattern {
+            scan: None,
             pattern: "**/*.env".to_string(),
         },
         access: FileSystemAccessMode::Deny,
@@ -641,6 +672,7 @@ fn intersect_permission_profiles_materializes_relative_deny_globs_for_reuse() {
                     },
                     FileSystemSandboxEntry {
                         path: FileSystemPath::GlobPattern {
+                            scan: None,
                             pattern: request_cwd.join("**/*.env").to_string_lossy().into_owned(),
                         },
                         access: FileSystemAccessMode::Deny,
@@ -715,6 +747,7 @@ fn intersect_permission_profiles_uses_granted_bounded_glob_scan_depth() {
     };
     let deny_env_files = FileSystemSandboxEntry {
         path: FileSystemPath::GlobPattern {
+            scan: None,
             pattern: "**/*.env".to_string(),
         },
         access: FileSystemAccessMode::Deny,
@@ -743,6 +776,7 @@ fn intersect_permission_profiles_uses_granted_bounded_glob_scan_depth() {
                     root_write,
                     FileSystemSandboxEntry {
                         path: FileSystemPath::GlobPattern {
+                            scan: None,
                             pattern: AbsolutePathBuf::resolve_path_against_base(
                                 "**/*.env",
                                 cwd.as_path()
@@ -773,6 +807,7 @@ fn intersect_permission_profiles_uses_granted_unbounded_glob_scan_depth() {
     };
     let deny_env_files = FileSystemSandboxEntry {
         path: FileSystemPath::GlobPattern {
+            scan: None,
             pattern: "**/*.env".to_string(),
         },
         access: FileSystemAccessMode::Deny,
@@ -801,6 +836,7 @@ fn intersect_permission_profiles_uses_granted_unbounded_glob_scan_depth() {
                     root_write,
                     FileSystemSandboxEntry {
                         path: FileSystemPath::GlobPattern {
+                            scan: None,
                             pattern: AbsolutePathBuf::resolve_path_against_base(
                                 "**/*.env",
                                 cwd.as_path()
@@ -873,6 +909,7 @@ fn merge_file_system_policy_with_additional_permissions_preserves_unreadable_roo
 fn merge_file_system_policy_with_additional_permissions_carries_bounded_glob_scan_depth() {
     let deny_env_files = FileSystemSandboxEntry {
         path: FileSystemPath::GlobPattern {
+            scan: None,
             pattern: "**/*.env".to_string(),
         },
         access: FileSystemAccessMode::Deny,

@@ -145,6 +145,7 @@ async fn windows_restricted_token_rejects_exact_and_glob_deny_read_policy() -> a
         },
         FileSystemSandboxEntry {
             path: FileSystemPath::GlobPattern {
+                scan: None,
                 pattern: "**/*.env".to_string(),
             },
             access: FileSystemAccessMode::Deny,
@@ -196,7 +197,10 @@ async fn windows_restricted_token_rejects_exact_and_glob_deny_read_policy() -> a
 
     assert_eq!(
         err.to_string(),
-        "unsupported operation: windows unelevated restricted-token sandbox cannot enforce deny-read restrictions directly; refusing to run unsandboxed"
+        format!(
+            "unsupported operation: {}",
+            codex_sandboxing::UNELEVATED_DENY_READ_REFUSAL
+        )
     );
     Ok(())
 }
@@ -287,6 +291,7 @@ async fn windows_elevated_enforces_deny_read_and_protects_setup_marker() -> anyh
         },
         FileSystemSandboxEntry {
             path: FileSystemPath::GlobPattern {
+                scan: None,
                 pattern: "**/*.env".to_string(),
             },
             access: FileSystemAccessMode::Deny,
