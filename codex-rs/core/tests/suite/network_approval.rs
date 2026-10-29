@@ -1328,14 +1328,17 @@ async fn remote_guardian_network_decisions_are_scoped_to_each_request_and_enviro
     ];
 
     let mut scripted_responses = Vec::with_capacity(cases.len() * 3 + 4);
-    for (call_id, command, _, rationale, approved) in &cases {
+    for (call_id, command, environment, rationale, approved) in &cases {
         if *call_id == "local-guardian-deny" {
             scripted_responses.push(sse(vec![
                 ev_response_created("resp-remote-guardian-session-approval-parent"),
                 ev_function_call(
                     session_call_id,
                     "exec_command",
-                    &serde_json::to_string(&network_exec_args(&session_command))?,
+                    &serde_json::to_string(&network_exec_args_for(
+                        REMOTE_ENVIRONMENT_ID,
+                        &session_command,
+                    ))?,
                 ),
                 ev_completed("resp-remote-guardian-session-approval-parent"),
             ]));
@@ -1350,7 +1353,10 @@ async fn remote_guardian_network_decisions_are_scoped_to_each_request_and_enviro
             ev_function_call(
                 call_id,
                 "exec_command",
-                &serde_json::to_string(&network_exec_args(command))?,
+                &serde_json::to_string(&network_exec_args_for(
+                    &environment.environment_id,
+                    command,
+                ))?,
             ),
             ev_completed(&format!("resp-{call_id}-parent")),
         ]));
@@ -1376,7 +1382,10 @@ async fn remote_guardian_network_decisions_are_scoped_to_each_request_and_enviro
         ev_function_call(
             session_probe_call_id,
             "exec_command",
-            &serde_json::to_string(&network_exec_args(&session_probe_command))?,
+            &serde_json::to_string(&network_exec_args_for(
+                REMOTE_ENVIRONMENT_ID,
+                &session_probe_command,
+            ))?,
         ),
         ev_completed("resp-remote-guardian-session-probe-parent"),
     ]));
@@ -1462,7 +1471,19 @@ async fn remote_guardian_network_decisions_are_scoped_to_each_request_and_enviro
             },
         }));
     }
-    assert_eq!(guardian_network_actions(&responses)?, expected_actions);
+    // A remote call runs the remote default shell, whose path may differ.
+    let mut actions = guardian_network_actions(&responses)?;
+    for (action, (_, _, environment, _, _)) in actions.iter_mut().zip(&cases) {
+        if environment.environment_id == REMOTE_ENVIRONMENT_ID {
+            let shell = &mut action["trigger"]["command"][0];
+            assert!(
+                shell.as_str().is_some_and(|shell| shell.ends_with("bash")),
+                "{shell}"
+            );
+            *shell = json!("/bin/sh");
+        }
+    }
+    assert_eq!(actions, expected_actions);
 
     let requests = responses.requests();
     for (call_id, marker) in [
@@ -1543,7 +1564,7 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
         "fetch from the local environment",
         environments.clone(),
         ApprovalsReviewer::User,
-        AskForApproval::UnlessTrusted,
+        AskForApproval::OnRequest,
     )
     .await?;
     let approval = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID).await?;
@@ -1568,7 +1589,7 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
         "fetch from the remote environment",
         environments.clone(),
         ApprovalsReviewer::User,
-        AskForApproval::UnlessTrusted,
+        AskForApproval::OnRequest,
     )
     .await?;
     let approval = expect_network_approval(&test, REMOTE_ENVIRONMENT_ID).await?;
@@ -1786,7 +1807,7 @@ fn network_fetch_args(environment_id: &str) -> Value {
     let command = format!(
         "python3 -c \"import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); print('OK:' + opener.open('http://{NETWORK_TEST_HOST}', timeout=2).read().decode(errors='replace'))\""
     );
-    let mut args = network_exec_args(&command);
+    let mut args = network_exec_args_for(environment_id, &command);
     args["environment_id"] = json!(environment_id);
     args
 }
@@ -1798,6 +1819,18 @@ fn network_exec_args(command: &str) -> Value {
         "login": false,
         "yield_time_ms": 1_000,
     })
+}
+
+/// A remote environment runs only its own default shell, so its calls omit
+/// `shell`.
+fn network_exec_args_for(environment_id: &str, command: &str) -> Value {
+    let mut args = network_exec_args(command);
+    if environment_id != LOCAL_ENVIRONMENT_ID
+        && let Some(args) = args.as_object_mut()
+    {
+        args.remove("shell");
+    }
+    args
 }
 
 fn remote_network_proxy_request_command(marker: &str) -> String {
