@@ -162,8 +162,8 @@ Other ways to start a process (#1507), measured on the hosted Windows runner
 activating Explorer's `ShellWindows` (E_ACCESSDENIED) and the Task
 Scheduler (opening its task folder fails with 0x80070003). Naming another
 legacy command's process as the parent (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`)
-is refused too since D259: each legacy command's token carries its own
-identity SID, and its default DACL (what its processes, threads, token and
+is refused too since D259 (but see #1560 below): each legacy command's token
+carries its own identity SID, and its default DACL (what its processes, threads, token and
 the pipes and other objects it creates without explicit security get)
 grants full access only to the user, SYSTEM and that SID, and read and
 execute to Everyone, the logon SID and the capability SIDs. A legacy command

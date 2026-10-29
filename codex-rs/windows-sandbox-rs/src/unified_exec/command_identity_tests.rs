@@ -527,12 +527,11 @@ fn legacy_command_keeps_write_access_to_its_own_processes() {
             sandbox_log(codex_home.path())
         )
     });
-    let denied: Vec<&str> = line
+    let denied = line
         .split(' ')
-        .filter(|part| part.contains('=') && !part.ends_with("=ok") && !part.ends_with("=true"))
-        .collect();
+        .any(|part| part.contains('=') && !part.ends_with("=ok") && !part.ends_with("=true"));
     assert!(
-        denied.is_empty() && line.contains("child_token_adjust_default=ok"),
+        !denied && line.contains("child_token_adjust_default=ok"),
         "a legacy command lost access to its own processes: {line}"
     );
 }
