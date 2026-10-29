@@ -155,6 +155,50 @@ fn literal_text_is_distinct_from_named_enter_key() -> Result<()> {
     Ok(())
 }
 
+/// The od lines of a capture, whitespace-normalized: BSD od pads its columns
+/// ("2f  78").
+fn od_reads(capture: &str) -> Vec<String> {
+    capture
+        .lines()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .filter(|line| !line.is_empty() && line != "ready")
+        .collect()
+}
+
+#[test]
+fn input_after_escape_is_not_read_with_the_escape() -> Result<()> {
+    let Some(server) = server_or_skip("escape_then_text")? else {
+        return Ok(());
+    };
+    // Polls the terminal every 150 ms without blocking (`min 0 time 0`) and
+    // prints the bytes of each nonempty read(2) on its own line, like a busy
+    // TUI. Without a gap, Esc and the text that follows it land in one read,
+    // which crossterm parses as Alt+`/`. The first read waits a second, longer
+    // than the minimum gap, like a reader descheduled on a loaded runner: the
+    // text must still wait until the Esc has been read.
+    let session = server.new_session(SessionSpec::new(
+        "escape",
+        TerminalSize::new(/*columns*/ 40, /*rows*/ 8),
+        command_for_shell(
+            "stty raw -echo min 0 time 0; printf 'ready\r\n'; sleep 1; \
+             while :; do sleep 0.15; dd bs=64 count=1 2>/dev/null | od -An -tx1; printf '\r'; done",
+        ),
+    ))?;
+    let pane = session.primary_pane();
+    pane.wait_stable_contains("ready", Duration::from_secs(/*secs*/ 3))?;
+
+    pane.send_key(TmuxKey::Escape)?;
+    pane.send_literal("/x")?;
+    let capture = pane.wait_stable_until(
+        "a read containing 2f 78",
+        Duration::from_secs(/*secs*/ 3),
+        |capture| od_reads(capture).iter().any(|read| read.contains("2f 78")),
+    )?;
+    let reads = od_reads(&capture);
+    pretty_assertions::assert_eq!(reads, vec!["1b", "2f 78"]);
+    Ok(())
+}
+
 #[test]
 fn viewport_and_scrollback_are_captured_separately() -> Result<()> {
     let Some(server) = server_or_skip("viewport_and_scrollback")? else {

@@ -18,6 +18,7 @@ pub use auth_fixtures::ChatGptAuthFixture;
 pub use auth_fixtures::ChatGptIdTokenClaims;
 pub use auth_fixtures::encode_id_token;
 pub use auth_fixtures::write_chatgpt_auth;
+pub use auth_fixtures::write_named_chatgpt_auth;
 use codex_app_server_protocol::JSONRPCResponse;
 pub use config::MockResponsesConfig;
 pub use config::write_mock_responses_config_toml;

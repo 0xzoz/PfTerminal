@@ -48,8 +48,8 @@ fn stream(events: Vec<Value>, sink: Option<Arc<Sink>>) -> ResponseStream {
             bytes: futures::stream::iter(vec![Ok(data.into())]).boxed(),
         },
         Duration::from_secs(1),
-        None,
-        None,
+        /*telemetry*/ None,
+        /*turn_state*/ None,
         sink.map(|value| value as Arc<dyn ResponsesUsageObserver>),
     )
 }
@@ -277,16 +277,14 @@ async fn responses_accounting_awaits_observation_before_completion() {
         assert_eq!(sink.values.lock().unwrap().len(), 1);
         sink.gate.as_ref().unwrap().add_permits(1);
         let output = drain(stream).await;
-        assert_eq!(completed(&output), usize::from(!reject));
-        assert_eq!(
-            output.iter().filter(|v| v.is_err()).count(),
-            usize::from(reject)
-        );
+        // A rejected observation never ends the stream.
+        assert_eq!(completed(&output), 1);
+        assert_eq!(output.iter().filter(|v| v.is_err()).count(), 0);
     }
 }
 
 #[tokio::test]
-async fn responses_accounting_invalid_usage_latches_and_stops() {
+async fn responses_accounting_invalid_usage_stops_observing_not_the_stream() {
     let sink = Arc::new(Sink::default());
     let output = drain(stream(
         vec![
@@ -300,10 +298,10 @@ async fn responses_accounting_invalid_usage_latches_and_stops() {
         *sink.values.lock().unwrap(),
         vec![(1, Err(InvalidResponsesUsage))]
     );
-    assert_eq!(completed(&output), 0);
-    assert_eq!(output.len(), 2);
+    // Only the invalid event was observed; the stream still completed.
+    assert_eq!(completed(&output), 1, "{output:?}");
     assert!(matches!(output[0], Ok(ResponseEvent::RateLimits(_))));
-    assert!(output[1].is_err());
+    assert_eq!(output.iter().filter(|v| v.is_err()).count(), 0);
 }
 
 #[tokio::test]
@@ -316,7 +314,7 @@ async fn responses_accounting_none_preserves_legacy_stream() {
             json!({"input_tokens":1,"output_tokens":2,"total_tokens":3}),
         ),
     ];
-    let output = drain(stream(payload.clone(), None)).await;
+    let output = drain(stream(payload.clone(), /*sink*/ None)).await;
     assert_eq!(completed(&output), 1);
     let data: String = payload
         .iter()
@@ -329,8 +327,8 @@ async fn responses_accounting_none_preserves_legacy_stream() {
             bytes: futures::stream::iter(vec![Ok(data.into())]).boxed(),
         },
         Duration::from_secs(1),
-        None,
-        None,
+        /*telemetry*/ None,
+        /*turn_state*/ None,
     );
     assert_eq!(format!("{output:?}"), format!("{:?}", drain(legacy).await));
 }
@@ -384,5 +382,75 @@ fn vercel_gateway_charge_is_read_with_the_final_usage() {
             .unwrap()
             .billed_usd,
         Some("0.25".to_string())
+    );
+}
+
+/// The Images API states input as text plus image parts and no cache fields:
+/// a generation whose input is stated as all text used no cache. Anything
+/// else keeps the cache counts unknown.
+#[test]
+fn image_generation_body_usage_reads_all_text_input_as_no_cache() {
+    let parse = |usage: serde_json::Value| {
+        image_generation_body_usage(
+            json!({"created": 1, "data": [], "usage": usage})
+                .to_string()
+                .as_bytes(),
+        )
+        .expect("valid usage")
+        .expect("usage present")
+    };
+    let full = parse(json!({
+        "input_tokens": 12,
+        "input_tokens_details": {"text_tokens": 12, "image_tokens": 0},
+        "output_tokens": 272,
+        "output_tokens_details": {"text_tokens": 0, "image_tokens": 272},
+        "total_tokens": 284
+    }));
+    assert_eq!(
+        full,
+        ResponsesUsagePatch {
+            input_tokens: ResponsesTokenPresence::Number(12),
+            cached_tokens: ResponsesTokenPresence::Number(0),
+            cache_write_tokens: ResponsesTokenPresence::Number(0),
+            output_tokens: ResponsesTokenPresence::Number(272),
+            reasoning_tokens: ResponsesTokenPresence::Missing,
+            total_tokens: ResponsesTokenPresence::Number(284),
+            billed_usd: None,
+        }
+    );
+
+    let partial = parse(json!({
+        "input_tokens": 12,
+        "input_tokens_details": {"text_tokens": 10},
+        "output_tokens": 272,
+        "total_tokens": 284
+    }));
+    assert_eq!(partial.cached_tokens, ResponsesTokenPresence::Missing);
+    assert_eq!(partial.cache_write_tokens, ResponsesTokenPresence::Missing);
+
+    let image_input = parse(json!({
+        "input_tokens": 12,
+        "input_tokens_details": {"text_tokens": 4, "image_tokens": 8},
+        "output_tokens": 272,
+        "total_tokens": 284
+    }));
+    assert_eq!(image_input.cached_tokens, ResponsesTokenPresence::Missing);
+    assert_eq!(
+        image_input.cache_write_tokens,
+        ResponsesTokenPresence::Missing
+    );
+
+    let stated = parse(json!({
+        "input_tokens": 12,
+        "input_tokens_details": {"text_tokens": 12, "image_tokens": 0, "cached_tokens": 4},
+        "output_tokens": 272,
+        "total_tokens": 284
+    }));
+    assert_eq!(stated.cached_tokens, ResponsesTokenPresence::Number(4));
+    assert_eq!(stated.cache_write_tokens, ResponsesTokenPresence::Missing);
+
+    assert_eq!(
+        image_generation_body_usage(br#"{"created": 1, "data": []}"#),
+        Ok(None)
     );
 }

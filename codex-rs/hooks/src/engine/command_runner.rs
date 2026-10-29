@@ -29,6 +29,9 @@ pub(crate) struct CommandRunResult {
     pub stdout: String,
     pub stderr: String,
     pub error: Option<String>,
+    /// The hook command never received its input: the process could not be
+    /// spawned or its stdin could not be written.
+    pub start_failed: bool,
 }
 
 #[tracing::instrument(
@@ -146,12 +149,19 @@ struct CommandRunCompletion {
     outcome: &'static str,
 }
 
+impl CommandRunCompletion {
+    fn start_failed(&self) -> bool {
+        matches!(self.outcome, "spawn_error" | "stdin_error")
+    }
+}
+
 fn finish_command_run(
     started_at: i64,
     started: Instant,
     completion: CommandRunCompletion,
 ) -> CommandRunResult {
     Span::current().record("hook.command_outcome", completion.outcome);
+    let start_failed = completion.start_failed();
     CommandRunResult {
         started_at,
         completed_at: chrono::Utc::now().timestamp(),
@@ -160,6 +170,7 @@ fn finish_command_run(
         stdout: completion.stdout,
         stderr: completion.stderr,
         error: completion.error,
+        start_failed,
     }
 }
 
@@ -188,6 +199,7 @@ fn build_command(shell: &CommandShell, handler: &ConfiguredHandler) -> Command {
         #[cfg(not(windows))]
         command.arg(&handler.command);
     }
+    crate::registry::apply_secretless_launch_env(&mut command);
     command.envs(&handler.env);
     command
 }
@@ -205,7 +217,12 @@ fn default_shell_command() -> Command {
     {
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         let mut command = Command::new(shell);
-        command.arg("-lc");
+        // PF-27-S02: login shells re-load profile files that can export secrets.
+        if codex_protocol::secretless_launch::is_armed() {
+            command.arg("-c");
+        } else {
+            command.arg("-lc");
+        }
         command
     }
 }

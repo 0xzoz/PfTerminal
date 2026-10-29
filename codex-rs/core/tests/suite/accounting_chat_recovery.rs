@@ -76,14 +76,28 @@ async fn accounting_chat_native_api_key_401_no_invented_refresh() -> anyhow::Res
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
     let db = test.codex.state_db().unwrap();
-    assert_eq!(attempts(&db).await?.len(), 1);
-    assert!(observations(&db).await?.is_empty());
+    let records = attempts(&db).await?;
+    assert_eq!(records.len(), 1);
+    // #475: the refusal is recorded, so the attempt reads as refused with no
+    // tokens and no charge, not as one with incomplete usage.
+    let recorded = observations(&db).await?;
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0].patch,
+        Patch {
+            refused_status: Some(401),
+            ..Patch::default()
+        }
+    );
+    let day = totals(&db, &records[0]).await?;
+    assert_eq!((day.attempts, day.per_use_unknown()), (1, 0));
+    assert_eq!(day.known_usd, Decimal::default());
     stop(&test).await;
     Ok(())
 }
 
 #[tokio::test]
-async fn accounting_chat_native_redirects_no_follow_or_repair() -> anyhow::Result<()> {
+async fn accounting_chat_native_redirects_are_resent_unrecorded() -> anyhow::Result<()> {
     for status in [301, 302, 303, 307, 308] {
         for on in [true, false] {
             if !on && !matches!(status, 307 | 308) {
@@ -115,12 +129,17 @@ async fn accounting_chat_native_redirects_no_follow_or_repair() -> anyhow::Resul
                 .build_with_auto_env(&origin)
                 .await?;
             submit(&test).await?;
-            terminal(&test).await?;
-            assert_eq!(origin.received_requests().await.unwrap().len(), 1);
+            let events = terminal(&test).await?;
+            if on {
+                core_test_support::assert_accounting_gap(&events);
+            }
+            // Recorded or not, the request reaches the redirect target once;
+            // with accounting on the refused no-redirect send comes first.
             assert_eq!(
-                target.received_requests().await.unwrap().len(),
-                usize::from(!on)
+                origin.received_requests().await.unwrap().len(),
+                1 + usize::from(on)
             );
+            assert_eq!(target.received_requests().await.unwrap().len(), 1);
             let db = test.codex.state_db().unwrap();
             if on {
                 assert_eq!(attempts(&db).await?.len(), 1);
@@ -146,7 +165,7 @@ async fn accounting_chat_native_outer_retry_prefix_and_ids() -> anyhow::Result<(
     let first = gate.next().await?;
     first.chunks.send(event(usage())).await?;
     let db = test.codex.state_db().unwrap();
-    wait_observations(&db, 1).await?;
+    wait_observations(&db, /*count*/ 1).await?;
     drop(first);
     let second = gate.next().await?;
     second.chunks.send(success(usage())).await?;
@@ -158,7 +177,7 @@ async fn accounting_chat_native_outer_retry_prefix_and_ids() -> anyhow::Result<(
     let patches = observations(&db).await?;
     assert_ne!(patches[0].source, patches[1].source);
     let day = totals(&db, &records[0]).await?;
-    assert_eq!(day, golden(true, false, 2)?);
+    assert_eq!(day, golden(/*cached*/ true, /*zero*/ false, /*count*/ 2)?);
     assert_eq!(
         day.measured[6],
         Metric {
@@ -182,17 +201,12 @@ async fn accounting_chat_native_observation_failure_no_repair() -> anyhow::Resul
     let held = gate.next().await?;
     let db = test.codex.state_db().unwrap();
     held.chunks.send(event(usage())).await?;
-    wait_observations(&db, 1).await?;
+    wait_observations(&db, /*count*/ 1).await?;
     let before = observations(&db).await?;
     sqlx::query("CREATE TRIGGER reject_responses_observation BEFORE INSERT ON draft_accounting_observations BEGIN SELECT RAISE(ABORT, 'fixture'); END")
         .execute(&mut connection(&db).await?).await?;
     held.chunks.send(success(usage())).await?;
-    assert!(
-        terminal(&test)
-            .await?
-            .iter()
-            .any(|e| matches!(e, EventMsg::Error(_)))
-    );
+    core_test_support::assert_accounting_gap(&terminal(&test).await?);
     assert_eq!(observations(&db).await?, before);
     assert_eq!(attempts(&db).await?.len(), 1);
     gate.no_pending();
@@ -223,16 +237,53 @@ async fn accounting_chat_native_admission_barrier_and_failure() -> anyhow::Resul
     held.chunks.send(success(usage())).await?;
     terminal(&test).await?;
     sqlx::query("CREATE TRIGGER reject_responses_attempt BEFORE INSERT ON draft_accounting_attempts BEGIN SELECT RAISE(ABORT, 'fixture'); END").execute(&mut lock).await?;
+    // A failed admission sends the request unrecorded.
     submit(&test).await?;
-    assert!(
-        terminal(&test)
-            .await?
-            .iter()
-            .any(|e| matches!(e, EventMsg::Error(_)))
-    );
+    let held = gate.next().await?;
+    held.chunks.send(success(usage())).await?;
+    core_test_support::assert_accounting_gap(&terminal(&test).await?);
     assert_eq!(attempts(&db).await?.len(), 1);
     gate.no_pending();
     stop(&test).await;
+    Ok(())
+}
+
+/// #287: a wall clock behind the ledger checkpoint (an NTP or VM step back)
+/// failed every request with "Native Anthropic accounting failed" before it
+/// was sent. The turn now runs and is recorded, with no error or warning.
+#[tokio::test]
+async fn accounting_chat_native_clock_behind_checkpoint_still_runs_and_records()
+-> anyhow::Result<()> {
+    for behind in [58_000_i64, 6 * 86_400_000] {
+        let server = MockServer::start().await;
+        let mut gate = Gate::start(GateRoutes::ChatOnly).await?;
+        let test = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
+            .build_with_auto_env(&server)
+            .await?;
+        let db = test.codex.state_db().unwrap();
+        submit(&test).await?;
+        gate.next().await?.chunks.send(success(usage())).await?;
+        terminal(&test).await?;
+        let ahead = chrono::Utc::now().timestamp_millis() + behind;
+        sqlx::query("UPDATE draft_accounting_retention_checkpoint SET completed_as_of_ms = ?")
+            .bind(ahead)
+            .execute(&mut connection(&db).await?)
+            .await?;
+        submit(&test).await?;
+        gate.next().await?.chunks.send(success(usage())).await?;
+        let events = terminal(&test).await?;
+        assert!(
+            !events.iter().any(|e| matches!(e, EventMsg::Error(_))
+                || matches!(e, EventMsg::Warning(w) if w.message.contains("accounting"))),
+            "{events:?}"
+        );
+        let records = attempts(&db).await?;
+        assert_eq!(records.len(), 2);
+        assert!(i64::from(records[1].dispatched_at_ms) < ahead);
+        assert_eq!(observations(&db).await?.len(), 2);
+        gate.no_pending();
+        stop(&test).await;
+    }
     Ok(())
 }
 
@@ -256,7 +307,12 @@ async fn accounting_chat_native_cancellation_and_two_reopens() -> anyhow::Result
     terminal(&test).await?;
     sqlx::query("ROLLBACK").execute(&mut lock).await?;
     gate.no_pending();
-    assert!(attempts(&db).await.unwrap_or_default().is_empty());
+    // The interrupt came while the sampling was still waiting for the ledger
+    // to open (the writer's first try waits up to `QUICK_BUSY_TIMEOUT`, here
+    // past the 100 ms above), so no admission was handed over.
+    assert!(db.flush_accounting(Duration::from_secs(30)).await);
+    assert_eq!(attempts(&db).await.unwrap_or_default().len(), 0);
+    assert!(observations(&db).await.unwrap_or_default().is_empty());
     stop(&test).await;
     for prefix in [false, true] {
         let server = MockServer::start().await;
@@ -271,7 +327,7 @@ async fn accounting_chat_native_cancellation_and_two_reopens() -> anyhow::Result
         let db = test.codex.state_db().unwrap();
         if prefix {
             held.chunks.send(event(usage())).await?;
-            wait_observations(&db, 1).await?;
+            wait_observations(&db, /*count*/ 1).await?;
         }
         test.codex.submit(Op::Interrupt).await?;
         assert!(
@@ -322,7 +378,12 @@ async fn accounting_chat_native_delete_rejects_late_usage() -> anyhow::Result<()
     let server = MockServer::start().await;
     let mut gate = Gate::start(GateRoutes::ChatOnly).await?;
     let test = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
-        .with_config(|config| config.model_provider.stream_max_retries = Some(1))
+        .with_config(|config| {
+            config.model_provider.stream_max_retries = Some(1);
+            // The held stream stays silent while a second thread starts and finishes a turn;
+            // the fixture's 2s idle timeout let loaded runners retry it behind the test's back.
+            config.model_provider.stream_idle_timeout_ms = Some(30_000);
+        })
         .build_with_auto_env(&server)
         .await?;
     submit(&test).await?;
@@ -452,7 +513,7 @@ async fn accounting_chat_native_spawned_role_children_and_fork() -> anyhow::Resu
         .expect("reloaded role instructions in a native child request");
     let role = held.remove(role_index);
     role.chunks.send(event(usage())).await?;
-    wait_observations(&db, 2).await?;
+    wait_observations(&db, /*count*/ 2).await?;
     drop(role); // EOF forces the role child's native stream retry.
     let retried = gate.next().await?;
     assert!(retried.body.to_string().contains("responses role fixture"));
@@ -474,15 +535,15 @@ async fn accounting_chat_native_spawned_role_children_and_fork() -> anyhow::Resu
         held.chunks.send(success(usage())).await?;
     }
     terminal(&test).await?;
-    wait_observations(&db, 5).await?;
+    wait_observations(&db, /*count*/ 5).await?;
     let before = attempts(&db).await?;
     test.thread_manager
         .fork_thread(
             codex_core::ForkSnapshot::Interrupted,
             test.config.clone(),
             test.codex.rollout_path().unwrap(),
-            None,
-            None,
+            /*thread_source*/ None,
+            /*parent_trace*/ None,
         )
         .await?;
     assert_eq!(attempts(&db).await?, before);
@@ -492,25 +553,39 @@ async fn accounting_chat_native_spawned_role_children_and_fork() -> anyhow::Resu
 
 #[tokio::test]
 async fn accounting_chat_native_invalid_evidence_no_repair() -> anyhow::Result<()> {
-    for bad in ["malformed".to_string(), json!({"usage":{"prompt_tokens":-1}}).to_string(),
-        json!({"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":101}}}).to_string(),
-        json!({"usage":{"completion_tokens":40,"completion_tokens_details":{"reasoning_tokens":41}}}).to_string(),
-        json!({"usage":{"prompt_tokens":100,"completion_tokens":40,"total_tokens":139}}).to_string()] {
+    // Invalid usage only. A malformed chunk is a provider stream error, handled
+    // as one whether or not accounting is on. A reasoning count above the
+    // output count is not invalid evidence: it is recorded as not reported
+    // (#786; `accounting_chat_reasoning_above_output_keeps_the_record`).
+    for bad in [
+        json!({"usage":{"prompt_tokens":-1}}).to_string(),
+        json!({"usage":{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":101}}})
+            .to_string(),
+        json!({"usage":{"prompt_tokens":100,"completion_tokens":40,"total_tokens":139}})
+            .to_string(),
+    ] {
         let server = MockServer::start().await;
         let mut gate = Gate::start(GateRoutes::ChatOnly).await?;
         let test = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
             .with_config(|c| c.model_provider.stream_max_retries = Some(1))
-            .build_with_auto_env(&server).await?;
+            .build_with_auto_env(&server)
+            .await?;
         submit(&test).await?;
         let held = gate.next().await?;
         held.chunks.send(event(usage())).await?;
         let db = test.codex.state_db().unwrap();
-        wait_observations(&db, 1).await?;
+        wait_observations(&db, /*count*/ 1).await?;
         let before = observations(&db).await?;
-        held.chunks.send(format!("data: {bad}\n\ndata: [DONE]\n\n")).await?;
+        held.chunks
+            .send(format!("data: {bad}\n\n") + &ending("stop"))
+            .await?;
         let events = terminal(&test).await?;
-        assert!(events.iter().any(|e| matches!(e, EventMsg::Error(_))));
-        assert!(!events.iter().any(|e| matches!(e, EventMsg::StreamError(_))), "accounting failure must bypass reconnect handling");
+        // Invalid usage closes collection; the stream itself carries on.
+        core_test_support::assert_accounting_gap(&events);
+        assert!(
+            !events.iter().any(|e| matches!(e, EventMsg::StreamError(_))),
+            "accounting failure must not cause a reconnect"
+        );
         assert_eq!(observations(&db).await?, before);
         assert_eq!(attempts(&db).await?.len(), 1);
         gate.no_pending();

@@ -3,6 +3,7 @@
 use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::AMBIENT_KIMI_K2_7_CODE_MODEL;
 use codex_model_provider_info::BASETEN_DEFAULT_MODEL;
+use codex_model_provider_info::CLAUDE_OPUS_5_5_PLAN_UPSTREAM_MODEL;
 use codex_model_provider_info::OPENROUTER_DEFAULT_MODEL;
 use codex_model_provider_info::VERCEL_DEFAULT_MODEL;
 use codex_model_provider_info::VERCEL_GLM_5_2_FAST_MODEL;
@@ -54,10 +55,12 @@ impl ClaudeProviderProfileKind {
         match self {
             Self::ClaudePlan => ClaudeProviderProfile {
                 kind: self,
-                title: "Claude Code - Opus 5 Claude Plan",
-                description: "Use Claude Code's native auth with Opus 5 Claude Plan.",
-                claude_model: "opus",
-                provider_model: "opus",
+                // Pinned: Claude Code's `opus` alias follows its newest Opus,
+                // which made this label name a model the pane didn't serve (#366).
+                title: "Claude Code - Opus 5.5 Claude Plan",
+                description: "Use Claude Code's native auth with Claude Opus 5.5 on your Claude plan.",
+                claude_model: CLAUDE_OPUS_5_5_PLAN_UPSTREAM_MODEL,
+                provider_model: CLAUDE_OPUS_5_5_PLAN_UPSTREAM_MODEL,
                 small_model: "haiku",
                 base_url: None,
                 accounting_provider_id: Some(codex_model_provider_info::CLAUDE_PLAN_PROVIDER_ID),
@@ -176,6 +179,24 @@ impl ClaudeProviderProfileKind {
             .to_string()
     }
 
+    /// Pane-title suffixes this profile used before its current label, so saved
+    /// panes keep their spawn identity.
+    pub(crate) fn legacy_status_model_labels(self) -> &'static [&'static str] {
+        match self {
+            Self::ClaudePlan => &["Opus 5 Claude Plan", "Claude Plan"],
+            _ => &[],
+        }
+    }
+
+    /// A retired label that named a different model than the one served; saved
+    /// pane titles ending in it are relabelled on restore (#366).
+    pub(crate) fn relabelled_status_model_label(self) -> Option<&'static str> {
+        match self {
+            Self::ClaudePlan => Some("Opus 5 Claude Plan"),
+            _ => None,
+        }
+    }
+
     pub(crate) fn native_codex_model(self) -> Option<&'static str> {
         match self {
             Self::ClaudePlan => None,
@@ -187,6 +208,12 @@ impl ClaudeProviderProfileKind {
             Self::VercelGlm52 => Some(VERCEL_DEFAULT_MODEL),
             Self::VercelGlm52Fast => Some(VERCEL_GLM_5_2_FAST_MODEL),
         }
+    }
+
+    /// The runtime provider a Claude Code pane records as a `/spawn` crew member,
+    /// e.g. `external-claude:claudeplan` (`CLAUDE_PLAN_PANE_PROVIDER_ID`).
+    pub(crate) fn crew_runtime_provider_id(self) -> String {
+        format!("external-claude:{self:?}").to_ascii_lowercase()
     }
 
     pub(crate) fn creation_options() -> &'static [Self] {

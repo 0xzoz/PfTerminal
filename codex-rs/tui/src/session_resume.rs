@@ -27,6 +27,21 @@ struct RolloutResumeState {
     thread_id: Option<ThreadId>,
     cwd: Option<PathBuf>,
     model: Option<String>,
+    provider_account: Option<RecordedProviderAccount>,
+}
+
+/// PF-84: the named account a thread ran on, from its newest turn context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RecordedProviderAccount {
+    pub(crate) provider_id: String,
+    pub(crate) account: String,
+}
+
+impl RecordedProviderAccount {
+    /// `<provider>:<account>`, the form `ConfigOverrides` and the app server use.
+    pub(crate) fn selection(&self) -> String {
+        format!("{}:{}", self.provider_id, self.account)
+    }
 }
 
 #[derive(Deserialize)]
@@ -39,6 +54,14 @@ struct SessionMetadata {
 struct TurnContextResumeState {
     cwd: PathBuf,
     model: String,
+}
+
+#[derive(Deserialize)]
+struct TurnContextAccountState {
+    #[serde(default)]
+    model_provider: Option<String>,
+    #[serde(default)]
+    provider_account: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -102,6 +125,16 @@ pub(crate) async fn read_session_model(
         .await
         .ok()
         .and_then(|state| state.model)
+}
+
+/// PF-84 (#545): the account the thread at `path` ran on, read the same way
+/// the app server picks it on resume (the newest turn context only), so the
+/// TUI can check it before deciding whether provider onboarding is needed.
+pub(crate) async fn read_recorded_provider_account(path: &Path) -> Option<RecordedProviderAccount> {
+    read_rollout_resume_state(path)
+        .await
+        .ok()
+        .and_then(|state| state.provider_account)
 }
 
 pub(crate) async fn resolve_cwd_for_resume_or_fork(
@@ -243,6 +276,15 @@ async fn read_rollout_resume_state(path: &Path) -> io::Result<RolloutResumeState
                 }
             }
             "turn_context" => {
+                state.provider_account =
+                    serde_json::from_value::<TurnContextAccountState>(payload.clone())
+                        .ok()
+                        .and_then(|turn_context| {
+                            Some(RecordedProviderAccount {
+                                provider_id: turn_context.model_provider?,
+                                account: turn_context.provider_account?,
+                            })
+                        });
                 if let Ok(turn_context) = serde_json::from_value::<TurnContextResumeState>(payload)
                 {
                     state.cwd = Some(turn_context.cwd);
@@ -329,6 +371,39 @@ mod tests {
         assert_eq!(state.thread_id, Some(thread_id));
         assert_eq!(state.cwd, Some(latest));
         assert_eq!(state.model, Some("latest".to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn recorded_provider_account_is_the_newest_turn_contexts() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let cwd = temp_dir.path().join("session");
+        let turn = |account: Option<&str>| {
+            let mut payload = serde_json::json!({
+                "cwd": cwd.clone(),
+                "model": "glm-5.3-flash",
+                "model_provider": "zai",
+            });
+            if let Some(account) = account {
+                payload["provider_account"] = serde_json::json!(account);
+            }
+            rollout_line("t", "turn_context", payload)
+        };
+        let rollout_path = temp_dir.path().join("rollout.jsonl");
+
+        write_rollout_lines(&rollout_path, &[turn(Some("personal")), turn(Some("work"))])?;
+        assert_eq!(
+            read_recorded_provider_account(&rollout_path).await,
+            Some(RecordedProviderAccount {
+                provider_id: "zai".to_string(),
+                account: "work".to_string(),
+            })
+        );
+
+        // Like the app server, an older turn's account does not apply when the
+        // newest turn recorded none (named accounts were off).
+        write_rollout_lines(&rollout_path, &[turn(Some("work")), turn(None)])?;
+        assert_eq!(read_recorded_provider_account(&rollout_path).await, None);
         Ok(())
     }
 

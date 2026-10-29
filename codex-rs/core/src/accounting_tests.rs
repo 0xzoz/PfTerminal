@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "#[traced_test] installs tracing-test's in-memory global subscriber"
+)]
 use super::*;
 use crate::accounting::Sampling;
 use crate::accounting::SamplingScope;
@@ -19,6 +23,16 @@ use sqlx::SqliteConnection;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use uuid::Uuid;
+
+/// Waits until the ledger writer has written what it was handed. A slow write
+/// is put off and written later (#865), so read the ledger after this.
+async fn settle(db: &StateRuntime) {
+    assert!(
+        db.flush_accounting(std::time::Duration::from_secs(30))
+            .await,
+        "records still queued"
+    );
+}
 
 const ENDPOINT: &str = "http://127.0.0.1:1/v1";
 
@@ -226,6 +240,7 @@ async fn accounting_developer_activation_samples_http_and_installs_inspectable_d
     while let Some(event) = stream.next().await {
         event?;
     }
+    settle(&db).await;
     let now = chrono::Utc::now().timestamp_millis();
     let day = AccountingStore::inspect_day(&db, owner, now / 86_400_000, now).await?;
     let InspectionDay::Ready(view) = day else {
@@ -468,6 +483,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new() -> anyhow::Result<Self> {
+        Self::with_endpoint(ENDPOINT).await
+    }
+
+    async fn with_endpoint(endpoint: &str) -> anyhow::Result<Self> {
         let home = tempfile::tempdir()?;
         let db = StateRuntime::init(
             SqliteConfig::from_sqlite_home(AbsolutePathBuf::try_from(home.path().to_path_buf())?),
@@ -488,7 +507,7 @@ impl Fixture {
             "turn".into(),
             &AccountingMode::DirectAnthropic {
                 scope: Uuid::new_v4(),
-                approved_endpoint: ENDPOINT.into(),
+                approved_endpoint: endpoint.into(),
             },
         )
         .await?;
@@ -592,7 +611,9 @@ async fn accounting_actual_transport_retries_and_old_response_keep_distinct_owne
     );
     assert!(transport.stream(request()).await.is_err());
     transport.stream(request()).await?;
-    first.observe(1, Ok(usage(7))).await?;
+    first
+        .observe(/*position*/ 1, Ok(usage(/*value*/ 7)))
+        .await?;
     let second = ResponseEvidence::new(fixture.sampling.clone());
     AccountingTransport::new(
         Probe {
@@ -604,8 +625,13 @@ async fn accounting_actual_transport_retries_and_old_response_keep_distinct_owne
     )
     .stream(request())
     .await?;
-    second.observe(1, Ok(usage(11))).await?;
-    first.observe(2, Ok(usage(8))).await?;
+    second
+        .observe(/*position*/ 1, Ok(usage(/*value*/ 11)))
+        .await?;
+    first
+        .observe(/*position*/ 2, Ok(usage(/*value*/ 8)))
+        .await?;
+    settle(&fixture.db).await;
     let attempts = fixture.attempts().await?;
     assert_eq!(attempts.len(), 3);
     assert_eq!(
@@ -639,38 +665,82 @@ async fn accounting_actual_transport_retries_and_old_response_keep_distinct_owne
             )
         ]
     );
-    let rows: Vec<(String, i64, String)> = sqlx::query_as("SELECT attempt_id, revision, json_extract(payload, '$.patch') FROM draft_accounting_observations ORDER BY rowid")
+    // Sorted: the writer merges records queued for the same attempt, so a
+    // record it put off changes the order rows are written in.
+    let mut rows: Vec<(String, i64, String)> = sqlx::query_as("SELECT attempt_id, revision, json_extract(payload, '$.patch') FROM draft_accounting_observations")
         .fetch_all(&mut fixture.connection().await?).await?;
-    assert_eq!(
-        rows,
-        vec![
-            (
-                attempts[1].attempt_id.to_string(),
-                1,
-                r#"{"input":7}"#.into()
-            ),
-            (
-                attempts[2].attempt_id.to_string(),
-                1,
-                r#"{"input":11}"#.into()
-            ),
-            (
-                attempts[1].attempt_id.to_string(),
-                2,
-                r#"{"input":8}"#.into()
-            ),
-        ]
-    );
+    rows.sort();
+    let mut expected: Vec<(String, i64, String)> = vec![
+        (
+            attempts[1].attempt_id.to_string(),
+            1,
+            r#"{"input":7}"#.into(),
+        ),
+        (
+            attempts[2].attempt_id.to_string(),
+            1,
+            r#"{"input":11}"#.into(),
+        ),
+        (
+            attempts[1].attempt_id.to_string(),
+            2,
+            r#"{"input":8}"#.into(),
+        ),
+    ];
+    expected.sort();
+    assert_eq!(rows, expected);
     assert_eq!(sends.load(Ordering::SeqCst), 3);
     Ok(())
 }
 
+/// The saved records of `fixture`'s ledger writer not yet in the ledger.
+fn pending_records(fixture: &Fixture) -> usize {
+    std::fs::read_dir(
+        fixture
+            .db
+            .sqlite()
+            .home()
+            .join(codex_state::accounting::PENDING_DIR),
+    )
+    .map(|listing| {
+        listing
+            .flatten()
+            .filter(|item| item.path().extension().is_some_and(|ext| ext == "json"))
+            .count()
+    })
+    .unwrap_or(0)
+}
+
+/// The admission is durable before the request is sent: in the ledger, or,
+/// while another process holds the state DB's write lock, saved for the
+/// ledger writer. A busy state DB holds the request up for at most about
+/// `QUICK_BUSY_TIMEOUT`.
 #[tokio::test]
-async fn accounting_writer_barrier_prevents_send_until_durable_admission() -> anyhow::Result<()> {
+async fn accounting_admission_is_durable_before_send_and_a_busy_state_db_does_not_hold_it_up()
+-> anyhow::Result<()> {
     let fixture = Fixture::new().await?;
+    // Uncontended: in the ledger before the send.
+    let sends = Arc::new(AtomicUsize::new(0));
+    AccountingTransport::new(
+        Probe {
+            sends: sends.clone(),
+            fail_first: false,
+        },
+        Some(ResponseEvidence::new(fixture.sampling.clone())),
+        "claude-opus-5".into(),
+    )
+    .stream(request())
+    .await?;
+    assert_eq!(
+        (
+            fixture.attempts().await?.len(),
+            sends.load(Ordering::SeqCst)
+        ),
+        (1, 1)
+    );
+
     let mut conn = fixture.connection().await?;
     let transaction = conn.begin_with("BEGIN IMMEDIATE").await?;
-    let sends = Arc::new(AtomicUsize::new(0));
     let transport = AccountingTransport::new(
         Probe {
             sends: sends.clone(),
@@ -679,20 +749,30 @@ async fn accounting_writer_barrier_prevents_send_until_durable_admission() -> an
         Some(ResponseEvidence::new(fixture.sampling.clone())),
         "claude-opus-5".into(),
     );
-    let task = tokio::spawn(async move { transport.stream(request()).await });
-    tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-    assert!(!task.is_finished());
-    assert_eq!(sends.load(Ordering::SeqCst), 0);
-    assert_eq!(fixture.attempts().await?, vec![]);
-    transaction.commit().await?;
-    task.await??;
-    assert_eq!(
-        (
-            fixture.attempts().await?.len(),
-            sends.load(Ordering::SeqCst)
-        ),
-        (1, 1)
+    let started = std::time::Instant::now();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        transport.stream(request()),
+    )
+    .await??;
+    assert!(
+        started.elapsed() < codex_state::QUICK_BUSY_TIMEOUT + std::time::Duration::from_millis(750),
+        "held up {:?}",
+        started.elapsed()
     );
+    assert_eq!(sends.load(Ordering::SeqCst), 2);
+    // Saved, not yet in the ledger.
+    assert_eq!(pending_records(&fixture), 1);
+    transaction.rollback().await?;
+    assert!(
+        fixture
+            .db
+            .flush_accounting(std::time::Duration::from_secs(30))
+            .await
+    );
+    assert_eq!(fixture.attempts().await?.len(), 2);
+    assert_eq!(pending_records(&fixture), 0);
+    fixture.sampling.check()?;
     Ok(())
 }
 
@@ -709,6 +789,7 @@ async fn accounting_guard_denial_precedes_admission_and_never_sends() -> anyhow:
         runtime_nonce: [0; 16],
         session_id: "fixture".into(),
         denial: Mutex::new(None),
+        unlabelled_request: std::sync::atomic::AtomicBool::new(false),
     });
     let transport = StageOneGuardedTransport::new(
         AccountingTransport::new(
@@ -734,7 +815,7 @@ async fn accounting_guard_denial_precedes_admission_and_never_sends() -> anyhow:
 }
 
 #[tokio::test]
-async fn accounting_admission_failure_and_route_mismatch_are_sticky_without_send()
+async fn accounting_admission_failure_and_route_mismatch_serve_the_request_unrecorded()
 -> anyhow::Result<()> {
     for fault in ["admission", "route", "missing_owner"] {
         let fixture = Fixture::new().await?;
@@ -758,27 +839,86 @@ async fn accounting_admission_failure_and_route_mismatch_are_sticky_without_send
         if fault == "route" {
             outbound.url = "http://127.0.0.1:2/v1/messages".into();
         }
-        assert!(transport.stream(outbound).await.is_err());
-        assert!(transport.stream(request()).await.is_err());
+        // Accounting never stops a request: both are sent, neither recorded,
+        // and the sampling stays closed for the rest of the turn.
+        transport.stream(outbound).await?;
+        transport.stream(request()).await?;
         assert_eq!(
             (
                 fixture.attempts().await?.len(),
                 sends.load(Ordering::SeqCst)
             ),
-            (0, 0)
+            (0, 2)
         );
-        let error = fixture.sampling.check().unwrap_err();
-        assert!(!error.is_retryable());
-        assert_eq!(
-            error.to_string(),
-            format!("Fatal error: {}", crate::accounting::FAILURE)
-        );
+        assert!(fixture.sampling.is_closed());
     }
     Ok(())
 }
 
+/// #654: under Aggressive the credential broker serves model requests, and
+/// each reaches the transport rewritten to the broker's plain-HTTP URL. Every
+/// such request is recorded against the approved HTTPS route, as it is when
+/// the request goes out directly.
 #[tokio::test]
-async fn accounting_scope_drop_clears_cancelled_sampling_and_observation_failure_is_fatal()
+async fn issue_654_brokered_requests_are_all_recorded() -> anyhow::Result<()> {
+    const PROVIDER: &str = "https://api.z.ai/api/anthropic/v1";
+    let fixture = Fixture::with_endpoint(PROVIDER).await?;
+    let sends = Arc::new(AtomicUsize::new(0));
+    let requests = 3;
+    for _ in 0..requests {
+        let brokered = crate::model_broker_auth::rewritten_for_broker_in_tests(Request {
+            url: format!("{PROVIDER}/messages"),
+            ..request()
+        });
+        assert!(brokered.url.starts_with("http://api.z.ai:443/"));
+        AccountingTransport::new(
+            Probe {
+                sends: sends.clone(),
+                fail_first: false,
+            },
+            Some(ResponseEvidence::new(fixture.sampling.clone())),
+            "glm-5.3-flash".into(),
+        )
+        .stream(brokered)
+        .await?;
+    }
+    settle(&fixture.db).await;
+    assert_eq!(
+        (
+            sends.load(Ordering::SeqCst),
+            fixture.attempts().await?.len()
+        ),
+        (requests, requests),
+        "every request the broker served is recorded"
+    );
+    assert!(!fixture.sampling.is_closed());
+
+    // A brokered request to another route is still not attributed to this one.
+    let other = Fixture::with_endpoint(PROVIDER).await?;
+    let transport = AccountingTransport::new(
+        Probe {
+            sends: sends.clone(),
+            fail_first: false,
+        },
+        Some(ResponseEvidence::new(other.sampling.clone())),
+        "glm-5.3-flash".into(),
+    );
+    transport
+        .stream(crate::model_broker_auth::rewritten_for_broker_in_tests(
+            Request {
+                url: "https://api.z.ai:8443/api/anthropic/v1/messages".into(),
+                ..request()
+            },
+        ))
+        .await?;
+    settle(&other.db).await;
+    assert_eq!(other.attempts().await?.len(), 0);
+    assert!(other.sampling.is_closed());
+    Ok(())
+}
+
+#[tokio::test]
+async fn accounting_scope_drop_clears_cancelled_sampling_and_observation_failure_closes_it()
 -> anyhow::Result<()> {
     let fixture = Fixture::new().await?;
     let slot = Default::default();
@@ -798,11 +938,18 @@ async fn accounting_scope_drop_clears_cancelled_sampling_and_observation_failure
     )
     .stream(request())
     .await?;
-    evidence.observe(1, Ok(usage(7))).await?;
+    evidence
+        .observe(/*position*/ 1, Ok(usage(/*value*/ 7)))
+        .await?;
+    settle(&fixture.db).await;
     sqlx::query("CREATE TRIGGER reject_observation BEFORE INSERT ON draft_accounting_observations BEGIN SELECT RAISE(ABORT, 'fixture-observation'); END")
         .execute(&mut fixture.connection().await?).await?;
-    assert!(evidence.observe(2, Ok(usage(9))).await.is_err());
-    assert!(!fixture.sampling.check().unwrap_err().is_retryable());
+    // The stream carries on; only recording stops.
+    evidence
+        .observe(/*position*/ 2, Ok(usage(/*value*/ 9)))
+        .await?;
+    assert!(fixture.sampling.is_closed());
+    settle(&fixture.db).await;
     let rows: Vec<String> = sqlx::query_scalar(
         "SELECT json_extract(payload, '$.patch') FROM draft_accounting_observations",
     )
@@ -813,16 +960,16 @@ async fn accounting_scope_drop_clears_cancelled_sampling_and_observation_failure
     Ok(())
 }
 
-/// Another Corbanu process sharing the state DB can hold its write lock past
-/// SQLite's 5 s busy timeout - an hourly ledger sweep did, for 10-17 s. That
-/// used to fail the admission or observation and end the turn with the
-/// accounting failure. A contended write wrote nothing, so it waits and retries;
-/// the request is sent only after its admission is durable.
+/// Another Corbanu process sharing the state DB can hold its write lock for
+/// seconds. That used to hold every admission and observation up for up to
+/// 15 s and then send the request unrecorded, losing its record. Now the
+/// records are put off: the request and its stream go on at once, and the
+/// records are written once the lock is free.
 #[tokio::test]
 #[tracing_test::traced_test]
-async fn accounting_waits_out_another_process_holding_the_state_db_past_its_busy_timeout()
--> anyhow::Result<()> {
-    const HELD: std::time::Duration = std::time::Duration::from_millis(5_600);
+async fn accounting_puts_records_off_while_another_process_holds_the_state_db() -> anyhow::Result<()>
+{
+    const HELD: std::time::Duration = std::time::Duration::from_millis(3_000);
     let fixture = Fixture::new().await?;
     let sends = Arc::new(AtomicUsize::new(0));
     let evidence = ResponseEvidence::new(fixture.sampling.clone());
@@ -837,29 +984,22 @@ async fn accounting_waits_out_another_process_holding_the_state_db_past_its_busy
 
     let mut conn = fixture.connection().await?;
     let held = conn.begin_with("BEGIN IMMEDIATE").await?;
-    let admission = tokio::spawn(async move { transport.stream(request()).await.map(drop) });
-    tokio::time::sleep(HELD).await;
-    assert!(!admission.is_finished());
-    assert_eq!(sends.load(Ordering::SeqCst), 0);
+    let started = std::time::Instant::now();
+    transport.stream(request()).await?;
+    evidence
+        .observe(/*position*/ 1, Ok(usage(/*value*/ 7)))
+        .await?;
+    assert!(started.elapsed() < HELD, "held up {:?}", started.elapsed());
+    assert_eq!(sends.load(Ordering::SeqCst), 1);
+    tokio::time::sleep(HELD.saturating_sub(started.elapsed())).await;
     held.commit().await?;
-    admission.await??;
-    assert_eq!(
-        (
-            fixture.attempts().await?.len(),
-            sends.load(Ordering::SeqCst)
-        ),
-        (1, 1)
+    assert!(
+        fixture
+            .db
+            .flush_accounting(std::time::Duration::from_secs(30))
+            .await
     );
-
-    let held = conn.begin_with("BEGIN IMMEDIATE").await?;
-    let observing = {
-        let evidence = evidence.clone();
-        tokio::spawn(async move { evidence.observe(1, Ok(usage(7))).await })
-    };
-    tokio::time::sleep(HELD).await;
-    assert!(!observing.is_finished());
-    held.commit().await?;
-    observing.await??;
+    assert_eq!(fixture.attempts().await?.len(), 1);
     let rows: Vec<String> = sqlx::query_scalar(
         "SELECT json_extract(payload, '$.patch') FROM draft_accounting_observations",
     )
@@ -867,13 +1007,92 @@ async fn accounting_waits_out_another_process_holding_the_state_db_past_its_busy
     .await?;
     assert_eq!(rows, vec![r#"{"input":7}"#]);
     assert!(fixture.sampling.check().is_ok());
-    // It waited by retrying, not by one long busy wait.
-    assert!(logs_contain("state DB busy; retrying"));
-    assert!(logs_contain("succeeded after state DB contention"));
+    assert!(logs_contain("records are written once it is free"));
     Ok(())
 }
 
-/// The user sees one fixed message; the log records which step failed and why.
+/// #287: with the clock behind the ledger checkpoint (58 s, 6 days), opening a
+/// sampling failed and every request in the turn stopped before it was sent.
+/// Now the sampling opens and the request is sent and recorded at the time the
+/// clock read.
+#[tokio::test]
+async fn accounting_clock_behind_the_checkpoint_still_records_and_sends() -> anyhow::Result<()> {
+    for behind in [58_000_i64, 6 * 86_400_000] {
+        let fixture = Fixture::new().await?;
+        let ahead = chrono::Utc::now().timestamp_millis() + behind;
+        sqlx::query("UPDATE draft_accounting_retention_checkpoint SET completed_as_of_ms = ?")
+            .bind(ahead)
+            .execute(&mut fixture.connection().await?)
+            .await?;
+        let sampling = Sampling::start(
+            fixture.db.clone(),
+            fixture.owner,
+            "skewed".into(),
+            &AccountingMode::DirectAnthropic {
+                scope: Uuid::new_v4(),
+                approved_endpoint: ENDPOINT.into(),
+            },
+        )
+        .await?;
+        let sends = Arc::new(AtomicUsize::new(0));
+        let evidence = ResponseEvidence::new(sampling.clone());
+        AccountingTransport::new(
+            Probe {
+                sends: sends.clone(),
+                fail_first: false,
+            },
+            Some(evidence.clone()),
+            "claude-opus-5".into(),
+        )
+        .stream(request())
+        .await?;
+        evidence
+            .observe(/*position*/ 1, Ok(usage(/*value*/ 7)))
+            .await?;
+        settle(&fixture.db).await;
+        let attempts = fixture.attempts().await?;
+        assert_eq!((attempts.len(), sends.load(Ordering::SeqCst)), (1, 1));
+        assert!(i64::from(attempts[0].dispatched_at_ms) < ahead);
+        assert!(!sampling.is_closed());
+    }
+    Ok(())
+}
+
+/// A clock at least 90 days behind the checkpoint (a clock that once ran far
+/// ahead, then was corrected) cannot be recorded at all:
+/// every attempt would already be past detail retention. It is a gap, never a
+/// stopped request.
+#[tokio::test]
+async fn accounting_clock_far_behind_the_checkpoint_sends_unrecorded() -> anyhow::Result<()> {
+    let fixture = Fixture::new().await?;
+    let ahead = chrono::Utc::now().timestamp_millis() + 100 * 86_400_000;
+    sqlx::query("UPDATE draft_accounting_retention_checkpoint SET completed_as_of_ms = ?")
+        .bind(ahead)
+        .execute(&mut fixture.connection().await?)
+        .await?;
+    let sends = Arc::new(AtomicUsize::new(0));
+    AccountingTransport::new(
+        Probe {
+            sends: sends.clone(),
+            fail_first: false,
+        },
+        Some(ResponseEvidence::new(fixture.sampling.clone())),
+        "claude-opus-5".into(),
+    )
+    .stream(request())
+    .await?;
+    assert_eq!(
+        (
+            fixture.attempts().await?.len(),
+            sends.load(Ordering::SeqCst)
+        ),
+        (0, 1)
+    );
+    assert!(fixture.sampling.is_closed());
+    Ok(())
+}
+
+/// The request is sent; the log records which step failed and why.
 #[tokio::test]
 #[tracing_test::traced_test]
 async fn accounting_failure_logs_its_step_and_cause() -> anyhow::Result<()> {
@@ -888,11 +1107,39 @@ async fn accounting_failure_logs_its_step_and_cause() -> anyhow::Result<()> {
         Some(ResponseEvidence::new(fixture.sampling.clone())),
         "claude-opus-5".into(),
     );
-    assert!(transport.stream(request()).await.is_err());
+    transport.stream(request()).await?;
     assert!(logs_contain("admit attempt"));
     assert!(logs_contain("fixture-admission"));
-    assert!(logs_contain(crate::accounting::FAILURE));
+    assert!(logs_contain("request sent unrecorded"));
     // Not contention, so it was not retried.
     assert!(!logs_contain("retrying"));
     Ok(())
+}
+
+/// #403: the TUI's `/cost` names a reopen warm-up by this exact prefix (it
+/// can't import the constant), so a change here must change it there too.
+#[test]
+fn reopen_prewarm_label_is_stable() {
+    use crate::accounting::REOPEN_PREWARM_LABEL;
+    use crate::accounting::prewarm_turn_label;
+    use crate::accounting::reopen_prewarm_turn_label;
+    assert_eq!(REOPEN_PREWARM_LABEL, "prewarm:reopen:");
+    let label = reopen_prewarm_turn_label();
+    assert!(label.starts_with("prewarm:reopen:"), "{label}");
+    assert!(prewarm_turn_label().starts_with("prewarm:"));
+    assert!(!prewarm_turn_label().starts_with(REOPEN_PREWARM_LABEL));
+}
+
+/// #824: `/cost` names a realtime WebSocket session by this label prefix
+/// (the TUI's `REALTIME_SESSION_LABEL`). It stays a `realtime:` label, and a
+/// WebRTC call's label is not one.
+#[test]
+fn realtime_session_label_is_stable() {
+    use crate::accounting::REALTIME_SESSION_LABEL;
+    use crate::accounting::realtime_session_turn_label;
+    use crate::accounting::realtime_turn_label;
+    assert_eq!(REALTIME_SESSION_LABEL, "realtime:ws:");
+    assert_eq!(realtime_session_turn_label("sub"), "realtime:ws:sub");
+    assert!(realtime_session_turn_label("sub").starts_with("realtime:"));
+    assert!(!realtime_turn_label("sub").starts_with(REALTIME_SESSION_LABEL));
 }

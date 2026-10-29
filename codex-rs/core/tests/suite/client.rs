@@ -57,7 +57,7 @@ use codex_protocol::user_input::UserInput;
 use core_test_support::PathBufExt;
 use core_test_support::TestCodexResponsesRequestKind;
 use core_test_support::apps_test_server::AppsTestServer;
-use core_test_support::load_default_config_for_test;
+use core_test_support::load_default_config_for_test_in;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -1476,6 +1476,7 @@ async fn amazon_bedrock_proxy_uses_command_auth_and_custom_headers() {
 /// reaches `Completed` without surfacing an auth or transport error to the client.
 async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuthInfo) {
     let provider = ModelProviderInfo {
+        account: None,
         name: "corp".into(),
         base_url: Some(format!("{}/v1", server.uri())),
         env_key: None,
@@ -1499,6 +1500,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        billing: None,
     };
 
     send_request_with_provider(provider).await;
@@ -1507,7 +1509,9 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
 #[expect(clippy::unwrap_used)]
 async fn send_request_with_provider(provider: ModelProviderInfo) {
     let codex_home = TempDir::new().unwrap();
-    let mut config = load_default_config_for_test(&codex_home).await;
+    let cwd = TempDir::new().unwrap();
+    let mut config =
+        load_default_config_for_test_in(&codex_home, Default::default(), cwd.path()).await;
     config.model_provider_id = provider.name.clone();
     config.model_provider = provider.clone();
     let effort = config.model_reasoning_effort.clone();
@@ -1757,7 +1761,9 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
         Some("acc-123"),
     );
 
-    let mut config = load_default_config_for_test(&codex_home).await;
+    let cwd = TempDir::new().unwrap();
+    let mut config =
+        load_default_config_for_test_in(&codex_home, Default::default(), cwd.path()).await;
     config.model_provider = model_provider;
 
     let auth = CodexAuth::from_auth_storage(
@@ -3223,6 +3229,7 @@ async fn azure_responses_request_includes_store_and_prefixed_item_ids() {
     let resp_mock = mount_sse_once(&server, sse_body.to_string()).await;
 
     let provider = ModelProviderInfo {
+        account: None,
         name: "azure".into(),
         base_url: Some(format!("{}/openai", server.uri())),
         env_key: None,
@@ -3246,10 +3253,13 @@ async fn azure_responses_request_includes_store_and_prefixed_item_ids() {
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        billing: None,
     };
 
     let codex_home = TempDir::new().unwrap();
-    let mut config = load_default_config_for_test(&codex_home).await;
+    let cwd = TempDir::new().unwrap();
+    let mut config =
+        load_default_config_for_test_in(&codex_home, Default::default(), cwd.path()).await;
     config.model_provider_id = provider.name.clone();
     config.model_provider = provider.clone();
     let effort = config.model_reasoning_effort.clone();
@@ -3882,6 +3892,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         .await;
 
     let provider = ModelProviderInfo {
+        account: None,
         name: "custom".to_string(),
         base_url: Some(format!("{}/openai", server.uri())),
         // Reuse the existing environment variable to avoid using unsafe code
@@ -3912,6 +3923,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        billing: None,
     };
 
     // Init session
@@ -3977,6 +3989,7 @@ async fn env_var_overrides_loaded_auth() {
         .await;
 
     let provider = ModelProviderInfo {
+        account: None,
         name: "custom".to_string(),
         base_url: Some(format!("{}/openai", server.uri())),
         // Reuse the existing environment variable to avoid using unsafe code
@@ -4007,6 +4020,7 @@ async fn env_var_overrides_loaded_auth() {
         requires_openai_auth: false,
         supports_websockets: false,
         supports_standalone_web_search: false,
+        billing: None,
     };
 
     // Init session

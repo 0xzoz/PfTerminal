@@ -39,7 +39,7 @@ async fn accounting_responses_ws_native_complete_and_partial_goldens() -> anyhow
             .await?;
         submit(&test).await?;
         let held = gate.next().await?;
-        assert_eq!(held.body["model"], "gpt-5.6-sol");
+        assert_eq!(held.body["model"], "gpt-5.6-terra");
         held.send(success(write)).await?;
         terminal(&test).await?;
         let db = test.codex.state_db().unwrap();
@@ -63,9 +63,9 @@ async fn accounting_responses_ws_native_complete_and_partial_goldens() -> anyhow
                     unknown: i64::from(write.is_none() && (i == 1 || i == 3))
                 }),
                 known_usd: if write.is_some() {
-                    "0.00161"
+                    "0.000644"
                 } else {
-                    "0.00121"
+                    "0.000484"
                 }
                 .to_string()
                 .try_into()?,
@@ -188,7 +188,7 @@ async fn accounting_responses_ws_native_ws_prefix_then_http_fallback() -> anyhow
         .send(vec![event("response.usage", usage(Some(0)))])
         .await?;
     let db = test.codex.state_db().unwrap();
-    wait_turn_observations(&db, 1).await?;
+    wait_turn_observations(&db, /*count*/ 1).await?;
     drop(first);
     let http = gate.next().await?;
     assert!(http.http);
@@ -200,8 +200,8 @@ async fn accounting_responses_ws_native_ws_prefix_then_http_fallback() -> anyhow
     chain(&records);
     assert_eq!(
         totals(&db, &records[0]).await?.known_usd,
-        // The two turn attempts, plus the startup prewarm's own $0.02997.
-        "0.03319".to_string().try_into()?
+        // The two turn attempts, plus the startup prewarm's own $0.011988.
+        "0.013276".to_string().try_into()?
     );
     counts(&gate, (1, 1, 1, 1));
     stop(&test).await;
@@ -331,7 +331,7 @@ async fn accounting_responses_ws_native_handshake_and_postdispatch_errors() -> a
     Ok(())
 }
 #[tokio::test]
-async fn accounting_responses_ws_native_redirects_never_escape_binding() -> anyhow::Result<()> {
+async fn accounting_responses_ws_native_redirects_are_never_attributed() -> anyhow::Result<()> {
     for status in [301, 302, 303, 307, 308] {
         for fallback in [false, true] {
             let origin = MockServer::start().await;
@@ -361,25 +361,10 @@ async fn accounting_responses_ws_native_redirects_never_escape_binding() -> anyh
                     .iter()
                     .any(|event| matches!(event, EventMsg::Error(_)))
             );
-            if !fallback {
-                // A plain 3xx transport error also sends nothing. Require the
-                // accounting latch's fatal outcome at the sampling retry boundary.
-                let errors: Vec<_> = events
-                    .iter()
-                    .filter_map(|event| match event {
-                        EventMsg::Error(error) => Some(error.message.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                assert_eq!(
-                    errors,
-                    [
-                        "Fatal error: Native Anthropic accounting failed; request stopped without a repair send"
-                    ],
-                    "WS redirect {status} must latch accounting failure"
-                );
-            }
-            assert!(target.received_requests().await.unwrap().is_empty());
+            // A websocket handshake never follows a redirect, recorded or not.
+            // An HTTP fallback that is redirected is resent once, unrecorded,
+            // on the ordinary client, which follows it to the target.
+            let target_requests = target.received_requests().await.unwrap().len();
             let requests = origin.received_requests().await.unwrap();
             let handshakes = requests
                 .iter()
@@ -390,9 +375,10 @@ async fn accounting_responses_ws_native_redirects_never_escape_binding() -> anyh
                 .filter(|r| r.method.as_str() == "POST")
                 .count();
             eprintln!(
-                "redirect status={status} fallback={fallback}: handshakes={handshakes}, frames=0, posts={posts}, target=0"
+                "redirect status={status} fallback={fallback}: handshakes={handshakes}, posts={posts}, target={target_requests}"
             );
-            assert_eq!(posts, usize::from(fallback));
+            assert_eq!(target_requests, usize::from(fallback));
+            assert_eq!(posts, 2 * usize::from(fallback));
             let db = test.codex.state_db().unwrap();
             assert_eq!(turn_attempts(&db).await?.len(), usize::from(fallback));
             stop(&test).await;
@@ -401,7 +387,8 @@ async fn accounting_responses_ws_native_redirects_never_escape_binding() -> anyh
     Ok(())
 }
 #[tokio::test]
-async fn accounting_responses_ws_native_endpoint_and_cached_auth_mismatch() -> anyhow::Result<()> {
+async fn accounting_responses_ws_native_endpoint_is_unrecorded_and_a_switched_auth_reconnects()
+-> anyhow::Result<()> {
     let server = MockServer::start().await;
     let mut gate = Gate::start().await?;
     let test = builder(
@@ -411,15 +398,11 @@ async fn accounting_responses_ws_native_endpoint_and_cached_auth_mismatch() -> a
     .build_with_auto_env(&server)
     .await?;
     submit(&test).await?;
-    assert!(
-        terminal(&test)
-            .await?
-            .iter()
-            .any(|event| matches!(event, EventMsg::Error(_)))
-    );
+    gate.next().await?.complete().await?;
+    core_test_support::assert_accounting_gap(&terminal(&test).await?);
     gate.no_pending().await;
     absent(&test.codex.state_db().unwrap()).await?;
-    assert_eq!(gate.counts.lock().unwrap().2, 0);
+    assert_eq!(gate.counts.lock().unwrap().2, 1);
     stop(&test).await;
 
     let mut gate = Gate::start().await?;
@@ -428,7 +411,7 @@ async fn accounting_responses_ws_native_endpoint_and_cached_auth_mismatch() -> a
     let subscription = codex_login::CodexAuth::from_external_chatgpt_tokens(
         "header.e30.synthetic",
         "synthetic-account",
-        None,
+        /*chatgpt_plan_type*/ None,
     )?;
     let test = builder(gate.endpoint.clone(), enabled(&gate.endpoint))
         .with_auth(subscription)
@@ -444,14 +427,27 @@ async fn accounting_responses_ws_native_endpoint_and_cached_auth_mismatch() -> a
         )))
         .await?;
     warmup.complete().await?;
+    gate.next().await?.complete().await?;
+    // #1311 (D171): the request is never sent on the connection opened with
+    // the subscription's tokens; a new one is opened with the API key, so the
+    // request is attributable and recorded, with no accounting gap.
+    let events = terminal(&test).await?;
     assert!(
-        terminal(&test)
-            .await?
+        !events
             .iter()
-            .any(|event| matches!(event, EventMsg::Error(_)))
+            .any(|event| matches!(event, EventMsg::Error(_))
+                || matches!(
+                    event,
+                    EventMsg::Warning(warning)
+                        if warning.message.starts_with("Developer accounting could not record")
+                )),
+        "{events:?}"
     );
-    counts(&gate, (1, 1, 0, 0));
-    absent(&test.codex.state_db().unwrap()).await?;
+    counts(&gate, (2, 1, 1, 0));
+    assert_eq!(
+        turn_attempts(&test.codex.state_db().unwrap()).await?.len(),
+        1
+    );
     stop(&test).await;
     Ok(())
 }

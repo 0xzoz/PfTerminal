@@ -240,6 +240,26 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
         etag: String,
         http_client_factory: HttpClientFactory,
     ) -> ModelsManagerFuture<'_, ()>;
+
+    /// PF-84: list models with the sign-in of named account `account` (`None`:
+    /// the default login) from now on. Returns whether that changed. Managers
+    /// not bound to an OpenAI sign-in keep their list and return `false`.
+    fn follow_sign_in_account(&self, _account: Option<&codex_login::NamedChatgptAccount>) -> bool {
+        false
+    }
+
+    /// PF-84: whether a response from a request to `provider` describes this
+    /// list, so its models etag may refresh it.
+    fn lists_for_provider(&self, _provider: &codex_model_provider_info::ModelProviderInfo) -> bool {
+        true
+    }
+
+    /// PF-84: loads a usable cached list (the same check refreshing uses:
+    /// fresh, this client version) and returns whether the list is current
+    /// without a fetch. `true` when this manager never fetches.
+    fn load_cached_list(&self) -> ModelsManagerFuture<'_, bool> {
+        Box::pin(async { true })
+    }
 }
 
 pub type ModelsManagerFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -361,6 +381,10 @@ impl ModelsManager for OpenAiModelsManager {
             etag,
             http_client_factory,
         ))
+    }
+
+    fn load_cached_list(&self) -> ModelsManagerFuture<'_, bool> {
+        Box::pin(async move { !self.should_refresh_models().await || self.try_load_cache().await })
     }
 }
 

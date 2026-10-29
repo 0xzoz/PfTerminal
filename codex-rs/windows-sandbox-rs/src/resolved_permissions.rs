@@ -77,6 +77,19 @@ impl ResolvedWindowsSandboxPermissions {
         })
     }
 
+    /// #734: the file-system half of a run's permissions, `:workspace_roots`
+    /// bound as in [`Self::try_from_permission_profile_for_workspace_roots`].
+    pub(crate) fn from_file_system_policy(
+        file_system: FileSystemSandboxPolicy,
+        workspace_roots: &[AbsolutePathBuf],
+    ) -> Self {
+        Self {
+            file_system: file_system
+                .materialize_project_roots_with_workspace_roots(workspace_roots),
+            network: NetworkSandboxPolicy::default(),
+        }
+    }
+
     /// Resolves a managed permission profile and binds symbolic `:workspace_roots`
     /// entries to the workspace roots supplied by the caller.
     pub fn try_from_permission_profile_for_workspace_roots(
@@ -310,6 +323,7 @@ mod tests {
                     },
                     FileSystemSandboxEntry {
                         path: FileSystemPath::GlobPattern {
+                            scan: None,
                             pattern: project_roots_glob_pattern(Path::new("**/*.env")),
                         },
                         access: FileSystemAccessMode::Deny,
@@ -361,6 +375,7 @@ mod tests {
                 },
                 FileSystemSandboxEntry {
                     path: FileSystemPath::GlobPattern {
+                        scan: None,
                         pattern: AbsolutePathBuf::resolve_path_against_base(
                             "**/*.env",
                             first.as_path(),
@@ -373,6 +388,7 @@ mod tests {
                 },
                 FileSystemSandboxEntry {
                     path: FileSystemPath::GlobPattern {
+                        scan: None,
                         pattern: AbsolutePathBuf::resolve_path_against_base(
                             "**/*.env",
                             second.as_path(),

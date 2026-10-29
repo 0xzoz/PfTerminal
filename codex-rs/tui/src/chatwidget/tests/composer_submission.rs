@@ -179,6 +179,7 @@ async fn submission_preserves_text_elements_and_local_images() {
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
+        provider_account: None,
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -257,6 +258,7 @@ async fn submission_includes_configured_active_permission_profile() {
                 },
                 FileSystemSandboxEntry {
                     path: FileSystemPath::GlobPattern {
+                        scan: None,
                         pattern: "/home/user/project/secrets/**".to_string(),
                     },
                     access: FileSystemAccessMode::Deny,
@@ -288,6 +290,7 @@ async fn submission_includes_configured_active_permission_profile() {
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
+        provider_account: None,
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -343,6 +346,7 @@ async fn submission_omits_active_permission_profile_for_legacy_snapshot() {
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
+        provider_account: None,
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -388,6 +392,7 @@ async fn submission_with_remote_and_local_images_keeps_local_placeholder_numberi
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
+        provider_account: None,
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -486,6 +491,7 @@ async fn enter_with_only_remote_images_submits_user_turn() {
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
+        provider_account: None,
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -553,6 +559,7 @@ async fn shift_enter_with_only_remote_images_does_not_submit_user_turn() {
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
+        provider_account: None,
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -594,6 +601,7 @@ async fn enter_with_only_remote_images_does_not_submit_when_modal_is_active() {
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
+        provider_account: None,
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -635,6 +643,7 @@ async fn enter_with_only_remote_images_does_not_submit_when_input_disabled() {
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
+        provider_account: None,
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);
@@ -679,6 +688,7 @@ async fn submission_prefers_selected_duplicate_skill_path() {
         message_history: None,
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
+        provider_account: None,
     };
     chat.handle_thread_session(configured);
     drain_insert_history(&mut rx);

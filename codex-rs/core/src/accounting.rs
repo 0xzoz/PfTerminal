@@ -13,20 +13,25 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_state::StateRuntime;
 use codex_state::accounting::AccountingStore;
-use codex_state::accounting::AsOf;
 use codex_state::accounting::Attempt;
 use codex_state::accounting::Dialect;
+use codex_state::accounting::LedgerWrite;
 use codex_state::accounting::Observation;
 use codex_state::accounting::Patch;
 use codex_state::accounting::Presence;
+use codex_state::accounting::WriteOutcome;
 use sha2::Digest;
 use sha2::Sha256;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use uuid::Uuid;
 
+#[cfg(test)]
+#[path = "accounting_basis_tests.rs"]
+mod basis_tests;
 #[path = "accounting_chat.rs"]
 pub(crate) mod chat;
 #[cfg(test)]
@@ -34,6 +39,8 @@ pub(crate) mod chat;
 mod policy_tests;
 #[path = "accounting_prices.rs"]
 mod prices;
+#[path = "accounting_realtime.rs"]
+pub(crate) mod realtime;
 #[path = "accounting_responses.rs"]
 pub(crate) mod responses;
 #[path = "accounting_transport.rs"]
@@ -70,6 +77,8 @@ pub(crate) fn developer_accounting_mode(
         approved_endpoint,
         approved_query: canonical_query(provider),
         pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
     }
 }
 
@@ -122,12 +131,25 @@ pub(crate) fn compaction_turn_label(sub_id: &str) -> String {
 
 /// A turn label for one realtime call.
 ///
-/// Creating the call is a model request the operator paid for. The realtime
-/// session's own token usage never reaches this client - the protocol this
-/// client parses carries none - so the call is recorded with its tokens
-/// unknown rather than left invisible.
+/// Creating the call is a model request the operator paid for. Its response
+/// carries no usage and the call's sideband reports are not recorded, so the
+/// call is recorded with its tokens unknown rather than left invisible.
 pub(crate) fn realtime_turn_label(sub_id: &str) -> String {
     scoped_turn_label("realtime:", sub_id)
+}
+
+/// The turn-label prefix of one realtime WebSocket session (#824): a
+/// `realtime:` label, so anything that reads realtime work reads it, told
+/// apart from a WebRTC call so `/cost` can name it a session with a start and
+/// an end. The TUI's `/cost` matches it by value;
+/// `realtime_session_label_is_stable` pins it.
+pub(crate) const REALTIME_SESSION_LABEL: &str = "realtime:ws:";
+
+/// A turn label for one realtime WebSocket session (#824). The session is
+/// one request, with the tokens its finished responses reported (#889 D223)
+/// and no price.
+pub(crate) fn realtime_session_turn_label(sub_id: &str) -> String {
+    scoped_turn_label(REALTIME_SESSION_LABEL, sub_id)
 }
 
 /// A turn label for one stage-one memory extraction.
@@ -151,6 +173,18 @@ pub(crate) fn prewarm_turn_label() -> String {
     format!("prewarm:{}", Uuid::new_v4())
 }
 
+/// #403: the warm-up a conversation the user reopens (resume, restart) or
+/// forks (`/side`, editing a message) sends, told apart from a new
+/// conversation's so `/cost` can name it. Still a `prewarm:` label, so anything
+/// that reads warm-ups reads it. The TUI's `/cost` matches the prefix by value;
+/// `reopen_prewarm_label_is_stable` pins it.
+pub(crate) fn reopen_prewarm_turn_label() -> String {
+    format!("{REOPEN_PREWARM_LABEL}{}", Uuid::new_v4())
+}
+
+/// The turn-label prefix of a reopen warm-up; the TUI's `/cost` matches it.
+pub(crate) const REOPEN_PREWARM_LABEL: &str = "prewarm:reopen:";
+
 /// A bounded turn label for the completion assessment of `sub_id`.
 ///
 /// The classifier is a second model request the operator paid for, issued on its
@@ -167,7 +201,13 @@ pub(crate) fn assessment_turn_label(sub_id: &str) -> String {
 /// fine. Keep the prefix and as much of the id as fits.
 fn scoped_turn_label(prefix: &str, sub_id: &str) -> String {
     const LIMIT: usize = 128;
-    let room = LIMIT - prefix.len();
+    // Nested prefixes (`side:agent:review:`) stay far below this; the digest
+    // form below needs room for `-` and 16 hex digits.
+    debug_assert!(
+        prefix.len() <= LIMIT - 17,
+        "turn label prefix too long: {prefix}"
+    );
+    let room = LIMIT.saturating_sub(prefix.len());
     if sub_id.len() <= room {
         return format!("{prefix}{sub_id}");
     }
@@ -190,9 +230,134 @@ pub(crate) struct TurnScopes {
     pub(crate) anthropic: Option<Arc<Sampling>>,
     pub(crate) responses: Option<Arc<responses::DeferredResponsesSampling>>,
     pub(crate) chat: Option<Arc<chat::DeferredChatSampling>>,
+    /// A collector for this turn never opened.
+    unrecorded: bool,
+    /// The ledger and conversation this turn records under, to notice records
+    /// the ledger writer refused after their request stopped waiting.
+    ledger: Option<(Arc<StateRuntime>, ThreadId)>,
+    /// #314 (D228): the last UTC day this unit's gap marker covers, once one
+    /// is written or on its way; `-1` before.
+    gap_marked_through: AtomicI64,
+    /// When this unit attached (Unix ms): its unrecorded requests were sent
+    /// between then and when it is marked.
+    attached_at_ms: i64,
     _anthropic_scope: SamplingScope,
     _responses_scope: responses::Scope,
     _chat_scope: chat::Scope,
+}
+
+impl TurnScopes {
+    /// Whether this turn has stopped recording its requests: a collector never
+    /// opened, or one closed after an accounting failure. Its requests still go
+    /// to the provider; they are only missing from the ledger.
+    pub(crate) fn stopped(&self) -> bool {
+        self.unrecorded
+            || self
+                .anthropic
+                .as_ref()
+                .is_some_and(|value| value.is_closed())
+            || self
+                .responses
+                .as_ref()
+                .is_some_and(|value| value.is_closed())
+            || self.chat.as_ref().is_some_and(|value| value.is_closed())
+    }
+
+    /// #314 (D228): durably mark the UTC days this unit ran on (attach to
+    /// now) as days on which accounting failed to record one of this
+    /// conversation's requests, again only once the UTC day has moved on, so
+    /// `/cost` says those days' totals may be incomplete. Nothing when the ledger was never reached; a
+    /// failed mark is logged. A record the ledger writer refuses marks its own
+    /// day (`accounting_writer::refuse`).
+    pub(crate) async fn mark_gap(&self) {
+        if let Some((db, owner, attached)) = self.claim_gap_mark() {
+            write_gap_mark(&db, owner, attached).await;
+        }
+    }
+
+    fn claim_gap_mark(&self) -> Option<(Arc<StateRuntime>, ThreadId, i64)> {
+        let (db, owner) = self.ledger.as_ref()?;
+        let today = now().div_euclid(86_400_000);
+        (self.gap_marked_through.fetch_max(today, Ordering::AcqRel) < today)
+            .then(|| (Arc::clone(db), *owner, self.attached_at_ms))
+    }
+
+    /// Whether a collector stopped this turn (`Sampling::halt`).
+    pub(crate) fn halted(&self) -> bool {
+        self.anthropic
+            .as_ref()
+            .is_some_and(|value| value.is_halted())
+            || self
+                .responses
+                .as_ref()
+                .is_some_and(|value| value.is_halted())
+            || self.chat.as_ref().is_some_and(|value| value.is_halted())
+    }
+}
+
+/// #314 (D228): a unit that ends with requests unrecorded and no turn-end
+/// check (a startup warm-up, a completion assessment, a memory extraction, a
+/// realtime session) still marks its days; the write is handed to the runtime
+/// as the unit's scopes are dropped, so one dropped as the process exits can
+/// be lost. A memory-denial stop (`halted`) is not an accounting failure.
+impl Drop for TurnScopes {
+    fn drop(&mut self) {
+        if !self.stopped() || self.halted() {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if let Some((db, owner, attached)) = self.claim_gap_mark() {
+            handle.spawn(async move { write_gap_mark(&db, owner, attached).await });
+        }
+    }
+}
+
+async fn write_gap_mark(db: &StateRuntime, owner: ThreadId, attached_at_ms: i64) {
+    if let Err(error) = AccountingStore::record_gap(db, owner, attached_at_ms, now()).await {
+        tracing::warn!(
+            target: LOG_TARGET,
+            cause = %format_args!("{error:#}"),
+            "accounting: could not mark this day's totals as incomplete"
+        );
+    }
+}
+
+/// Warn once per turn when `scopes` - or a collector that never attached
+/// (`None`) - left a model request unrecorded, including a record the ledger
+/// writer refused after its request stopped waiting for it
+/// (`SessionNotices::refused_since`).
+pub(crate) async fn warn_if_unrecorded(
+    session: &crate::session::session::Session,
+    turn_context: &crate::session::turn_context::TurnContext,
+    scopes: Option<&TurnScopes>,
+) {
+    let ledger = scopes.and_then(|scopes| scopes.ledger.as_ref());
+    // Always read, so a refusal this turn already reports is not reported
+    // again by the next one.
+    let refused = session.services.accounting_notices.refused_since(ledger);
+    let unrecorded = scopes.is_none_or(TurnScopes::stopped) || refused;
+    // A refused record marked its own day as the writer refused it.
+    if let Some(scopes) = scopes.filter(|scopes| scopes.stopped()) {
+        scopes.mark_gap().await;
+    }
+    if unrecorded
+        && !turn_context
+            .accounting_gap_warning_emitted
+            .swap(true, Ordering::Relaxed)
+    {
+        session
+            .send_event(
+                turn_context,
+                codex_protocol::protocol::EventMsg::Warning(
+                    codex_protocol::protocol::WarningEvent {
+                        message: GAP_WARNING.to_string(),
+                    },
+                ),
+            )
+            .await;
+    }
 }
 
 /// Bind collection for one turn on one client session.
@@ -219,7 +384,7 @@ pub(crate) async fn attach_turn(
     } else {
         (None, String::new())
     };
-    attach_scopes(
+    let scopes = attach_scopes(
         session,
         &turn_context.config.accounting,
         &turn_context.config.model_provider_id,
@@ -229,7 +394,159 @@ pub(crate) async fn attach_turn(
         client_session,
         turn,
     )
-    .await
+    .await?;
+    let notices = &session.services.accounting_notices;
+    if notices.format.load(Ordering::Relaxed) == FORMAT_NEWER
+        && !notices.format_warned.swap(true, Ordering::Relaxed)
+    {
+        session
+            .send_event(
+                turn_context,
+                codex_protocol::protocol::EventMsg::Warning(
+                    codex_protocol::protocol::WarningEvent {
+                        message: NEWER_LEDGER_WARNING.to_string(),
+                    },
+                ),
+            )
+            .await;
+    }
+    Ok(scopes)
+}
+
+/// Shown once per session when the home's ledger is in a newer format.
+pub(crate) const NEWER_LEDGER_WARNING: &str = "Developer accounting is off for this session: this home's cost ledger was written by a newer Corbanu build. \
+     Requests are sent as usual; /cost does not include them.";
+
+/// Where a session's paid requests are recorded: the thread they are
+/// attributed to and the ledger that thread lives in.
+#[derive(Clone)]
+pub(crate) struct AccountingOwner {
+    pub(crate) thread: ThreadId,
+    pub(crate) db: codex_rollout::state_db::StateDbHandle,
+    /// Prefixed to the turn label of work recorded for another conversation
+    /// (`review:`, `consolidation:`, `agent:`, `code-review:`, `side:`,
+    /// `fork:`, nested as in `side:review:`); empty for a session's own.
+    pub(crate) label_prefix: String,
+}
+
+/// The conversation an internal worker with no thread of its own (memory
+/// consolidation) was started by; its paid requests are recorded there
+/// (PF-60-S04). Attached to the worker's thread extension data when it is
+/// built, through [`crate::CodexThread::record_worker_requests_here`].
+pub(crate) struct StartedBy(pub(crate) ThreadId);
+
+/// What a session has already been told about its ledger; each notice is
+/// given once per session. Held on the session, so it ends with it.
+#[derive(Debug, Default)]
+pub(crate) struct SessionNotices {
+    /// `FORMAT_NEWER` once the ledger was found in a newer format.
+    pub(crate) format: std::sync::atomic::AtomicU8,
+    pub(crate) format_warned: std::sync::atomic::AtomicBool,
+    pub(crate) excluded: std::sync::atomic::AtomicBool,
+    /// The ledger writer's refusal count for this session's records when it
+    /// last reported them (`refused_since`); set when its first turn attaches.
+    pub(crate) refusals_seen: std::sync::atomic::AtomicU64,
+    pub(crate) refusals_seen_set: std::sync::atomic::AtomicBool,
+}
+
+const FORMAT_NEWER: u8 = 1;
+
+/// Whether the session's ledger is in a format newer than this build's. Once
+/// it is, collection stays off for the session. Anything else is probed again
+/// on the next turn - one read of the applied migrations - because another
+/// build sharing this home may upgrade the ledger at any time.
+async fn ledger_refused(
+    session: &crate::session::session::Session,
+    db: &codex_rollout::state_db::StateDbHandle,
+) -> bool {
+    let notices = &session.services.accounting_notices;
+    if notices.format.load(Ordering::Relaxed) == FORMAT_NEWER {
+        return true;
+    }
+    match AccountingStore::check_format(db).await {
+        Ok(()) => false,
+        Err(error) if codex_state::accounting::is_newer_format(&error) => {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "accounting: ledger written in a newer format; collection off for this session"
+            );
+            notices.format.store(FORMAT_NEWER, Ordering::Relaxed);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+impl SessionNotices {
+    /// Start counting the ledger writer's refusals of this session's records
+    /// (`refused_since`), once: refusals before its first turn are not its own.
+    fn count_refusals_from(&self, db: &StateRuntime, owner: ThreadId) {
+        if !self.refusals_seen_set.swap(true, Ordering::Relaxed) {
+            self.refusals_seen
+                .store(db.accounting_refusals(owner), Ordering::Relaxed);
+        }
+    }
+
+    /// Whether the ledger writer refused any of this session's records since
+    /// the session last looked. A record can be refused after its request
+    /// stopped waiting for it; the turn that notices reports the gap.
+    pub(crate) fn refused_since(&self, ledger: Option<&(Arc<StateRuntime>, ThreadId)>) -> bool {
+        let Some((db, owner)) = ledger else {
+            return false;
+        };
+        let refused = db.accounting_refusals(*owner);
+        refused > self.refusals_seen.swap(refused, Ordering::Relaxed)
+    }
+}
+
+/// Name, once per session, a session whose paid requests are not collected.
+fn excluded_once(session: &crate::session::session::Session, reason: &'static str) {
+    if !session
+        .services
+        .accounting_notices
+        .excluded
+        .swap(true, Ordering::Relaxed)
+    {
+        // The module path is `LOG_TARGET`; a dotted field name cannot follow
+        // an explicit target in this macro.
+        tracing::warn!(
+            accounting.excluded = reason,
+            "accounting: this session's model requests are not recorded"
+        );
+    }
+}
+
+/// Why a session's requests are not recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Uncollected {
+    /// Not collected by design (an ephemeral session, a reviewer of a
+    /// conversation that is not persisted): named once in the log.
+    Excluded(&'static str),
+    /// The ledger could not be reached: each such turn warns that requests
+    /// went unrecorded.
+    Failed(&'static str),
+    /// The ledger is in a newer format: collection is off for the session.
+    NewerFormat,
+}
+
+/// The owner a collecting session records under. A session excluded by design
+/// is named once in the log; a ledger that cannot be reached is logged as a
+/// gap.
+pub(crate) async fn collecting_owner(
+    session: &crate::session::session::Session,
+) -> Result<AccountingOwner, Uncollected> {
+    let owner = session
+        .accounting_owner()
+        .await
+        .inspect_err(|why| match *why {
+            Uncollected::Excluded(reason) => excluded_once(session, reason),
+            Uncollected::Failed(cause) => gap("open sampling", cause),
+            Uncollected::NewerFormat => {}
+        })?;
+    if ledger_refused(session, &owner.db).await {
+        return Err(Uncollected::NewerFormat);
+    }
+    Ok(owner)
 }
 
 /// Bind collection for one unit of inference on one client session.
@@ -250,52 +567,136 @@ pub(crate) async fn attach_scopes(
     client_session: &crate::client::ModelClientSession,
     turn: String,
 ) -> Result<TurnScopes, CodexErr> {
-    // An ephemeral session persists no thread, so the ledger has no owner to
-    // attribute its attempts to. Like any unattributable request it is left
-    // uncollected, and the turn still runs, rather than failing every turn.
-    let mode = if session.live_thread().is_none() {
-        AccountingMode::Disabled
-    } else if matches!(accounting, AccountingMode::Provider { .. }) {
-        turn_mode(
+    // A persisted session records under its own thread. A session with no
+    // thread of its own (a guardian reviewer, a memory consolidation agent, a
+    // sub-agent, a `/side` conversation or another temporary fork) records
+    // under the saved conversation it works for, labelled as such
+    // (`Session::accounting_owner`). Any other session (`exec --ephemeral` and
+    // work for it) is left uncollected - named once in the log - and its turns
+    // run.
+    // A ledger that cannot be reached leaves this turn's requests unrecorded;
+    // it never stops them.
+    let mut candidate = match accounting {
+        AccountingMode::Provider { .. } => turn_mode(
             accounting,
             provider_id,
             provider,
             auth_mode,
             resolved_endpoint,
-        )
+        ),
+        _ => accounting.clone(),
+    };
+    // The owner is only looked up when this route would be collected, so a
+    // session using a route that collects nothing is neither named nor warned.
+    let collected = [
+        codex_model_provider_info::WireApi::Anthropic,
+        codex_model_provider_info::WireApi::Responses,
+        codex_model_provider_info::WireApi::Chat,
+    ]
+    .into_iter()
+    .any(|wire| collects(&candidate, provider_id, provider, wire));
+    let mut unrecorded = false;
+    let owner = if !collected {
+        None
     } else {
-        accounting.clone()
+        match collecting_owner(session).await {
+            Ok(owner) => Some(owner),
+            Err(Uncollected::Failed(_)) => {
+                unrecorded = true;
+                None
+            }
+            Err(Uncollected::Excluded(_) | Uncollected::NewerFormat) => None,
+        }
+    };
+    let ledger = owner
+        .as_ref()
+        .map(|owner| (Arc::clone(&owner.db), owner.thread));
+    let turn = match &owner {
+        Some(owner) if !owner.label_prefix.is_empty() => {
+            scoped_turn_label(&owner.label_prefix, &turn)
+        }
+        Some(_) | None => turn,
+    };
+    let mode = if owner.is_some() {
+        bind_account_fingerprint(
+            &mut candidate,
+            provider,
+            session.get_config().await.codex_home.to_path_buf(),
+        )
+        .await;
+        candidate
+    } else {
+        AccountingMode::Disabled
     };
     let collects_wire = |wire| collects(&mode, provider_id, provider, wire);
+    // A sampling that cannot open leaves this turn's Messages requests
+    // unrecorded; it never stops them.
     let anthropic = if collects_wire(codex_model_provider_info::WireApi::Anthropic) {
-        session
-            .try_ensure_rollout_materialized()
-            .await
-            .map_err(|error| CodexErr::Fatal(failure("materialize rollout", error).into()))?;
-        let runtime = session
-            .state_db()
-            .ok_or_else(|| CodexErr::Fatal(failure("open sampling", "no state database").into()))?;
-        Some(Sampling::start(runtime, session.thread_id, turn.clone(), &mode).await?)
+        let opened = async {
+            session
+                .try_ensure_rollout_materialized()
+                .await
+                .map_err(|error| CodexErr::Fatal(failure("materialize rollout", error).into()))?;
+            let owner = owner.as_ref().ok_or_else(|| {
+                CodexErr::Fatal(failure("open sampling", "no accounting owner").into())
+            })?;
+            Sampling::start(owner.db.clone(), owner.thread, turn.clone(), &mode).await
+        }
+        .await;
+        match opened {
+            Ok(sampling) => Some(sampling),
+            Err(error) => {
+                gap("open sampling", error);
+                unrecorded = true;
+                None
+            }
+        }
     } else {
         None
     };
     let _anthropic_scope =
         SamplingScope::attach(Arc::clone(&client_session.accounting), anthropic.clone())?;
-    let responses = collects_wire(codex_model_provider_info::WireApi::Responses).then(|| {
-        responses::DeferredResponsesSampling::new(Arc::clone(session), turn.clone(), mode.clone())
-    });
+    let responses = owner
+        .clone()
+        .filter(|_| collects_wire(codex_model_provider_info::WireApi::Responses))
+        .map(|owner| {
+            responses::DeferredResponsesSampling::new_for(
+                Arc::clone(session),
+                owner,
+                turn.clone(),
+                mode.clone(),
+            )
+        });
     let _responses_scope = responses::Scope::attach(
         Arc::clone(&client_session.responses_accounting),
         responses.clone(),
     )?;
-    let chat = collects_wire(codex_model_provider_info::WireApi::Chat)
-        .then(|| chat::DeferredChatSampling::new(Arc::clone(session), turn.clone(), mode.clone()));
+    let chat = owner
+        .filter(|_| collects_wire(codex_model_provider_info::WireApi::Chat))
+        .map(|owner| {
+            chat::DeferredChatSampling::new_for(
+                Arc::clone(session),
+                owner,
+                turn.clone(),
+                mode.clone(),
+            )
+        });
     let _chat_scope =
         chat::Scope::attach(Arc::clone(&client_session.chat_accounting), chat.clone())?;
+    if let Some((db, owner)) = ledger.as_ref() {
+        session
+            .services
+            .accounting_notices
+            .count_refusals_from(db, *owner);
+    }
     Ok(TurnScopes {
+        gap_marked_through: AtomicI64::new(-1),
+        attached_at_ms: now(),
+        ledger,
         anthropic,
         responses,
         chat,
+        unrecorded,
         _anthropic_scope,
         _responses_scope,
         _chat_scope,
@@ -328,7 +729,14 @@ pub(crate) fn pinned_route(approved_endpoint: &str, query: Option<&str>, path: &
         Some((path, query)) => (path, Some(query)),
         None => (path, None),
     };
-    let route = format!("{}/{path}", approved_endpoint.trim_end_matches('/'));
+    // An empty path is the approved endpoint itself: a realtime session whose
+    // base URL already names its path (#824).
+    let base = approved_endpoint.trim_end_matches('/');
+    let route = if path.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}/{path}")
+    };
     let query: Vec<&str> = [query, path_query]
         .into_iter()
         .flatten()
@@ -348,7 +756,13 @@ pub(crate) fn turn_mode(
     auth_mode: Option<codex_protocol::auth::AuthMode>,
     resolved_endpoint: &str,
 ) -> AccountingMode {
-    let AccountingMode::Provider { scope, .. } = mode else {
+    let AccountingMode::Provider {
+        scope,
+        provider_id: bound_provider,
+        account: bound_account,
+        ..
+    } = mode
+    else {
         return mode.clone();
     };
     if route_refusal(provider).is_some() {
@@ -385,68 +799,59 @@ pub(crate) fn turn_mode(
                         .to_api_provider(auth_mode)
                         .is_ok_and(|api| api.base_url == resolved_endpoint)
             });
-    // Which economics apply is decided by the authentication actually used, not
-    // by whether per-token rates happen to be available. Treating "API key on a
-    // route this client will not price" as subscription capacity would book
-    // API-key spend as plan work.
-    use codex_protocol::auth::AuthMode;
-    // Named positively. Defining the plan side as "not an API key" would make a
-    // turn with no visible credential, or one whose credential is supplied out of
-    // band, into subscription capacity - the same substitution in the other
-    // direction.
-    let codex_subscription = matches!(
-        auth_mode,
-        Some(
-            AuthMode::Chatgpt
-                | AuthMode::ChatgptAuthTokens
-                | AuthMode::Headers
-                | AuthMode::AgentIdentity
-                | AuthMode::PersonalAccessToken
-        )
+    // Which economics apply is the billing basis declared for the route and
+    // credential actually used (PF-60-S05): never inferred from the kind of
+    // login, and never from whether per-token rates happen to be available.
+    // A route the table does not know is undeclared, not guessed.
+    let credential = codex_model_provider_info::BillingCredential::of(provider, auth_mode);
+    let declaration = codex_model_provider_info::declared_billing(
+        provider_id,
+        provider,
+        credential,
+        resolved_endpoint,
+        own_route,
     );
-    // A provider whose own credential is a plan login, as the built-in
-    // `claude-plan` provider's command auth is. Such a turn carries no Codex auth
-    // mode of its own, so keying only on `AuthMode` dropped it to no economics -
-    // and gave it the plan side only when an unrelated ChatGPT login happened to
-    // exist. The shape is named here rather than inferred from that accident.
-    //
-    // Deliberately NOT qualified by the Codex auth mode. `auth_mode` describes
-    // the OpenAI credential this profile happens to hold, which has nothing to
-    // say about how a Claude subscription route is paid for. Excluding
-    // `AuthMode::ApiKey` meant an unrelated OpenAI API key sitting in the same
-    // profile silently dropped every Claude Plan turn to no economics at all -
-    // the same accident this predicate was written to end, with the other
-    // credential playing the part.
-    let provider_plan_login = provider.auth.is_some();
-    let subscription = codex_subscription || provider_plan_login;
-    let pricing = if !own_route {
-        PriceAuthority::Unavailable
-    } else if auth_mode == Some(AuthMode::ApiKey) && !provider_plan_login {
-        // Deliberately NOT gated on `api_key_header_name`: the built-in Anthropic
-        // provider declares `x-api-key` as its own credential header, so requiring
-        // it to be absent made the Anthropic pricing arm below dead code and left
-        // metered Anthropic turns with no rate at all. What disqualifies per-token
-        // rates is a credential this client cannot attribute to the account the
-        // catalogue quotes.
-        // `provider.auth` is deliberately absent from this list: a provider
-        // holding its own plan credential no longer reaches this arm at all.
-        let attributable = provider.aws.is_none()
-            && provider.experimental_bearer_token.is_none()
-            && !credential_header(&provider.http_headers)
-            && !credential_header(&provider.env_http_headers);
-        if attributable {
-            PriceAuthority::ApiKeyRates
-        } else {
-            PriceAuthority::Unavailable
+    let basis_source = match declaration {
+        codex_model_provider_info::BillingDeclaration::UserConfig(_) => {
+            codex_state::accounting::BasisSource::UserConfig
         }
-    } else if subscription {
-        PriceAuthority::PlanRate
-    } else {
-        // No credential this client can name: not an API key it can attribute,
-        // not a Codex subscription, not a provider-held plan login. It cannot say
-        // which side of the catalogue such a turn is charged on, so it says
-        // nothing.
-        PriceAuthority::Unavailable
+        codex_model_provider_info::BillingDeclaration::BuiltIn(_)
+        | codex_model_provider_info::BillingDeclaration::NotDeclared => {
+            codex_state::accounting::BasisSource::BuiltIn
+        }
+    };
+    use codex_model_provider_info::BillingBasis;
+    let pricing = match declaration.basis() {
+        None => PriceAuthority::Undeclared,
+        Some(BillingBasis::Local) => PriceAuthority::Local,
+        // The catalogue's plan figures are quoted for the built-in route only.
+        Some(BillingBasis::Subscription) if own_route => PriceAuthority::PlanRate,
+        Some(BillingBasis::Subscription) => PriceAuthority::PlanBasis,
+        Some(BillingBasis::PayPerUse) => {
+            // Deliberately NOT gated on `api_key_header_name`: the built-in
+            // Anthropic provider declares `x-api-key` as its own credential
+            // header. What disqualifies per-token rates is a route other than
+            // the one the catalogue quotes, or a credential this client cannot
+            // attribute to the account the catalogue quotes.
+            let attributable = provider.aws.is_none()
+                && provider.experimental_bearer_token.is_none()
+                && !credential_header(&provider.http_headers)
+                && !credential_header(&provider.env_http_headers);
+            if own_route && attributable {
+                PriceAuthority::ApiKeyRates
+            } else if let Some(route) = crate::config::PricedRoute::at(resolved_endpoint)
+                && attributable
+                && provider.wire_api == codex_model_provider_info::WireApi::Chat
+                && credential == codex_model_provider_info::BillingCredential::ApiKey
+            {
+                // #368: a provider the user configured at a route whose
+                // operator publishes per-token prices for it. The provider id
+                // is the user's own name, so the route is the key.
+                PriceAuthority::RouteRates(route)
+            } else {
+                PriceAuthority::Unavailable
+            }
+        }
     };
     AccountingMode::Provider {
         scope: *scope,
@@ -455,7 +860,83 @@ pub(crate) fn turn_mode(
         approved_endpoint: resolved_endpoint.into(),
         approved_query: canonical_query(provider),
         pricing,
+        basis_source,
+        account: attempt_account(
+            bound_provider,
+            provider_id,
+            provider,
+            bound_account.as_ref(),
+        ),
     }
+}
+
+/// PF-84: the serving provider's selected named account as the ledger records
+/// it, keeping a fingerprint already bound for that same account. `None` for
+/// the `default` account.
+fn attempt_account(
+    bound_provider: &str,
+    provider_id: &str,
+    provider: &codex_model_provider_info::ModelProviderInfo,
+    bound: Option<&codex_state::accounting::AttemptAccount>,
+) -> Option<codex_state::accounting::AttemptAccount> {
+    let selected = provider.account.as_ref()?;
+    Some(codex_state::accounting::AttemptAccount {
+        name: selected.name.clone(),
+        // Kept only for the same account of the same provider.
+        fingerprint: bound
+            .filter(|bound| bound.name == selected.name && bound_provider == provider_id)
+            .and_then(|bound| bound.fingerprint.clone()),
+    })
+}
+
+/// Binds the account's per-home fingerprint once per turn. The vault decrypts
+/// the account's material to hash it, and only the salted hash is kept. A
+/// fingerprint that cannot be read within `FINGERPRINT_BUDGET` (a busy vault
+/// lock, no vault) is left out and the account recorded by name alone: the
+/// request is never held for it.
+pub(crate) async fn bind_account_fingerprint(
+    mode: &mut AccountingMode,
+    provider: &codex_model_provider_info::ModelProviderInfo,
+    codex_home: std::path::PathBuf,
+) {
+    let AccountingMode::Provider {
+        account: Some(account),
+        ..
+    } = mode
+    else {
+        return;
+    };
+    if account.fingerprint.is_some() {
+        return;
+    }
+    let Some(selected) = provider.account.clone() else {
+        return;
+    };
+    const FINGERPRINT_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);
+    let lookup = tokio::task::spawn_blocking(move || {
+        let name = codex_vault::ProviderAccountName::parse(&selected.name).ok()?;
+        let vault = codex_vault::Vault::new(codex_home);
+        // Never initialise a vault (or its key) just to fingerprint.
+        if vault.key_storage() == codex_vault::VaultKeyStorage::NotInitialized {
+            return None;
+        }
+        vault
+            .provider_account_fingerprint(&selected.provider_id, &name)
+            .ok()
+            .flatten()
+    });
+    let fingerprint = tokio::time::timeout(FINGERPRINT_BUDGET, lookup)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten();
+    if fingerprint.is_none() {
+        tracing::warn!(
+            target: LOG_TARGET,
+            "account fingerprint unavailable; recording the account by name only"
+        );
+    }
+    account.fingerprint = fingerprint;
 }
 
 pub(crate) fn collects(
@@ -486,118 +967,83 @@ pub(crate) fn collects(
     }
 }
 
-pub(crate) const FAILURE: &str =
-    "Native Anthropic accounting failed; request stopped without a repair send";
+/// The error chain an accounting failure carries. It never reaches the user:
+/// every accounting failure sends the request unrecorded (`gap`).
+pub(crate) const FAILURE: &str = "developer accounting failed";
+
+/// A stage-one memory denial observed while a recorded websocket response was
+/// streaming. It is a privacy guard, not an accounting failure, and the one
+/// case that stops the turn (`Sampling::halt`).
+pub(crate) const MEMORY_DENIAL: &str =
+    "Stage-one memory denied this request while it was streaming; it was not re-sent";
 
 /// Where accounting diagnostics go. Exec prints errors on this target to stderr
 /// and the TUI keeps them in its log database.
 const LOG_TARGET: &str = "codex_core::accounting";
 
-/// Record why a request is being stopped on accounting grounds, and return the
-/// one message the user sees.
+/// Record why accounting failed, and return `FAILURE` for the error chain.
 ///
-/// Every such path reports only `FAILURE`, so without this the cause - a busy
-/// state database, a route mismatch, a ledger validation error - is lost. `step`
-/// names where it happened; `cause` is the underlying error chain. Neither ever
-/// carries prompt content or credentials.
+/// Most callers then send the request unrecorded rather than stop it, so the
+/// cause - a busy state database, a route mismatch, a ledger validation error -
+/// is logged here or lost. `step` names where it happened; `cause` is the
+/// underlying error chain. Neither ever carries prompt content or credentials.
 pub(crate) fn failure(step: &'static str, cause: impl std::fmt::Display) -> &'static str {
     tracing::error!(target: LOG_TARGET, step, cause = %cause, "{FAILURE}");
     FAILURE
 }
 
-/// How long one accounting operation - opening a sampling, an admission or an
-/// observation, each with every store call it makes - waits out contention on
-/// the shared state DB before the request fails closed.
-///
-/// The state DB is shared by every Corbanu process on a home: the TUI, `exec`
-/// workers, owner-loop workers. Another process's write can hold its lock for
-/// seconds, and SQLite gives up after its 5 s busy timeout, which used to end the
-/// turn on the spot. A contended write wrote nothing, so it is simply retried.
-const CONTENTION_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+/// Record that a request goes to the provider unrecorded because accounting
+/// failed. Accounting observes model requests; it never blocks one. The
+/// provider still bills such a request, so the gap is logged here and the turn
+/// warns once (`TurnScopes::stopped`).
+pub(crate) fn gap(step: &'static str, cause: impl std::fmt::Display) {
+    tracing::warn!(
+        target: LOG_TARGET,
+        step,
+        cause = %cause,
+        "accounting: request sent unrecorded"
+    );
+}
 
-/// Run one idempotent store call, retrying while the state DB is contended and
-/// `deadline` - shared by every call of one operation - has not passed.
-///
-/// Only contention is retried (`is_contention`); any other error returns at
-/// once, with `step` in its chain. The caller keeps its fail-closed handling for
-/// whatever finally comes back.
-async fn store_call<T, F, Fut>(
-    step: &'static str,
-    deadline: std::time::Instant,
-    mut call: F,
-) -> anyhow::Result<T>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<T>>,
-{
-    use std::time::Duration;
-    let started = std::time::Instant::now();
-    let mut delay = Duration::from_millis(50);
-    let mut retries = 0_u32;
-    loop {
-        match call().await {
-            Ok(value) => {
-                if retries > 0 {
-                    tracing::info!(
-                        target: LOG_TARGET,
-                        step,
-                        retries,
-                        waited_ms = started.elapsed().as_millis() as u64,
-                        "accounting write succeeded after state DB contention"
-                    );
-                }
-                return Ok(value);
-            }
-            Err(error)
-                if codex_state::accounting::is_contention(&error)
-                    && std::time::Instant::now() + delay < deadline =>
-            {
-                retries += 1;
-                tracing::warn!(
-                    target: LOG_TARGET,
-                    step,
-                    retries,
-                    waited_ms = started.elapsed().as_millis() as u64,
-                    cause = %format_args!("{error:#}"),
-                    "accounting: state DB busy; retrying"
-                );
-                // Spread retries so contending processes do not wake together.
-                let jitter = Duration::from_millis(u64::from(Uuid::new_v4().as_u128() as u8) % 50);
-                tokio::time::sleep(delay + jitter).await;
-                delay = (delay * 2).min(Duration::from_secs(2));
-            }
-            Err(error) => {
-                let error = error.context(step);
-                return Err(if retries > 0 {
-                    error.context(format!(
-                        "after {retries} contended retries over {} ms",
-                        started.elapsed().as_millis()
-                    ))
-                } else {
-                    error
-                });
-            }
-        }
+/// The warning a turn shows once when any of its requests went unrecorded.
+pub(crate) const GAP_WARNING: &str = "Developer accounting could not record one or more model requests in this turn. \
+     They were sent anyway; /cost does not include them. \
+     The cause is in the log (target codex_core::accounting).";
+
+/// Fixtures shared by the accounting unit tests.
+#[cfg(test)]
+pub(crate) mod tests_support {
+    /// Take the state DB's write lock on a connection of another pool, as
+    /// another Corbanu process would. `ROLLBACK` on it releases the lock.
+    pub(crate) async fn hold_write_lock(
+        db: &codex_state::StateRuntime,
+    ) -> anyhow::Result<sqlx::pool::PoolConnection<sqlx::Sqlite>> {
+        let pool = db
+            .sqlite()
+            .open_read_write_pool(&db.sqlite().state_db_path())
+            .await?;
+        let mut connection = pool.acquire().await?;
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await?;
+        Ok(connection)
     }
 }
+
 pub(crate) type Slot = Arc<Mutex<Option<Arc<Sampling>>>>;
 
-// The facade accepts explicit as-of values. Serialize this process's collector
-// transactions before sampling time so concurrent native children cannot commit
-// a later checkpoint ahead of an older local operation. Never hold across HTTP;
-// external writers still use the store's fail-visible validation contract.
-static WRITES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-
+/// The sampling this request is recorded on, if any. A closed sampling or a
+/// poisoned slot records nothing, so the request goes out unrecorded on the
+/// ordinary client.
 pub(crate) fn read_slot(slot: &Slot) -> Result<Option<Arc<Sampling>>, CodexErr> {
     match slot.lock() {
-        Ok(value) => Ok(value.clone()),
+        Ok(value) => Ok(value.clone().filter(|sampling| !sampling.is_closed())),
         Err(poison) => {
             if let Some(stale) = poison.into_inner().take() {
                 stale.reject();
             }
-            Err(CodexErr::Fatal(
-                failure("read sampling slot", "slot lock poisoned").into(),
-            ))
+            gap("read sampling slot", "slot lock poisoned");
+            Ok(None)
         }
     }
 }
@@ -610,15 +1056,14 @@ impl SamplingScope {
             match slot.lock() {
                 Ok(mut value) => *value = sampling,
                 Err(poison) => {
+                    // Leave the slot empty: this turn's requests go unrecorded.
                     if let Some(stale) = poison.into_inner().take() {
                         stale.reject();
                     }
                     if let Some(incoming) = sampling {
                         incoming.reject();
                     }
-                    return Err(CodexErr::Fatal(
-                        failure("attach sampling", "slot lock poisoned").into(),
-                    ));
+                    gap("attach sampling", "slot lock poisoned");
                 }
             }
         }
@@ -644,10 +1089,18 @@ enum Pricing {
     Anthropic,
     Responses,
     Chat,
+    /// Pay per use on a priced route a user-configured provider reached (#368).
+    Route(crate::config::PricedRoute),
     /// Subscription capacity: record the plan rate and the API equivalent, not spend.
     Plan,
-    /// Tokens only: this route and credential state no economics this client can use.
+    /// Subscription capacity with no catalogue figure.
+    PlanBasis,
+    /// Pay per use with no attributable rate: tokens only.
     Unavailable,
+    /// The user's own machine: no charge.
+    Local,
+    /// No declared basis: neither spent nor subscription.
+    Undeclared,
 }
 
 /// The economics a mode admits, shared by admission and by the guards that check
@@ -662,14 +1115,37 @@ fn pricing_for(mode: &AccountingMode) -> Pricing {
                 codex_model_provider_info::WireApi::Responses => Pricing::Responses,
                 codex_model_provider_info::WireApi::Chat => Pricing::Chat,
             },
+            // Route rates are quoted for one dialect, Chat Completions.
+            PriceAuthority::RouteRates(route) => match wire_api {
+                codex_model_provider_info::WireApi::Chat => Pricing::Route(*route),
+                codex_model_provider_info::WireApi::Anthropic
+                | codex_model_provider_info::WireApi::Responses => Pricing::Unavailable,
+            },
             PriceAuthority::PlanRate => Pricing::Plan,
+            PriceAuthority::PlanBasis => Pricing::PlanBasis,
             PriceAuthority::Unavailable => Pricing::Unavailable,
+            PriceAuthority::Local => Pricing::Local,
+            PriceAuthority::Undeclared => Pricing::Undeclared,
         },
         AccountingMode::DirectAnthropic { .. } => Pricing::Anthropic,
         AccountingMode::DirectOpenAiChat { .. } => Pricing::Chat,
         AccountingMode::DirectOpenAiResponsesHttp { .. }
         | AccountingMode::DirectOpenAiResponses { .. } => Pricing::Responses,
         AccountingMode::Disabled => Pricing::Unavailable,
+    }
+}
+
+/// Where a mode's basis was declared.
+fn basis_source_for(mode: &AccountingMode) -> codex_state::accounting::BasisSource {
+    match mode {
+        AccountingMode::Provider { basis_source, .. } => *basis_source,
+        AccountingMode::Disabled
+        | AccountingMode::DirectAnthropic { .. }
+        | AccountingMode::DirectOpenAiResponsesHttp { .. }
+        | AccountingMode::DirectOpenAiChat { .. }
+        | AccountingMode::DirectOpenAiResponses { .. } => {
+            codex_state::accounting::BasisSource::BuiltIn
+        }
     }
 }
 
@@ -681,14 +1157,31 @@ pub(crate) struct Sampling {
     scope: Uuid,
     endpoint: String,
     provider: String,
+    /// PF-84: the named account the requests are sent on; `None` is `default`.
+    account: Option<codex_state::accounting::AttemptAccount>,
     dialect: Dialect,
     pricing: Pricing,
+    /// The priced route the requests go to, if any (#368): its usage fields
+    /// have the meaning its operator documents, however the provider is named.
+    pub(super) route: Option<crate::config::PricedRoute>,
+    /// Pinned to OpenAI's image generation endpoint under API-key rates: priced
+    /// from OpenAI's published image rates rather than the chat-model
+    /// catalogue, and its body read as an Images API usage report. Any other
+    /// economics (a plan, no price) keeps the ordinary reading unchanged.
+    image_generation: bool,
+    basis_source: codex_state::accounting::BasisSource,
     previous: Mutex<Option<Uuid>>,
+    /// Held from reading `previous` until this admission replaces it, so
+    /// concurrent admissions chain as retries one after another.
+    admission: tokio::sync::Semaphore,
     failed: AtomicBool,
+    /// The turn must stop: see `halt`.
+    halted: AtomicBool,
 }
 
-// A cancelled SQL future may already have committed. Never reuse that sampling
-// with a guessed predecessor; release the permit normally and fail it closed.
+// A record handed to the ledger writer is written even if the request that
+// handed it over is cancelled. Never reuse that sampling with a guessed
+// predecessor; fail it closed.
 struct Completion<'a> {
     sampling: &'a Sampling,
     complete: bool,
@@ -835,18 +1328,9 @@ impl Sampling {
                 .into(),
             ));
         }
-        let _write = WRITES
-            .acquire()
-            .await
-            .map_err(|error| CodexErr::Fatal(failure("open sampling", error).into()))?;
-        let deadline = std::time::Instant::now() + CONTENTION_BUDGET;
-        store_call("open accounting store", deadline, || {
-            AccountingStore::open(&runtime, AsOf::Now)
-        })
-        .await
-        .map_err(|error| {
-            CodexErr::Fatal(failure("open sampling", format_args!("{error:#}")).into())
-        })?;
+        // The ledger writer installs or checks the ledger now, unless the state
+        // DB is busy: then the first record does, and a request never waits.
+        runtime.open_accounting().await;
         Ok(Arc::new(Self {
             runtime,
             owner,
@@ -859,30 +1343,70 @@ impl Sampling {
                 path_override.unwrap_or(path),
             ),
             provider: provider.into(),
+            account: match mode {
+                AccountingMode::Provider { account, .. } => account.clone(),
+                _ => None,
+            },
             dialect,
             pricing: pricing_for(mode),
+            route: crate::config::PricedRoute::at(approved_endpoint),
+            image_generation: path_override == Some(prices::IMAGE_GENERATIONS_PATH)
+                && pricing_for(mode) == Pricing::Responses
+                && provider == codex_model_provider_info::OPENAI_PROVIDER_ID,
+            basis_source: basis_source_for(mode),
             previous: Mutex::new(None),
+            admission: tokio::sync::Semaphore::const_new(1),
             failed: AtomicBool::new(false),
+            halted: AtomicBool::new(false),
         }))
     }
 
+    /// PF-84: whether `mode` sends on the account this sampling records.
+    pub(crate) fn same_account(&self, mode: &AccountingMode) -> bool {
+        let name = |account: Option<&codex_state::accounting::AttemptAccount>| {
+            account.map(|account| account.name.clone())
+        };
+        let bound = match mode {
+            AccountingMode::Provider { account, .. } => account.as_ref(),
+            _ => None,
+        };
+        name(bound) == name(self.account.as_ref())
+    }
+
     pub(crate) fn check(&self) -> Result<(), CodexErr> {
-        if self.failed.load(Ordering::Acquire) {
+        if self.is_closed() {
             Err(CodexErr::Fatal(FAILURE.into()))
         } else {
             Ok(())
         }
     }
 
-    /// Close this sampling: every later request on it stops with `FAILURE`.
-    /// The first close is logged with its caller, so a later stop has a cause.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.failed.load(Ordering::Acquire)
+    }
+
+    /// Close this sampling and stop its turn with `MEMORY_DENIAL`: a stage-one
+    /// memory denial seen mid-stream. Every accounting failure only closes the
+    /// sampling.
+    #[track_caller]
+    pub(crate) fn halt(&self) {
+        self.halted.store(true, Ordering::Release);
+        self.reject();
+    }
+
+    pub(crate) fn is_halted(&self) -> bool {
+        self.halted.load(Ordering::Acquire)
+    }
+
+    /// Close this sampling: it records nothing more, and every later request on
+    /// it is sent unrecorded. The first close is logged with its caller.
     #[track_caller]
     pub(crate) fn reject(&self) {
         if !self.failed.swap(true, Ordering::AcqRel) {
             tracing::warn!(
                 target: LOG_TARGET,
                 at = %std::panic::Location::caller(),
-                "accounting sampling closed; later requests in this turn stop"
+                "accounting sampling closed; later requests in this turn are sent unrecorded"
             );
         }
     }
@@ -897,12 +1421,37 @@ impl Sampling {
         endpoint: &str,
         tier: Option<&str>,
     ) -> anyhow::Result<Attempt> {
+        self.admit_priced(model, endpoint, tier, /*rated*/ true)
+            .await
+    }
+
+    /// Admit a request this sampling's basis covers but no rate prices
+    /// (#889 D223): a realtime session, whose tokens are audio and text at
+    /// realtime rates no catalogue row states. Its record keeps its basis and
+    /// binds no rate, so its reported tokens read "no price", never a figure
+    /// from a text model's rates.
+    pub(crate) async fn admit_without_rates(
+        &self,
+        model: &str,
+        endpoint: &str,
+    ) -> anyhow::Result<Attempt> {
+        self.admit_priced(model, endpoint, /*tier*/ None, /*rated*/ false)
+            .await
+    }
+
+    async fn admit_priced(
+        &self,
+        model: &str,
+        endpoint: &str,
+        tier: Option<&str>,
+        rated: bool,
+    ) -> anyhow::Result<Attempt> {
         self.check()?;
         anyhow::ensure!(
             canonical_route(endpoint) == canonical_route(&self.endpoint),
             "accounting route mismatch"
         );
-        let _write = WRITES.acquire().await?;
+        let _admission = self.admission.acquire().await?;
         self.check()?;
         let mut completion = Completion {
             sampling: self,
@@ -912,14 +1461,7 @@ impl Sampling {
             self.reject();
             anyhow::anyhow!("previous-attempt lock poisoned")
         })?;
-        // The facade borrows its runtime. Reopening validates/maintains through
-        // its public contract; never fabricate an attached or Active handle.
-        let deadline = std::time::Instant::now() + CONTENTION_BUDGET;
-        let store = store_call("open accounting store", deadline, || {
-            AccountingStore::open(&self.runtime, AsOf::Now)
-        })
-        .await?;
-        // Read once: a contended retry re-sends this same, idempotent admission.
+        // Read once: a deferred admission is written later with this same time.
         let dispatched_at = now();
         let attempt = Attempt {
             attempt_id: Uuid::new_v4(),
@@ -932,25 +1474,83 @@ impl Sampling {
             scope: self.scope,
             dialect: self.dialect,
             dispatched_at_ms: dispatched_at.try_into()?,
+            account: self.account.clone(),
         };
-        let prices = match self.pricing {
-            Pricing::Unavailable => Vec::new(),
-            Pricing::Plan => {
-                prices::plan_original(model, &self.provider, self.scope, dispatched_at, tier)?
+        use codex_state::accounting::Basis;
+        let basis_only = |basis| {
+            prices::basis_only(
+                basis,
+                self.basis_source,
+                model,
+                &self.provider,
+                self.scope,
+                dispatched_at,
+            )
+        };
+        let mut prices = match self.pricing {
+            // Unrated (`admit_without_rates`): subscription work keeps its
+            // basis with no plan rate; pay per use falls to the basis-only
+            // record below. Local, undeclared and unpriced work bind no rate
+            // either way.
+            Pricing::Plan if !rated => basis_only(Basis::PlanEquivalent)?,
+            Pricing::Anthropic | Pricing::Responses | Pricing::Chat | Pricing::Route(_)
+                if !rated =>
+            {
+                Vec::new()
             }
+            Pricing::Unavailable => Vec::new(),
+            // Subscription work stays subscription work with no catalogue
+            // figure: a plan record with no rates, never a missing record that
+            // would read as pay per use.
+            Pricing::Plan => {
+                let plan =
+                    prices::plan_original(model, &self.provider, self.scope, dispatched_at, tier)?;
+                if plan.is_empty() {
+                    basis_only(Basis::PlanEquivalent)?
+                } else {
+                    plan
+                }
+            }
+            Pricing::PlanBasis => basis_only(Basis::PlanEquivalent)?,
+            Pricing::Local => basis_only(Basis::Local)?,
+            Pricing::Undeclared => basis_only(Basis::Undeclared)?,
             Pricing::Anthropic => {
                 prices::anthropic_original(model, &self.provider, self.scope, dispatched_at)?
             }
+            Pricing::Responses if self.image_generation => prices::image_generation_original(
+                model,
+                &self.provider,
+                self.scope,
+                dispatched_at,
+                tier,
+            )?,
             Pricing::Responses => {
                 prices::responses_original(model, &self.provider, self.scope, dispatched_at, tier)?
             }
             Pricing::Chat => {
                 prices::chat_original(model, &self.provider, self.scope, dispatched_at)?
             }
+            Pricing::Route(route) => {
+                prices::route_original(route, model, &self.provider, self.scope, dispatched_at)?
+            }
         };
-        store_call("admit attempt", deadline, || {
-            store.admit(self.owner, &attempt, &prices, AsOf::Now)
-        })
+        // Pay per use with no attributable rate still binds its basis and
+        // where it was declared: a record with no rates, which prices nothing
+        // and reads as "no price", so no attempt is left without a basis.
+        if prices.is_empty() {
+            prices = basis_only(Basis::Billed)?;
+        }
+        for snapshot in &mut prices {
+            snapshot.basis_source = self.basis_source;
+        }
+        self.record(
+            "admit attempt",
+            LedgerWrite::Admit {
+                owner: self.owner,
+                attempt: attempt.clone(),
+                prices,
+            },
+        )
         .await?;
         *self.previous.lock().map_err(|_| {
             self.reject();
@@ -999,27 +1599,44 @@ impl Sampling {
             sequence: position,
             patch,
         };
-        let _write = WRITES.acquire().await?;
         self.check()?;
         let mut completion = Completion {
             sampling: self,
             complete: false,
         };
-        let deadline = std::time::Instant::now() + CONTENTION_BUDGET;
-        let store = store_call("open accounting store", deadline, || {
-            AccountingStore::open(&self.runtime, AsOf::Now)
-        })
-        .await?;
-        store_call("observe usage", deadline, || {
-            store.observe(
-                self.owner,
-                attempt,
-                std::slice::from_ref(&observation),
-                AsOf::Now,
-            )
-        })
+        self.record(
+            "observe usage",
+            LedgerWrite::Observe {
+                owner: self.owner,
+                attempt: attempt.clone(),
+                observations: vec![observation],
+            },
+        )
         .await?;
         completion.complete = true;
+        Ok(())
+    }
+}
+
+impl Sampling {
+    /// Hand `write` to this process's ledger writer. It waits only while the
+    /// write meets no other connection's lock; a record put off for a busy
+    /// state DB is written later and the request goes ahead. An error is a
+    /// record the ledger refused.
+    async fn record(&self, step: &'static str, write: LedgerWrite) -> anyhow::Result<()> {
+        match self
+            .runtime
+            .record_accounting(write)
+            .await
+            .map_err(|error| error.context(step))?
+        {
+            WriteOutcome::Written => {}
+            WriteOutcome::Deferred => tracing::debug!(
+                target: LOG_TARGET,
+                step,
+                "accounting: state DB busy; record queued and the request goes ahead"
+            ),
+        }
         Ok(())
     }
 }

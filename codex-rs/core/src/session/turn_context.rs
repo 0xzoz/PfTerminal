@@ -343,9 +343,12 @@ pub struct TurnContext {
     pub(crate) explicit_tool_budget_state: Arc<ExplicitToolBudgetState>,
     pub(crate) malformed_tool_call_state: Arc<MalformedToolCallState>,
     pub(crate) repeated_tool_call_state: Arc<RepeatedToolCallState>,
+    pub(crate) pending_tool_calls: Arc<crate::tools::parallel::PendingToolCalls>,
     pub(crate) server_model_warning_emitted: AtomicBool,
     pub(crate) provider_cache_pressure_warning_emitted: AtomicBool,
     pub(crate) model_verification_emitted: AtomicBool,
+    /// The turn already warned that developer accounting stopped recording it.
+    pub(crate) accounting_gap_warning_emitted: AtomicBool,
 }
 
 enum TurnMultiAgentRuntime {
@@ -522,9 +525,9 @@ impl TurnContext {
     ) -> Self {
         let mut config = (*self.config).clone();
         config.model = Some(model.clone());
-        let model_info = models_manager
-            .get_model_info(model.as_str(), &config.to_models_manager_config())
-            .await;
+        let model_info =
+            crate::model_info_for_provider::model_info_for_config(models_manager, &model, &config)
+                .await;
         let supported_reasoning_levels = model_info
             .supported_reasoning_levels
             .iter()
@@ -605,6 +608,7 @@ impl TurnContext {
             explicit_tool_budget_state: Arc::clone(&self.explicit_tool_budget_state),
             malformed_tool_call_state: Arc::clone(&self.malformed_tool_call_state),
             repeated_tool_call_state: Arc::clone(&self.repeated_tool_call_state),
+            pending_tool_calls: Arc::clone(&self.pending_tool_calls),
             server_model_warning_emitted: AtomicBool::new(
                 self.server_model_warning_emitted.load(Ordering::Relaxed),
             ),
@@ -615,6 +619,9 @@ impl TurnContext {
             model_verification_emitted: AtomicBool::new(
                 self.model_verification_emitted.load(Ordering::Relaxed),
             ),
+            accounting_gap_warning_emitted: AtomicBool::new(
+                self.accounting_gap_warning_emitted.load(Ordering::Relaxed),
+            ),
         }
     }
 
@@ -623,10 +630,18 @@ impl TurnContext {
         additional_permissions: Option<AdditionalPermissionProfile>,
         environment: &TurnEnvironment,
     ) -> FileSystemSandboxContext {
-        let permissions = effective_permission_profile(
+        let mut permissions = effective_permission_profile(
             self.config.permissions.permission_profile(),
             additional_permissions.as_ref(),
         );
+        // PF-27-S02: in-process file tools get the protected profile, or no
+        // file access when the turn's permissions cannot be protected.
+        if let Some(contract) = crate::security::launch_contract::active() {
+            let cwd = environment.cwd().to_abs_path().ok();
+            let sandboxed = cwd.is_some() && cfg!(any(target_os = "macos", target_os = "linux"));
+            let cwd = cwd.map(|cwd| cwd.to_path_buf()).unwrap_or_default();
+            permissions = contract.file_tool_permissions(&permissions, sandboxed, &cwd);
+        }
         FileSystemSandboxContext {
             permissions: permissions.into(),
             cwd: Some(environment.cwd().clone()),
@@ -657,6 +672,16 @@ impl TurnContext {
             .then_some(file_system_sandbox_policy)
     }
 
+    /// #578: the provider (and named account) recorded as the producer of
+    /// this turn's model output items: `<provider id>`, or
+    /// `<provider id>:<account>` for a named account.
+    pub(crate) fn output_producer(&self) -> String {
+        crate::context_manager::provider_items::producer_key(
+            &self.config.model_provider_id,
+            self.provider.info().account.as_ref(),
+        )
+    }
+
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
         let workspace_roots = self.config.effective_workspace_roots();
         #[allow(deprecated)]
@@ -675,6 +700,24 @@ impl TurnContext {
             file_system_sandbox_policy: self.non_legacy_file_system_sandbox_policy(),
             model: self.model_info.slug.clone(),
             model_provider: Some(self.config.model_provider_id.clone()),
+            provider_account: self
+                .config
+                .features
+                .enabled(Feature::NamedAccounts)
+                .then(|| {
+                    // #1129: an account borrowed from another provider (same
+                    // API key, see `with_account_from`) keeps its owner.
+                    self.provider.info().account.as_ref().map_or_else(
+                        || "default".to_string(),
+                        |account| {
+                            if account.provider_id == self.config.model_provider_id {
+                                account.name.clone()
+                            } else {
+                                account.to_string()
+                            }
+                        },
+                    )
+                }),
             comp_hash: self.model_info.comp_hash.clone(),
             personality: self.personality,
             collaboration_mode: Some(self.collaboration_mode()),
@@ -682,6 +725,7 @@ impl TurnContext {
             multi_agent_mode: None,
             realtime_active: Some(self.realtime_active),
             effort: self.reasoning_effort.clone(),
+            security_level: Some(self.config.security_level),
             summary: ReasoningSummaryConfig::Auto,
         }
     }
@@ -908,9 +952,11 @@ impl Session {
             explicit_tool_budget_state: Arc::new(ExplicitToolBudgetState::default()),
             malformed_tool_call_state: Arc::new(MalformedToolCallState::default()),
             repeated_tool_call_state: Arc::new(RepeatedToolCallState::default()),
+            pending_tool_calls: Arc::default(),
             server_model_warning_emitted: AtomicBool::new(false),
             provider_cache_pressure_warning_emitted: AtomicBool::new(false),
             model_verification_emitted: AtomicBool::new(false),
+            accounting_gap_warning_emitted: AtomicBool::new(false),
         }
     }
 
@@ -945,6 +991,12 @@ impl Session {
                         .model_provider_id
                         != next.original_config_do_not_use.model_provider_id
                         || state.session_configuration.provider != next.provider;
+                    // PF-84: as in update_settings, the account follows first.
+                    if model_provider_changed {
+                        self.follow_provider_account(&next);
+                    }
+                    let follows_model_list =
+                        model_provider_changed && self.model_list_follows_this_session(&next);
                     if model_provider_changed {
                         // Match update_settings: frame guards must see this provider
                         // before its configuration is published, under the same writer lock.
@@ -972,6 +1024,7 @@ impl Session {
                         previous_config,
                         new_config,
                         stale_startup_prewarm,
+                        follows_model_list,
                     ))
                 }
                 Err(err) => Err(CodexErr::InvalidRequest(err.to_string())),
@@ -985,6 +1038,7 @@ impl Session {
             previous_config,
             new_config,
             stale_startup_prewarm,
+            follows_model_list,
         ) = match update_result {
             Ok(update) => update,
             Err(err) => {
@@ -1003,6 +1057,9 @@ impl Session {
         self.emit_config_changed_contributors(previous_config.as_ref(), new_config.as_ref());
         if mcp_inputs_changed {
             self.schedule_mcp_prewarm();
+        }
+        if follows_model_list {
+            self.follow_model_list_account().await;
         }
 
         if let Some(startup_prewarm) = stale_startup_prewarm {
@@ -1071,14 +1128,13 @@ impl Session {
             .and_then(|turn_environment| turn_environment.cwd().to_abs_path().ok())
             .unwrap_or_else(|| session_configuration.cwd().clone());
         let per_turn_config = Self::build_per_turn_config(&session_configuration, cwd.clone());
-        let model_info = self
-            .services
-            .models_manager
-            .get_model_info(
-                session_configuration.collaboration_mode.model(),
-                &per_turn_config.to_models_manager_config(),
-            )
-            .await;
+        // PF-84 (#572): Bedrock's own metadata after a switch to Bedrock.
+        let model_info = crate::model_info_for_provider::model_info_for_config(
+            &self.services.models_manager,
+            session_configuration.collaboration_mode.model(),
+            &per_turn_config,
+        )
+        .await;
         self.services
             .thread_extension_data
             .insert(model_info.clone());
@@ -1119,7 +1175,7 @@ impl Session {
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),
-            Some(Arc::clone(&self.services.auth_manager)),
+            Some(self.services.auth_manager()),
             &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,

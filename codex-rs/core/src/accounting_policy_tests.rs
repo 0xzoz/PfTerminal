@@ -101,7 +101,9 @@ async fn accounting_admission_matrix_agrees_at_all_three_gates() -> Result<()> {
                     let mut request = chat_body();
                     request.provider = provider.chat_completions_provider.clone();
                     let eligible = match wire {
-                        WireApi::Responses => responses::eligible(&provider, auth),
+                        WireApi::Responses => {
+                            responses::eligible(&provider, auth.map(CodexAuth::auth_mode))
+                        }
                         WireApi::Chat => chat::eligible(&provider, auth, &request),
                         WireApi::Anthropic => route_refusal(&provider).is_none(),
                     };
@@ -162,7 +164,7 @@ async fn accounting_admission_matrix_agrees_at_all_three_gates() -> Result<()> {
 fn accounting_chat_request_overrides_are_unattributable() -> Result<()> {
     use codex_model_provider_info::ModelProviderInfo;
     use codex_model_provider_info::WireApi;
-    let mut provider = ModelProviderInfo::create_openai_provider(None);
+    let mut provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
     provider.wire_api = WireApi::Chat;
     for field in ["provider", "provider_options", "plugins"] {
         let mut value =
@@ -175,7 +177,10 @@ fn accounting_chat_request_overrides_are_unattributable() -> Result<()> {
         let http =
             codex_http_client::Request::new(http::Method::POST, ENDPOINT.into()).with_json(&value);
         assert_eq!(
-            transport::request_refusal(&http, None, None, None),
+            transport::request_refusal(
+                &http, /*configured_routing*/ None, /*configured_routing_options*/ None,
+                /*configured_plugins*/ None
+            ),
             Some(field)
         );
         let mut request = chat_body();
@@ -208,7 +213,10 @@ fn accounting_prepared_bodies_are_inspected_not_refused() -> Result<()> {
             .into_prepared()
             .map_err(anyhow::Error::msg)?;
         assert_eq!(
-            transport::request_refusal(&prepared, None, None, None),
+            transport::request_refusal(
+                &prepared, /*configured_routing*/ None,
+                /*configured_routing_options*/ None, /*configured_plugins*/ None
+            ),
             None,
             "an ordinary prepared body must remain collectable under {compression:?}"
         );
@@ -225,7 +233,10 @@ fn accounting_prepared_bodies_are_inspected_not_refused() -> Result<()> {
                 .into_prepared()
                 .map_err(anyhow::Error::msg)?;
             assert_eq!(
-                transport::request_refusal(&prepared, None, None, None),
+                transport::request_refusal(
+                    &prepared, /*configured_routing*/ None,
+                    /*configured_routing_options*/ None, /*configured_plugins*/ None
+                ),
                 Some(field),
                 "{field} must stay unattributable under {compression:?}"
             );
@@ -243,7 +254,10 @@ fn accounting_prepared_bodies_are_inspected_not_refused() -> Result<()> {
             .into_prepared()
             .map_err(anyhow::Error::msg)?;
         assert_eq!(
-            transport::request_refusal(&prepared, None, None, None),
+            transport::request_refusal(
+                &prepared, /*configured_routing*/ None,
+                /*configured_routing_options*/ None, /*configured_plugins*/ None
+            ),
             Some("providerOptions"),
             "a serialized gateway pin must be refused under {compression:?}"
         );
@@ -253,7 +267,10 @@ fn accounting_prepared_bodies_are_inspected_not_refused() -> Result<()> {
             .into_prepared()
             .map_err(anyhow::Error::msg)?;
         assert_eq!(
-            transport::request_refusal(&prepared, None, None, None),
+            transport::request_refusal(
+                &prepared, /*configured_routing*/ None,
+                /*configured_routing_options*/ None, /*configured_plugins*/ None
+            ),
             None,
             "an ordinary serialized request must remain collectable under {compression:?}"
         );
@@ -279,7 +296,9 @@ fn accounting_prepared_bodies_are_inspected_not_refused() -> Result<()> {
             (None, Some(&configured))
         };
         assert_eq!(
-            transport::request_refusal(&prepared, routing, options, None),
+            transport::request_refusal(
+                &prepared, routing, options, /*configured_plugins*/ None
+            ),
             None,
             "{key} exactly as configured must stay collectable"
         );
@@ -290,7 +309,9 @@ fn accounting_prepared_bodies_are_inspected_not_refused() -> Result<()> {
             (None, Some(&foreign))
         };
         assert_eq!(
-            transport::request_refusal(&prepared, routing, options, None),
+            transport::request_refusal(
+                &prepared, routing, options, /*configured_plugins*/ None
+            ),
             Some(key),
             "{key} that configuration did not ask for must be refused"
         );
@@ -298,7 +319,10 @@ fn accounting_prepared_bodies_are_inspected_not_refused() -> Result<()> {
     let opaque = Request::new(http::Method::POST, ENDPOINT.into())
         .with_raw_body(vec![0x00, 0x01, 0x02, 0x03]);
     assert_eq!(
-        transport::request_refusal(&opaque, None, None, None),
+        transport::request_refusal(
+            &opaque, /*configured_routing*/ None, /*configured_routing_options*/ None,
+            /*configured_plugins*/ None
+        ),
         Some("uninspectable request body"),
         "a body whose routing keys cannot be read must still be refused"
     );
@@ -320,7 +344,7 @@ fn accounting_pricing_authority_follows_auth_mode_at_the_default_endpoint() {
     for (id, provider, endpoint) in [
         (
             "openai",
-            ModelProviderInfo::create_openai_provider(None),
+            ModelProviderInfo::create_openai_provider(/*base_url*/ None),
             "https://api.openai.com/v1",
         ),
         (
@@ -336,6 +360,8 @@ fn accounting_pricing_authority_follows_auth_mode_at_the_default_endpoint() {
             approved_endpoint: endpoint.into(),
             approved_query: None,
             pricing: PriceAuthority::Unavailable,
+            basis_source: Default::default(),
+            account: None,
         };
         let bound = super::turn_mode(&mode, id, &provider, Some(AuthMode::ApiKey), endpoint);
         let crate::config::AccountingMode::Provider {
@@ -364,14 +390,14 @@ fn accounting_pricing_authority_follows_auth_mode_at_the_default_endpoint() {
             matches!(
                 elsewhere,
                 crate::config::AccountingMode::Provider {
-                    pricing: PriceAuthority::Unavailable,
+                    pricing: PriceAuthority::Undeclared,
                     ..
                 }
             ),
-            "{id} off its own route must state no economics"
+            "{id} off its own route is not declared"
         );
     }
-    let provider = ModelProviderInfo::create_openai_provider(None);
+    let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
     assert_eq!(provider.wire_api, WireApi::Responses);
     let scope = uuid::Uuid::new_v4();
     let mode = crate::config::AccountingMode::Provider {
@@ -381,6 +407,8 @@ fn accounting_pricing_authority_follows_auth_mode_at_the_default_endpoint() {
         approved_endpoint: "https://api.openai.com/v1".into(),
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
     };
     // Each credential is checked at the route that credential actually resolves
     // to: a ChatGPT plan turn goes to the Codex route, an API key to the API one.
@@ -388,11 +416,13 @@ fn accounting_pricing_authority_follows_auth_mode_at_the_default_endpoint() {
         (Some(AuthMode::ApiKey), PriceAuthority::ApiKeyRates),
         (Some(AuthMode::Chatgpt), PriceAuthority::PlanRate),
         (Some(AuthMode::ChatgptAuthTokens), PriceAuthority::PlanRate),
-        (Some(AuthMode::Headers), PriceAuthority::PlanRate),
+        // Request headers are another OpenAI account credential: no row.
+        (Some(AuthMode::Headers), PriceAuthority::Undeclared),
         // No visible credential is not a subscription. Recording it as one would
-        // book a turn this client cannot attribute as plan capacity.
-        (None, PriceAuthority::Unavailable),
-        (Some(AuthMode::BedrockApiKey), PriceAuthority::Unavailable),
+        // book a turn this client cannot attribute as plan capacity; the table
+        // declares nothing for it.
+        (None, PriceAuthority::Undeclared),
+        (Some(AuthMode::BedrockApiKey), PriceAuthority::Undeclared),
     ] {
         let endpoint = provider
             .to_api_provider(auth)
@@ -422,7 +452,7 @@ fn accounting_chat_collects_the_fields_the_client_itself_emits() {
     use codex_model_provider_info::ModelProviderInfo;
     use codex_model_provider_info::WireApi;
     let plain = {
-        let mut provider = ModelProviderInfo::create_openai_provider(None);
+        let mut provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
         provider.wire_api = WireApi::Chat;
         provider
     };
@@ -451,10 +481,11 @@ fn accounting_chat_collects_the_fields_the_client_itself_emits() {
     let openrouter = {
         // `is_openrouter` keys off the provider NAME, so take the real builder
         // rather than an OpenAI provider pointed at OpenRouter's URL.
-        let mut provider = codex_model_provider_info::built_in_model_providers(None)
-            .into_values()
-            .find(ModelProviderInfo::is_openrouter)
-            .expect("built-in OpenRouter provider");
+        let mut provider =
+            codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)
+                .into_values()
+                .find(ModelProviderInfo::is_openrouter)
+                .expect("built-in OpenRouter provider");
         provider.wire_api = WireApi::Chat;
         provider
     };
@@ -501,37 +532,35 @@ fn accounting_every_built_in_provider_collects() {
             "{id} ({:?}) binds a mode that does not collect",
             provider.wire_api
         );
-        // Monetary rates follow the route, not a hand-picked pair of providers.
-        // Restricting them to openai and anthropic left every other metered
-        // provider recording tokens with no price at all, which is the same
-        // "accounting is unavailable here" the catalogue work set out to end.
-        // What disqualifies per-token rates is a credential this client cannot
-        // attribute to the account the catalogue quotes.
+        // Economics follow the declared basis for the provider's own route and
+        // the credential it is built to send (PF-60-S05): never the kind of
+        // login. Per-token rates need a credential this client can attribute.
         if let AccountingMode::Provider { pricing, .. } = bound {
-            let carries_own_credentials = provider.aws.is_some()
-                || provider.auth.is_some()
-                || provider.experimental_bearer_token.is_some();
-            // A provider holding its own plan credential states the plan side
-            // whatever OpenAI credential this profile happens to carry, because
-            // the Codex auth mode describes a different account entirely. The
-            // remaining own-credential shapes are still unattributable.
-            let expected = if provider.auth.is_some() {
-                PriceAuthority::PlanRate
-            } else if carries_own_credentials {
-                PriceAuthority::Unavailable
-            } else {
-                PriceAuthority::ApiKeyRates
-            };
-            assert_eq!(
-                pricing, expected,
-                "{id} pricing authority under API-key auth"
+            let credential = codex_model_provider_info::BillingCredential::of(
+                &provider,
+                Some(codex_protocol::auth::AuthMode::ApiKey),
             );
-            if !carries_own_credentials {
+            let declared = codex_model_provider_info::built_in_basis(&id, credential);
+            let attributable = provider.aws.is_none()
+                && provider.auth.is_none()
+                && provider.experimental_bearer_token.is_none();
+            use codex_model_provider_info::BillingBasis;
+            let expected = match declared {
+                Some(BillingBasis::Subscription) => PriceAuthority::PlanRate,
+                Some(BillingBasis::Local) => PriceAuthority::Local,
+                Some(BillingBasis::PayPerUse) if attributable => PriceAuthority::ApiKeyRates,
+                Some(BillingBasis::PayPerUse) => PriceAuthority::Unavailable,
+                None => PriceAuthority::Undeclared,
+            };
+            assert_eq!(pricing, expected, "{id} pricing authority at its own route");
+            if expected == PriceAuthority::ApiKeyRates {
                 priced_providers.push(id.clone());
             }
-            // And the authority is bound to that route: the same provider read
-            // through a different endpoint states no economics at all - not
-            // rates, and not a plan rate standing in for them.
+            // The basis is bound to the route: read through an endpoint no
+            // table declares, the same provider is not declared - not rates,
+            // and not a plan rate standing in for them. Bedrock's credentials
+            // reach only Bedrock, whose route is regional: pay per use with no
+            // attributable rate wherever it goes.
             let elsewhere = turn_mode(
                 &selected,
                 &id,
@@ -539,49 +568,18 @@ fn accounting_every_built_in_provider_collects() {
                 Some(codex_protocol::auth::AuthMode::ApiKey),
                 "https://relay.invalid/v1",
             );
-            assert!(
-                matches!(
-                    elsewhere,
-                    AccountingMode::Provider {
-                        pricing: PriceAuthority::Unavailable,
-                        ..
-                    }
-                ),
-                "{id} must not carry rates away from its own route"
-            );
-            // Subscription-style authentication on that provider's own route for
-            // that credential records the plan side instead, never per-token
-            // spend. A turn with no credential at all records neither.
-            let plan_auth = Some(codex_protocol::auth::AuthMode::Headers);
-            if let Ok(plan_route) = provider.to_api_provider(plan_auth) {
-                let on_plan = turn_mode(&selected, &id, &provider, plan_auth, &plan_route.base_url);
-                assert!(
-                    matches!(
-                        on_plan,
-                        AccountingMode::Provider {
-                            pricing: PriceAuthority::PlanRate,
-                            ..
-                        }
-                    ),
-                    "{id} on plan authentication must record the plan side"
-                );
-            }
-            // No Codex credential at all. For a provider whose own credential is
-            // a plan login - `claude-plan`'s command auth - that is exactly how a
-            // subscription turn arrives, and it must still take the plan side.
-            // For every other provider it is a turn this client cannot attribute.
-            let anonymous = turn_mode(&selected, &id, &provider, None, &endpoint);
-            let expected_anonymous = if provider.auth.is_some() {
-                PriceAuthority::PlanRate
-            } else {
+            let expected_elsewhere = if id == codex_model_provider_info::AMAZON_BEDROCK_PROVIDER_ID
+            {
                 PriceAuthority::Unavailable
+            } else {
+                PriceAuthority::Undeclared
             };
             assert!(
                 matches!(
-                    anonymous,
-                    AccountingMode::Provider { pricing, .. } if pricing == expected_anonymous
+                    elsewhere,
+                    AccountingMode::Provider { pricing, .. } if pricing == expected_elsewhere
                 ),
-                "{id} with no Codex credential must state {expected_anonymous:?}"
+                "{id} must not carry its basis away from its own route"
             );
         }
         // And the per-turn dialect gate must admit it too, not just the selector.
@@ -606,7 +604,7 @@ fn accounting_every_built_in_provider_collects() {
     // so losing any of them is a visible change rather than a quiet one.
     priced_providers.sort();
     assert!(
-        priced_providers.len() >= 14,
+        priced_providers.len() >= 13,
         "pricing authority shrank to {priced_providers:?}"
     );
     for required in ["anthropic", "openai", "openrouter", "vercel", "deepseek"] {
@@ -650,6 +648,7 @@ fn accounting_compaction_label_stays_recordable() -> Result<()> {
             scope: uuid::Uuid::new_v4(),
             dialect: codex_state::accounting::Dialect::Inclusive,
             dispatched_at_ms: 1i64.try_into()?,
+            account: None,
         };
         assert!(
             attempt.validate().is_ok(),
@@ -749,17 +748,21 @@ async fn accounting_unattributable_request_is_served_without_evidence() -> Resul
     // code shapes and a future edit could drop the guard from one of them.
     codex_api::ResponsesUsageObserver::observe(
         &*evidence,
-        0,
+        /*position*/ 0,
         Ok(codex_api::ResponsesUsagePatch::default()),
     )
     .await
     .map_err(|error| anyhow::anyhow!("excluded responses usage must not fail: {error}"))?;
-    codex_api::ChatUsageObserver::observe(&*evidence, 0, Ok(codex_api::ChatUsagePatch::default()))
-        .await
-        .map_err(|error| anyhow::anyhow!("excluded chat usage must not fail: {error}"))?;
+    codex_api::ChatUsageObserver::observe(
+        &*evidence,
+        /*position*/ 0,
+        Ok(codex_api::ChatUsagePatch::default()),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("excluded chat usage must not fail: {error}"))?;
     codex_api::AnthropicUsageObserver::observe(
         &*evidence,
-        0,
+        /*position*/ 0,
         Ok(codex_api::AnthropicUsagePatch::default()),
     )
     .await
@@ -873,55 +876,149 @@ fn poison<T>(mutex: &Mutex<T>) {
     );
 }
 
+/// The state DB's write lock held by another connection, as another Corbanu
+/// process holds it; released by `release`.
+async fn hold_write_lock(fixture: &Fixture) -> Result<sqlx::SqliteConnection> {
+    let mut connection = fixture.connection().await?;
+    sqlx::query("BEGIN IMMEDIATE")
+        .execute(&mut connection)
+        .await?;
+    Ok(connection)
+}
+
+async fn release(mut connection: sqlx::SqliteConnection) -> Result<()> {
+    sqlx::query("ROLLBACK").execute(&mut connection).await?;
+    connection.close().await?;
+    Ok(())
+}
+
+/// Longest a record may hold a request up while the state DB is busy.
+const BUSY_WAIT_BOUND: Duration = Duration::from_millis(1_500);
+
 #[tokio::test]
-async fn accounting_policy_wait_cancellation_and_post_wait_failure_have_no_effect() -> Result<()> {
+async fn accounting_policy_busy_state_db_never_holds_a_request_up_and_loses_nothing() -> Result<()>
+{
     let fixture = Fixture::new().await?;
-    let permit = WRITES.acquire().await?;
-    let mut waiting = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
-    assert!(poll!(&mut waiting).is_pending());
-    drop(waiting);
-    fixture.sampling.check()?;
-    let mut start = Box::pin(Sampling::start(
-        fixture.db.clone(),
-        fixture.sampling.owner,
-        "cancelled-start".into(),
-        &AccountingMode::Disabled,
-    ));
-    // OFF fails before the gate; a valid start waits and can be dropped without a Slot.
-    assert!(start.as_mut().await.is_err());
-    drop(start);
-    let enabled = mode();
-    let mut start = Box::pin(Sampling::start(
-        fixture.db.clone(),
-        fixture.sampling.owner,
-        "cancelled-start".into(),
-        &enabled,
-    ));
-    assert!(poll!(&mut start).is_pending());
-    drop(start);
-    let mut rejected = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
-    assert!(poll!(&mut rejected).is_pending());
-    fixture.sampling.reject();
-    drop(permit);
-    assert!(rejected.await.is_err());
-    assert!(fixture.attempts().await?.is_empty());
+    let lock = hold_write_lock(&fixture).await?;
+    // OFF still fails; a valid start writes nothing and does not wait.
+    assert!(
+        Sampling::start(
+            fixture.db.clone(),
+            fixture.sampling.owner,
+            "off".into(),
+            &AccountingMode::Disabled,
+        )
+        .await
+        .is_err()
+    );
+    let started = std::time::Instant::now();
     let fresh = Sampling::start(
         fixture.db.clone(),
         fixture.sampling.owner,
         "fresh".into(),
-        &enabled,
+        &mode(),
     )
     .await?;
-    let attempt = fresh.admit(MODEL, ENDPOINT).await?;
-    assert_eq!(attempt.retry_of, None);
+    assert!(started.elapsed() < BUSY_WAIT_BOUND);
+    // Records are put off, not refused: the samplings stay open.
+    let started = std::time::Instant::now();
+    let first = fixture.sampling.admit(MODEL, ENDPOINT).await?;
+    let usage = AnthropicUsagePatch {
+        input_tokens: AnthropicTokenPresence::Number(7),
+        ..Default::default()
+    };
+    fixture
+        .sampling
+        .observe(&first, Uuid::new_v4(), /*position*/ 1, usage)
+        .await?;
+    let second = fresh.admit(MODEL, ENDPOINT).await?;
+    assert!(
+        started.elapsed() < BUSY_WAIT_BOUND,
+        "waited {:?}",
+        started.elapsed()
+    );
+    fixture.sampling.check()?;
+    fresh.check()?;
+    assert!(fixture.attempts().await?.is_empty());
+    release(lock).await?;
+    assert!(fixture.db.flush_accounting(Duration::from_secs(30)).await);
+    let observations: i64 = {
+        let mut connection = fixture.connection().await?;
+        let count = sqlx::query_scalar("SELECT count(*) FROM draft_accounting_observations")
+            .fetch_one(&mut connection)
+            .await?;
+        connection.close().await?;
+        count
+    };
+    assert_eq!(observations, 1);
     drop(fresh);
-    fixture.two_reopens(vec![attempt]).await
+    fixture.two_reopens(vec![first, second]).await
+}
+
+/// A record the ledger writer refuses after its request stopped waiting is
+/// still reported: by the turn that notices it, once.
+#[tokio::test]
+async fn accounting_policy_late_refusals_are_reported_once() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let owner = fixture.sampling.owner;
+    let notices = SessionNotices::default();
+    let ledger = (fixture.db.clone(), owner);
+    let refuse = || async {
+        // Recorded under this conversation, for another one: refused.
+        let mut other = fixture.sampling.admit(MODEL, ENDPOINT).await?;
+        other.thread_id = ThreadId::new();
+        let refused = fixture
+            .db
+            .record_accounting(codex_state::accounting::LedgerWrite::Admit {
+                owner,
+                attempt: other,
+                prices: Vec::new(),
+            })
+            .await;
+        assert!(refused.is_err());
+        anyhow::Ok(())
+    };
+    // One from before the session's first turn is not its own.
+    refuse().await?;
+    notices.count_refusals_from(&fixture.db, owner);
+    assert!(!notices.refused_since(Some(&ledger)));
+    refuse().await?;
+    assert!(notices.refused_since(Some(&ledger)));
+    assert!(!notices.refused_since(Some(&ledger)));
+    assert!(!notices.refused_since(/*ledger*/ None));
+    Ok(())
+}
+
+/// Cancelling a sampling while it waits for the ledger to open attaches
+/// nothing.
+#[tokio::test]
+async fn accounting_policy_start_cancel_attaches_nothing() -> Result<()> {
+    let fixture = Fixture::new().await?;
+    let lock = hold_write_lock(&fixture).await?;
+    let slot = Slot::default();
+    let enabled = mode();
+    let mut start = Box::pin(async {
+        let sampling = Sampling::start(
+            fixture.db.clone(),
+            fixture.sampling.owner,
+            "cancelled".into(),
+            &enabled,
+        )
+        .await?;
+        SamplingScope::attach(slot.clone(), Some(sampling))
+    });
+    let _ = poll!(&mut start);
+    drop(start);
+    assert!(read_slot(&slot)?.is_none());
+    release(lock).await?;
+    fixture.two_reopens(Vec::new()).await
 }
 
 #[tokio::test]
-async fn accounting_policy_serial_retry_identity_and_time_sample_after_gate() -> Result<()> {
+async fn accounting_policy_serial_retry_identity_and_time_sample_after_the_admission_lock()
+-> Result<()> {
     let fixture = Fixture::new().await?;
-    let permit = WRITES.acquire().await?;
+    let admission = fixture.sampling.admission.acquire().await?;
     let mut first = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
     let mut second = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
     assert!(poll!(&mut first).is_pending());
@@ -934,7 +1031,7 @@ async fn accounting_policy_serial_retry_identity_and_time_sample_after_gate() ->
     })
     .await?;
     let barrier_time = now();
-    drop(permit);
+    drop(admission);
     let (first, second) = tokio::try_join!(first, second)?;
     assert_eq!(first.retry_of, None);
     assert_eq!(second.retry_of, Some(first.attempt_id));
@@ -950,59 +1047,12 @@ async fn accounting_policy_serial_retry_identity_and_time_sample_after_gate() ->
 }
 
 #[tokio::test]
-async fn accounting_policy_observe_wait_cancel_and_start_cancel_publish_nothing() -> Result<()> {
-    let fixture = Fixture::new().await?;
-    let attempt = fixture.sampling.admit(MODEL, ENDPOINT).await?;
-    let permit = WRITES.acquire().await?;
-    let mut waiting = Box::pin(fixture.sampling.observe(
-        &attempt,
-        Uuid::new_v4(),
-        0,
-        AnthropicUsagePatch::default(),
-    ));
-    assert!(poll!(&mut waiting).is_pending());
-    drop(waiting);
-    fixture.sampling.check()?;
-    drop(permit);
-    let mut connection = fixture.connection().await?;
-    sqlx::query("BEGIN IMMEDIATE")
-        .execute(&mut connection)
-        .await?;
-    let slot = Slot::default();
-    let enabled = mode();
-    let mut start = Box::pin(async {
-        let sampling = Sampling::start(
-            fixture.db.clone(),
-            fixture.sampling.owner,
-            "cancelled".into(),
-            &enabled,
-        )
-        .await?;
-        SamplingScope::attach(slot.clone(), Some(sampling))
-    });
-    assert!(poll!(&mut start).is_pending());
-    assert_eq!(WRITES.available_permits(), 0);
-    drop(start);
-    assert_eq!(WRITES.available_permits(), 1);
-    assert!(read_slot(&slot)?.is_none());
-    sqlx::query("ROLLBACK").execute(&mut connection).await?;
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM draft_accounting_observations")
-        .fetch_one(&mut connection)
-        .await?;
-    assert_eq!(count, 0);
-    connection.close().await?;
-    fixture.two_reopens(vec![attempt]).await
-}
-
-#[tokio::test]
-async fn accounting_policy_cancel_in_operation_rejects_and_releases_capacity() -> Result<()> {
+async fn accounting_policy_cancel_in_operation_closes_the_sampling_and_keeps_the_record()
+-> Result<()> {
     for operation in ["admit", "observe"] {
         let fixture = Fixture::new().await?;
         let attempt = fixture.sampling.admit(MODEL, ENDPOINT).await?;
-        let mut connection = fixture.connection().await?;
-        sqlx::query("BEGIN IMMEDIATE")
-            .execute(&mut connection)
-            .await?;
+        let lock = hold_write_lock(&fixture).await?;
         let sampling = &fixture.sampling;
         let mut pending = Box::pin(async {
             if operation == "admit" {
@@ -1012,7 +1062,7 @@ async fn accounting_policy_cancel_in_operation_rejects_and_releases_capacity() -
                     .observe(
                         &attempt,
                         Uuid::new_v4(),
-                        0,
+                        /*position*/ 1,
                         AnthropicUsagePatch {
                             input_tokens: AnthropicTokenPresence::Number(7),
                             ..Default::default()
@@ -1021,24 +1071,30 @@ async fn accounting_policy_cancel_in_operation_rejects_and_releases_capacity() -
                     .await
             }
         });
-        assert!(poll!(&mut pending).is_pending());
-        assert_eq!(
-            WRITES.available_permits(),
-            0,
-            "inside the operation, not queued"
+        // Handed over and waiting for the writer's first try.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut pending)
+                .await
+                .is_err()
         );
         drop(pending);
         assert!(fixture.sampling.check().is_err());
-        assert_eq!(WRITES.available_permits(), 1);
-        sqlx::query("ROLLBACK").execute(&mut connection).await?;
-        connection.close().await?;
         assert!(fixture.sampling.admit(MODEL, ENDPOINT).await.is_err());
+        release(lock).await?;
+        assert!(fixture.db.flush_accounting(Duration::from_secs(30)).await);
+        // The record handed over before the cancel is in the ledger.
         let mut connection = fixture.connection().await?;
-        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM draft_accounting_observations")
-            .fetch_one(&mut connection)
-            .await?;
-        assert_eq!(count, 0);
+        let (attempts, observations): (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT count(*) FROM draft_accounting_attempts),
+                    (SELECT count(*) FROM draft_accounting_observations)",
+        )
+        .fetch_one(&mut connection)
+        .await?;
         connection.close().await?;
+        assert_eq!(
+            (attempts, observations),
+            if operation == "admit" { (2, 0) } else { (1, 1) }
+        );
         let fresh = tokio::time::timeout(
             Duration::from_secs(10),
             Sampling::start(
@@ -1052,9 +1108,11 @@ async fn accounting_policy_cancel_in_operation_rejects_and_releases_capacity() -
         let next = fresh.admit(MODEL, ENDPOINT).await?;
         assert_eq!(next.retry_of, None);
         assert_ne!(next.request_id, attempt.request_id);
-        // This barrier blocked the first DB operation. It does not establish
-        // rollback for arbitrary cancellation after SQLite has committed.
-        fixture.two_reopens(vec![attempt, next]).await?;
+        drop(fresh);
+        let mut expected = fixture.attempts().await?;
+        expected.retain(|row| row.attempt_id != next.attempt_id);
+        expected.push(next);
+        fixture.two_reopens(expected).await?;
     }
     Ok(())
 }
@@ -1089,15 +1147,14 @@ async fn accounting_policy_previous_poison_before_and_during_admission_is_sticky
         let mut pending = Box::pin(fixture.sampling.admit(MODEL, ENDPOINT));
         if phase == "during" {
             assert!(poll!(&mut pending).is_pending());
-            assert_eq!(WRITES.available_permits(), 0);
             poison(&fixture.sampling.previous);
             sqlx::query("ROLLBACK").execute(&mut connection).await?;
         }
         assert!(pending.await.is_err());
         assert!(fixture.sampling.check().is_err());
         assert!(fixture.sampling.admit(MODEL, ENDPOINT).await.is_err());
-        assert_eq!(WRITES.available_permits(), 1);
         connection.close().await?;
+        assert!(fixture.db.flush_accounting(Duration::from_secs(30)).await);
         let rows = fixture.attempts().await?;
         assert_eq!(rows.len(), usize::from(phase == "during"));
         if let Some(attempt) = rows.first() {
@@ -1110,8 +1167,8 @@ async fn accounting_policy_previous_poison_before_and_during_admission_is_sticky
 }
 
 #[tokio::test]
-async fn accounting_policy_slot_poison_rejects_stale_and_incoming_without_disabling() -> Result<()>
-{
+async fn accounting_policy_slot_poison_closes_stale_and_incoming_and_serves_unrecorded()
+-> Result<()> {
     for operation in ["read", "attach", "drop"] {
         let fixture = Fixture::new().await?;
         let incoming = Sampling::start(
@@ -1125,9 +1182,9 @@ async fn accounting_policy_slot_poison_rejects_stale_and_incoming_without_disabl
         let scope = SamplingScope::attach(slot.clone(), Some(fixture.sampling.clone()))?;
         poison(&slot);
         match operation {
-            "read" => assert!(read_slot(&slot).is_err()),
+            "read" => assert!(read_slot(&slot)?.is_none()),
             "attach" => {
-                assert!(SamplingScope::attach(slot.clone(), Some(incoming.clone())).is_err());
+                drop(SamplingScope::attach(slot.clone(), Some(incoming.clone()))?);
                 assert!(incoming.check().is_err());
             }
             _ => {}
@@ -1136,8 +1193,9 @@ async fn accounting_policy_slot_poison_rejects_stale_and_incoming_without_disabl
         assert!(fixture.sampling.check().is_err());
         assert!(slot.is_poisoned());
         assert!(slot.lock().err().unwrap().into_inner().is_none());
-        assert!(read_slot(&slot).is_err(), "empty poison must not look OFF");
-        assert!(SamplingScope::attach(slot.clone(), None).is_err());
+        // A poisoned slot records nothing; its requests are served unrecorded.
+        assert!(read_slot(&slot)?.is_none());
+        drop(SamplingScope::attach(slot.clone(), /*sampling*/ None)?);
         assert!(fixture.attempts().await?.is_empty());
         fixture.db.close().await;
     }
@@ -1154,7 +1212,7 @@ fn a_pinned_route_carries_both_the_configured_query_and_the_path_s_own() {
     use super::pinned_route;
 
     assert_eq!(
-        pinned_route("https://example.com/v1", None, "responses"),
+        pinned_route("https://example.com/v1", /*query*/ None, "responses"),
         "https://example.com/v1/responses"
     );
     assert_eq!(
@@ -1164,7 +1222,7 @@ fn a_pinned_route_carries_both_the_configured_query_and_the_path_s_own() {
     assert_eq!(
         pinned_route(
             "https://example.com/v1",
-            None,
+            /*query*/ None,
             "realtime/calls?intent=quicksilver&architecture=avas"
         ),
         "https://example.com/v1/realtime/calls?intent=quicksilver&architecture=avas"
@@ -1199,13 +1257,13 @@ fn claude_plan_states_the_plan_side_whatever_openai_credential_exists() {
     use codex_model_provider_info::built_in_model_providers;
     use codex_protocol::auth::AuthMode;
 
-    let providers = built_in_model_providers(None);
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
     let provider = providers
         .get(CLAUDE_PLAN_PROVIDER_ID)
         .expect("built-in claude-plan provider")
         .clone();
     let endpoint = provider
-        .to_api_provider(None)
+        .to_api_provider(/*auth_mode*/ None)
         .expect("claude-plan route")
         .base_url;
     // Seeded literally rather than through `developer_accounting_mode`, which
@@ -1221,6 +1279,8 @@ fn claude_plan_states_the_plan_side_whatever_openai_credential_exists() {
         approved_endpoint: endpoint.clone(),
         approved_query: super::canonical_query(&provider),
         pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
     };
 
     for auth_mode in [
@@ -1248,8 +1308,8 @@ fn claude_plan_states_the_plan_side_whatever_openai_credential_exists() {
         );
     }
 
-    // And it is still bound to its own route: pointed elsewhere it claims
-    // nothing, an API key in the profile notwithstanding.
+    // And it is still bound to its own route: pointed elsewhere it is not
+    // declared, an API key in the profile notwithstanding.
     let elsewhere = turn_mode(
         &selected,
         CLAUDE_PLAN_PROVIDER_ID,
@@ -1260,7 +1320,7 @@ fn claude_plan_states_the_plan_side_whatever_openai_credential_exists() {
     assert!(matches!(
         elsewhere,
         AccountingMode::Provider {
-            pricing: PriceAuthority::Unavailable,
+            pricing: PriceAuthority::Undeclared,
             ..
         }
     ));

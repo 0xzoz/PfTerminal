@@ -33,13 +33,35 @@ jobs:
 
           # Run inside a glibc Linux image so dependency resolution exercises
           # the pinned manylinux runtime wheel that users install.
+          # Pull the official image from the ECR Public mirror (same digest as
+          # Docker Hub's python:3.12-slim) to avoid Docker Hub's anonymous
+          # pull rate limit on shared runners. ECR Public also throttles
+          # anonymous pulls ("toomanyrequests"), so retry with backoff and
+          # fall back to Google's Docker Hub mirror; the digest pins the
+          # same image either way.
+          digest=sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
+          image=""
+          for attempt in 1 2 3 4 5 6; do
+            for registry in public.ecr.aws/docker/library mirror.gcr.io/library; do
+              if docker pull --quiet "${registry}/python@${digest}"; then
+                image="${registry}/python@${digest}"
+                break 2
+              fi
+            done
+            sleep $((attempt * 10))
+          done
+          if [[ -z "${image}" ]]; then
+            echo "::error::could not pull python:3.12-slim (${digest}) from any mirror"
+            exit 1
+          fi
+
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -e HOME=/tmp/codex-python-sdk-home \
             -e UV_LINK_MODE=copy \
             -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
             -w "${GITHUB_WORKSPACE}/sdk/python" \
-            python:3.12-slim \
+            "${image}" \
             sh -euxc '
               python -m venv /tmp/uv
               /tmp/uv/bin/python -m pip install uv==0.11.3
@@ -79,15 +101,16 @@ jobs:
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@a8198c4bff370c8506180b035930dea56dbd5288 # v5
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5
         with:
           run_install: false
 
       - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-          cache: pnpm
+          # setup-node can't restore without saving, so only main caches (#636).
+          cache: ${{ github.ref == 'refs/heads/main' && 'pnpm' || '' }}
 
       - name: Set up Bazel CI
         id: prepare_bazel
@@ -179,7 +202,7 @@ jobs:
         run: pnpm -r --filter ./sdk/typescript run test
 
       - name: Save bazel repository cache
-        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true' && github.ref == 'refs/heads/main'
         continue-on-error: true
         uses: actions/cache/save@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
         with:

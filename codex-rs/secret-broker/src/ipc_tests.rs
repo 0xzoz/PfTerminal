@@ -140,3 +140,222 @@ fn pf_27_s04_pf_27_s01_debug_output_is_redacted() {
     assert_eq!(format!("{mac:?}"), "BrokerChannelMac(<redacted>)");
     assert_eq!(format!("{frame:?}"), "SignedBrokerFrame(<authenticated>)");
 }
+
+fn provider_request() -> ProviderRequestOperation {
+    ProviderRequestOperation::new(
+        "api.github.com",
+        /*port*/ 443,
+        "GET",
+        "/user?per_page=1",
+    )
+    .expect("provider request")
+}
+
+fn reference() -> CredentialReference {
+    CredentialReference::from_sha256_hex(REFERENCE).expect("reference")
+}
+
+#[test]
+fn pf_27_s04_pf_27_s01_provider_frame_round_trip_is_typed_and_secret_free() {
+    let mac = BrokerChannelMac::from_secret(KEY);
+    let frame = mac
+        .sign_provider_request(
+            binding(),
+            /*sequence*/ 3,
+            reference(),
+            provider_request(),
+        )
+        .expect("frame");
+    let verified = mac.verify_provider_request(&frame).expect("verified");
+
+    assert_eq!(
+        verified,
+        VerifiedProviderRequest {
+            sequence: 3,
+            binding: binding(),
+            credential: reference(),
+            request: provider_request(),
+        }
+    );
+    let wire = String::from_utf8_lossy(frame.as_bytes()).to_ascii_lowercase();
+    assert!(!wire.contains("authorization"));
+    assert!(!wire.contains("bearer"));
+}
+
+#[test]
+fn pf_27_s04_pf_27_s01_provider_and_openai_frames_are_domain_separated() {
+    let mac = BrokerChannelMac::from_secret(KEY);
+    let provider = mac
+        .sign_provider_request(
+            binding(),
+            /*sequence*/ 1,
+            reference(),
+            provider_request(),
+        )
+        .expect("provider frame");
+    let openai = mac
+        .sign(binding(), /*sequence*/ 1, operation())
+        .expect("openai frame");
+
+    assert_eq!(
+        mac.verify(&provider).err(),
+        Some(BrokerFrameError::MalformedFrame)
+    );
+    assert_eq!(
+        mac.verify_provider_request(&openai).err(),
+        Some(BrokerFrameError::MalformedFrame)
+    );
+}
+
+#[test]
+fn pf_27_s04_pf_27_s01_provider_frame_rejects_forgery_and_untyped_requests() {
+    let frame = BrokerChannelMac::from_secret(KEY)
+        .sign_provider_request(
+            binding(),
+            /*sequence*/ 1,
+            reference(),
+            provider_request(),
+        )
+        .expect("frame");
+    assert_eq!(
+        BrokerChannelMac::from_secret([8; 32])
+            .verify_provider_request(&frame)
+            .err(),
+        Some(BrokerFrameError::AuthenticationFailed)
+    );
+
+    let mut tampered = frame.as_bytes().to_vec();
+    let index = tampered.len() / 2;
+    tampered[index] ^= 1;
+    assert_eq!(
+        BrokerChannelMac::from_secret(KEY)
+            .verify_provider_request(&SignedBrokerFrame::from_bytes(tampered).expect("bounded"))
+            .err(),
+        Some(BrokerFrameError::AuthenticationFailed)
+    );
+
+    for (host, port, method, path) in [
+        ("API.GITHUB.COM", 443, "GET", "/user"),
+        ("api.github.com", 0, "GET", "/user"),
+        ("api.github.com", 443, "CONNECT", "/user"),
+        ("api.github.com", 443, "GET", "user"),
+        ("api.github.com", 443, "GET", "/user#fragment"),
+        ("api.github.com", 443, "GET", "/user name"),
+        ("api.github.com/evil", 443, "GET", "/user"),
+    ] {
+        assert_eq!(
+            ProviderRequestOperation::new(host, port, method, path).err(),
+            Some(BrokerFrameError::UnsupportedOperation),
+            "{host} {port} {method} {path}"
+        );
+    }
+    assert_eq!(
+        BrokerChannelMac::from_secret(KEY)
+            .sign_provider_request(
+                binding(),
+                /*sequence*/ 0,
+                reference(),
+                provider_request()
+            )
+            .err(),
+        Some(BrokerFrameError::InvalidSequence)
+    );
+}
+
+#[test]
+fn pf_33_s02_provider_frame_carries_authenticated_pins() {
+    let addrs: Vec<std::net::IpAddr> = vec![
+        "93.184.216.34".parse().expect("ipv4"),
+        "2606:2800:220:1::248".parse().expect("ipv6"),
+    ];
+    let pinned = provider_request()
+        .with_pinned_addrs(addrs.clone())
+        .expect("pinned");
+    assert_eq!(pinned.pinned_addrs(), addrs.as_slice());
+    let mac = BrokerChannelMac::from_secret(KEY);
+    let frame = mac
+        .sign_provider_request(binding(), /*sequence*/ 1, reference(), pinned.clone())
+        .expect("frame");
+    assert_eq!(
+        mac.verify_provider_request(&frame)
+            .expect("verified")
+            .request,
+        pinned
+    );
+    // The pins are inside the MAC: changing one byte of an address fails.
+    let wire = frame.as_bytes().to_vec();
+    let needle = b"93.184.216.34";
+    let at = wire
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .expect("pin on the wire");
+    let mut tampered = wire;
+    tampered[at] = b'1';
+    assert_eq!(
+        mac.verify_provider_request(&SignedBrokerFrame::from_bytes(tampered).expect("bounded"))
+            .err(),
+        Some(BrokerFrameError::AuthenticationFailed)
+    );
+    // Unpinned frames keep their previous wire shape.
+    let unpinned = mac
+        .sign_provider_request(
+            binding(),
+            /*sequence*/ 2,
+            reference(),
+            provider_request(),
+        )
+        .expect("frame");
+    assert!(!String::from_utf8_lossy(unpinned.as_bytes()).contains("pinned_addrs"));
+
+    assert_eq!(
+        provider_request().with_pinned_addrs([]).err(),
+        Some(BrokerFrameError::UnsupportedOperation)
+    );
+    let too_many =
+        (0..=MAX_PINNED_ADDRS as u8).map(|octet| std::net::IpAddr::from([93, 184, 216, octet]));
+    assert_eq!(
+        provider_request().with_pinned_addrs(too_many).err(),
+        Some(BrokerFrameError::UnsupportedOperation)
+    );
+}
+
+#[test]
+fn sec_390_pipe_peer_proof_binds_key_challenge_and_both_processes() {
+    let mac = BrokerChannelMac::from_secret(KEY);
+    let challenge = [3_u8; PIPE_CHALLENGE_BYTES];
+    let proof = mac.pipe_peer_proof(&challenge, /*client_pid*/ 10, /*server_pid*/ 20);
+    assert_eq!(proof.len(), PIPE_PROOF_BYTES);
+    assert!(mac.verify_pipe_peer_proof(
+        &challenge, /*client_pid*/ 10, /*server_pid*/ 20, &proof
+    ));
+
+    let other_key = BrokerChannelMac::from_secret([8; 32]);
+    assert!(!other_key.verify_pipe_peer_proof(
+        &challenge, /*client_pid*/ 10, /*server_pid*/ 20, &proof
+    ));
+    assert!(!mac.verify_pipe_peer_proof(
+        &[4; PIPE_CHALLENGE_BYTES],
+        /*client_pid*/ 10,
+        /*server_pid*/ 20,
+        &proof
+    ));
+    // A relaying process is the broker's client, so the ids differ.
+    assert!(!mac.verify_pipe_peer_proof(
+        &challenge, /*client_pid*/ 11, /*server_pid*/ 20, &proof
+    ));
+    assert!(!mac.verify_pipe_peer_proof(
+        &challenge, /*client_pid*/ 10, /*server_pid*/ 21, &proof
+    ));
+    assert!(!mac.verify_pipe_peer_proof(
+        &challenge,
+        /*client_pid*/ 10,
+        /*server_pid*/ 20,
+        &proof[..31]
+    ));
+    assert!(!mac.verify_pipe_peer_proof(
+        &challenge,
+        /*client_pid*/ 10,
+        /*server_pid*/ 20,
+        &[]
+    ));
+}

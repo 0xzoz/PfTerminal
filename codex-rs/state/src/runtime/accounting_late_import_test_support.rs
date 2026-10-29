@@ -63,6 +63,7 @@ pub(super) fn entry(id: u128, time: i64) -> anyhow::Result<RetainedImport> {
             scope: Uuid::nil(),
             dialect: Dialect::NativeAnthropic,
             dispatched_at_ms: time.try_into()?,
+            account: None,
         },
         observations: vec![Observation {
             revision: 1.try_into()?,
@@ -124,7 +125,7 @@ pub(super) async fn reject_unchanged(
     bundle: &[RetainedImport],
     as_of: i64,
 ) -> anyhow::Result<String> {
-    let store = AccountingStore::open(runtime, 0).await?;
+    let store = AccountingStore::open(runtime, /*as_of*/ 0).await?;
     let mut conn = connection(runtime).await?;
     let before = dump(&mut conn).await?;
     let owner = bundle

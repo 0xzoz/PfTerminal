@@ -13,7 +13,7 @@ use pretty_assertions::assert_eq;
 #[tokio::test]
 async fn permission_confirmation_deferral_preserves_payload_queue_and_running_state() {
     for running in [false, true] {
-        let (mut chat, _events, mut ops) = make_chatwidget_manual(None).await;
+        let (mut chat, _events, mut ops) = make_chatwidget_manual(/*model_override*/ None).await;
         chat.thread_id = Some(ThreadId::new());
         let mut prompt = UserMessage::from("use $figma [Image #2]");
         prompt.local_images = vec![crate::bottom_pane::LocalImageAttachment {
@@ -57,7 +57,7 @@ async fn permission_confirmation_deferral_preserves_payload_queue_and_running_st
             .queued_user_messages
             .push_back(UserMessage::from("queued").into());
         chat.turn_lifecycle.agent_turn_running = running;
-        chat.bottom_pane.set_task_running(true);
+        chat.bottom_pane.set_task_running(/*running*/ true);
         chat.defer_turn_for_permission_confirmation();
         let restored = chat.bottom_pane.composer_draft_snapshot();
         assert_eq!(restored.text, prompt.text);
@@ -392,6 +392,10 @@ async fn approvals_selection_popup_snapshot_windows_degraded_sandbox() {
         popup.contains("non-admin sandbox"),
         "expected degraded sandbox note in approvals popup: {popup}"
     );
+    assert!(
+        popup.contains("reading your files"),
+        "expected non-admin sandbox risk in approvals popup: {popup}"
+    );
 }
 
 #[tokio::test]
@@ -478,6 +482,49 @@ async fn full_access_confirmation_popup_snapshot() {
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
     assert_chatwidget_snapshot!("full_access_confirmation_popup", popup);
+}
+
+/// Cancel is preselected, so Enter alone keeps the current permissions. The
+/// outcome must be visible; PF-83 testers read the silent return to the picker
+/// as full access having been applied.
+#[tokio::test]
+async fn full_access_confirmation_cancel_reports_permissions_unchanged() {
+    for (key, reopens_picker) in [(KeyCode::Enter, true), (KeyCode::Esc, false)] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        let before = chat.config.permissions.permission_profile().clone();
+        let preset = builtin_approval_presets()
+            .into_iter()
+            .find(|preset| preset.id == "full-access")
+            .expect("full access preset");
+        chat.open_full_access_confirmation(
+            preset, /*return_to_permissions*/ true, /*profile_selection*/ None,
+        );
+
+        chat.handle_key_event(KeyEvent::from(key));
+
+        let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AppEvent::SelectPermissionPreset(_))),
+            "cancel must not request a permission change ({key:?})"
+        );
+        let notices = events
+            .iter()
+            .filter_map(|event| match event {
+                AppEvent::InsertHistoryCell(cell) => {
+                    Some(lines_to_single_string(&cell.display_lines(/*width*/ 80)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let saw_picker = events
+            .iter()
+            .any(|event| matches!(event, AppEvent::OpenPermissionsPopup));
+        assert_eq!((notices.len(), saw_picker), (1, reopens_picker), "{key:?}");
+        assert_chatwidget_snapshot!("full_access_confirmation_cancel_notice", notices[0]);
+        assert_eq!(chat.config.permissions.permission_profile(), &before);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -630,6 +677,7 @@ async fn required_windows_sandbox_setup_defers_configured_initial_prompt() {
         message_history: None,
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
+        provider_account: None,
     });
     drain_insert_history(&mut rx);
 
@@ -671,6 +719,40 @@ async fn windows_sandbox_required_fallback_prompt_snapshot() {
 
     let popup = render_bottom_popup(&chat, /*width*/ 120);
     assert_chatwidget_snapshot!("windows_sandbox_required_fallback_prompt", popup);
+}
+
+#[tokio::test]
+async fn windows_sandbox_enable_prompt_explains_non_admin_risk_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    let preset = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "auto")
+        .expect("auto preset");
+
+    chat.open_windows_sandbox_enable_prompt(preset, /*profile_selection*/ None);
+
+    assert_chatwidget_snapshot!(
+        "windows_sandbox_enable_prompt_non_admin_risk",
+        render_bottom_popup(&chat, /*width*/ 120)
+    );
+}
+
+#[tokio::test]
+async fn windows_sandbox_fallback_prompt_explains_non_admin_risk_snapshot() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    let preset = builtin_approval_presets()
+        .into_iter()
+        .find(|preset| preset.id == "auto")
+        .expect("auto preset");
+
+    chat.open_windows_sandbox_fallback_prompt(preset, /*profile_selection*/ None);
+
+    assert_chatwidget_snapshot!(
+        "windows_sandbox_fallback_prompt_non_admin_risk",
+        render_bottom_popup(&chat, /*width*/ 120)
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -831,6 +913,9 @@ async fn permissions_selection_requests_change_without_optimistic_history() {
     }
     chat.set_feature_enabled(Feature::GuardianApproval, /*enabled*/ true);
     chat.open_permissions_popup();
+    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    // Windows lists the non-admin sandbox approval row first.
+    #[cfg(target_os = "windows")]
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
@@ -1037,6 +1122,7 @@ async fn permissions_selection_marks_auto_review_current_after_session_configure
         message_history: None,
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
+        provider_account: None,
     });
 
     chat.open_permissions_popup();
@@ -1086,6 +1172,7 @@ async fn permissions_selection_marks_auto_review_current_with_custom_workspace_w
         message_history: None,
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
+        provider_account: None,
     });
 
     chat.open_permissions_popup();

@@ -1100,8 +1100,54 @@ supports_websockets = true
 
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert!(err.to_string().contains(
-        "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, and `aws.region`; other non-default provider fields are not supported"
+        "model_providers.amazon-bedrock only supports changing `base_url`, `auth`, `http_headers`, `aws.profile`, `aws.region`, and `billing`; other non-default provider fields are not supported"
     ));
+}
+
+/// `model_providers.<id>.billing` declares a basis for a built-in provider,
+/// reserved IDs included, without replacing it (PF-60-S05 AC3).
+#[tokio::test]
+async fn load_config_accepts_a_billing_override_on_built_in_providers() {
+    let cfg = toml::from_str::<ConfigToml>(
+        r#"
+model_provider = "zai"
+
+[model_providers.zai]
+billing = "subscription"
+
+[model_providers.kimi-code]
+billing = "pay_per_use"
+"#,
+    )
+    .expect("billing-only overrides deserialize");
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").abs(),
+    )
+    .await
+    .expect("billing-only overrides load");
+    let built_in =
+        codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None);
+    for (id, basis) in [
+        ("zai", codex_model_provider_info::BillingBasis::Subscription),
+        (
+            "kimi-code",
+            codex_model_provider_info::BillingBasis::PayPerUse,
+        ),
+    ] {
+        assert_eq!(
+            config.model_providers[id],
+            ModelProviderInfo {
+                billing: Some(basis),
+                ..built_in[id].clone()
+            }
+        );
+    }
+    let error = toml::from_str::<ConfigToml>("[model_providers.zai]\nbilling = \"free\"\n")
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("billing"), "{error}");
 }
 
 #[test]
@@ -1977,6 +2023,7 @@ respect_system_proxy = false
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cli_overrides(vec![(
             "features.respect_system_proxy".to_string(),
             toml::Value::Boolean(true),
@@ -2665,6 +2712,7 @@ async fn workspace_root_glob_none_compiles_to_filesystem_pattern_entry() -> std:
                 .entries
                 .contains(&FileSystemSandboxEntry {
                     path: FileSystemPath::GlobPattern {
+                        scan: None,
                         pattern: expected_pattern,
                     },
                     access: FileSystemAccessMode::Deny,
@@ -5322,6 +5370,7 @@ enabled = true
 
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .build()
         .await?;
     let plugins_manager = PluginsManager::new(codex_home.path().to_path_buf());
@@ -5382,6 +5431,7 @@ enabled = true
 
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -5485,6 +5535,7 @@ enabled = true
 
     let config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -5721,6 +5772,46 @@ async fn missing_security_state_defaults_to_permissive() -> std::io::Result<()> 
     .await?;
 
     assert_eq!(config.security_level, SecurityLevel::Permissive);
+    Ok(())
+}
+
+/// PF-23-S03: a level confirmed through the trusted controller is a floor at
+/// the next start; an unreadable store enforces Aggressive and says so.
+#[tokio::test]
+async fn security_recovery_config_load_uses_the_stricter_stored_level() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let load = |home: &TempDir| {
+        Config::load_from_base_config_with_overrides(
+            ConfigToml {
+                security: Some(codex_security_policy::SecuritySettings::new(
+                    SecurityLevel::Permissive,
+                )),
+                ..Default::default()
+            },
+            ConfigOverrides::default(),
+            home.abs(),
+        )
+    };
+    std::fs::write(
+        codex_home.path().join("security_state.json"),
+        r#"{"version":1,"level":"moderate","revocations":{"schema_version":1,"generation":0,"kill_switch_active":false}}"#,
+    )?;
+    assert_eq!(
+        load(&codex_home).await?.security_level,
+        SecurityLevel::Moderate
+    );
+
+    std::fs::write(codex_home.path().join("security_state.json"), "not json")?;
+    let config = load(&codex_home).await?;
+    assert_eq!(config.security_level, SecurityLevel::Aggressive);
+    assert!(
+        config
+            .startup_warnings
+            .iter()
+            .any(|warning| warning.starts_with("Security state is unreadable")),
+        "{:?}",
+        config.startup_warnings
+    );
     Ok(())
 }
 
@@ -7590,6 +7681,7 @@ async fn for_config_writes_selected_user_config_file() -> anyhow::Result<()> {
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .loader_overrides(LoaderOverrides {
             user_config_path: Some(selected_config.abs()),
             user_config_profile: Some("work".parse().expect("profile-v2 name")),
@@ -10270,6 +10362,7 @@ async fn requirements_disallowing_default_sandbox_falls_back_to_required_default
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"allowed_sandbox_modes = ["read-only"]"#,
@@ -10651,6 +10744,7 @@ async fn feature_requirements_normalize_effective_feature_values() -> std::io::R
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -10683,6 +10777,7 @@ async fn feature_requirements_auto_review_disables_guardian_approval() -> std::i
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -10705,6 +10800,7 @@ async fn browser_feature_requirements_are_valid() -> std::io::Result<()> {
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -10929,6 +11025,7 @@ async fn requirements_disallowing_default_approvals_reviewer_falls_back_to_requi
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"allowed_approvals_reviewers = ["guardian_subagent"]"#,
@@ -11685,6 +11782,7 @@ async fn feature_requirements_normalize_runtime_feature_mutations() -> std::io::
 
     let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -11719,6 +11817,7 @@ async fn feature_requirements_warn_on_collab_legacy_alias() -> std::io::Result<(
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -11749,6 +11848,7 @@ async fn feature_requirements_warn_and_ignore_unknown_feature() -> std::io::Resu
 
     let config = ConfigBuilder::without_managed_config_for_tests()
         .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(crate::session::tests::kept_test_cwd_overrides())
         .cloud_config_bundle(
             CloudConfigBundleFixture::loader_with_enterprise_requirement(
                 r#"
@@ -12529,7 +12629,7 @@ async fn interactive_fallback_recovers_persisted_incompatible_pairs() -> std::io
         // manager picks the catalogue default.
         assert_eq!(
             config.model,
-            codex_model_provider_info::resolve_model_for_provider(None, provider)
+            codex_model_provider_info::resolve_model_for_provider(/*model*/ None, provider)
         );
         assert!(config.startup_warnings.iter().any(|warning| {
             warning.contains(model)
@@ -12577,7 +12677,7 @@ async fn override_provider_with_stale_config_model_recovers_without_opt_in() -> 
         // manager picks the catalogue default.
         assert_eq!(
             config.model,
-            codex_model_provider_info::resolve_model_for_provider(None, provider)
+            codex_model_provider_info::resolve_model_for_provider(/*model*/ None, provider)
         );
         assert!(config.startup_warnings.iter().any(|warning| {
             warning.contains(stale_model) && warning.contains("using the provider's default model")
@@ -12854,5 +12954,65 @@ async fn incompatible_fallback_uses_non_openai_provider_default() -> std::io::Re
 
     assert_eq!(config.model_provider_id, DEEPSEEK_PROVIDER_ID);
     assert_eq!(config.model.as_deref(), Some(DEEPSEEK_DEFAULT_MODEL));
+    Ok(())
+}
+
+/// #412: a managed pin on shell_snapshot is detected, not silently kept on.
+#[test]
+fn issue_412_turn_off_unless_required_honours_a_shell_snapshot_pin() -> std::io::Result<()> {
+    let pinned = |enabled: bool| {
+        Some(Sourced::new(
+            FeatureRequirementsToml {
+                entries: BTreeMap::from([("shell_snapshot".to_string(), enabled)]),
+            },
+            RequirementSource::Unknown,
+        ))
+    };
+    let mut configured = Features::with_defaults();
+    configured.enable(Feature::ShellSnapshot);
+
+    let mut features = ManagedFeatures::from_configured(configured.clone(), pinned(true))?;
+    assert!(features.enabled(Feature::ShellSnapshot));
+    // `disable` succeeds and leaves the pin in place; that is why it can't
+    // be the check.
+    assert!(features.disable(Feature::ShellSnapshot).is_ok());
+    assert!(features.enabled(Feature::ShellSnapshot));
+    assert!(!features.turn_off_unless_required(Feature::ShellSnapshot));
+    assert!(features.enabled(Feature::ShellSnapshot));
+
+    let mut features =
+        ManagedFeatures::from_configured(configured, /*feature_requirements*/ None)?;
+    assert!(features.turn_off_unless_required(Feature::ShellSnapshot));
+    assert!(!features.enabled(Feature::ShellSnapshot));
+    Ok(())
+}
+
+/// #412: secret_output_gate fails closed before arming when policy pins
+/// shell snapshots on.
+#[tokio::test]
+async fn issue_412_secret_output_gate_fails_closed_on_a_shell_snapshot_pin() -> std::io::Result<()>
+{
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        "[features]\nsecret_output_gate = true\n",
+    )?;
+    let err = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                "[features]\nshell_snapshot = true\n",
+            ),
+        )
+        .build()
+        .await
+        .expect_err("a pinned shell snapshot must refuse the gate");
+    assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        err.to_string()
+            .contains("secret_output_gate: shell_snapshot is required by policy"),
+        "{err}"
+    );
     Ok(())
 }

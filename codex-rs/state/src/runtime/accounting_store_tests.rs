@@ -6,6 +6,9 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
+#[path = "accounting_empty_day_tests.rs"]
+mod empty_day;
+
 fn inspection(value: InspectionDay) -> Inspection {
     let InspectionDay::Ready(value) = value else {
         panic!("{value:?}")
@@ -14,7 +17,7 @@ fn inspection(value: InspectionDay) -> Inspection {
 }
 
 async fn inspected(runtime: &StateRuntime, day: i64, time: i64) -> anyhow::Result<InspectionDay> {
-    AccountingStore::inspect_day(runtime, attempt(1).thread_id, day, time).await
+    AccountingStore::inspect_day(runtime, attempt(/*id*/ 1).thread_id, day, time).await
 }
 
 #[tokio::test]
@@ -22,13 +25,15 @@ async fn accounting_inspect_noncanonical_own_id_is_an_error() -> anyhow::Result<
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let a = attempt(1);
-    AccountingStore::open(&runtime, 0)
+    let a = attempt(/*id*/ 1);
+    AccountingStore::open(&runtime, /*as_of*/ 0)
         .await?
-        .admit(a.thread_id, &a, &[], 0)
+        .admit(a.thread_id, &a, &[], /*as_of*/ 0)
         .await?;
     assert_eq!(
-        inspection(inspected(&runtime, 0, 0).await?).totals.attempts,
+        inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?)
+            .totals
+            .attempts,
         1
     );
     for spelling in [
@@ -45,7 +50,9 @@ async fn accounting_inspect_noncanonical_own_id_is_an_error() -> anyhow::Result<
         .await?;
         let before = rows(&runtime).await?;
         marker(
-            inspected(&runtime, 0, 0).await.unwrap_err(),
+            inspected(&runtime, /*day*/ 0, /*time*/ 0)
+                .await
+                .unwrap_err(),
             "invalid accounting ownership",
         );
         assert_eq!(rows(&runtime).await?, before);
@@ -66,14 +73,30 @@ async fn accounting_inspect_work_is_not_refunded_for_unrelated_roots() -> anyhow
     let mut conn = runtime.pool.acquire().await?;
     let mut work = InspectionWork::new(&mut conn).await?;
     let before = work.visits;
-    let view = inspect_tree_window(&mut conn, attempt(1).thread_id, 0, 0, None, &mut work).await?;
+    let view = inspect_tree_window(
+        &mut conn,
+        attempt(/*id*/ 1).thread_id,
+        /*day*/ 0,
+        /*read_at_ms*/ 0,
+        /*window*/ None,
+        &mut work,
+    )
+    .await?;
     assert_eq!(inspection(view).totals.attempts, 1);
     // Includes the owner's quote/history work, all seven candidates and six hops.
     assert!(before - work.visits >= 13);
     // Reuse the budget just as range buckets do: the second window must refuse.
     work.visits = 12;
     assert_eq!(
-        inspect_tree_window(&mut conn, attempt(1).thread_id, 0, 0, None, &mut work).await?,
+        inspect_tree_window(
+            &mut conn,
+            attempt(/*id*/ 1).thread_id,
+            /*day*/ 0,
+            /*read_at_ms*/ 0,
+            /*window*/ None,
+            &mut work
+        )
+        .await?,
         InspectionDay::TooLarge
     );
     // Exhaustion on the final UNKNOWN candidate must not become unavailable+Ready.
@@ -84,7 +107,15 @@ async fn accounting_inspect_work_is_not_refunded_for_unrelated_roots() -> anyhow
     let mut work = InspectionWork::new(&mut conn).await?;
     work.rows = 60;
     assert_eq!(
-        inspect_tree_window(&mut conn, attempt(1).thread_id, 0, 0, None, &mut work).await?,
+        inspect_tree_window(
+            &mut conn,
+            attempt(/*id*/ 1).thread_id,
+            /*day*/ 0,
+            /*read_at_ms*/ 0,
+            /*window*/ None,
+            &mut work
+        )
+        .await?,
         InspectionDay::TooLarge
     );
     drop(conn);
@@ -116,7 +147,7 @@ async fn accounting_inspect_provisional_unrelated_chain_is_bounded() -> anyhow::
     assert_eq!(
         tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            inspected(&runtime, 0, 0)
+            inspected(&runtime, /*day*/ 0, /*time*/ 0)
         )
         .await??,
         InspectionDay::TooLarge
@@ -130,7 +161,7 @@ async fn accounting_inspect_provisional_unrelated_chain_is_bounded() -> anyhow::
         .bind(Uuid::from_u128(8).to_string())
         .execute(runtime.pool.as_ref())
         .await?;
-    let view = inspection(inspected(&runtime, 0, 0).await?);
+    let view = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
     assert_eq!(
         (view.totals.attempts, view.unknown_parent_totals.attempts),
         (1, 0)
@@ -145,9 +176,9 @@ async fn accounting_inspect_coverage_divergence_with_overdue_other_day() -> anyh
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let a = attempt(1);
-    let store = AccountingStore::open(&runtime, 0).await?;
-    store.admit(a.thread_id, &a, &[], 0).await?;
+    let a = attempt(/*id*/ 1);
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
+    store.admit(a.thread_id, &a, &[], /*as_of*/ 0).await?;
     // Simulate an advanced checkpoint with retention still overdue on day zero.
     sqlx::query("UPDATE draft_accounting_retention_checkpoint SET completed_as_of_ms = ?")
         .bind(400 * DAY)
@@ -155,10 +186,12 @@ async fn accounting_inspect_coverage_divergence_with_overdue_other_day() -> anyh
         .await?;
     let before = rows(&runtime).await?;
     assert!(matches!(
-        store.read_day(a.thread_id, 400, 400 * DAY).await?,
+        store
+            .read_day(a.thread_id, /*utc_day*/ 400, 400 * DAY)
+            .await?,
         RetainedDay::NeedsMaintenance { .. }
     ));
-    let view = inspection(inspected(&runtime, 400, 400 * DAY).await?);
+    let view = inspection(inspected(&runtime, /*day*/ 400, 400 * DAY).await?);
     assert_eq!(
         (
             view.totals.attempts,
@@ -168,7 +201,7 @@ async fn accounting_inspect_coverage_divergence_with_overdue_other_day() -> anyh
         (0, 36, Some(0))
     );
     assert!(matches!(
-        inspected(&runtime, 0, 400 * DAY).await?,
+        inspected(&runtime, /*day*/ 0, 400 * DAY).await?,
         InspectionDay::CheckpointLag
     ));
     assert_eq!(rows(&runtime).await?, before);
@@ -181,7 +214,10 @@ async fn accounting_inspect_absent_schema_is_read_only() -> anyhow::Result<()> {
     let path = home();
     let runtime = open(&path).await?;
     let before = rows(&runtime).await?;
-    assert_eq!(inspected(&runtime, 0, 0).await?, InspectionDay::Absent);
+    assert_eq!(
+        inspected(&runtime, /*day*/ 0, /*time*/ 0).await?,
+        InspectionDay::Absent
+    );
     assert_eq!(rows(&runtime).await?, before);
     runtime.close().await;
     Ok(())
@@ -194,7 +230,9 @@ async fn accounting_inspect_schema_rejection_matrix() -> anyhow::Result<()> {
         "DROP INDEX draft_accounting_request",
         "UPDATE _accounting_migrations SET success = 0",
         "UPDATE _accounting_migrations SET checksum = X'00'",
-        "UPDATE _accounting_migrations SET version = 2",
+        "UPDATE _accounting_migrations SET version = version + 10",
+        "DELETE FROM _accounting_migrations WHERE version = 1",
+        "CREATE TABLE draft_accounting_ledger_format (version INTEGER PRIMARY KEY NOT NULL CHECK(version = 2))",
         "DELETE FROM _accounting_migrations",
         "DROP TABLE _accounting_migrations",
     ] {
@@ -205,7 +243,10 @@ async fn accounting_inspect_schema_rejection_matrix() -> anyhow::Result<()> {
             .execute(runtime.pool.as_ref())
             .await?;
         let before = rows(&runtime).await?;
-        assert!(inspected(&runtime, 0, 1).await.is_err(), "{mutation}");
+        assert!(
+            inspected(&runtime, /*day*/ 0, /*time*/ 1).await.is_err(),
+            "{mutation}"
+        );
         assert_eq!(rows(&runtime).await?, before);
         runtime.close().await;
     }
@@ -217,16 +258,22 @@ async fn accounting_inspect_raw_day_reconciles_contributions() -> anyhow::Result
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let a = attempt(1);
-    let mut retry = attempt(2);
+    let a = attempt(/*id*/ 1);
+    let mut retry = attempt(/*id*/ 2);
     retry.request_id = a.request_id;
     retry.retry_of = Some(a.attempt_id);
-    let store = AccountingStore::open(&runtime, 0).await?;
-    store.admit(a.thread_id, &a, &[snapshot()], 0).await?;
-    store.observe(a.thread_id, &a, &[row(1)], 0).await?;
-    let first = store.observe(a.thread_id, &a, &[row(2)], 0).await?;
-    let second = store.admit(a.thread_id, &retry, &[], 0).await?;
-    let view = inspection(inspected(&runtime, 0, 0).await?);
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
+    store
+        .admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 0)
+        .await?;
+    store
+        .observe(a.thread_id, &a, &[row(/*revision*/ 1)], /*as_of*/ 0)
+        .await?;
+    let first = store
+        .observe(a.thread_id, &a, &[row(/*revision*/ 2)], /*as_of*/ 0)
+        .await?;
+    let second = store.admit(a.thread_id, &retry, &[], /*as_of*/ 0).await?;
+    let view = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
     assert_eq!(
         view.requests,
         std::collections::BTreeMap::from([(a.request_id, vec![first, second])])
@@ -253,15 +300,18 @@ async fn accounting_inspect_original_null_and_price_are_immutable() -> anyhow::R
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let store = AccountingStore::open(&runtime, 0).await?;
-    for (a, prices) in [(attempt(1), vec![snapshot()]), (attempt(2), vec![])] {
-        store.admit(a.thread_id, &a, &prices, 0).await?;
-        let before = inspected(&runtime, 0, 0).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
+    for (a, prices) in [
+        (attempt(/*id*/ 1), vec![snapshot()]),
+        (attempt(/*id*/ 2), vec![]),
+    ] {
+        store.admit(a.thread_id, &a, &prices, /*as_of*/ 0).await?;
+        let before = inspected(&runtime, /*day*/ 0, /*time*/ 0).await?;
         let mut later = snapshot();
         later.id = Uuid::from_u128(9999);
         later.rates.noncached = Some("99".to_owned().try_into()?);
-        store.admit(a.thread_id, &a, &[later], 0).await?;
-        assert_eq!(inspected(&runtime, 0, 0).await?, before);
+        store.admit(a.thread_id, &a, &[later], /*as_of*/ 0).await?;
+        assert_eq!(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?, before);
     }
     runtime.close().await;
     Ok(())
@@ -277,21 +327,25 @@ async fn accounting_inspect_missing_binding_is_not_unpriced() -> anyhow::Result<
         let path = home();
         let runtime = open(&path).await?;
         seed(&runtime).await?;
-        let a = attempt(1);
-        AccountingStore::open(&runtime, 0)
+        let a = attempt(/*id*/ 1);
+        AccountingStore::open(&runtime, /*as_of*/ 0)
             .await?
-            .admit(a.thread_id, &a, &[], 0)
+            .admit(a.thread_id, &a, &[], /*as_of*/ 0)
             .await?;
         assert!(
-            inspection(inspected(&runtime, 0, 0).await?).requests[&a.request_id][0]
-                .snapshot
-                .is_none()
+            inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?).requests[&a.request_id]
+                [0]
+            .snapshot
+            .is_none()
         );
         sqlx::raw_sql(mutation)
             .execute(runtime.pool.as_ref())
             .await?;
         let before = rows(&runtime).await?;
-        assert!(inspected(&runtime, 0, 0).await.is_err(), "{mutation}");
+        assert!(
+            inspected(&runtime, /*day*/ 0, /*time*/ 0).await.is_err(),
+            "{mutation}"
+        );
         assert_eq!(rows(&runtime).await?, before);
         runtime.close().await;
     }
@@ -303,28 +357,43 @@ async fn accounting_inspect_checkpoint_and_stale_estimate() -> anyhow::Result<()
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let a = attempt(1);
-    let store = AccountingStore::open(&runtime, 0).await?;
-    store.admit(a.thread_id, &a, &[], 0).await?;
+    let a = attempt(/*id*/ 1);
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
+    store.admit(a.thread_id, &a, &[], /*as_of*/ 0).await?;
     let before = rows(&runtime).await?;
-    let lagged = inspection(inspected(&runtime, 0, 12).await?);
+    let lagged = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 12).await?);
     assert_eq!(
         (lagged.read_at_ms, lagged.coverage.completed_as_of_ms),
         (12, 0)
     );
     assert_eq!(rows(&runtime).await?, before);
     assert_eq!(
-        inspected(&runtime, 1, 86_400_000).await?,
+        inspected(&runtime, /*day*/ 1, /*time*/ 86_400_000).await?,
         InspectionDay::CheckpointLag
     );
+    let range = range_read(
+        &runtime,
+        /*start*/ 86_400_000,
+        /*end*/ 90_000_000,
+        InspectionGrouping::Hour,
+        /*now*/ 88_200_000,
+    )
+    .await?;
+    assert!(matches!(
+        range,
+        InspectionDay::Range { completed_as_of_ms: Some(0), buckets, .. }
+            if buckets[0].days == vec![InspectionDay::CheckpointLag]
+    ));
     assert_eq!(rows(&runtime).await?, before);
-    store.observe(a.thread_id, &a, &[row(1)], 0).await?;
+    store
+        .observe(a.thread_id, &a, &[row(/*revision*/ 1)], /*as_of*/ 0)
+        .await?;
     sqlx::query("UPDATE draft_accounting_contributions SET evidence = '[]'")
         .execute(runtime.pool.as_ref())
         .await?;
     let stale = rows(&runtime).await?;
     assert_eq!(
-        inspected(&runtime, 0, 1).await?,
+        inspected(&runtime, /*day*/ 0, /*time*/ 1).await?,
         InspectionDay::NeedsRefresh
     );
     assert_eq!(rows(&runtime).await?, stale);
@@ -334,7 +403,7 @@ async fn accounting_inspect_checkpoint_and_stale_estimate() -> anyhow::Result<()
     .execute(runtime.pool.as_ref())
     .await?;
     assert_eq!(
-        inspected(&runtime, 0, 1).await?,
+        inspected(&runtime, /*day*/ 0, /*time*/ 1).await?,
         InspectionDay::NeedsRefresh
     );
     runtime.close().await;
@@ -353,9 +422,22 @@ async fn accounting_inspect_never_maintained_is_checkpoint_lag() -> anyhow::Resu
     .await?;
     let before = rows(&runtime).await?;
     assert_eq!(
-        inspected(&runtime, 0, 0).await?,
+        inspected(&runtime, /*day*/ 0, /*time*/ 0).await?,
         InspectionDay::CheckpointLag
     );
+    let range = range_read(
+        &runtime,
+        /*start*/ 0,
+        /*end*/ 3_600_000,
+        InspectionGrouping::Hour,
+        /*now*/ 0,
+    )
+    .await?;
+    assert!(matches!(
+        range,
+        InspectionDay::Range { completed_as_of_ms: None, buckets, .. }
+            if buckets[0].days == vec![InspectionDay::CheckpointLag]
+    ));
     assert_eq!(rows(&runtime).await?, before);
     runtime.close().await;
     Ok(())
@@ -367,26 +449,26 @@ async fn accounting_inspect_retention_and_compact_matrix() -> anyhow::Result<()>
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let a = attempt(1);
-    let store = AccountingStore::open(&runtime, 0).await?;
-    store.admit(a.thread_id, &a, &[], 0).await?;
+    let a = attempt(/*id*/ 1);
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
+    store.admit(a.thread_id, &a, &[], /*as_of*/ 0).await?;
     assert!(matches!(
-        inspected(&runtime, 0, 90 * DAY - 1).await?,
+        inspected(&runtime, /*day*/ 0, 90 * DAY - 1).await?,
         InspectionDay::Ready(_)
     ));
     let before = rows(&runtime).await?;
     for now in [90 * DAY, 90 * DAY + 1, 365 * DAY] {
         assert!(matches!(
-            inspected(&runtime, 0, now).await?,
+            inspected(&runtime, /*day*/ 0, now).await?,
             InspectionDay::DetailUnavailable { compact: false, .. }
         ));
     }
     assert_eq!(rows(&runtime).await?, before);
-    let mut late = attempt(2);
+    let mut late = attempt(/*id*/ 2);
     late.dispatched_at_ms = 1.try_into()?;
-    store.admit(a.thread_id, &late, &[], 1).await?;
+    store.admit(a.thread_id, &late, &[], /*as_of*/ 1).await?;
     store.maintain(90 * DAY).await?;
-    let unavailable = inspected(&runtime, 0, 90 * DAY).await?;
+    let unavailable = inspected(&runtime, /*day*/ 0, 90 * DAY).await?;
     assert!(matches!(
         unavailable,
         InspectionDay::DetailUnavailable {
@@ -400,12 +482,12 @@ async fn accounting_inspect_retention_and_compact_matrix() -> anyhow::Result<()>
     ));
     store.maintain(90 * DAY + 1).await?;
     assert!(matches!(
-        inspected(&runtime, 0, 90 * DAY + 1).await?,
+        inspected(&runtime, /*day*/ 0, 90 * DAY + 1).await?,
         InspectionDay::DetailUnavailable { compact: true, .. }
     ));
     store.maintain(365 * DAY).await?;
     assert!(matches!(
-        inspected(&runtime, 0, 365 * DAY).await?,
+        inspected(&runtime, /*day*/ 0, 365 * DAY).await?,
         InspectionDay::DetailUnavailable {
             coverage: RetentionCoverage {
                 aggregate_day_floor: 1,
@@ -425,7 +507,7 @@ async fn accounting_inspect_half_open_date_bounds() -> anyhow::Result<()> {
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let store = AccountingStore::open(&runtime, 0).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
     for (id, time) in [(1, 0), (2, DAY - 1), (3, DAY)] {
         let mut a = attempt(id);
         a.dispatched_at_ms = time.try_into()?;
@@ -433,16 +515,21 @@ async fn accounting_inspect_half_open_date_bounds() -> anyhow::Result<()> {
     }
     // Later observation admission does not change request-day ownership.
     store
-        .observe(attempt(1).thread_id, &attempt(1), &[row(1)], DAY)
+        .observe(
+            attempt(/*id*/ 1).thread_id,
+            &attempt(/*id*/ 1),
+            &[row(/*revision*/ 1)],
+            DAY,
+        )
         .await?;
     assert_eq!(
-        inspection(inspected(&runtime, 0, DAY).await?)
+        inspection(inspected(&runtime, /*day*/ 0, DAY).await?)
             .totals
             .attempts,
         2
     );
     assert_eq!(
-        inspection(inspected(&runtime, 1, DAY).await?)
+        inspection(inspected(&runtime, /*day*/ 1, DAY).await?)
             .totals
             .attempts,
         1
@@ -471,13 +558,15 @@ async fn accounting_inspect_corruption_and_unknowns() -> anyhow::Result<()> {
         let path = home();
         let runtime = open(&path).await?;
         seed(&runtime).await?;
-        let a = attempt(1);
-        let store = AccountingStore::open(&runtime, 0).await?;
-        store.admit(a.thread_id, &a, &[], 0).await?;
-        let mut zero = row(1);
+        let a = attempt(/*id*/ 1);
+        let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
+        store.admit(a.thread_id, &a, &[], /*as_of*/ 0).await?;
+        let mut zero = row(/*revision*/ 1);
         zero.patch = serde_json::from_value(json!({"input":0,"read":null}))?;
-        store.observe(a.thread_id, &a, &[zero.clone()], 0).await?;
-        let view = inspection(inspected(&runtime, 0, 0).await?);
+        store
+            .observe(a.thread_id, &a, &[zero.clone()], /*as_of*/ 0)
+            .await?;
+        let view = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
         assert_eq!(view.requests[&a.request_id][0].observations, vec![zero]);
         assert_eq!(view.requests[&a.request_id][0].usage.noncached, Some(0));
         assert_eq!(view.requests[&a.request_id][0].usage.read, None);
@@ -485,18 +574,21 @@ async fn accounting_inspect_corruption_and_unknowns() -> anyhow::Result<()> {
             .execute(runtime.pool.as_ref())
             .await?;
         let before = rows(&runtime).await?;
-        assert!(inspected(&runtime, 0, 0).await.is_err(), "{mutation}");
+        assert!(
+            inspected(&runtime, /*day*/ 0, /*time*/ 0).await.is_err(),
+            "{mutation}"
+        );
         assert_eq!(rows(&runtime).await?, before);
         runtime.close().await;
     }
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let store = AccountingStore::open(&runtime, 0).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
     for id in [1, 2] {
         let a = attempt(id);
-        store.admit(a.thread_id, &a, &[], 0).await?;
-        let mut observation = row(1);
+        store.admit(a.thread_id, &a, &[], /*as_of*/ 0).await?;
+        let mut observation = row(/*revision*/ 1);
         observation.source = a.attempt_id;
         observation.patch =
             serde_json::from_value(json!({"input": if id == 1 { i64::MAX } else { 1 }}))?;
@@ -507,7 +599,12 @@ async fn accounting_inspect_corruption_and_unknowns() -> anyhow::Result<()> {
             .execute(runtime.pool.as_ref())
             .await?;
     }
-    marker(inspected(&runtime, 0, 0).await.unwrap_err(), "overflow");
+    marker(
+        inspected(&runtime, /*day*/ 0, /*time*/ 0)
+            .await
+            .unwrap_err(),
+        "overflow",
+    );
     runtime.close().await;
     Ok(())
 }
@@ -517,10 +614,12 @@ async fn accounting_inspect_single_snapshot_concurrent_writer() -> anyhow::Resul
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let a = attempt(1);
-    let store = AccountingStore::open(&runtime, 0).await?;
-    store.admit(a.thread_id, &a, &[snapshot()], 0).await?;
-    let mut before = inspection(inspected(&runtime, 0, 0).await?);
+    let a = attempt(/*id*/ 1);
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
+    store
+        .admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 0)
+        .await?;
+    let mut before = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
     // The single-owner journal read does not read other conversations.
     assert_eq!(before.other_conversations.take(), Some(Default::default()));
     let before = InspectionDay::Ready(before);
@@ -531,20 +630,26 @@ async fn accounting_inspect_single_snapshot_concurrent_writer() -> anyhow::Resul
     let writer_runtime = runtime.clone();
     let writer = tokio::spawn(async move {
         barrier.await?;
-        AccountingStore::open(&writer_runtime, 0)
+        AccountingStore::open(&writer_runtime, /*as_of*/ 0)
             .await?
-            .observe(a.thread_id, &a, &[row(1)], 0)
+            .observe(a.thread_id, &a, &[row(/*revision*/ 1)], /*as_of*/ 0)
             .await?;
         anyhow::Ok(())
     });
     release.send(()).unwrap();
     writer.await??;
     assert_eq!(
-        Journal::inspect_on_connection(&mut tx, attempt(1).thread_id, 0, 0).await?,
+        Journal::inspect_on_connection(
+            &mut tx,
+            attempt(/*id*/ 1).thread_id,
+            /*day*/ 0,
+            /*read_at_ms*/ 0
+        )
+        .await?,
         before
     );
     tx.commit().await?;
-    let after = inspection(inspected(&runtime, 0, 0).await?);
+    let after = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
     assert_eq!(
         after.totals.measured[1],
         Metric {
@@ -553,7 +658,9 @@ async fn accounting_inspect_single_snapshot_concurrent_writer() -> anyhow::Resul
         }
     );
     assert_eq!(
-        after.requests[&attempt(1).request_id][0].usage.noncached,
+        after.requests[&attempt(/*id*/ 1).request_id][0]
+            .usage
+            .noncached,
         Some(1)
     );
     runtime.close().await;
@@ -563,7 +670,7 @@ async fn accounting_inspect_single_snapshot_concurrent_writer() -> anyhow::Resul
 // Root, closed child, grandchild, orphan, unrelated root, and cycle.
 async fn tree_fixture(runtime: &StateRuntime) -> anyhow::Result<()> {
     seed(runtime).await?;
-    let store = AccountingStore::open(runtime, 0).await?;
+    let store = AccountingStore::open(runtime, /*as_of*/ 0).await?;
     for id in 1..=7 {
         let mut a = attempt(id);
         a.thread_id = ThreadId::from_string(&Uuid::from_u128(id + 6).to_string())?;
@@ -574,8 +681,12 @@ async fn tree_fixture(runtime: &StateRuntime) -> anyhow::Result<()> {
                 runtime.sqlite().home().to_path_buf(),
             ))
             .await?;
-        store.admit(a.thread_id, &a, &[snapshot()], 0).await?;
-        store.observe(a.thread_id, &a, &[row(id as i64)], 0).await?;
+        store
+            .admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 0)
+            .await?;
+        store
+            .observe(a.thread_id, &a, &[row(id as i64)], /*as_of*/ 0)
+            .await?;
     }
     for (parent, child) in [(7, 8), (8, 9), (999, 10), (12, 13), (13, 12)] {
         runtime
@@ -596,7 +707,7 @@ async fn accounting_inspect_tree_reconciles_and_quarantines_unknown_parents() ->
     let runtime = open(&path).await?;
     tree_fixture(&runtime).await?;
     let before = rows(&runtime).await?;
-    let view = inspection(inspected(&runtime, 0, 0).await?);
+    let view = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
     // Independent known-price calculation: one USD per million noncached tokens.
     assert_eq!(view.totals.known_usd, "0.000006".to_owned().try_into()?);
     assert_eq!(view.own_totals.known_usd, "0.000001".to_owned().try_into()?);
@@ -651,7 +762,7 @@ async fn accounting_inspect_conflicting_and_missing_edges_are_unknown() -> anyho
             .await?;
     }
     let before = rows(&runtime).await?;
-    let view = inspection(inspected(&runtime, 0, 0).await?);
+    let view = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
     assert_eq!(
         (view.totals.attempts, view.unknown_parent_totals.attempts),
         (2, 5)
@@ -672,7 +783,7 @@ async fn accounting_inspect_malformed_source_with_edge_is_unknown() -> anyhow::R
         .bind(Uuid::from_u128(8).to_string())
         .execute(runtime.pool.as_ref())
         .await?;
-    let view = inspection(inspected(&runtime, 0, 0).await?);
+    let view = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
     assert_eq!(
         (view.totals.attempts, view.unknown_parent_totals.attempts),
         (1, 5)
@@ -695,7 +806,7 @@ async fn accounting_inspect_descendant_stale_and_compact_refuse_tree_total() -> 
             .await?;
         let before = rows(&runtime).await?;
         assert_eq!(
-            inspected(&runtime, 0, 0).await?,
+            inspected(&runtime, /*day*/ 0, /*time*/ 0).await?,
             InspectionDay::NeedsRefresh
         );
         assert_eq!(rows(&runtime).await?, before);
@@ -707,7 +818,13 @@ async fn accounting_inspect_descendant_stale_and_compact_refuse_tree_total() -> 
     let _store = AccountingStore::open(&runtime, 90 * 86_400_000).await?;
     let before = rows(&runtime).await?;
     assert!(matches!(
-        AccountingStore::inspect_day(&runtime, attempt(1).thread_id, 0, 90 * 86_400_000).await?,
+        AccountingStore::inspect_day(
+            &runtime,
+            attempt(/*id*/ 1).thread_id,
+            /*utc_day*/ 0,
+            90 * 86_400_000
+        )
+        .await?,
         InspectionDay::DetailUnavailable { compact: true, .. }
     ));
     assert_eq!(rows(&runtime).await?, before);
@@ -720,7 +837,7 @@ async fn accounting_inspect_unknown_unavailable_preserves_root() -> anyhow::Resu
     let path = home();
     let runtime = open(&path).await?;
     tree_fixture(&runtime).await?;
-    let mut expected = inspection(inspected(&runtime, 0, 0).await?);
+    let mut expected = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
     expected.unknown_parent_requests.clear();
     expected.unknown_parent_totals = DayTotals::default();
     expected.unknown_parent_unavailable_threads = 3;
@@ -733,7 +850,7 @@ async fn accounting_inspect_unknown_unavailable_preserves_root() -> anyhow::Resu
     }
     let before = rows(&runtime).await?;
     assert_eq!(
-        inspected(&runtime, 0, 0).await?,
+        inspected(&runtime, /*day*/ 0, /*time*/ 0).await?,
         InspectionDay::Ready(expected)
     );
     assert_eq!(rows(&runtime).await?, before);
@@ -749,15 +866,18 @@ async fn accounting_inspect_other_conversations_are_read_beside_the_tree() -> an
     let runtime = open(&path).await?;
     tree_fixture(&runtime).await?;
     let other = ThreadId::from_string(&Uuid::from_u128(11).to_string())?;
-    let alone = inspection(AccountingStore::inspect_day(&runtime, other, 0, 0).await?);
+    let alone = inspection(
+        AccountingStore::inspect_day(&runtime, other, /*utc_day*/ 0, /*read_at_ms*/ 0).await?,
+    );
     assert_eq!(alone.totals.known_usd, "0.000005".to_owned().try_into()?);
-    let view = inspection(inspected(&runtime, 0, 0).await?);
+    let view = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
     assert_eq!(
         view.other_conversations,
         Some(OtherConversations {
             conversations: 1,
             unavailable: 0,
             requests: alone.requests,
+            deleted_attempts: DeletedAttempts::Counted(0),
         })
     );
     assert_eq!(
@@ -771,6 +891,7 @@ async fn accounting_inspect_other_conversations_are_read_beside_the_tree() -> an
         conversations: 1,
         unavailable: 1,
         requests: Default::default(),
+        deleted_attempts: DeletedAttempts::Counted(0),
     });
     sqlx::query("DELETE FROM draft_accounting_contributions WHERE attempt_id = ?")
         .bind(Uuid::from_u128(5).to_string())
@@ -778,10 +899,102 @@ async fn accounting_inspect_other_conversations_are_read_beside_the_tree() -> an
         .await?;
     let before = rows(&runtime).await?;
     assert_eq!(
-        inspected(&runtime, 0, 0).await?,
+        inspected(&runtime, /*day*/ 0, /*time*/ 0).await?,
         InspectionDay::Ready(expected)
     );
     assert_eq!(rows(&runtime).await?, before);
+    runtime.close().await;
+    Ok(())
+}
+
+// #286: deleting a conversation removes its attempts and their cost. The day
+// must still say that deleted conversations spent on it, never read as empty.
+#[tokio::test]
+async fn accounting_inspect_counts_deleted_conversations_attempts() -> anyhow::Result<()> {
+    let path = home();
+    let runtime = open(&path).await?;
+    tree_fixture(&runtime).await?;
+    let other = ThreadId::from_string(&Uuid::from_u128(11).to_string())?;
+    let before = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?)
+        .other_conversations
+        .expect("day view reads other conversations");
+    let attempts: usize = before.requests.values().map(Vec::len).sum();
+    assert_eq!((before.conversations, attempts), (1, 1));
+    runtime.delete_threads_at(&[other], /*as_of_ms*/ 0).await?;
+    assert_eq!(
+        inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?).other_conversations,
+        Some(OtherConversations {
+            conversations: 0,
+            unavailable: 0,
+            requests: Default::default(),
+            deleted_attempts: DeletedAttempts::Counted(attempts),
+        })
+    );
+    runtime.close().await;
+    Ok(())
+}
+
+// #286: only tombstones that cannot come from retention count as deletions.
+#[tokio::test]
+async fn accounting_deleted_attempts_count_only_what_retention_cannot_explain() -> anyhow::Result<()>
+{
+    const REPLAY: i64 = 365 * DAY;
+    let path = home();
+    let runtime = open(&path).await?;
+    seed(&runtime).await?;
+    let ahead = 200 * DAY;
+    AccountingStore::open(&runtime, ahead).await?;
+    // Tombstones for attempts dispatched on day 150 and day 100.
+    for (id, dispatch) in [(1u128, 150 * DAY + 5), (2, 100 * DAY + 5)] {
+        sqlx::query("INSERT INTO draft_accounting_tombstones VALUES (?, ?)")
+            .bind(Uuid::from_u128(id).to_string())
+            .bind(dispatch + REPLAY)
+            .execute(runtime.pool.as_ref())
+            .await?;
+    }
+    let count = |day: i64, read_at: i64| {
+        let runtime = runtime.clone();
+        async move {
+            let mut conn = runtime.pool.acquire().await?;
+            let mut work = InspectionWork::new(&mut conn).await?;
+            anyhow::Ok(scope::deleted_attempts(&mut conn, day, read_at, &mut work).await)
+        }
+    };
+    // Inside the detail window at the checkpoint: a deletion.
+    assert_eq!(count(150, ahead).await?, DeletedAttempts::Counted(1));
+    // Past it (day 100 + 90 days <= day 200): retention may have written it.
+    assert_eq!(count(100, ahead).await?, DeletedAttempts::PastDetailWindow);
+    // Batched expiry can run ahead of the checkpoint: the reader's clock
+    // bounds the window too, exactly at the edge.
+    assert_eq!(
+        count(150, 240 * DAY).await?,
+        DeletedAttempts::PastDetailWindow
+    );
+    assert_eq!(
+        count(150, 240 * DAY - 1).await?,
+        DeletedAttempts::Counted(1)
+    );
+    // A day nothing was deleted on, inside the window.
+    assert_eq!(count(151, ahead).await?, DeletedAttempts::Counted(0));
+    // An exhausted work budget reads as unread, never zero.
+    {
+        let mut conn = runtime.pool.acquire().await?;
+        let mut work = InspectionWork {
+            rows: 0,
+            visits: 0,
+            scan_rows: 1,
+            started: None,
+        };
+        assert_eq!(
+            scope::deleted_attempts(&mut conn, /*day*/ 150, ahead, &mut work).await,
+            DeletedAttempts::Unread
+        );
+    }
+    // No checkpoint yet: unread, never zero.
+    sqlx::query("UPDATE draft_accounting_retention_checkpoint SET completed_as_of_ms = NULL, admission_active = 0")
+        .execute(runtime.pool.as_ref())
+        .await?;
+    assert_eq!(count(150, ahead).await?, DeletedAttempts::Unread);
     runtime.close().await;
     Ok(())
 }
@@ -792,8 +1005,16 @@ async fn accounting_inspect_range_days_do_not_read_other_conversations() -> anyh
     let path = home();
     let runtime = open(&path).await?;
     tree_fixture(&runtime).await?;
-    let mut buckets =
-        range_buckets(range_read(&runtime, 0, 86_400_000, InspectionGrouping::Day, 0).await?);
+    let mut buckets = range_buckets(
+        range_read(
+            &runtime,
+            /*start*/ 0,
+            /*end*/ 86_400_000,
+            InspectionGrouping::Day,
+            /*now*/ 0,
+        )
+        .await?,
+    );
     let view = inspection(buckets.remove(0).days.remove(0));
     assert_eq!((view.totals.attempts, view.other_conversations), (3, None));
     runtime.close().await;
@@ -805,10 +1026,10 @@ async fn accounting_inspect_unknown_compact_preserves_root_coverage() -> anyhow:
     let path = home();
     let runtime = open(&path).await?;
     tree_fixture(&runtime).await?;
-    let mut expected = inspection(inspected(&runtime, 0, 0).await?);
+    let mut expected = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
     expected
         .unknown_parent_requests
-        .remove(&attempt(4).request_id);
+        .remove(&attempt(/*id*/ 4).request_id);
     expected.unknown_parent_totals =
         DayTotals::from_quotes(expected.unknown_parent_requests.values().flatten())?;
     expected.unknown_parent_unavailable_threads = 1;
@@ -823,7 +1044,7 @@ async fn accounting_inspect_unknown_compact_preserves_root_coverage() -> anyhow:
             .execute(runtime.pool.as_ref())
             .await?;
         let before = rows(&runtime).await?;
-        let result = inspected(&runtime, 0, 0).await?;
+        let result = inspected(&runtime, /*day*/ 0, /*time*/ 0).await?;
         if owner == 10 {
             assert_eq!(inspection(result), expected);
         } else {
@@ -844,7 +1065,7 @@ async fn accounting_inspect_candidate_cap_precedes_unavailable_candidates() -> a
     let runtime = open(&path).await?;
     tree_fixture(&runtime).await?;
     let mut tx = runtime.pool.begin().await?;
-    let mut expected = inspection(inspected(&runtime, 0, 0).await?);
+    let mut expected = inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?);
     expected.unknown_parent_unavailable_threads += 512;
     // Distinct unknown owners missing contributions remain unavailable unknowns;
     // their count must not suppress the known root and descendant totals.
@@ -864,7 +1085,7 @@ async fn accounting_inspect_candidate_cap_precedes_unavailable_candidates() -> a
     }
     tx.commit().await?;
     assert_eq!(
-        inspected(&runtime, 0, 0).await?,
+        inspected(&runtime, /*day*/ 0, /*time*/ 0).await?,
         InspectionDay::Ready(expected)
     );
     runtime.close().await;
@@ -876,7 +1097,7 @@ async fn accounting_inspect_tree_lineage_and_cost_share_one_snapshot() -> anyhow
     let path = home();
     let runtime = open(&path).await?;
     tree_fixture(&runtime).await?;
-    let before = inspected(&runtime, 0, 0).await?;
+    let before = inspected(&runtime, /*day*/ 0, /*time*/ 0).await?;
     let mut read = runtime.pool.begin().await?;
     validate_on_connection(&mut read).await?;
     sqlx::query("UPDATE thread_spawn_edges SET parent_thread_id = ? WHERE child_thread_id = ?")
@@ -885,12 +1106,20 @@ async fn accounting_inspect_tree_lineage_and_cost_share_one_snapshot() -> anyhow
         .execute(runtime.pool.as_ref())
         .await?;
     assert_eq!(
-        inspect_tree(&mut read, attempt(1).thread_id, 0, 0).await?,
+        inspect_tree(
+            &mut read,
+            attempt(/*id*/ 1).thread_id,
+            /*day*/ 0,
+            /*read_at_ms*/ 0
+        )
+        .await?,
         before
     );
     read.commit().await?;
     assert_eq!(
-        inspection(inspected(&runtime, 0, 0).await?).totals.attempts,
+        inspection(inspected(&runtime, /*day*/ 0, /*time*/ 0).await?)
+            .totals
+            .attempts,
         1
     );
     runtime.close().await;
@@ -902,10 +1131,15 @@ async fn accounting_inspect_tree_combined_attempt_cap_is_not_per_run() -> anyhow
     let path = home();
     let runtime = open(&path).await?;
     tree_fixture(&runtime).await?;
-    let store = AccountingStore::open(&runtime, 0).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
     // Batch synthetic rows to avoid hundreds of unrelated maintenance sweeps.
     let template = store
-        .admit(attempt(1).thread_id, &attempt(19), &[], 0)
+        .admit(
+            attempt(/*id*/ 1).thread_id,
+            &attempt(/*id*/ 19),
+            &[],
+            /*as_of*/ 0,
+        )
         .await?;
     let mut tx = runtime.pool.begin().await?;
     for id in 20..530 {
@@ -935,7 +1169,10 @@ async fn accounting_inspect_tree_combined_attempt_cap_is_not_per_run() -> anyhow
             .await?;
     }
     tx.commit().await?;
-    assert_eq!(inspected(&runtime, 0, 0).await?, InspectionDay::TooLarge);
+    assert_eq!(
+        inspected(&runtime, /*day*/ 0, /*time*/ 0).await?,
+        InspectionDay::TooLarge
+    );
     runtime.close().await;
     Ok(())
 }
@@ -956,7 +1193,7 @@ async fn range_read(
 ) -> anyhow::Result<InspectionDay> {
     AccountingStore::inspect_range(
         runtime,
-        attempt(1).thread_id,
+        attempt(/*id*/ 1).thread_id,
         InspectionRange {
             start_ms: start,
             end_ms: end,
@@ -965,6 +1202,55 @@ async fn range_read(
         now,
     )
     .await
+}
+
+/// #289: a week or month bucket that reaches past the ledger reports the
+/// interval it covers, as a day bucket containing today does, not
+/// "unavailable".
+#[tokio::test]
+async fn accounting_inspect_range_bucket_reaching_past_the_ledger_states_its_coverage()
+-> anyhow::Result<()> {
+    let path = home();
+    let runtime = open(&path).await?;
+    seed(&runtime).await?;
+    // The ledger is current to 12:00 on day 6 (a Wednesday); the read is at
+    // the same time. Day 4 (1970-01-05) is a Monday, so one ISO week and one
+    // month bucket cover the range.
+    let now = 6 * DAY + DAY / 2;
+    AccountingStore::open(&runtime, now).await?;
+    for grouping in [InspectionGrouping::Week, InspectionGrouping::Month] {
+        let buckets = range_buckets(
+            range_read(
+                &runtime,
+                /*start*/ 4 * DAY,
+                /*end*/ 11 * DAY,
+                grouping,
+                now,
+            )
+            .await?,
+        );
+        assert_eq!(buckets.len(), 1, "{grouping:?}");
+        assert!(buckets[0].partial);
+        assert_eq!(
+            buckets[0].effective,
+            Some((4 * DAY, now + 1)),
+            "{grouping:?}"
+        );
+    }
+    // A bucket whose first day the ledger has not reached stays unavailable.
+    let later = range_buckets(
+        range_read(
+            &runtime,
+            /*start*/ 7 * DAY,
+            /*end*/ 9 * DAY,
+            InspectionGrouping::Week,
+            /*now*/ 9 * DAY,
+        )
+        .await?,
+    );
+    assert_eq!(later[0].effective, None);
+    runtime.close().await;
+    Ok(())
 }
 
 #[tokio::test]
@@ -979,22 +1265,42 @@ async fn accounting_inspect_range_invalid_empty_reversed_and_unavailable() -> an
         (0, i64::MAX, "overflow"),
     ] {
         assert!(
-            range_read(&runtime, start, end, InspectionGrouping::Day, 10)
-                .await
-                .unwrap_err()
-                .to_string()
-                .contains(reason)
+            range_read(
+                &runtime,
+                start,
+                end,
+                InspectionGrouping::Day,
+                /*now*/ 10
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains(reason)
         );
     }
     assert_eq!(
-        range_read(&runtime, 0, 1, InspectionGrouping::Hour, 10).await?,
+        range_read(
+            &runtime,
+            /*start*/ 0,
+            /*end*/ 1,
+            InspectionGrouping::Hour,
+            /*now*/ 10
+        )
+        .await?,
         InspectionDay::Absent
     );
     assert_eq!(rows(&runtime).await?, before);
     seed(&runtime).await?;
-    AccountingStore::open(&runtime, 86_400_000).await?;
+    AccountingStore::open(&runtime, /*as_of*/ 86_400_000).await?;
     let bucket = range_buckets(
-        range_read(&runtime, 0, 3_600_000, InspectionGrouping::Hour, 86_400_000).await?,
+        range_read(
+            &runtime,
+            /*start*/ 0,
+            /*end*/ 3_600_000,
+            InspectionGrouping::Hour,
+            /*now*/ 86_400_000,
+        )
+        .await?,
     )
     .remove(0);
     assert!(!bucket.partial);
@@ -1065,7 +1371,7 @@ async fn accounting_inspect_range_hours_half_open_and_cutoff_suffix() -> anyhow:
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let store = AccountingStore::open(&runtime, 0).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
     for (id, time) in [(1, 0), (2, HOUR), (3, 2 * HOUR - 1), (4, 2 * HOUR)] {
         let mut a = attempt(id);
         a.dispatched_at_ms = time.try_into()?;
@@ -1093,8 +1399,16 @@ async fn accounting_inspect_range_hours_half_open_and_cutoff_suffix() -> anyhow:
         vec![Uuid::from_u128(2), Uuid::from_u128(3)]
     );
     assert_eq!(view.totals.known_usd, "0.000005".to_owned().try_into()?);
-    let old =
-        range_buckets(range_read(&runtime, 0, HOUR, InspectionGrouping::Hour, 90 * DAY).await?);
+    let old = range_buckets(
+        range_read(
+            &runtime,
+            /*start*/ 0,
+            HOUR,
+            InspectionGrouping::Hour,
+            90 * DAY,
+        )
+        .await?,
+    );
     assert!(matches!(
         old[0].days[0],
         InspectionDay::DetailUnavailable { compact: true, .. }
@@ -1110,10 +1424,17 @@ async fn accounting_inspect_range_partial_edges_and_checkpoint_coverage() -> any
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let store = AccountingStore::open(&runtime, 0).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
     store.maintain(3 * DAY).await?;
     let buckets = range_buckets(
-        range_read(&runtime, 1, 3 * DAY - 1, InspectionGrouping::Day, 3 * DAY).await?,
+        range_read(
+            &runtime,
+            /*start*/ 1,
+            3 * DAY - 1,
+            InspectionGrouping::Day,
+            3 * DAY,
+        )
+        .await?,
     );
     assert_eq!(
         buckets
@@ -1150,7 +1471,7 @@ async fn accounting_inspect_range_mixed_compaction_exact_no_double_count() -> an
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let store = AccountingStore::open(&runtime, 0).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
     for (id, time) in [(1, 0), (2, DAY)] {
         let mut a = attempt(id);
         a.dispatched_at_ms = time.try_into()?;
@@ -1161,9 +1482,16 @@ async fn accounting_inspect_range_mixed_compaction_exact_no_double_count() -> an
     }
     store.maintain(90 * DAY).await?;
     let before = rows(&runtime).await?;
-    let value = range_read(&runtime, 0, 2 * DAY, InspectionGrouping::Day, 90 * DAY).await?;
+    let value = range_read(
+        &runtime,
+        /*start*/ 0,
+        2 * DAY,
+        InspectionGrouping::Day,
+        90 * DAY,
+    )
+    .await?;
     assert!(
-        matches!(&value, InspectionDay::Range { oldest_aggregate_day: Some(0), read_at_ms, .. } if *read_at_ms == 90 * DAY)
+        matches!(&value, InspectionDay::Range { aggregate_day_floor: Some(0), read_at_ms, .. } if *read_at_ms == 90 * DAY)
     );
     let mut buckets = range_buckets(value);
     assert!(matches!(
@@ -1183,12 +1511,43 @@ async fn accounting_inspect_range_mixed_compaction_exact_no_double_count() -> an
     let RetainedDay::Available {
         totals: Current::Ready(compact),
         ..
-    } = store.read_day(attempt(1).thread_id, 0, 90 * DAY).await?
+    } = store
+        .read_day(attempt(/*id*/ 1).thread_id, /*utc_day*/ 0, 90 * DAY)
+        .await?
     else {
         panic!()
     };
     assert_eq!(compact.known_usd, "0.000001".to_owned().try_into()?);
     assert_eq!(rows(&runtime).await?, before);
+    runtime.close().await;
+    Ok(())
+}
+
+// #289 R3: a range states the same daily-totals floor as the day pages, even
+// before anything has been compacted.
+#[tokio::test]
+async fn accounting_inspect_range_states_day_page_retention_floor() -> anyhow::Result<()> {
+    const DAY: i64 = 86_400_000;
+    let path = home();
+    let runtime = open(&path).await?;
+    seed(&runtime).await?;
+    let time = 400 * DAY;
+    let store = AccountingStore::open(&runtime, time).await?;
+    let mut a = attempt(/*id*/ 1);
+    a.dispatched_at_ms = time.try_into()?;
+    store.admit(a.thread_id, &a, &[snapshot()], time).await?;
+    store
+        .observe(a.thread_id, &a, &[row(/*revision*/ 1)], time)
+        .await?;
+    let floor = inspection(inspected(&runtime, /*day*/ 400, time).await?)
+        .coverage
+        .aggregate_day_floor;
+    assert_eq!(floor, 36);
+    let value = range_read(&runtime, time, time + DAY, InspectionGrouping::Day, time).await?;
+    assert!(
+        matches!(value, InspectionDay::Range { aggregate_day_floor: Some(f), .. } if f == floor),
+        "{value:?}"
+    );
     runtime.close().await;
     Ok(())
 }
@@ -1199,7 +1558,7 @@ async fn accounting_inspect_range_week_day_slices_and_expired_prefix() -> anyhow
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let store = AccountingStore::open(&runtime, 0).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
     let mut expected = Vec::new();
     for (id, time) in [(1, 4 * DAY + 1), (2, 5 * DAY + 1)] {
         let mut a = attempt(id);
@@ -1266,12 +1625,26 @@ async fn accounting_inspect_range_week_day_slices_and_expired_prefix() -> anyhow
         ),
         (7, Some((6 * DAY, 11 * DAY)), true)
     );
-    assert!(
-        buckets[0]
-            .days
-            .iter()
-            .all(|d| matches!(d, InspectionDay::DetailUnavailable { .. }))
-    );
+    // The two recorded days are past the daily totals. #1196: the five empty
+    // days inside them read as the day view reads them, never as zero.
+    for (index, day) in buckets[0].days.iter().enumerate() {
+        if index < 2 {
+            assert!(
+                matches!(day, InspectionDay::DetailUnavailable { .. }),
+                "{day:?}"
+            );
+            continue;
+        }
+        let InspectionDay::Ready(view) = day else {
+            panic!("{day:?}")
+        };
+        assert_eq!((view.utc_day, view.totals.attempts), (4 + index as i64, 0));
+        assert!(view.requests.is_empty());
+        assert!(
+            matches!(view.empty_day, Some(EmptyDay::BeforeLedger { .. })),
+            "{view:?}"
+        );
+    }
     runtime.close().await;
     Ok(())
 }
@@ -1294,8 +1667,9 @@ async fn accounting_inspect_range_tree_unknown_and_single_snapshot() -> anyhow::
     let writer = runtime.clone();
     tokio::spawn(async move { AccountingStore::open(&writer, 3 * HOUR).await.map(|_| ()) })
         .await??;
-    let mut buckets =
-        range_buckets(inspect_buckets(&mut tx, attempt(1).thread_id, requested, 3 * HOUR).await?);
+    let mut buckets = range_buckets(
+        inspect_buckets(&mut tx, attempt(/*id*/ 1).thread_id, requested, 3 * HOUR).await?,
+    );
     let view = inspection(buckets[0].days.remove(0));
     assert_eq!(view.coverage.completed_as_of_ms, 2 * HOUR);
     assert_eq!(
@@ -1362,7 +1736,7 @@ async fn open(path: &Path) -> anyhow::Result<Arc<StateRuntime>> {
 
 async fn seed(runtime: &StateRuntime) -> anyhow::Result<()> {
     let path = runtime.sqlite().home();
-    let owner = attempt(1).thread_id;
+    let owner = attempt(/*id*/ 1).thread_id;
     runtime
         .upsert_thread(&test_thread_metadata(path, owner, path.to_path_buf()))
         .await?;
@@ -1375,7 +1749,7 @@ async fn seed(runtime: &StateRuntime) -> anyhow::Result<()> {
             crate::DirectionalThreadSpawnEdgeStatus::Closed,
         )
         .await?;
-    AccountingStore::open(runtime, 0).await?;
+    AccountingStore::open(runtime, /*as_of*/ 0).await?;
     Ok(())
 }
 
@@ -1495,10 +1869,12 @@ async fn store_sql_faults_roll_back_all_tables_then_two_reopens_and_retry() -> a
         let path = home();
         let runtime = open(&path).await?;
         seed(&runtime).await?;
-        let a = attempt(1);
-        let store = AccountingStore::open(&runtime, 0).await?;
+        let a = attempt(/*id*/ 1);
+        let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
         if observing {
-            store.admit(a.thread_id, &a, &[snapshot()], 0).await?;
+            store
+                .admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 0)
+                .await?;
         }
         let before = rows(&runtime).await?;
         sqlx::raw_sql(sqlx::AssertSqlSafe(format!(
@@ -1506,12 +1882,12 @@ async fn store_sql_faults_roll_back_all_tables_then_two_reopens_and_retry() -> a
         ))).execute(runtime.pool.as_ref()).await?;
         let error = if observing {
             store
-                .observe(a.thread_id, &a, &[row(1)], 1)
+                .observe(a.thread_id, &a, &[row(/*revision*/ 1)], /*as_of*/ 1)
                 .await
                 .unwrap_err()
         } else {
             store
-                .admit(a.thread_id, &a, &[snapshot()], 1)
+                .admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 1)
                 .await
                 .unwrap_err()
         };
@@ -1523,11 +1899,15 @@ async fn store_sql_faults_roll_back_all_tables_then_two_reopens_and_retry() -> a
         sqlx::raw_sql("DROP TRIGGER store_fault")
             .execute(runtime.pool.as_ref())
             .await?;
-        let store = AccountingStore::open(&runtime, 0).await?;
+        let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
         let quote = if observing {
-            store.observe(a.thread_id, &a, &[row(1)], 1).await?
+            store
+                .observe(a.thread_id, &a, &[row(/*revision*/ 1)], /*as_of*/ 1)
+                .await?
         } else {
-            store.admit(a.thread_id, &a, &[snapshot()], 1).await?
+            store
+                .admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 1)
+                .await?
         };
         assert_eq!(quote.snapshot, Some(snapshot()));
         assert_eq!(quote.usage.noncached, observing.then_some(1));
@@ -1562,9 +1942,17 @@ async fn store_commit_failure_is_not_admission_and_rolls_back_complete_state() -
     sqlx::raw_sql("PRAGMA defer_foreign_keys = ON")
         .execute(&mut *tx)
         .await?;
-    let a = attempt(1);
-    Journal::store_on_connection(&mut tx, a.thread_id, &a, &[], Some(&[snapshot()]), 1, None)
-        .await?;
+    let a = attempt(/*id*/ 1);
+    Journal::store_on_connection(
+        &mut tx,
+        a.thread_id,
+        &a,
+        &[],
+        Some(&[snapshot()]),
+        /*as_of_ms*/ 1,
+        /*validated_at_ms*/ None,
+    )
+    .await?;
     let error = tx.commit().await.unwrap_err();
     assert_eq!(
         error
@@ -1581,9 +1969,9 @@ async fn store_commit_failure_is_not_admission_and_rolls_back_complete_state() -
     sqlx::raw_sql("DROP TRIGGER store_commit")
         .execute(runtime.pool.as_ref())
         .await?;
-    AccountingStore::open(&runtime, 0)
+    AccountingStore::open(&runtime, /*as_of*/ 0)
         .await?
-        .admit(a.thread_id, &a, &[snapshot()], 1)
+        .admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 1)
         .await?;
     let success = rows(&runtime).await?;
     runtime.close().await;
@@ -1595,26 +1983,31 @@ async fn store_rejections_preserve_clock_native_rows_and_original_binding() -> a
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let a = attempt(1);
-    let store = AccountingStore::open(&runtime, 0).await?;
+    let a = attempt(/*id*/ 1);
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
     marker(
         store
-            .observe(a.thread_id, &a, &[row(1)], 1)
+            .observe(a.thread_id, &a, &[row(/*revision*/ 1)], /*as_of*/ 1)
             .await
             .unwrap_err(),
         "not admitted",
     );
-    store.admit(a.thread_id, &a, &[snapshot()], 0).await?;
+    store
+        .admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 0)
+        .await?;
     let before = rows(&runtime).await?;
     marker(
-        store.admit(ThreadId::new(), &a, &[], 1).await.unwrap_err(),
+        store
+            .admit(ThreadId::new(), &a, &[], /*as_of*/ 1)
+            .await
+            .unwrap_err(),
         "owner mismatch",
     );
-    let mut missing = attempt(2);
+    let mut missing = attempt(/*id*/ 2);
     missing.thread_id = ThreadId::new();
     marker(
         store
-            .admit(missing.thread_id, &missing, &[], 1)
+            .admit(missing.thread_id, &missing, &[], /*as_of*/ 1)
             .await
             .unwrap_err(),
         "owner missing",
@@ -1622,11 +2015,17 @@ async fn store_rejections_preserve_clock_native_rows_and_original_binding() -> a
     let mut price = snapshot();
     price.model = "conflict".into();
     marker(
-        store.admit(a.thread_id, &a, &[price], 1).await.unwrap_err(),
+        store
+            .admit(a.thread_id, &a, &[price], /*as_of*/ 1)
+            .await
+            .unwrap_err(),
         "snapshot conflict",
     );
     marker(
-        store.admit(a.thread_id, &a, &[], -1).await.unwrap_err(),
+        store
+            .admit(a.thread_id, &a, &[], /*as_of*/ -1)
+            .await
+            .unwrap_err(),
         "negative",
     );
     assert_eq!(rows(&runtime).await?, before);
@@ -1677,8 +2076,8 @@ async fn public_deletion_samples_time_after_cleanup_and_writer_acquisition() -> 
         let path = home();
         let runtime = open(&path).await?;
         seed(&runtime).await?;
-        let mut a = attempt(1);
-        let mut b = attempt(2);
+        let mut a = attempt(/*id*/ 1);
+        let mut b = attempt(/*id*/ 2);
         b.thread_id = ThreadId::new();
         let unrelated = ThreadId::new();
         for owner in [b.thread_id, unrelated] {
@@ -1803,7 +2202,7 @@ async fn public_deletion_samples_time_after_cleanup_and_writer_acquisition() -> 
 async fn absent_store_delete_locks_before_inspection_and_ordinary_writer() -> anyhow::Result<()> {
     let path = home();
     let runtime = open(&path).await?;
-    let owner = attempt(1).thread_id;
+    let owner = attempt(/*id*/ 1).thread_id;
     let unrelated = ThreadId::new();
     for id in [owner, unrelated] {
         runtime
@@ -1826,7 +2225,10 @@ async fn absent_store_delete_locks_before_inspection_and_ordinary_writer() -> an
         error.as_database_error().unwrap().code().as_deref(),
         Some("5")
     );
-    let error = AccountingStore::open(&other, 0).await.err().unwrap();
+    let error = AccountingStore::open(&other, /*as_of*/ 0)
+        .await
+        .err()
+        .unwrap();
     assert_eq!(
         error
             .downcast_ref::<sqlx::Error>()
@@ -1839,7 +2241,13 @@ async fn absent_store_delete_locks_before_inspection_and_ordinary_writer() -> an
     );
     assert_eq!(whole(&mut deletion).await?, before);
     assert_eq!(
-        StateRuntime::delete_threads_on_connection(&mut deletion, &[owner], 0).await?,
+        StateRuntime::delete_threads_on_connection(
+            &mut deletion,
+            &[owner],
+            /*as_of_ms*/ 0,
+            /*validated_at_ms*/ None
+        )
+        .await?,
         1
     );
     deletion.commit().await?;
@@ -1873,16 +2281,20 @@ async fn resultant_day_overflow_rejects_observation_without_poisoning_native_sta
     runtime
         .upsert_thread(&test_thread_metadata(&path, unrelated, path.to_path_buf()))
         .await?;
-    let a = attempt(1);
-    let b = attempt(2);
-    let store = AccountingStore::open(&runtime, 0).await?;
+    let a = attempt(/*id*/ 1);
+    let b = attempt(/*id*/ 2);
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
     for attempt in [&a, &b] {
-        store.admit(a.thread_id, attempt, &[], 0).await?;
+        store.admit(a.thread_id, attempt, &[], /*as_of*/ 0).await?;
     }
-    let mut maximum = row(1);
+    let mut maximum = row(/*revision*/ 1);
     maximum.patch.input = Presence::Number(Count::try_from(i64::MAX)?);
-    store.observe(a.thread_id, &a, &[maximum], 1).await?;
-    let total = store.read_day(a.thread_id, 0, 1).await?;
+    store
+        .observe(a.thread_id, &a, &[maximum], /*as_of*/ 1)
+        .await?;
+    let total = store
+        .read_day(a.thread_id, /*utc_day*/ 0, /*as_of_ms*/ 1)
+        .await?;
     let RetainedDay::Available {
         totals: Current::Ready(ref totals),
         ..
@@ -1899,21 +2311,44 @@ async fn resultant_day_overflow_rejects_observation_without_poisoning_native_sta
     );
     assert_eq!(totals.unknown_estimates, 2);
     let before = rows(&runtime).await?;
-    let mut one = row(1);
+    let mut one = row(/*revision*/ 1);
     one.source = Uuid::from_u128(2);
     marker(
-        store.observe(b.thread_id, &b, &[one], 2).await.unwrap_err(),
+        store
+            .observe(b.thread_id, &b, &[one], /*as_of*/ 2)
+            .await
+            .unwrap_err(),
         "metric overflow",
     );
     assert_eq!(rows(&runtime).await?, before);
-    assert_eq!(store.read_day(a.thread_id, 0, 1).await?, total);
+    assert_eq!(
+        store
+            .read_day(a.thread_id, /*utc_day*/ 0, /*as_of_ms*/ 1)
+            .await?,
+        total
+    );
     runtime.close().await;
     reopens(&path, &before).await?;
     let runtime = open(&path).await?;
-    let store = AccountingStore::open(&runtime, 1).await?;
-    assert_eq!(store.read_day(a.thread_id, 0, 1).await?, total);
-    assert_eq!(runtime.delete_threads_at(&[unrelated], 1).await?, 1);
-    assert_eq!(store.read_day(a.thread_id, 0, 1).await?, total);
+    let store = AccountingStore::open(&runtime, /*as_of*/ 1).await?;
+    assert_eq!(
+        store
+            .read_day(a.thread_id, /*utc_day*/ 0, /*as_of_ms*/ 1)
+            .await?,
+        total
+    );
+    assert_eq!(
+        runtime
+            .delete_threads_at(&[unrelated], /*as_of_ms*/ 1)
+            .await?,
+        1
+    );
+    assert_eq!(
+        store
+            .read_day(a.thread_id, /*utc_day*/ 0, /*as_of_ms*/ 1)
+            .await?,
+        total
+    );
     let after = rows(&runtime).await?;
     let mut expected = before;
     expected[10].retain(|row| !row.contains(&unrelated.to_string()));
@@ -1930,12 +2365,12 @@ async fn price_bound_admission_and_native_delete_contend_in_both_orders_with_sna
         let runtime = open(&path).await?;
         seed(&runtime).await?;
         let other = peer(&runtime).await?;
-        let a = attempt(1);
-        AccountingStore::open(&runtime, 0)
+        let a = attempt(/*id*/ 1);
+        AccountingStore::open(&runtime, /*as_of*/ 0)
             .await?
-            .admit(a.thread_id, &a, &[snapshot()], 0)
+            .admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 0)
             .await?;
-        let a = attempt(2);
+        let a = attempt(/*id*/ 2);
         let before = rows(&runtime).await?;
         let mut read = runtime.pool.begin().await?;
         assert_eq!(whole(&mut read).await?, before);
@@ -1944,10 +2379,16 @@ async fn price_bound_admission_and_native_delete_contend_in_both_orders_with_sna
         let writer = Arc::clone(&runtime);
         let task = tokio::spawn(async move {
             let mut tx = writer.pool.begin_with("BEGIN IMMEDIATE").await?;
-            let a = attempt(2);
+            let a = attempt(/*id*/ 2);
             if delete_first {
                 assert_eq!(
-                    StateRuntime::delete_threads_on_connection(&mut tx, &[a.thread_id], 1).await?,
+                    StateRuntime::delete_threads_on_connection(
+                        &mut tx,
+                        &[a.thread_id],
+                        /*as_of_ms*/ 1,
+                        /*validated_at_ms*/ None,
+                    )
+                    .await?,
                     1
                 );
             } else {
@@ -1957,8 +2398,8 @@ async fn price_bound_admission_and_native_delete_contend_in_both_orders_with_sna
                     &a,
                     &[],
                     Some(&[snapshot()]),
-                    1,
-                    None,
+                    /*as_of_ms*/ 1,
+                    /*validated_at_ms*/ None,
                 )
                 .await?;
             }
@@ -1970,12 +2411,12 @@ async fn price_bound_admission_and_native_delete_contend_in_both_orders_with_sna
         held_rx.await?;
         let error = if delete_first {
             AccountingStore { runtime: &other }
-                .admit(a.thread_id, &a, &[snapshot()], 1)
+                .admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 1)
                 .await
                 .unwrap_err()
         } else {
             other
-                .delete_threads_at(&[a.thread_id], 1)
+                .delete_threads_at(&[a.thread_id], /*as_of_ms*/ 1)
                 .await
                 .unwrap_err()
         };
@@ -1993,7 +2434,12 @@ async fn price_bound_admission_and_native_delete_contend_in_both_orders_with_sna
         task.await??;
         assert_eq!(whole(&mut read).await?, before);
         if !delete_first {
-            assert_eq!(other.delete_threads_at(&[a.thread_id], 1).await?, 1);
+            assert_eq!(
+                other
+                    .delete_threads_at(&[a.thread_id], /*as_of_ms*/ 1)
+                    .await?,
+                1
+            );
         }
         assert_eq!(whole(&mut read).await?, before);
         read.commit().await?;
@@ -2002,17 +2448,22 @@ async fn price_bound_admission_and_native_delete_contend_in_both_orders_with_sna
         for index in [0, 1, 2, 3, 4, 5, 7, 8, 10, 11, 12] {
             expected[index].clear();
         }
-        expected[6] =
-            vec![json!([attempt(1).attempt_id.to_string(), 365 * 86_400_000_i64]).to_string()];
+        expected[6] = vec![
+            json!([
+                attempt(/*id*/ 1).attempt_id.to_string(),
+                365 * 86_400_000_i64
+            ])
+            .to_string(),
+        ];
         if !delete_first {
             expected[6].push(json!([a.attempt_id.to_string(), 365 * 86_400_000_i64]).to_string());
         }
         expected[9] = vec!["[1,1,1]".into()];
         assert_eq!(after, expected);
-        for retry in [a.clone(), attempt(3)] {
+        for retry in [a.clone(), attempt(/*id*/ 3)] {
             marker(
                 AccountingStore { runtime: &other }
-                    .admit(retry.thread_id, &retry, &[snapshot()], 1)
+                    .admit(retry.thread_id, &retry, &[snapshot()], /*as_of*/ 1)
                     .await
                     .unwrap_err(),
                 "owner missing",
@@ -2040,7 +2491,7 @@ fn process_interruption_recovers_install_and_activation() -> anyhow::Result<()> 
             if phase == "activation" {
                 tx.commit().await?;
                 tx = runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
-                Journal::maintain_native_on_connection(&mut tx, 1).await?;
+                Journal::maintain_native_on_connection(&mut tx, /*as_of_ms*/ 1).await?;
             }
             use std::io::Write;
             println!("ACCOUNTING_TRANSACTION_HELD");
@@ -2099,11 +2550,11 @@ fn process_interruption_recovers_install_and_activation() -> anyhow::Result<()> 
                 runtime.close().await;
             }
             let runtime = open(&path).await?;
-            let store = AccountingStore::open(&runtime, 1).await?;
-            let a = attempt(1);
+            let store = AccountingStore::open(&runtime, /*as_of*/ 1).await?;
+            let a = attempt(/*id*/ 1);
             let path = runtime.sqlite().home();
             runtime.upsert_thread(&test_thread_metadata(path, a.thread_id, path.to_path_buf())).await?;
-            store.admit(a.thread_id, &a, &[snapshot()], 1).await?;
+            store.admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 1).await?;
             let success = rows(&runtime).await?;
             runtime.close().await;
             reopens(path, &success).await
@@ -2118,12 +2569,12 @@ async fn inactive_activation_and_installed_native_delete_failures_are_retryable(
     for deleting in [false, true] {
         let path = home();
         let runtime = open(&path).await?;
-        let a = attempt(1);
+        let a = attempt(/*id*/ 1);
         if deleting {
             seed(&runtime).await?;
-            AccountingStore::open(&runtime, 0)
+            AccountingStore::open(&runtime, /*as_of*/ 0)
                 .await?
-                .admit(a.thread_id, &a, &[snapshot()], 0)
+                .admit(a.thread_id, &a, &[snapshot()], /*as_of*/ 0)
                 .await?;
         } else {
             let mut tx = runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
@@ -2146,14 +2597,14 @@ async fn inactive_activation_and_installed_native_delete_failures_are_retryable(
         if deleting {
             marker(
                 runtime
-                    .delete_threads_at(&[a.thread_id], 1)
+                    .delete_threads_at(&[a.thread_id], /*as_of_ms*/ 1)
                     .await
                     .unwrap_err(),
                 "after-accounting-delete",
             );
         } else {
             marker(
-                AccountingStore::open(&runtime, 1)
+                AccountingStore::open(&runtime, /*as_of*/ 1)
                     .await
                     .err()
                     .expect("activation fails"),
@@ -2168,9 +2619,14 @@ async fn inactive_activation_and_installed_native_delete_failures_are_retryable(
             .execute(runtime.pool.as_ref())
             .await?;
         if deleting {
-            assert_eq!(runtime.delete_threads_at(&[a.thread_id], 1).await?, 1);
+            assert_eq!(
+                runtime
+                    .delete_threads_at(&[a.thread_id], /*as_of_ms*/ 1)
+                    .await?,
+                1
+            );
         } else {
-            AccountingStore::open(&runtime, 1).await?;
+            AccountingStore::open(&runtime, /*as_of*/ 1).await?;
         }
         let success = rows(&runtime).await?;
         assert_eq!(success[9], vec!["[1,1,1]".to_owned()]);
@@ -2197,9 +2653,11 @@ async fn request_writes_validate_the_whole_ledger_hourly_and_when_retention_is_d
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let store = AccountingStore::open(&runtime, 0).await?;
-    for attempt in [attempt(1), attempt(2)] {
-        store.admit(attempt.thread_id, &attempt, &[], 0).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
+    for attempt in [attempt(/*id*/ 1), attempt(/*id*/ 2)] {
+        store
+            .admit(attempt.thread_id, &attempt, &[], /*as_of*/ 0)
+            .await?;
     }
     let checkpoint = || async {
         sqlx::query_scalar::<_, i64>(
@@ -2254,9 +2712,11 @@ async fn the_hours_validation_reads_a_snapshot_while_another_process_writes() ->
     let path = home();
     let runtime = open(&path).await?;
     seed(&runtime).await?;
-    let store = AccountingStore::open(&runtime, 0).await?;
-    for attempt in [attempt(1), attempt(2)] {
-        store.admit(attempt.thread_id, &attempt, &[], 0).await?;
+    let store = AccountingStore::open(&runtime, /*as_of*/ 0).await?;
+    for attempt in [attempt(/*id*/ 1), attempt(/*id*/ 2)] {
+        store
+            .admit(attempt.thread_id, &attempt, &[], /*as_of*/ 0)
+            .await?;
     }
     let checkpoint = || async {
         sqlx::query_scalar::<_, i64>(
@@ -2282,7 +2742,7 @@ async fn the_hours_validation_reads_a_snapshot_while_another_process_writes() ->
         Some(HOUR)
     );
     assert_eq!(
-        Journal::validate_hour_on_connection(&mut read, 1, i64::MIN).await?,
+        Journal::validate_hour_on_connection(&mut read, /*as_of_ms*/ 1, i64::MIN).await?,
         None
     );
     read.rollback().await?;
@@ -2328,9 +2788,13 @@ async fn the_hours_validation_reads_a_snapshot_while_another_process_writes() ->
     read.rollback().await?;
     let mut tx = runtime.pool.begin_with("BEGIN IMMEDIATE").await?;
     assert!(
-        Journal::maintain_for_write_on_connection(&mut tx, DETAIL + 20, None)
-            .await
-            .is_err(),
+        Journal::maintain_for_write_on_connection(
+            &mut tx,
+            DETAIL + 20,
+            /*validated_at_ms*/ None
+        )
+        .await
+        .is_err(),
         "the full sweep ran and met the corrupt attempt"
     );
     tx.rollback().await?;
@@ -2376,6 +2840,274 @@ async fn contention_is_named_and_nothing_else_is() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A wall clock that stepped back behind the checkpoint (58 s and 6 days in the
+/// PF-60-S03 acceptance run) used to fail every `Now` write as a backward
+/// checkpoint, and with it every model request. The ledger now holds its time
+/// at the checkpoint; the attempt keeps the dispatch time the clock read.
+#[tokio::test]
+async fn now_writes_hold_at_the_checkpoint_when_the_clock_is_behind_it() -> anyhow::Result<()> {
+    for behind in [58_000, 6 * 86_400_000] {
+        let path = home();
+        let runtime = open(&path).await?;
+        seed(&runtime).await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let ahead = now + behind;
+        AccountingStore::open(&runtime, ahead).await?;
+        let store = AccountingStore::open(&runtime, AsOf::Now).await?;
+        let mut a = serde_json::to_value(attempt(/*id*/ 1))?;
+        a["dispatched_at_ms"] = json!(now);
+        let a: Attempt = serde_json::from_value(a)?;
+        store.admit(a.thread_id, &a, &[], AsOf::Now).await?;
+        store
+            .observe(a.thread_id, &a, &[row(/*revision*/ 1)], AsOf::Now)
+            .await?;
+        let checkpoint: i64 = sqlx::query_scalar(
+            "SELECT completed_as_of_ms FROM draft_accounting_retention_checkpoint",
+        )
+        .fetch_one(runtime.pool.as_ref())
+        .await?;
+        assert!(checkpoint >= ahead, "the checkpoint never moves backward");
+        let stored: Vec<String> =
+            sqlx::query_scalar("SELECT payload FROM draft_accounting_attempts")
+                .fetch_all(runtime.pool.as_ref())
+                .await?;
+        let stored: Vec<Attempt> = stored
+            .iter()
+            .map(|payload| serde_json::from_str(payload))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(stored, vec![a]);
+        // Explicit times stay strict.
+        marker(
+            AccountingStore::open(&runtime, now)
+                .await
+                .err()
+                .expect("stale time"),
+            "backward",
+        );
+        runtime.close().await;
+    }
+    Ok(())
+}
+
+/// #1518: inspecting at a time behind the checkpoint is still refused, as a
+/// typed clock-behind error the caller can name, never as damage.
+#[tokio::test]
+async fn inspection_behind_the_checkpoint_is_a_typed_clock_refusal() -> anyhow::Result<()> {
+    let path = home();
+    let runtime = open(&path).await?;
+    seed(&runtime).await?;
+    let a = attempt(/*id*/ 1);
+    let checkpoint = 2 * 86_400_000 + 5_000;
+    AccountingStore::open(&runtime, checkpoint)
+        .await?
+        .admit(a.thread_id, &a, &[], checkpoint)
+        .await?;
+    let error = inspected(&runtime, /*day*/ 2, checkpoint - 4_000)
+        .await
+        .expect_err("a read behind the checkpoint is refused");
+    assert_eq!(
+        clock_behind_ledger(&error),
+        Some(ClockBehindLedger { behind_ms: 4_000 })
+    );
+    marker(error, "backward inspection read");
+    let error = AccountingStore::inspect_range(
+        &runtime,
+        a.thread_id,
+        InspectionRange {
+            start_ms: 0,
+            end_ms: 86_400_000,
+            grouping: InspectionGrouping::Day,
+        },
+        checkpoint - 1,
+    )
+    .await
+    .expect_err("a range read behind the checkpoint is refused");
+    assert_eq!(
+        clock_behind_ledger(&error),
+        Some(ClockBehindLedger { behind_ms: 1 })
+    );
+    assert!(
+        inspected(&runtime, /*day*/ 2, checkpoint).await.is_ok(),
+        "the read succeeds once the clock reaches the checkpoint"
+    );
+    runtime.close().await;
+    Ok(())
+}
+
+/// #1522: a view opened while the clock read ahead into a later UTC day and
+/// refreshed after the clock was set back rereads that later day. The read is
+/// still refused, as a typed clock error the caller can name, never as damage.
+#[tokio::test]
+async fn inspection_of_a_day_after_the_clock_is_a_typed_clock_refusal() -> anyhow::Result<()> {
+    let path = home();
+    let runtime = open(&path).await?;
+    seed(&runtime).await?;
+    let a = attempt(/*id*/ 1);
+    let ahead = 3 * 86_400_000 + 5_000;
+    AccountingStore::open(&runtime, ahead)
+        .await?
+        .admit(a.thread_id, &a, &[], ahead)
+        .await?;
+    let set_back = 3 * 86_400_000 - 7_000;
+    let error = inspected(&runtime, /*day*/ 3, set_back)
+        .await
+        .expect_err("a day after the clock is refused");
+    assert_eq!(
+        clock_before_day(&error),
+        Some(ClockBeforeDay { behind_ms: 7_000 })
+    );
+    assert_eq!(clock_behind_ledger(&error), None);
+    marker(error, "invalid or future day");
+    let error = AccountingStore::inspect_range(
+        &runtime,
+        a.thread_id,
+        InspectionRange {
+            start_ms: 3 * 86_400_000,
+            end_ms: 4 * 86_400_000,
+            grouping: InspectionGrouping::Day,
+        },
+        set_back,
+    )
+    .await
+    .expect_err("a range starting on a day after the clock is refused");
+    assert_eq!(
+        clock_before_day(&error),
+        Some(ClockBeforeDay { behind_ms: 7_000 })
+    );
+    let error = inspected(&runtime, /*day*/ -1, set_back)
+        .await
+        .expect_err("a day before the epoch is refused");
+    assert_eq!(clock_before_day(&error), None);
+    marker(error, "invalid or future day");
+    // Reopened at the clock's own day, the read reaches the checkpoint check.
+    let error = inspected(&runtime, /*day*/ 2, set_back)
+        .await
+        .expect_err("the clock is still behind the checkpoint");
+    assert_eq!(
+        clock_behind_ledger(&error),
+        Some(ClockBehindLedger { behind_ms: 12_000 })
+    );
+    runtime.close().await;
+    Ok(())
+}
+
+/// #308: deleting a conversation with the clock behind the checkpoint (58 s and
+/// 6 days in the acceptance run) failed as a backward checkpoint. It now holds
+/// at the checkpoint like ledger writes, and the deleted spend is still counted
+/// for "deleted conversations" (#286).
+#[tokio::test]
+async fn delete_holds_at_the_checkpoint_when_the_clock_is_behind_it() -> anyhow::Result<()> {
+    for behind in [58_000, 6 * 86_400_000] {
+        let path = home();
+        let runtime = open(&path).await?;
+        seed(&runtime).await?;
+        let now = chrono::Utc::now().timestamp_millis();
+        let ahead = now + behind;
+        let store = AccountingStore::open(&runtime, ahead).await?;
+        // A conversation and its subagent, deleted together.
+        let child = ThreadId::from_string(&Uuid::from_u128(8).to_string())?;
+        let home = runtime.sqlite().home().to_path_buf();
+        runtime
+            .upsert_thread(&test_thread_metadata(&home, child, home.clone()))
+            .await?;
+        let mut owned = Vec::new();
+        for (id, owner) in [(1, None), (2, Some(child))] {
+            let mut a = serde_json::to_value(attempt(id))?;
+            a["dispatched_at_ms"] = json!(now);
+            if let Some(owner) = owner {
+                a["thread_id"] = json!(owner);
+            }
+            let a: Attempt = serde_json::from_value(a)?;
+            store.admit(a.thread_id, &a, &[], AsOf::Now).await?;
+            if owner.is_none() {
+                store
+                    .observe(a.thread_id, &a, &[row(/*revision*/ 1)], AsOf::Now)
+                    .await?;
+            }
+            owned.push(a);
+        }
+        let (a, owners) = (&owned[0], [owned[0].thread_id, child]);
+
+        runtime.preflight_delete_threads(&owners).await?;
+        assert_eq!(
+            runtime
+                .get_thread(a.thread_id)
+                .await?
+                .map(|thread| thread.id),
+            Some(a.thread_id),
+            "the preflight changes nothing"
+        );
+        assert_eq!(runtime.delete_threads_strict(&owners).await?, 2);
+
+        let checkpoint: i64 = sqlx::query_scalar(
+            "SELECT completed_as_of_ms FROM draft_accounting_retention_checkpoint",
+        )
+        .fetch_one(runtime.pool.as_ref())
+        .await?;
+        assert!(checkpoint >= ahead, "the checkpoint never moves backward");
+        let attempts: i64 = sqlx::query_scalar("SELECT count(*) FROM draft_accounting_attempts")
+            .fetch_one(runtime.pool.as_ref())
+            .await?;
+        let tombstones: Vec<(String, i64)> =
+            sqlx::query_as("SELECT attempt_id, expires_at_ms FROM draft_accounting_tombstones")
+                .fetch_all(runtime.pool.as_ref())
+                .await?;
+        assert_eq!(
+            (attempts, tombstones),
+            (
+                0,
+                owned
+                    .iter()
+                    .map(|a| (a.attempt_id.to_string(), now + 365 * 86_400_000_i64))
+                    .collect::<Vec<_>>()
+            )
+        );
+        let mut conn = runtime.pool.acquire().await?;
+        let mut work = InspectionWork::new(&mut conn).await?;
+        assert_eq!(
+            scope::deleted_attempts(&mut conn, now / 86_400_000, now, &mut work).await,
+            DeletedAttempts::Counted(2)
+        );
+        drop(conn);
+        for owner in owners {
+            assert!(runtime.get_thread(owner).await?.is_none());
+        }
+        runtime.close().await;
+    }
+    Ok(())
+}
+
+/// #308: a ledger that cannot be updated fails the preflight and the delete,
+/// and leaves every row as it was.
+#[tokio::test]
+async fn failed_delete_preflight_changes_nothing() -> anyhow::Result<()> {
+    let path = home();
+    let runtime = open(&path).await?;
+    seed(&runtime).await?;
+    let mut a = serde_json::to_value(attempt(/*id*/ 1))?;
+    a["dispatched_at_ms"] = json!(chrono::Utc::now().timestamp_millis());
+    let a: Attempt = serde_json::from_value(a)?;
+    AccountingStore::open(&runtime, AsOf::Now)
+        .await?
+        .admit(a.thread_id, &a, &[], AsOf::Now)
+        .await?;
+    sqlx::query("CREATE TRIGGER reject_tombstone BEFORE INSERT ON draft_accounting_tombstones BEGIN SELECT RAISE(ABORT, 'fixture-ledger-failure'); END")
+        .execute(runtime.pool.as_ref())
+        .await?;
+    let before = rows(&runtime).await?;
+    marker(
+        runtime
+            .preflight_delete_threads(&[a.thread_id])
+            .await
+            .unwrap_err(),
+        "fixture-ledger-failure",
+    );
+    assert_eq!(rows(&runtime).await?, before);
+    assert!(runtime.get_thread(a.thread_id).await?.is_some());
+    runtime.close().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn writes_read_their_clock_after_another_process_advanced_the_checkpoint()
 -> anyhow::Result<()> {
@@ -2395,12 +3127,14 @@ async fn writes_read_their_clock_after_another_process_advanced_the_checkpoint()
         "backward",
     );
     // Reading the clock under the lock cannot fall behind a committed checkpoint.
-    let mut a = serde_json::to_value(attempt(1))?;
+    let mut a = serde_json::to_value(attempt(/*id*/ 1))?;
     a["dispatched_at_ms"] = json!(committed);
     let a: Attempt = serde_json::from_value(a)?;
     AccountingStore::open(&runtime, AsOf::Now).await?;
     store.admit(a.thread_id, &a, &[], AsOf::Now).await?;
-    store.observe(a.thread_id, &a, &[row(1)], AsOf::Now).await?;
+    store
+        .observe(a.thread_id, &a, &[row(/*revision*/ 1)], AsOf::Now)
+        .await?;
     let checkpoint: i64 =
         sqlx::query_scalar("SELECT completed_as_of_ms FROM draft_accounting_retention_checkpoint")
             .fetch_one(runtime.pool.as_ref())
@@ -2543,7 +3277,7 @@ async fn expiry_interrupted_mid_sweep_resumes_to_the_full_sweeps_result() -> any
     let now = DETAIL + 120 * STEP;
     let (path, full_path) = (home(), home());
     let full = open(&full_path).await?;
-    aging_ledger(&full, 150).await?;
+    aging_ledger(&full, /*count*/ 150).await?;
     AccountingStore::open(&full, DETAIL - 1)
         .await?
         .maintain(now)
@@ -2552,7 +3286,7 @@ async fn expiry_interrupted_mid_sweep_resumes_to_the_full_sweeps_result() -> any
     full.close().await;
 
     let runtime = open(&path).await?;
-    aging_ledger(&runtime, 150).await?;
+    aging_ledger(&runtime, /*count*/ 150).await?;
     let before = accounting_rows(&runtime).await?;
     // The hour's validation, then two committed batches and one cut short.
     let mut read = runtime.pool.begin().await?;
@@ -2583,4 +3317,17 @@ async fn expiry_interrupted_mid_sweep_resumes_to_the_full_sweeps_result() -> any
     assert_eq!(accounting_rows(&runtime).await?, expected);
     runtime.close().await;
     Ok(())
+}
+
+/// The unapplied-migration check reads object names from `CREATE` statements;
+/// a migration whose statements it cannot see would make that check vacuous.
+#[test]
+fn every_accounting_migration_creates_named_objects() {
+    for migration in crate::migrations::accounting_migrator().iter() {
+        assert!(
+            !super::created_objects(migration.sql.as_str()).is_empty(),
+            "migration {} names no objects",
+            migration.version
+        );
+    }
 }

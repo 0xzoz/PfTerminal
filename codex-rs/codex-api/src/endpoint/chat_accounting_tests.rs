@@ -54,9 +54,9 @@ fn launch(stream: ByteStream, sink: Option<Arc<Sink>>) -> (Receiver, tokio::task
         tx,
         Duration::from_millis(100),
         Duration::from_millis(50),
-        None,
+        /*telemetry*/ None,
         Some("fixture".into()),
-        None,
+        /*metrics*/ None,
         sink.map(|s| s as Arc<dyn ChatUsageObserver>),
     ));
     (rx, task)
@@ -187,6 +187,23 @@ fn chat_accounting_top_level_containers_only() {
             Ok(Some(ChatUsagePatch::default()))
         );
     }
+    // `usage.cached_tokens` is kept apart from the prompt details' count; a
+    // value there that is not a count reads as null, never failing the report.
+    for (value, expected) in [
+        (json!(12), ChatTokenPresence::Number(12)),
+        (json!(null), ChatTokenPresence::Null),
+        (json!("12"), ChatTokenPresence::Null),
+        (json!(12.5), ChatTokenPresence::Null),
+        (json!(-1), ChatTokenPresence::Null),
+    ] {
+        assert_eq!(
+            accounting::decode(&json!({"usage":{"cached_tokens":value}}).to_string()),
+            Ok(Some(ChatUsagePatch {
+                usage_cached_tokens: expected,
+                ..Default::default()
+            }))
+        );
+    }
     // OpenRouter reports cache writes inside the prompt details.
     assert_eq!(
         accounting::decode(
@@ -278,7 +295,10 @@ async fn chat_accounting_done_and_finish_reason_are_not_usage() {
         let output = drain(rx).await;
         task.await.unwrap();
         assert!(sink.values.lock().unwrap().is_empty());
-        let (legacy, task) = launch(bytes(finish(reason) + "data: [DONE]\n\n"), None);
+        let (legacy, task) = launch(
+            bytes(finish(reason) + "data: [DONE]\n\n"),
+            /*sink*/ None,
+        );
         assert_eq!(format!("{output:?}"), format!("{:?}", drain(legacy).await));
         task.await.unwrap();
     }
@@ -331,23 +351,21 @@ async fn chat_accounting_observation_barrier_and_rejection() {
         sink.gate.as_ref().unwrap().add_permits(1);
         let output = drain(rx).await;
         task.await.unwrap();
-        assert_eq!(completed(&output), usize::from(!reject));
-        assert_eq!(
-            output.iter().filter(|v| v.is_err()).count(),
-            usize::from(reject)
-        );
+        // A rejected observation never ends the stream.
+        assert_eq!(completed(&output), 1);
+        assert_eq!(output.iter().filter(|v| v.is_err()).count(), 0);
     }
 }
 
 #[tokio::test]
-async fn chat_accounting_invalid_evidence_stops_before_done() {
+async fn chat_accounting_invalid_evidence_stops_observing_not_the_stream() {
     for raw in [
         "private-invalid-json".to_string(),
         json!({"usage":{"prompt_tokens":-1}}).to_string(),
     ] {
         let sink = Arc::new(Sink::default());
         let (rx, task) = launch(
-            bytes(format!("data: {raw}\n\ndata: [DONE]\n\n")),
+            bytes(format!("data: {raw}\n\n") + &finish("stop") + "data: [DONE]\n\n"),
             Some(sink.clone()),
         );
         let output = drain(rx).await;
@@ -356,11 +374,8 @@ async fn chat_accounting_invalid_evidence_stops_before_done() {
             *sink.values.lock().unwrap(),
             vec![(1, Err(InvalidChatUsage))]
         );
-        assert_eq!(completed(&output), 0);
-        assert_eq!(
-            format!("{output:?}"),
-            "[Err(Stream(\"Chat accounting evidence rejected\"))]"
-        );
+        assert_eq!(completed(&output), 1, "{output:?}");
+        assert_eq!(output.iter().filter(|v| v.is_err()).count(), 0);
     }
 }
 
@@ -416,7 +431,7 @@ async fn chat_accounting_none_preserves_legacy() {
         "data: malformed\n\n: keepalive\n\ndata: [DONE]\n\n".into(),
         data(json!({"error":{"message":"fixture"}})),
     ] {
-        let (rx, task) = launch(bytes(input.clone()), None);
+        let (rx, task) = launch(bytes(input.clone()), /*sink*/ None);
         let observed = drain(rx).await;
         task.await.unwrap();
         let (tx, rx) = mpsc::channel(100);
@@ -425,9 +440,9 @@ async fn chat_accounting_none_preserves_legacy() {
             tx,
             Duration::from_millis(100),
             Duration::from_millis(50),
-            None,
+            /*telemetry*/ None,
             Some("fixture".into()),
-            None,
+            /*metrics*/ None,
         )
         .await;
         assert_eq!(format!("{observed:?}"), format!("{:?}", drain(rx).await));

@@ -1,6 +1,5 @@
 //! Refresh-capable access to Claude Code subscription credentials.
 
-use std::fs::File;
 use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
@@ -32,6 +31,11 @@ use codex_vault::resolve_claude_auth_source;
 use serde::Deserialize;
 use tokio::process::Command;
 use zeroize::Zeroizing;
+
+#[path = "claude_refresh_lock.rs"]
+mod refresh_lock;
+
+use refresh_lock::ClaudeRefreshLock;
 
 const CLAUDE_CREDENTIALS_FILE: &str = ".credentials.json";
 const CLAUDE_REFRESH_LOCK_FILE: &str = ".pfterminal-oauth-refresh.lock";
@@ -170,6 +174,52 @@ impl PlatformCredentialStore {
 const CURRENT_PLATFORM_STORE: PlatformCredentialStore = PlatformCredentialStore::MacosKeychain;
 #[cfg(not(target_os = "macos"))]
 const CURRENT_PLATFORM_STORE: PlatformCredentialStore = PlatformCredentialStore::CredentialsFile;
+
+/// PF-84: the token of one named Claude account: its stored subscription
+/// token, else the Claude Code login in the account's own config directory.
+/// Never the home's selection, `CLAUDE_CODE_OAUTH_TOKEN` or another account.
+pub(crate) async fn resolve_claude_account_access_token(
+    codex_home: &Path,
+    name: &codex_vault::ProviderAccountName,
+) -> Result<Zeroizing<String>> {
+    const CLAUDE_PLAN_PROVIDER_ID: &str = "claude-plan";
+    let vault = Vault::new(codex_home.to_path_buf());
+    if let Some(token) = vault
+        .read_provider_account(
+            CLAUDE_PLAN_PROVIDER_ID,
+            name,
+            codex_vault::ProviderAccountKind::ClaudeOauthToken,
+        )
+        .context("failed to read the Claude account")?
+    {
+        return Ok(token);
+    }
+    if let Some(config_dir) = vault
+        .read_provider_account(
+            CLAUDE_PLAN_PROVIDER_ID,
+            name,
+            codex_vault::ProviderAccountKind::ClaudeConfigDir,
+        )
+        .context("failed to read the Claude account")?
+    {
+        let requested = PathBuf::from(config_dir.as_str());
+        if !requested.is_absolute() || !requested.is_dir() {
+            return Err(anyhow!(
+                "Claude account `{name}` uses the Claude Code config directory {}, which is \
+                 not an existing absolute directory; add the account again with the right \
+                 `--value`",
+                requested.display()
+            ));
+        }
+        let config_dir = claude_config_dir_for_profile(Path::new(""), Some(requested))?;
+        let store = preferred_platform_store(&config_dir, /*security*/ None).await?;
+        return resolve_claude_code_login_access_token(&config_dir, store).await;
+    }
+    Err(anyhow!(
+        "Claude account `{name}` is not configured; add it with \
+         `corbanu account add claude-plan {name} --kind claude-token` or choose another account"
+    ))
+}
 
 pub(crate) async fn resolve_claude_oauth_access_token(
     codex_home: &Path,
@@ -1068,7 +1118,10 @@ fn claude_config_dir_is_default(config_dir: &Path) -> bool {
     dirs::home_dir().is_some_and(|home| config_dir == home.join(".claude"))
 }
 
-async fn acquire_refresh_lock(config_dir: &Path, store: PlatformCredentialStore) -> Result<File> {
+async fn acquire_refresh_lock(
+    config_dir: &Path,
+    store: PlatformCredentialStore,
+) -> Result<ClaudeRefreshLock> {
     let lock_path = refresh_lock_path(config_dir, store)?;
     let lock_dir = lock_path
         .parent()
@@ -1079,15 +1132,14 @@ async fn acquire_refresh_lock(config_dir: &Path, store: PlatformCredentialStore)
             lock_dir.display()
         )
     })?;
-    tokio::task::spawn_blocking(move || -> io::Result<File> {
+    tokio::task::spawn_blocking(move || -> io::Result<ClaudeRefreshLock> {
         let lock_file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(lock_path)?;
-        lock_file.lock()?;
-        Ok(lock_file)
+        ClaudeRefreshLock::lock(lock_file)
     })
     .await
     .context("Claude OAuth refresh lock task failed")?
@@ -1130,6 +1182,10 @@ fn current_time_ms() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
+
+#[cfg(all(test, unix))]
+#[path = "claude_refresh_lock_tests.rs"]
+mod refresh_lock_tests;
 
 #[cfg(test)]
 mod tests {

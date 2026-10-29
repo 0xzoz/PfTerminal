@@ -112,19 +112,26 @@ async fn pair() -> anyhow::Result<(ResponsesWebsocketConnection, Server)> {
     };
     let factory =
         HttpClientFactory::new(codex_http_client::OutboundProxyPolicy::RespectSystemProxy);
-    let connect = connect_websocket(url, HeaderMap::new(), &factory, None);
+    let connect = connect_websocket(url, HeaderMap::new(), &factory, /*turn_state*/ None);
     let (connected, server) = tokio::join!(connect, accept);
     let (stream, _, _, _, _) = connected?;
     Ok((
-        ResponsesWebsocketConnection::new(stream, Duration::from_secs(5), false, None, None, None),
+        ResponsesWebsocketConnection::new(
+            stream,
+            Duration::from_secs(5),
+            /*server_reasoning_included*/ false,
+            /*models_etag*/ None,
+            /*server_model*/ None,
+            /*telemetry*/ None,
+        ),
         server?,
     ))
 }
 async fn start(conn: &ResponsesWebsocketConnection, admit: Option<Arc<Admit>>) -> ResponseStream {
     conn.stream_request_with_accounting(
         request(),
-        false,
-        None,
+        /*connection_reused*/ false,
+        /*turn_state*/ None,
         admit.map(|v| v as Arc<dyn accounting::ResponsesWebsocketAdmission>),
     )
     .await
@@ -161,7 +168,7 @@ fn done() -> Value {
 #[tokio::test]
 async fn responses_websocket_accounting_none_preserves_legacy() -> anyhow::Result<()> {
     let (conn, mut server) = pair().await?;
-    let mut stream = start(&conn, None).await;
+    let mut stream = start(&conn, /*admit*/ None).await;
     let frame: Value = serde_json::from_str(server.next().await.unwrap()?.to_text()?)?;
     assert_eq!(
         (frame["type"].as_str(), frame["model"].as_str()),
@@ -182,7 +189,7 @@ async fn responses_websocket_accounting_none_preserves_legacy() -> anyhow::Resul
 async fn responses_websocket_accounting_pump_admission_barrier() -> anyhow::Result<()> {
     for rejected in [false, true] {
         let (conn, mut server) = pair().await?;
-        let admit = Admit::new(0);
+        let admit = Admit::new(/*permits*/ 0);
         admit.reject.store(rejected, Ordering::SeqCst);
         let mut stream = start(&conn, Some(admit.clone())).await;
         no_frame(&mut server).await;
@@ -203,7 +210,7 @@ async fn responses_websocket_accounting_pump_admission_barrier() -> anyhow::Resu
 #[tokio::test]
 async fn responses_websocket_accounting_queued_cancel_and_send_failure() -> anyhow::Result<()> {
     let (conn, mut server) = pair().await?;
-    let admit = Admit::new(8);
+    let admit = Admit::new(/*permits*/ 8);
     let mut first = start(&conn, Some(admit.clone())).await;
     server.next().await.unwrap()?;
     let queued = start(&conn, Some(admit.clone())).await;
@@ -221,7 +228,7 @@ async fn responses_websocket_accounting_queued_cancel_and_send_failure() -> anyh
     assert!(conn.is_closed().await);
     for cancel in [false, true] {
         let (conn, mut server) = pair().await?;
-        let admit = Admit::new(0);
+        let admit = Admit::new(/*permits*/ 0);
         let stream = start(&conn, Some(admit.clone())).await;
         no_frame(&mut server).await;
         assert_eq!(admit.calls.load(Ordering::SeqCst), 1);
@@ -283,7 +290,7 @@ async fn responses_websocket_accounting_usage_and_terminal_containers() -> anyho
                 continue;
             }
             let (conn, mut server) = pair().await?;
-            let admit = Admit::new(1);
+            let admit = Admit::new(/*permits*/ 1);
             let mut stream = start(&conn, Some(admit.clone())).await;
             server.next().await.unwrap()?;
             let mut event = json!({"type":kind,"response":{"id":"same","error":{"code":"fixture","message":"fixture"},"incomplete_details":{"reason":"max_output_tokens"}}});
@@ -307,7 +314,8 @@ async fn responses_websocket_accounting_usage_and_terminal_containers() -> anyho
     }
     let sink = Arc::new(Sink::default());
     let mut evidence = accounting::Evidence::new(sink.clone());
-    assert!(evidence.text(&json!({"type":"response.usage","usage":{"input_tokens":1},"response":{"usage":{"input_tokens":2}}}).to_string()).await.is_err());
+    // Ambiguous usage is reported as invalid; the stream itself is not ended.
+    evidence.text(&json!({"type":"response.usage","usage":{"input_tokens":1},"response":{"usage":{"input_tokens":2}}}).to_string()).await?;
     assert_eq!(
         sink.records.lock().unwrap()[0].1,
         Err(InvalidResponsesUsage)
@@ -315,7 +323,8 @@ async fn responses_websocket_accounting_usage_and_terminal_containers() -> anyho
     Ok(())
 }
 #[tokio::test]
-async fn responses_websocket_accounting_invalid_evidence_stops() -> anyhow::Result<()> {
+async fn responses_websocket_accounting_invalid_evidence_stops_observing_not_the_stream()
+-> anyhow::Result<()> {
     for value in [
         json!(-1),
         json!(1.5),
@@ -332,7 +341,7 @@ async fn responses_websocket_accounting_invalid_evidence_stops() -> anyhow::Resu
             "reasoning_tokens",
         ] {
             let (conn, mut server) = pair().await?;
-            let admit = Admit::new(1);
+            let admit = Admit::new(/*permits*/ 1);
             let mut stream = start(&conn, Some(admit.clone())).await;
             server.next().await.unwrap()?;
             let mut patch = json!({});
@@ -344,12 +353,13 @@ async fn responses_websocket_accounting_invalid_evidence_stops() -> anyhow::Resu
                 _ => patch[field] = value.clone(),
             }
             send(&mut server, json!({"type":"response.usage","usage":patch})).await;
-            assert!(completed(&mut stream).await.is_err());
+            send(&mut server, done()).await;
+            assert!(completed(&mut stream).await.is_ok());
             assert_eq!(
-                admit.sink.records.lock().unwrap()[0].1,
-                Err(InvalidResponsesUsage)
+                *admit.sink.records.lock().unwrap(),
+                vec![(1, Err(InvalidResponsesUsage))],
+                "nothing is observed after rejected evidence"
             );
-            assert!(conn.is_closed().await);
         }
     }
     for text in [
@@ -358,7 +368,14 @@ async fn responses_websocket_accounting_invalid_evidence_stops() -> anyhow::Resu
         r#"{"type":"response.usage","usage":{"input_tokens_details":[]}}"#,
     ] {
         let sink = Arc::new(Sink::default());
-        assert!(accounting::Evidence::new(sink).text(text).await.is_err());
+        let mut evidence = accounting::Evidence::new(sink.clone());
+        evidence.text(text).await?;
+        evidence.text(&usage(json!(7)).to_string()).await?;
+        assert_eq!(
+            *sink.records.lock().unwrap(),
+            vec![(1, Err(InvalidResponsesUsage))],
+            "{text}: nothing is observed after rejected evidence"
+        );
     }
     Ok(())
 }
@@ -386,7 +403,8 @@ async fn responses_websocket_accounting_observation_barrier() -> anyhow::Result<
         );
         admit.sink.reject.store(rejected, Ordering::SeqCst);
         admit.sink.gate.as_ref().unwrap().add_permits(1);
-        assert_eq!(completion.await.is_err(), rejected);
+        // A rejected observation never ends the stream.
+        assert!(completion.await.is_ok(), "rejected={rejected}");
     }
     Ok(())
 }
@@ -401,8 +419,8 @@ async fn responses_websocket_accounting_response_local_binding() -> anyhow::Resu
     assert_eq!(old.records.lock().unwrap()[0].0, 1);
     assert_eq!(new.records.lock().unwrap()[0].0, 1);
     assert_ne!(*old.records.lock().unwrap(), *new.records.lock().unwrap());
-    let first = Admit::new(1);
-    let second = Admit::new(1);
+    let first = Admit::new(/*permits*/ 1);
+    let second = Admit::new(/*permits*/ 1);
     for (admit, tokens) in [(&first, 11), (&second, 23)] {
         let (conn, mut server) = pair().await?;
         let mut stream = start(&conn, Some(admit.clone())).await;

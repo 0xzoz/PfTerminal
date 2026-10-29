@@ -38,11 +38,18 @@ pub(super) async fn expire_batch_on_connection(
     let mut unbound = BTreeSet::new();
     let due: Vec<String> = sqlx::query_scalar(
         "SELECT attempt_id FROM draft_accounting_attempts
-            WHERE json_extract(payload, '$.dispatched_at_ms') + ? <= ?
-            ORDER BY attempt_id LIMIT ?",
+            WHERE json_extract(payload, '$.dispatched_at_ms') <= ?
+            ORDER BY json_extract(payload, '$.dispatched_at_ms'), attempt_id LIMIT ?",
     )
-    .bind(DETAIL_MS)
-    .bind(as_of_ms)
+    // `dispatched + DETAIL_MS <= as_of`, with the arithmetic on the bound, and
+    // oldest first, so the dispatch index (`accounting_indexes.rs`) answers it
+    // under the lock; ordering by `attempt_id` alone made SQLite walk the
+    // primary key through every attempt.
+    .bind(
+        as_of_ms
+            .checked_sub(DETAIL_MS)
+            .context("detail expiry underflow")?,
+    )
     .bind(limit)
     .fetch_all(&mut *conn)
     .await?;
@@ -95,6 +102,9 @@ pub(super) async fn expire_batch_on_connection(
         }
         applied += 1;
     }
+    // #314: a gap marker expires with its day's totals. At most one per
+    // conversation per day, a small table, so one statement does for all.
+    crate::runtime::accounting::gap_days::expire(conn, as_of_ms, REPLAY_MS).await?;
     // Only snapshots this batch unbound can have become unreferenced by it. A
     // whole-table collection scans every binding per snapshot - about 1 s on a
     // real ledger - and would only differ for a snapshot already unreferenced,

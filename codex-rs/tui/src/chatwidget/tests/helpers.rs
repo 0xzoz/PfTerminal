@@ -18,14 +18,25 @@ pub(super) async fn test_config() -> Config {
     config.codex_home = codex_home.abs();
     config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.as_path().abs());
     config.log_dir = codex_home.join("log");
-    config.cwd = PathBuf::from(test_path_display("/tmp/project")).abs();
+    config.cwd = test_project_path().abs();
     config.config_layer_stack = ConfigLayerStack::default();
     config.startup_warnings.clear();
     config
 }
 
+/// Display form of the chat widget's test cwd. On Windows it has the same
+/// width as `/tmp/project` (and the same `project` basename), so footers that
+/// overflow 80 columns truncate at the same place on every platform.
+pub(super) fn test_cwd_display() -> String {
+    if cfg!(windows) {
+        r"C:\t\project".to_string()
+    } else {
+        "/tmp/project".to_string()
+    }
+}
+
 pub(super) fn test_project_path() -> PathBuf {
-    PathBuf::from(test_path_display("/tmp/project"))
+    PathBuf::from(test_cwd_display())
 }
 
 pub(super) fn cache_test_project_root(chat: &mut ChatWidget, root_name: Option<&str>) {
@@ -53,6 +64,17 @@ pub(super) fn normalize_snapshot_paths(text: impl Into<String>) -> String {
         let platform_path = test_path_display(unix_path);
         if platform_path != unix_path {
             text = text.replace(&platform_path, unix_path);
+        }
+    }
+    let test_cwd = test_cwd_display();
+    if test_cwd != "/tmp/project" {
+        text = text.replace(&test_cwd, "/tmp/project");
+        for platform_prefix in truncated_path_variants(&test_cwd).into_iter().rev() {
+            let unix_prefix: String = "/tmp/project"
+                .chars()
+                .take(platform_prefix.chars().count())
+                .collect();
+            text = text.replace(&format!("{platform_prefix}…"), &format!("{unix_prefix}…"));
         }
     }
 
@@ -517,6 +539,7 @@ pub(super) fn handle_token_count(chat: &mut ChatWidget, info: Option<TokenUsageI
                             last: token_usage_breakdown(info.last_token_usage),
                             model_context_window: info.model_context_window,
                         },
+                        account_usage: None,
                     },
                 ),
                 /*replay_kind*/ None,
@@ -1835,4 +1858,11 @@ fn hook_event_label(event_name: codex_app_server_protocol::HookEventName) -> &'s
         codex_app_server_protocol::HookEventName::SubagentStop => "SubagentStop",
         codex_app_server_protocol::HookEventName::Stop => "Stop",
     }
+}
+
+/// Answer an approval prompt with a decision key: the key highlights its
+/// option and Enter confirms it.
+pub(super) fn press_approval_shortcut(chat: &mut ChatWidget, key: char) {
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 }

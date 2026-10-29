@@ -1,3 +1,7 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "#[traced_test] installs tracing-test's in-memory global subscriber"
+)]
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -43,7 +47,6 @@ use http::HeaderMap;
 use http::HeaderValue;
 use http::header::AUTHORIZATION;
 use pretty_assertions::assert_eq;
-use sha2::Digest as _;
 use sha2::Sha256;
 use tracing_test::traced_test;
 use uuid::Uuid;

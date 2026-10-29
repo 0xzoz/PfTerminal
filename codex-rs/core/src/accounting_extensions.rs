@@ -97,9 +97,8 @@ impl ExtensionAccounting {
     ) -> Option<Arc<ResponseEvidence>> {
         let owner = self.owner.upgrade()?;
         let (accounting, provider_id) = owner.accounting_binding().await;
-        let auth = owner.services.auth_manager.auth().await;
-        let auth_mode = auth.as_ref().map(codex_login::CodexAuth::auth_mode);
-        let mode = if matches!(accounting, AccountingMode::Provider { .. }) {
+        let auth_mode = accounting_auth_mode(&owner, provider).await;
+        let mut mode = if matches!(accounting, AccountingMode::Provider { .. }) {
             crate::accounting::turn_mode(&accounting, &provider_id, provider, auth_mode, endpoint)
         } else {
             accounting
@@ -107,11 +106,20 @@ impl ExtensionAccounting {
         if !crate::accounting::collects(&mode, &provider_id, provider, provider.wire_api) {
             return None;
         }
+        crate::accounting::bind_account_fingerprint(
+            &mut mode,
+            provider,
+            owner.get_config().await.codex_home.to_path_buf(),
+        )
+        .await;
+        // Recorded where the session's turns are: its own thread, or the
+        // conversation it works for, labelled as such.
+        let recorded = crate::accounting::collecting_owner(&owner).await.ok()?;
+        let label = format!("{}{label}", recorded.label_prefix);
         owner.try_ensure_rollout_materialized().await.ok()?;
-        let runtime = owner.state_db()?;
         let sampling = Sampling::start_at_path(
-            runtime,
-            owner.thread_id,
+            recorded.db,
+            recorded.thread,
             format!("{label}:{}", Uuid::new_v4()),
             &mode,
             path,
@@ -140,8 +148,10 @@ impl ExtensionAccounting {
     ///   may be reported; this records them.
     ///
     /// No money is claimed. The credential is the reporting client's, not one
-    /// this session can attribute to a catalogue account, so the turn records
-    /// its tokens and states no economics.
+    /// this session can attribute to a catalogue account, so a pay-per-use
+    /// route records its tokens with no price. The route's declared basis is
+    /// still bound to the attempt: Claude subscription work reported here is
+    /// subscription work, never pay per use.
     pub async fn record_sent_request(&self, request: SentModelRequest) -> bool {
         let Some(owner) = self.owner.upgrade() else {
             return false;
@@ -152,24 +162,73 @@ impl ExtensionAccounting {
         let AccountingMode::Provider { scope, .. } = accounting else {
             return false;
         };
+        // The reporter's route is a built-in provider's own route (the server
+        // checked it), reached with the credential that provider is built
+        // for. The session's own definition of that provider carries any
+        // `billing` the user configured.
+        let built_in =
+            codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)
+                .remove(&request.provider_id);
+        let declared = match (
+            owner.configured_model_provider(&request.provider_id).await,
+            built_in,
+        ) {
+            (configured, Some(built_in)) => {
+                let credential = codex_model_provider_info::BillingCredential::of(
+                    &built_in, /*auth_mode*/ None,
+                );
+                let provider = codex_model_provider_info::ModelProviderInfo {
+                    billing: configured.and_then(|provider| provider.billing),
+                    ..built_in
+                };
+                codex_model_provider_info::declared_billing(
+                    &request.provider_id,
+                    &provider,
+                    credential,
+                    &request.endpoint,
+                    /*at_built_in_route*/ true,
+                )
+            }
+            (_, None) => codex_model_provider_info::BillingDeclaration::NotDeclared,
+        };
+        use codex_model_provider_info::BillingBasis;
+        let pricing = match declared.basis() {
+            Some(BillingBasis::Subscription) => crate::config::PriceAuthority::PlanRate,
+            Some(BillingBasis::PayPerUse) => crate::config::PriceAuthority::Unavailable,
+            Some(BillingBasis::Local) => crate::config::PriceAuthority::Local,
+            None => crate::config::PriceAuthority::Undeclared,
+        };
+        let basis_source = match declared {
+            codex_model_provider_info::BillingDeclaration::UserConfig(_) => {
+                codex_state::accounting::BasisSource::UserConfig
+            }
+            codex_model_provider_info::BillingDeclaration::BuiltIn(_)
+            | codex_model_provider_info::BillingDeclaration::NotDeclared => {
+                codex_state::accounting::BasisSource::BuiltIn
+            }
+        };
         let mode = AccountingMode::Provider {
             scope,
             provider_id: request.provider_id,
             wire_api: request.wire_api,
             approved_endpoint: request.endpoint.clone(),
             approved_query: None,
-            pricing: crate::config::PriceAuthority::Unavailable,
+            pricing,
+            basis_source,
+            // The reporting client's credential, not an account of this session.
+            account: None,
+        };
+        let Ok(recorded) = crate::accounting::collecting_owner(&owner).await else {
+            return false;
         };
         if owner.try_ensure_rollout_materialized().await.is_err() {
             return false;
         }
-        let Some(runtime) = owner.state_db() else {
-            return false;
-        };
+        let label = format!("{}{}", recorded.label_prefix, request.label);
         let Ok(sampling) = Sampling::start_at_path(
-            runtime,
-            owner.thread_id,
-            format!("{}:{}", request.label, Uuid::new_v4()),
+            recorded.db,
+            recorded.thread,
+            format!("{label}:{}", Uuid::new_v4()),
             &mode,
             &request.path,
         )
@@ -214,6 +273,7 @@ impl ExtensionAccounting {
                         )
                         .await
                         .is_ok()
+                            && evidence.is_recorded()
                     }
                     Ok(None) => true,
                     Err(_) => false,
@@ -229,6 +289,7 @@ impl ExtensionAccounting {
                         )
                         .await
                         .is_ok()
+                            && evidence.is_recorded()
                     }
                     Ok(None) => true,
                     Err(_) => false,
@@ -244,6 +305,7 @@ impl ExtensionAccounting {
                         )
                         .await
                         .is_ok()
+                            && evidence.is_recorded()
                     }
                     // A streamed Anthropic response reports its usage inside
                     // events this path never sees. The call is recorded; its
@@ -285,6 +347,24 @@ impl<T: HttpTransport> HttpTransport for Accounted<T> {
     async fn stream(&self, request: Request) -> Result<StreamResponse, TransportError> {
         self.inner.stream(request).await
     }
+}
+
+/// The sign-in mode the ledger prices a request to `provider` under: that
+/// provider's account (a named one, or the default login), the same source
+/// the request authenticates with, so a switch mid-turn prices each request
+/// under its own account (PF-84).
+pub(crate) async fn accounting_auth_mode(
+    owner: &Session,
+    provider: &ModelProviderInfo,
+) -> Option<codex_protocol::auth::AuthMode> {
+    owner
+        .services
+        .active_auth
+        .for_provider(provider)
+        .auth()
+        .await
+        .as_ref()
+        .map(codex_login::CodexAuth::auth_mode)
 }
 
 #[cfg(test)]

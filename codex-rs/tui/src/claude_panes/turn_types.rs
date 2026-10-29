@@ -11,6 +11,7 @@ use serde_json::Value;
 use tokio::sync::OwnedMutexGuard;
 use tokio_util::sync::CancellationToken;
 
+use super::containment::ClaudeContainment;
 use super::pane::ClaudeCommandMode;
 use super::pane::ClaudePaneTurnStatus;
 use super::pane::ClaudePaneUsageStatus;
@@ -130,6 +131,11 @@ pub(crate) struct ClaudeCommandPlan {
     /// Set only when no bridge carries this turn: with no request to observe,
     /// the turn is recorded from what the pane reports it cost.
     pub(crate) direct_accounting: Option<PaneDirectAccounting>,
+    /// Set when the turn runs contained (#218): sandboxed, clean environment.
+    pub(crate) containment: Option<ClaudeContainment>,
+    /// The prompt, sent as Claude Code's first stream-json input message
+    /// rather than in argv, when tool approvals go through Corbanu.
+    pub(crate) stdin_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,12 +264,18 @@ pub(crate) struct DeferredClaudePlanAuth {
     pub(crate) helper_executable: PathBuf,
     pub(crate) cwd: PathBuf,
     pub(crate) claude_config_dir_override: Option<PathBuf>,
+    /// PF-84: the named Claude Plan account `[provider_accounts]` selects;
+    /// `None` is the home's default selection.
+    pub(crate) account: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClaudeBridgeKind {
     AmbientChat,
     AnthropicPassthrough,
+    /// A direct provider bridged for a contained pane: the key goes upstream
+    /// as both `Authorization: Bearer` and `x-api-key`.
+    AnthropicApiKeyPassthrough,
     AnthropicOauthPassthrough,
 }
 
@@ -300,6 +312,7 @@ impl std::fmt::Debug for ClaudeCommandPlan {
                 "bridge_addr",
                 &self.bridge.as_ref().map(|bridge| bridge.bind_addr),
             )
+            .field("containment", &self.containment)
             .finish()
     }
 }

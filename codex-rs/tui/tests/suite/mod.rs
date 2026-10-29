@@ -11,6 +11,7 @@ mod memory_human_fixture;
 mod memory_stage_one_policy;
 #[cfg(unix)]
 mod multi_provider_onboarding;
+mod nested_launch;
 #[cfg(unix)]
 mod output_text_stream;
 #[cfg(unix)]
@@ -19,7 +20,13 @@ mod provider_convergence;
 mod provider_management;
 mod resize_reflow;
 #[cfg(unix)]
+mod resume_provider_accounts;
+#[cfg(unix)]
+mod resume_recorded_account;
+#[cfg(unix)]
 mod security_profiles;
+#[cfg(unix)]
+mod side_refusal;
 #[cfg(unix)]
 mod slash_dispatch;
 mod status_indicator;

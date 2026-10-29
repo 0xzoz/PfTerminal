@@ -66,7 +66,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
     let trace_input_history = compaction_trace
         .is_enabled()
         .then(|| history.raw_items().to_vec());
-    let mut input = history.for_prompt(&turn_context.model_info.input_modalities);
+    let mut input = history.for_turn_prompt(turn_context);
     let tool_router = &step_context.tool_router;
     input.push(ResponseItem::CompactionTrigger {});
     let prompt = Prompt {
@@ -76,6 +76,8 @@ pub(super) async fn run_remote_compact_v2_attempt(
         base_instructions,
         output_schema: None,
         output_schema_strict: true,
+        producer: Some(turn_context.output_producer()),
+        flat_tool_names: tool_router.flat_tool_names().clone(),
     };
 
     let window_id = sess.current_window_id().await;
@@ -102,7 +104,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
     // Skipping the borrowed case - the first version of this - left every
     // auto-compaction unrecorded. Best effort: a compaction that cannot be
     // recorded must still run.
-    let _accounting = match crate::accounting::attach_turn(
+    let accounting = match crate::accounting::attach_turn(
         sess,
         turn_context.as_ref(),
         client_session,
@@ -124,6 +126,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         &responses_metadata,
     )
     .await;
+    crate::accounting::warn_if_unrecorded(sess, turn_context, accounting.as_ref()).await;
     trace_attempt.record_result(
         compaction_output_result
             .as_ref()

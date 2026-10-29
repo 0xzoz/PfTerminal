@@ -180,7 +180,8 @@ impl ChatWidget {
                     api_key: crate::app_event::ProviderApiKeySecret::new(secret),
                 });
             }),
-        );
+        )
+        .rejecting_shown_errors(self.shown_error_texts());
         self.bottom_pane.show_view(Box::new(view));
     }
 
@@ -431,6 +432,9 @@ fn claude_status_description(status: &ClaudeCodePlanStatus) -> String {
         }
         ClaudeCodePlanStatus::EnvironmentToken { available: false } => {
             "Recovery needed · selected environment token is missing".to_string()
+        }
+        ClaudeCodePlanStatus::EnvironmentTokenWithoutSelection => {
+            "Ready · CLAUDE_CODE_OAUTH_TOKEN from the environment".to_string()
         }
         ClaudeCodePlanStatus::SelectionRequired {
             existing_source_detected: true,
@@ -854,6 +858,10 @@ mod tests {
                 existing_source_detected: true,
             }),
             "Choose method · existing credentials detected"
+        );
+        assert_eq!(
+            claude_status_description(&ClaudeCodePlanStatus::EnvironmentTokenWithoutSelection),
+            "Ready · CLAUDE_CODE_OAUTH_TOKEN from the environment"
         );
         assert_eq!(
             claude_status_description(&ClaudeCodePlanStatus::InvalidSelection),

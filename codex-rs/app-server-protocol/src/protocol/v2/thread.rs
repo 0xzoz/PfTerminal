@@ -61,6 +61,11 @@ pub struct ThreadStartParams {
     pub model: Option<String>,
     #[ts(optional = nullable)]
     pub model_provider: Option<String>,
+    /// PF-84: a named account (`[<provider>:]<name>`) for this thread; it
+    /// beats `[provider_accounts]`.
+    #[experimental("thread/start.providerAccount")]
+    #[ts(optional = nullable)]
+    pub provider_account: Option<String>,
     /// Allow a provider with an authoritative static model catalog to replace an unavailable
     /// requested model with its default.
     #[experimental("thread/start.allowProviderModelFallback")]
@@ -115,6 +120,13 @@ pub struct ThreadStartParams {
     pub history_mode: Option<ThreadHistoryMode>,
     #[ts(optional = nullable)]
     pub session_start_source: Option<ThreadStartSource>,
+    /// The person edited the first message of a saved conversation and this
+    /// thread continues from that point (#1038). It has no history, but its
+    /// startup warm-up is a reopen warm-up: labelled, announced, and skipped
+    /// with `skip_reopen_warmup`, as when a later message is edited.
+    #[experimental("thread/start.reopenedByPromptEdit")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reopened_by_prompt_edit: bool,
     /// Optional client-supplied analytics source classification for this thread.
     #[ts(optional = nullable)]
     pub thread_source: Option<ThreadSource>,
@@ -474,6 +486,11 @@ pub struct ThreadResumeParams {
     pub model: Option<String>,
     #[ts(optional = nullable)]
     pub model_provider: Option<String>,
+    /// PF-84: a named account (`[<provider>:]<name>`) for this thread; it
+    /// beats `[provider_accounts]` and the account recorded in the rollout.
+    #[experimental("thread/resume.providerAccount")]
+    #[ts(optional = nullable)]
+    pub provider_account: Option<String>,
     #[serde(
         default,
         deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
@@ -575,6 +592,12 @@ pub struct ThreadResumeResponse {
     #[experimental("thread/resume.itemsBackwardsCursor")]
     #[serde(default)]
     pub items_backwards_cursor: Option<String>,
+    /// PF-84: the account the resumed thread runs on, as
+    /// `<provider>:<name>` (`default` included). It can be the account the
+    /// thread recorded rather than the one the client asked for.
+    #[experimental("thread/resume.providerAccount")]
+    #[serde(default)]
+    pub provider_account: Option<String>,
 }
 
 impl ThreadResumeResponse {
@@ -662,6 +685,11 @@ pub struct ThreadForkParams {
     pub model: Option<String>,
     #[ts(optional = nullable)]
     pub model_provider: Option<String>,
+    /// PF-84: a named account (`[<provider>:]<name>`) for the fork; it beats
+    /// `[provider_accounts]` and the account the source thread runs on.
+    #[experimental("thread/fork.providerAccount")]
+    #[ts(optional = nullable)]
+    pub provider_account: Option<String>,
     #[serde(
         default,
         deserialize_with = "crate::protocol::serde_helpers::deserialize_double_option",
@@ -749,6 +777,12 @@ pub struct ThreadForkResponse {
     #[experimental("thread/fork.multiAgentMode")]
     #[serde(default)]
     pub multi_agent_mode: MultiAgentMode,
+    /// PF-84: the account the fork runs on, as `<provider>:<name>`
+    /// (`default` included): the source thread's unless the request named
+    /// another account of the same provider.
+    #[experimental("thread/fork.providerAccount")]
+    #[serde(default)]
+    pub provider_account: Option<String>,
 }
 
 impl ThreadForkResponse {
@@ -1712,6 +1746,32 @@ pub struct ThreadTokenUsageUpdatedNotification {
     pub thread_id: String,
     pub turn_id: String,
     pub token_usage: ThreadTokenUsage,
+    /// PF-84: this thread's provider-reported usage per (provider, named
+    /// account), `default` included. Sent only while named accounts are on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub account_usage: Option<Vec<ThreadAccountTokenUsage>>,
+}
+
+/// PF-84: provider-reported token usage of one named provider account: its
+/// provider id and account name, never credential material.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadAccountTokenUsage {
+    pub provider_id: String,
+    pub account: String,
+    pub usage: TokenUsageBreakdown,
+}
+
+impl From<codex_protocol::protocol::AccountTokenUsage> for ThreadAccountTokenUsage {
+    fn from(value: codex_protocol::protocol::AccountTokenUsage) -> Self {
+        Self {
+            provider_id: value.provider_id,
+            account: value.account,
+            usage: value.usage.into(),
+        }
+    }
 }
 
 /// Internal-only notification containing the exact usage from one upstream

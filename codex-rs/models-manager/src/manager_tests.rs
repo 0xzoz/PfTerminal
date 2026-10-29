@@ -14,6 +14,7 @@ use codex_protocol::auth::AuthMode;
 use codex_protocol::openai_models::ChatReasoningEffortProtocol;
 use codex_protocol::openai_models::ChatReasoningProtocol;
 use codex_protocol::openai_models::InputModality;
+use codex_protocol::openai_models::LongContextRates;
 use codex_protocol::openai_models::MeteredRates;
 use codex_protocol::openai_models::ModelBilling;
 use codex_protocol::openai_models::ModelCapabilityTier;
@@ -727,22 +728,112 @@ async fn remote_overlay_keeps_retired_ambient_model_out_of_picker() {
     );
 }
 
+async fn assert_catalogue_issue_128_saved_ids(manager: &dyn ModelsManager) {
+    let presets = manager
+        .list_models(RefreshStrategy::Offline, DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    let bundled = load_remote_models_from_file().expect("bundled models");
+    for (slug, provider) in [
+        ("x-ai/grok-4.6", "openrouter"),
+        ("openrouter/owl-alpha", "openrouter"),
+        ("x-ai/grok-4.5", "openrouter"),
+        ("deepseek/deepseek-v4-pro", "openrouter"),
+        ("deepseek/deepseek-v4-flash-0731", "openrouter"),
+        ("gpt-5.5", "openai"),
+    ] {
+        let saved = Some(slug.to_string());
+        let selected = manager
+            .get_default_model(
+                &saved,
+                /*allow_provider_model_fallback*/ false,
+                RefreshStrategy::Offline,
+                DEFAULT_HTTP_CLIENT_FACTORY,
+            )
+            .await;
+        let resolved = manager
+            .get_model_info(&selected, &ModelsManagerConfig::default())
+            .await;
+        let original = bundled.iter().find(|model| model.slug == slug).unwrap();
+        let preset = presets.iter().find(|model| model.model == slug).unwrap();
+        assert_eq!(
+            (
+                selected.as_str(),
+                resolved.slug.as_str(),
+                preset.provider_id.as_deref(),
+                preset.show_in_picker,
+                preset.is_default,
+                &resolved.orchestration,
+                resolved.max_output_tokens,
+                resolved.used_fallback_model_metadata,
+            ),
+            (
+                slug,
+                slug,
+                Some(provider),
+                false,
+                false,
+                &original.orchestration,
+                original.max_output_tokens,
+                false,
+            ),
+            "saved compatibility contract for {slug}"
+        );
+        assert!(matches!(
+            resolved.orchestration,
+            Some(ModelOrchestrationMetadata::Disabled { .. })
+        ));
+    }
+}
+
 #[tokio::test]
-async fn remote_and_cached_overlays_cannot_resurrect_bundled_hidden_models() {
+async fn catalogue_issue_128_saved_ids_without_discovery() {
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::without_refresh(Vec::new());
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+    manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            DEFAULT_HTTP_CLIENT_FACTORY,
+        )
+        .await;
+    assert_catalogue_issue_128_saved_ids(&manager).await;
+    assert_eq!(endpoint.fetch_count(), 0);
+    assert!(!codex_home.path().join(MODEL_CACHE_FILE).exists());
+}
+
+#[tokio::test]
+async fn catalogue_issue_128_remote_and_cached_overlays_preserve_saved_ids() {
     let retired = load_remote_models_from_file()
         .expect("bundled models")
         .into_iter()
         .filter(|model| model.visibility == ModelVisibility::Hide)
         .collect::<Vec<_>>();
     assert!(!retired.is_empty());
-    let advertised = retired
+    let mut advertised = retired
         .iter()
         .cloned()
         .map(|mut model| {
             model.visibility = ModelVisibility::List;
+            model.orchestration = Some(ModelOrchestrationMetadata::Eligible {
+                provider_id: "unrelated-provider".to_string(),
+                capability: ModelCapabilityTier::Frontier,
+                billing: ModelBilling::AuthDependent {
+                    plan_relative_burn_millis: 1_000,
+                    api_key_input_milli_usd_per_million_tokens: 1,
+                    api_key_output_milli_usd_per_million_tokens: 1,
+                    api_key_cached_input_milli_usd_per_million_tokens: None,
+                    api_key_cache_write_milli_usd_per_million_tokens: None,
+                    api_key_long_context: None,
+                    api_key_valid_through_utc: None,
+                },
+            });
             model
         })
         .collect::<Vec<_>>();
+    // A separate discovered model's output limit must not leak into a saved ID.
+    let mut unrelated = remote_model("unrelated-capped-model", "Unrelated", /*priority*/ 0);
+    unrelated.max_output_tokens = Some(8_192);
+    advertised.push(unrelated);
     let codex_home = tempdir().expect("temp dir");
     let manager = openai_manager_for_tests(
         codex_home.path().to_path_buf(),
@@ -751,8 +842,11 @@ async fn remote_and_cached_overlays_cannot_resurrect_bundled_hidden_models() {
     let online = manager
         .list_models(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
         .await;
-    let cached_endpoint = TestModelsEndpoint::new(Vec::new());
-    let cached = openai_manager_for_tests(codex_home.path().to_path_buf(), cached_endpoint.clone())
+    assert_catalogue_issue_128_saved_ids(&manager).await;
+    let cached_endpoint = TestModelsEndpoint::new(vec![Vec::new()]);
+    let cached_manager =
+        openai_manager_for_tests(codex_home.path().to_path_buf(), cached_endpoint.clone());
+    let cached = cached_manager
         .list_models(
             RefreshStrategy::OnlineIfUncached,
             DEFAULT_HTTP_CLIENT_FACTORY,
@@ -760,6 +854,7 @@ async fn remote_and_cached_overlays_cannot_resurrect_bundled_hidden_models() {
         .await;
     assert_eq!(cached, online);
     assert_eq!(cached_endpoint.fetch_count(), 0);
+    assert_catalogue_issue_128_saved_ids(&cached_manager).await;
     for retired_model in retired {
         let preset = online
             .iter()
@@ -771,6 +866,157 @@ async fn remote_and_cached_overlays_cannot_resurrect_bundled_hidden_models() {
             .await;
         assert_eq!(explicit.slug, retired_model.slug);
         assert!(!explicit.used_fallback_model_metadata);
+    }
+
+    // Expire the actual persisted cache, then simulate discovery omitting the
+    // retained IDs. Refetch must still resolve every saved ID from the bundle.
+    cached_manager
+        .cache_manager
+        .as_ref()
+        .unwrap()
+        .manipulate_cache_for_test(|fetched_at| {
+            *fetched_at = Utc::now() - chrono::Duration::hours(1);
+        })
+        .await
+        .expect("expire cache");
+    let refreshed_manager =
+        openai_manager_for_tests(codex_home.path().to_path_buf(), cached_endpoint.clone());
+    refreshed_manager
+        .list_models(
+            RefreshStrategy::OnlineIfUncached,
+            DEFAULT_HTTP_CLIENT_FACTORY,
+        )
+        .await;
+    assert_eq!(cached_endpoint.fetch_count(), 1);
+    assert_catalogue_issue_128_saved_ids(&refreshed_manager).await;
+    assert!(
+        refreshed_manager
+            .get_remote_models()
+            .await
+            .iter()
+            .all(|model| model.slug != "unrelated-capped-model"),
+        "expired discovery records must not survive the empty refresh"
+    );
+}
+
+/// The explicit disposition of each #128 retained ID. Sources and dates are in
+/// `qa/release/unreleased/model128-compatibility-contract.md`; change both together.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RetainedIdDisposition {
+    /// Still served upstream; the row carries a verified or deliberately conservative cap.
+    Served,
+    /// Still served upstream on the Responses wire, which never sends an output cap, so
+    /// the provider's own limit applies and the row deliberately states none.
+    ServedCapOmitted,
+    /// No longer served upstream. The row stays, keeping its last cap and carrying a
+    /// retirement note, so a saved ID resolves to itself and never to another model.
+    RetiredUpstream,
+}
+
+#[derive(Debug, PartialEq)]
+struct RetainedIdRow {
+    provider_id: String,
+    visibility: ModelVisibility,
+    disabled: bool,
+    max_output_tokens: Option<i64>,
+    reason_says_retired: bool,
+    description_says_retired: bool,
+}
+
+#[test]
+fn catalogue_issue_128_retained_ids_have_explicit_dispositions() {
+    use codex_model_provider_info::WireApi;
+    use codex_model_provider_info::built_in_model_providers;
+    use codex_model_provider_info::default_model_max_output_tokens_for_provider;
+
+    let bundled = load_remote_models_from_file().expect("bundled models");
+    let providers = built_in_model_providers(/*openai_base_url*/ None);
+    for (slug, provider_id, disposition, max_output_tokens) in [
+        (
+            "x-ai/grok-4.6",
+            "openrouter",
+            RetainedIdDisposition::Served,
+            Some(128_000),
+        ),
+        (
+            "x-ai/grok-4.5",
+            "openrouter",
+            RetainedIdDisposition::Served,
+            Some(128_000),
+        ),
+        (
+            "deepseek/deepseek-v4-pro",
+            "openrouter",
+            RetainedIdDisposition::Served,
+            Some(384_000),
+        ),
+        (
+            "deepseek/deepseek-v4-flash-0731",
+            "openrouter",
+            RetainedIdDisposition::Served,
+            Some(384_000),
+        ),
+        (
+            "openrouter/owl-alpha",
+            "openrouter",
+            RetainedIdDisposition::RetiredUpstream,
+            Some(262_144),
+        ),
+        (
+            "gpt-5.5",
+            "openai",
+            RetainedIdDisposition::ServedCapOmitted,
+            None,
+        ),
+    ] {
+        let row = bundled
+            .iter()
+            .find(|model| model.slug == slug)
+            .unwrap_or_else(|| panic!("{slug} must stay in the bundled catalogue"));
+        let (row_provider, reason) = match &row.orchestration {
+            Some(ModelOrchestrationMetadata::Disabled {
+                provider_id,
+                reason,
+                ..
+            }) => (provider_id.clone(), Some(reason.as_str())),
+            Some(orchestration) => (orchestration.provider_id().to_string(), None),
+            None => (String::new(), None),
+        };
+        let retired = disposition == RetainedIdDisposition::RetiredUpstream;
+        assert_eq!(
+            RetainedIdRow {
+                provider_id: row_provider,
+                visibility: row.visibility,
+                disabled: reason.is_some(),
+                max_output_tokens: row.max_output_tokens,
+                reason_says_retired: reason
+                    .is_some_and(|reason| reason.starts_with("retired upstream:")),
+                description_says_retired: row
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| description.contains("Retired:")),
+            },
+            RetainedIdRow {
+                provider_id: provider_id.to_string(),
+                visibility: ModelVisibility::Hide,
+                disabled: true,
+                max_output_tokens,
+                reason_says_retired: retired,
+                description_says_retired: retired,
+            },
+            "disposition of {slug}"
+        );
+        if disposition == RetainedIdDisposition::ServedCapOmitted {
+            assert_eq!(
+                (
+                    providers.get(provider_id).map(|provider| provider.wire_api),
+                    default_model_max_output_tokens_for_provider(provider_id, slug),
+                ),
+                (Some(WireApi::Responses), None),
+                "{slug}: omitting the cap is only safe on a wire that never sends one, \
+                 with no provider default supplying a cap the row deliberately omits"
+            );
+        }
     }
 }
 
@@ -785,6 +1031,7 @@ async fn remote_model_overlay_preserves_bundled_orchestration_metadata() {
         provider_id: "attacker-provider".to_string(),
         capability: ModelCapabilityTier::Legacy,
         reason: "remote payload attempted to replace local policy".to_string(),
+        billing: None,
     });
     remote_models[0].supported_reasoning_levels = vec![ReasoningEffortPreset {
         effort: ReasoningEffort::Custom("untrusted-expensive-mode".to_string()),
@@ -815,9 +1062,18 @@ async fn remote_model_overlay_preserves_bundled_orchestration_metadata() {
             capability: ModelCapabilityTier::Frontier,
             billing: ModelBilling::AuthDependent {
                 plan_relative_burn_millis: 1_000,
-                api_key_input_milli_usd_per_million_tokens: 5_000,
-                api_key_output_milli_usd_per_million_tokens: 30_000,
-                api_key_cached_input_milli_usd_per_million_tokens: Some(500),
+                api_key_input_milli_usd_per_million_tokens: 4_000,
+                api_key_output_milli_usd_per_million_tokens: 20_000,
+                api_key_cached_input_milli_usd_per_million_tokens: Some(400),
+                api_key_cache_write_milli_usd_per_million_tokens: Some(5_000),
+                api_key_long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 8_000,
+                    output_milli_usd_per_million_tokens: 30_000,
+                    cached_input_milli_usd_per_million_tokens: Some(800),
+                    cache_write_milli_usd_per_million_tokens: Some(10_000),
+                }),
+                api_key_valid_through_utc: Some("2026-11-21T23:59:59.999Z".to_string()),
             },
         })
     );
@@ -1659,6 +1915,107 @@ async fn static_manager_reads_latest_auth_mode() {
     );
 }
 
+/// The Anthropic Messages wire requires `max_tokens`, and `zai-anthropic`
+/// serves the bare `glm-…` slugs, so each needs a catalogued output limit.
+/// Without one every turn on that route failed before reaching the provider.
+#[test]
+fn bundled_zai_anthropic_models_have_output_limits() {
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+
+    let missing = response
+        .models
+        .iter()
+        .filter(|model| model.slug.starts_with("glm-") && model.max_output_tokens.is_none())
+        .map(|model| model.slug.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(missing, Vec::<&str>::new());
+}
+
+/// The Anthropic Messages wire requires `max_tokens`, so every model a built-in
+/// Anthropic-wire provider can run must resolve to an output limit (#181).
+#[test]
+fn bundled_anthropic_wire_provider_models_have_output_limits() {
+    use codex_model_provider_info::CORBANU_API_CLAUDE_FABLE_5_MODEL;
+    use codex_model_provider_info::CORBANU_API_KIMI_K3_MODEL;
+    use codex_model_provider_info::WireApi;
+    use codex_model_provider_info::built_in_model_providers;
+    use codex_model_provider_info::canonical_catalog_provider;
+    use codex_model_provider_info::corrected_catalog_provider;
+    use codex_model_provider_info::default_model_max_output_tokens_for_provider;
+    use codex_model_provider_info::resolve_model_for_provider;
+
+    const UNLISTED_MODEL: &str = "unlisted-vendor/unlisted-model";
+
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+    let mut providers = built_in_model_providers(/*openai_base_url*/ None)
+        .into_iter()
+        .filter(|(_, provider)| provider.wire_api == WireApi::Anthropic)
+        .map(|(provider_id, _)| provider_id)
+        .collect::<Vec<_>>();
+    providers.sort();
+    assert!(
+        providers.contains(&"openrouter-anthropic".to_string())
+            && providers.contains(&"baseten-anthropic".to_string()),
+        "expected the Anthropic-wire gateways in {providers:?}"
+    );
+
+    let mut missing = Vec::new();
+    for provider_id in &providers {
+        // Pass-through gateways (OpenRouter) accept any slug. Walk the slugs
+        // catalogued for that gateway; allow-list providers resolve only to
+        // the slugs they accept.
+        let passes_through =
+            resolve_model_for_provider(Some(UNLISTED_MODEL.to_string()), provider_id).as_deref()
+                == Some(UNLISTED_MODEL);
+        let family = provider_id
+            .strip_suffix("-anthropic")
+            .unwrap_or(provider_id);
+        // Catalogue slugs, plus public slugs that providers accept but that
+        // borrow another row's metadata (Corbanu API identities).
+        let requested = std::iter::once(None)
+            .chain(response.models.iter().map(|model| Some(model.slug.clone())))
+            .chain(
+                [CORBANU_API_KIMI_K3_MODEL, CORBANU_API_CLAUDE_FABLE_5_MODEL]
+                    .map(|model| Some(model.to_string())),
+            );
+        for request in requested {
+            let explicit = request.is_some();
+            let Some(model) = resolve_model_for_provider(request, provider_id) else {
+                continue;
+            };
+            // Impossible pairs are moved to another provider before a turn.
+            if corrected_catalog_provider(&model, provider_id).is_some() {
+                continue;
+            }
+            if passes_through
+                && explicit
+                && !canonical_catalog_provider(&model)
+                    .is_some_and(|owner| owner == provider_id.as_str() || owner == family)
+            {
+                continue;
+            }
+            let config = ModelsManagerConfig {
+                model_max_output_tokens: default_model_max_output_tokens_for_provider(
+                    provider_id,
+                    &model,
+                ),
+                ..Default::default()
+            };
+            let info = construct_model_info_from_candidates(&model, &response.models, &config);
+            if info.used_fallback_model_metadata || info.max_output_tokens.is_none() {
+                missing.push(format!("{provider_id}: {model}"));
+            }
+        }
+    }
+    missing.sort();
+    missing.dedup();
+
+    assert_eq!(missing, Vec::<String>::new());
+}
+
 #[test]
 fn bundled_models_json_roundtrips() {
     let response = crate::bundled_models_response()
@@ -1972,9 +2329,18 @@ fn bundled_orchestration_policy_distinguishes_gpt_5_6_tiers_and_disables_gpt_5_5
             capability: ModelCapabilityTier::Frontier,
             billing: ModelBilling::AuthDependent {
                 plan_relative_burn_millis: 1_000,
-                api_key_input_milli_usd_per_million_tokens: 5_000,
-                api_key_output_milli_usd_per_million_tokens: 30_000,
-                api_key_cached_input_milli_usd_per_million_tokens: Some(500),
+                api_key_input_milli_usd_per_million_tokens: 4_000,
+                api_key_output_milli_usd_per_million_tokens: 20_000,
+                api_key_cached_input_milli_usd_per_million_tokens: Some(400),
+                api_key_cache_write_milli_usd_per_million_tokens: Some(5_000),
+                api_key_long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 8_000,
+                    output_milli_usd_per_million_tokens: 30_000,
+                    cached_input_milli_usd_per_million_tokens: Some(800),
+                    cache_write_milli_usd_per_million_tokens: Some(10_000),
+                }),
+                api_key_valid_through_utc: Some("2026-11-21T23:59:59.999Z".to_string()),
             },
         }
     );
@@ -1985,9 +2351,18 @@ fn bundled_orchestration_policy_distinguishes_gpt_5_6_tiers_and_disables_gpt_5_5
             capability: ModelCapabilityTier::Balanced,
             billing: ModelBilling::AuthDependent {
                 plan_relative_burn_millis: 500,
-                api_key_input_milli_usd_per_million_tokens: 2_500,
-                api_key_output_milli_usd_per_million_tokens: 15_000,
-                api_key_cached_input_milli_usd_per_million_tokens: Some(250),
+                api_key_input_milli_usd_per_million_tokens: 2_000,
+                api_key_output_milli_usd_per_million_tokens: 12_000,
+                api_key_cached_input_milli_usd_per_million_tokens: Some(200),
+                api_key_cache_write_milli_usd_per_million_tokens: Some(2_500),
+                api_key_long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 4_000,
+                    output_milli_usd_per_million_tokens: 18_000,
+                    cached_input_milli_usd_per_million_tokens: Some(400),
+                    cache_write_milli_usd_per_million_tokens: Some(5_000),
+                }),
+                api_key_valid_through_utc: None,
             },
         }
     );
@@ -1998,9 +2373,18 @@ fn bundled_orchestration_policy_distinguishes_gpt_5_6_tiers_and_disables_gpt_5_5
             capability: ModelCapabilityTier::Fast,
             billing: ModelBilling::AuthDependent {
                 plan_relative_burn_millis: 200,
-                api_key_input_milli_usd_per_million_tokens: 1_000,
-                api_key_output_milli_usd_per_million_tokens: 6_000,
-                api_key_cached_input_milli_usd_per_million_tokens: Some(100),
+                api_key_input_milli_usd_per_million_tokens: 200,
+                api_key_output_milli_usd_per_million_tokens: 1_200,
+                api_key_cached_input_milli_usd_per_million_tokens: Some(20),
+                api_key_cache_write_milli_usd_per_million_tokens: Some(250),
+                api_key_long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 400,
+                    output_milli_usd_per_million_tokens: 1_800,
+                    cached_input_milli_usd_per_million_tokens: Some(40),
+                    cache_write_milli_usd_per_million_tokens: Some(500),
+                }),
+                api_key_valid_through_utc: None,
             },
         }
     );
@@ -2011,6 +2395,21 @@ fn bundled_orchestration_policy_distinguishes_gpt_5_6_tiers_and_disables_gpt_5_5
             capability: ModelCapabilityTier::Legacy,
             reason: "superseded by GPT-5.6 and lower capability than Sol, Terra, and Luna"
                 .to_string(),
+            billing: Some(ModelBilling::Metered {
+                input_milli_usd_per_million_tokens: 5_000,
+                output_milli_usd_per_million_tokens: 30_000,
+                cached_input_milli_usd_per_million_tokens: Some(500),
+                cache_write_milli_usd_per_million_tokens: None,
+                long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 10_000,
+                    output_milli_usd_per_million_tokens: 45_000,
+                    // The page states 2x input and 1.5x output only.
+                    cached_input_milli_usd_per_million_tokens: None,
+                    cache_write_milli_usd_per_million_tokens: None,
+                }),
+                valid_through_utc: None,
+            }),
         }
     );
 }
@@ -2041,13 +2440,17 @@ fn bundled_orchestration_states_published_rates_for_opus_5_5_and_gpt_6_sol() {
                 input_milli_usd_per_million_tokens: 4_000,
                 output_milli_usd_per_million_tokens: 20_000,
                 cached_input_milli_usd_per_million_tokens: Some(200),
+                cache_write_milli_usd_per_million_tokens: None,
+                long_context: None,
+                valid_through_utc: None,
             },
         })
     );
     assert_eq!(model("claude-opus-5-5").context_window, Some(1_000_000));
     assert_eq!(model("claude-opus-5-5").max_output_tokens, Some(128_000));
 
-    // OpenAI: $2 / $10 per million, cache reads $0.20 per million.
+    // OpenAI: $2 / $10 per million, cache reads $0.20, cache writes $2.50 per
+    // million; above 272K input tokens 2x input and cache rates, 1.5x output.
     //
     // Metered, not auth-dependent. OpenAI publishes those API rates and nothing
     // about subscription capacity for this model, and Codex rejects it outright
@@ -2064,11 +2467,109 @@ fn bundled_orchestration_states_published_rates_for_opus_5_5_and_gpt_6_sol() {
                 input_milli_usd_per_million_tokens: 2_000,
                 output_milli_usd_per_million_tokens: 10_000,
                 cached_input_milli_usd_per_million_tokens: Some(200),
+                cache_write_milli_usd_per_million_tokens: Some(2_500),
+                long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 4_000,
+                    output_milli_usd_per_million_tokens: 15_000,
+                    cached_input_milli_usd_per_million_tokens: Some(400),
+                    cache_write_milli_usd_per_million_tokens: Some(5_000),
+                }),
+                valid_through_utc: None,
             },
         })
     );
     assert_eq!(model("gpt-6-sol").context_window, Some(1_050_000));
     assert_eq!(model("gpt-6-sol").max_output_tokens, Some(128_000));
+}
+
+/// #368: GPT-6.1 Sol at the Standard rates OpenAI publishes, read 2026-10-14
+/// from developers.openai.com/api/docs/pricing and
+/// developers.openai.com/api/docs/models/gpt-6.1-sol: $2 input, $0.10 cached
+/// input (5% of input), $2.50 cache writes (1.25x), $10 output per million;
+/// above 272K input tokens 2x input and cache rates and 1.5x output. Manual
+/// selection only, like GPT-6 Astra and Luna: it states its price for
+/// accounting and takes no automatically allocated work.
+#[test]
+fn bundled_orchestration_states_published_rates_for_gpt_6_1_sol() {
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+    let model = response
+        .models
+        .iter()
+        .find(|model| model.slug == "gpt-6.1-sol")
+        .expect("gpt-6.1-sol must be in the bundled catalogue");
+    assert_eq!(
+        model.orchestration,
+        Some(ModelOrchestrationMetadata::Disabled {
+            provider_id: "openai".to_string(),
+            capability: ModelCapabilityTier::Frontier,
+            reason: "manual selection only; automatic allocation economics are not configured"
+                .to_string(),
+            billing: Some(ModelBilling::Metered {
+                input_milli_usd_per_million_tokens: 2_000,
+                output_milli_usd_per_million_tokens: 10_000,
+                cached_input_milli_usd_per_million_tokens: Some(100),
+                cache_write_milli_usd_per_million_tokens: Some(2_500),
+                long_context: Some(LongContextRates {
+                    above_input_tokens: 272_000,
+                    input_milli_usd_per_million_tokens: 4_000,
+                    output_milli_usd_per_million_tokens: 15_000,
+                    cached_input_milli_usd_per_million_tokens: Some(200),
+                    cache_write_milli_usd_per_million_tokens: Some(5_000),
+                }),
+                valid_through_utc: None,
+            }),
+        })
+    );
+    assert_eq!(model.context_window, Some(1_050_000));
+    assert_eq!(model.max_output_tokens, Some(128_000));
+    assert_eq!(model.visibility, ModelVisibility::List);
+    assert!(model.base_instructions.contains("based on GPT-6.1 Sol"));
+}
+
+/// Off-peak holiday dates are whole UTC days on which a weekday peak would
+/// otherwise apply. Listing a weekend or repeating a date is a transcription
+/// slip, and rows of one provider must agree: `scripts/check_price_calendars.py`
+/// reads each list as covering through the end of its last year (#368).
+#[test]
+fn bundled_off_peak_dates_are_sorted_unique_weekdays_shared_per_provider() {
+    let response = crate::bundled_models_response()
+        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
+    let mut lists = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for model in &response.models {
+        let Some(metadata) = model.orchestration.as_ref() else {
+            continue;
+        };
+        let Some(ModelBilling::MeteredSchedule {
+            peak_weekdays,
+            off_peak_dates_utc,
+            ..
+        }) = metadata.billing()
+        else {
+            continue;
+        };
+        for pair in off_peak_dates_utc.windows(2) {
+            assert!(pair[0] < pair[1], "{}: {pair:?} out of order", model.slug);
+        }
+        for date in off_peak_dates_utc {
+            let day = chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+                .unwrap_or_else(|err| panic!("{}: {date}: {err}", model.slug));
+            let weekday = day.format("%A").to_string();
+            assert!(
+                peak_weekdays.is_none_or(|weekdays| weekdays.names().contains(&weekday.as_str())),
+                "{}: {date} is not a peak weekday",
+                model.slug
+            );
+        }
+        if let Some(other) = lists.insert(
+            metadata.provider_id().to_string(),
+            off_peak_dates_utc.clone(),
+        ) {
+            assert_eq!(&other, off_peak_dates_utc, "{}", model.slug);
+        }
+    }
+    assert!(lists.contains_key("deepseek"));
 }
 
 #[test]
@@ -2146,6 +2647,9 @@ fn bundled_models_json_contains_ambient_and_zai_models() {
             input_milli_usd_per_million_tokens: 1_400,
             output_milli_usd_per_million_tokens: 4_400,
             cached_input_milli_usd_per_million_tokens: Some(260),
+            cache_write_milli_usd_per_million_tokens: None,
+            long_context: None,
+            valid_through_utc: None,
         })
     );
     let preset = ModelPreset::from(zai_glm_5_3.clone());
@@ -2893,4 +3397,43 @@ fn glm_5_3_flash_routes_use_standard_base_with_work_pattern() {
             "{slug}"
         );
     }
+}
+
+/// PF-84: a list that needs a fetch is current only with a fresh cache of
+/// this client version, the same check refreshing applies.
+#[tokio::test]
+async fn load_cached_list_needs_a_usable_cache() {
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::new(vec![vec![remote_model(
+        "cached-model",
+        "Cached",
+        /*priority*/ 1,
+    )]]);
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+    assert!(!manager.load_cached_list().await, "no cache yet");
+
+    manager
+        .list_models(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
+        .await;
+    let reloaded = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint);
+    assert!(reloaded.load_cached_list().await, "fresh cache");
+    reloaded
+        .cache_manager
+        .as_ref()
+        .expect("cache manager")
+        .manipulate_cache_for_test(|fetched_at| {
+            *fetched_at = Utc::now() - chrono::Duration::hours(1);
+        })
+        .await
+        .expect("age the cache");
+    assert!(!reloaded.load_cached_list().await, "stale cache");
+
+    let no_fetch = openai_manager_for_tests(
+        tempdir().expect("temp dir").path().to_path_buf(),
+        TestModelsEndpoint::without_refresh(Vec::new()),
+    );
+    assert!(
+        no_fetch.load_cached_list().await,
+        "an API-key list needs no fetch"
+    );
 }

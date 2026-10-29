@@ -65,6 +65,20 @@ pub struct Patch {
     /// absent, so every patch recorded without one keeps its exact bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billed_usd: Option<Decimal>,
+    /// The HTTP status (401 or 403) with which the provider refused the
+    /// attempt before any response (#475): it used no tokens and is not
+    /// charged. Such a patch states nothing else. Omitted when absent, so
+    /// every other patch keeps its exact bytes; one that has it needs ledger
+    /// format 5.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused_status: Option<u16>,
+    /// When the realtime session this attempt opened ended, in Unix ms
+    /// (#824). The attempt's admission time is when the session started; the
+    /// tokens its responses reported (#889 D223) are in earlier patches. Such
+    /// a patch states nothing else. Omitted when absent, so every other patch keeps
+    /// its exact bytes; one that has it needs ledger format 6.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ended_at_ms: Option<Count>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +101,52 @@ pub struct Attempt {
     pub scope: Uuid,
     pub dialect: Dialect,
     pub dispatched_at_ms: Count,
+    /// PF-84: the named provider account the attempt was sent on. Absent for
+    /// the `default` account, so every attempt recorded before named accounts,
+    /// and every default-account attempt since, keeps its exact bytes and the
+    /// ledger's format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<AttemptAccount>,
+}
+
+/// A named provider account as the ledger records it: its name and, when the
+/// vault could compute it, a 12-hex fingerprint salted per home. Never a
+/// credential value.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptAccount {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+}
+
+/// The account name every attempt without a recorded account was sent on.
+pub const DEFAULT_ACCOUNT: &str = "default";
+
+impl AttemptAccount {
+    pub fn validate(&self) -> anyhow::Result<()> {
+        // `default` is the absence of an account, never a second spelling of it.
+        ensure!(
+            !self.name.trim().is_empty()
+                && self.name.len() <= 64
+                && self.name != DEFAULT_ACCOUNT
+                && !self
+                    .name
+                    .chars()
+                    .any(|c| c.is_control() || c.is_whitespace()),
+            "invalid account name"
+        );
+        if let Some(fingerprint) = &self.fingerprint {
+            ensure!(
+                fingerprint.len() == 12
+                    && fingerprint
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f')),
+                "invalid account fingerprint"
+            );
+        }
+        Ok(())
+    }
 }
 
 impl Attempt {
@@ -98,7 +158,23 @@ impl Attempt {
             );
         }
         ensure!(self.retry_of != Some(self.attempt_id), "self retry");
+        if let Some(account) = &self.account {
+            account.validate()?;
+        }
         Ok(())
+    }
+
+    /// The account name this attempt was sent on, `default` when none is recorded.
+    pub fn account_name(&self) -> &str {
+        self.account
+            .as_ref()
+            .map_or(DEFAULT_ACCOUNT, |account| account.name.as_str())
+    }
+
+    /// The ledger format this attempt needs: 4 when it names an account,
+    /// otherwise 1. `append_on_connection` upgrades the ledger to it first.
+    pub(crate) fn ledger_format(&self) -> i64 {
+        if self.account.is_some() { 4 } else { 1 }
     }
 
     pub fn same_owner(&self, other: &Self) -> bool {
@@ -117,6 +193,21 @@ pub struct Observation {
     pub patch: Patch,
 }
 
+impl Observation {
+    /// The ledger format this observation needs: 6 when it records a realtime
+    /// session's end, 5 when it records a refused attempt, otherwise 1.
+    /// `append_on_connection` upgrades the ledger to it first.
+    pub(crate) fn ledger_format(&self) -> i64 {
+        if self.patch.session_ended_at_ms.is_some() {
+            6
+        } else if self.patch.refused_status.is_some() {
+            5
+        } else {
+            1
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Usage {
     pub input: Option<i64>,
@@ -130,6 +221,14 @@ pub struct Usage {
     /// from tokens; omitted when absent so earlier estimates keep their bytes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billed_usd: Option<Decimal>,
+    /// The status the provider refused the attempt with (#475); every count
+    /// is then zero. Omitted when absent so earlier estimates keep their bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused_status: Option<u16>,
+    /// When the realtime session the attempt opened ended (#824). Omitted
+    /// when absent so earlier estimates keep their bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_ended_at_ms: Option<i64>,
 }
 
 /// Replay cumulative patches in source revision order, validating every prefix.
@@ -137,6 +236,64 @@ pub(super) fn replay(dialect: Dialect, observations: &[Observation]) -> anyhow::
     let mut raw = [None; 6];
     let mut billed_usd = None;
     let mut usage = Usage::default();
+    // #824: a realtime session's end is one observation that states the time
+    // and nothing else. It changes no count, so the counts below replay from
+    // the other observations alone.
+    let mut session_ended_at_ms = None;
+    for observation in observations {
+        let Some(ended) = observation.patch.session_ended_at_ms else {
+            continue;
+        };
+        ensure!(
+            session_ended_at_ms.is_none(),
+            "a realtime session ends once"
+        );
+        ensure!(
+            observation.patch
+                == Patch {
+                    session_ended_at_ms: Some(ended),
+                    ..Patch::default()
+                },
+            "a session end states no usage"
+        );
+        session_ended_at_ms = Some(i64::from(ended));
+    }
+    usage.session_ended_at_ms = session_ended_at_ms;
+    // #475: a refused attempt got no response, so its one patch states the
+    // refusal and nothing else, and every count is zero.
+    if let Some(refused) = observations
+        .iter()
+        .find_map(|observation| observation.patch.refused_status)
+    {
+        let [observation] = observations else {
+            anyhow::bail!("a refused attempt has exactly one observation");
+        };
+        ensure!(
+            i64::from(observation.revision) > 0,
+            "replay requires unique ordered revisions"
+        );
+        ensure!(
+            observation.patch
+                == Patch {
+                    refused_status: Some(refused),
+                    ..Patch::default()
+                },
+            "a refusal states no usage"
+        );
+        ensure!(matches!(refused, 401 | 403), "invalid refusal status");
+        return Ok(Usage {
+            input: Some(0),
+            noncached: Some(0),
+            read: Some(0),
+            write: Some(0),
+            output: Some(0),
+            reasoning: Some(0),
+            total: Some(0),
+            billed_usd: None,
+            refused_status: Some(refused),
+            session_ended_at_ms: None,
+        });
+    }
     let mut previous = 0;
     for observation in observations {
         let revision = i64::from(observation.revision);
@@ -206,6 +363,8 @@ pub(super) fn replay(dialect: Dialect, observations: &[Observation]) -> anyhow::
             reasoning: measured_reasoning,
             total: measured_total,
             billed_usd,
+            refused_status: None,
+            session_ended_at_ms,
         };
     }
     Ok(usage)

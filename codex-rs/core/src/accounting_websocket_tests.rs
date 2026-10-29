@@ -9,15 +9,18 @@ use codex_state::accounting::Attempt;
 use codex_state::accounting::Observation;
 use codex_state::accounting::Snapshot;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use futures::poll;
 use pretty_assertions::assert_eq;
 use uuid::Uuid;
 
 #[tokio::test]
 async fn accounting_responses_ws_subscription_uses_resolved_endpoint_without_api_prices()
 -> anyhow::Result<()> {
-    let provider = ModelProviderInfo::create_openai_provider(None);
-    let auth = CodexAuth::from_external_chatgpt_tokens("header.e30.synthetic", "fixture", None)?;
+    let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let auth = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.synthetic",
+        "fixture",
+        /*chatgpt_plan_type*/ None,
+    )?;
     let api = provider.to_api_provider(Some(auth.auth_mode()))?;
     assert_eq!(
         api.base_url,
@@ -30,10 +33,12 @@ async fn accounting_responses_ws_subscription_uses_resolved_endpoint_without_api
         approved_endpoint: api.base_url.clone(),
         approved_query: None,
         pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
     };
     let fixture = Fixture::new(mode).await?;
     let provenance = Provenance::capture(&provider, Some(&auth), &api);
-    assert!(provenance.validate(&fixture.deferred, None)?);
+    assert!(provenance.validate(&fixture.deferred, /*cached*/ None)?);
     let sampling = fixture
         .deferred
         .resolve(&provider, Some(&auth), &api.url_for_path("responses"))
@@ -45,7 +50,7 @@ async fn accounting_responses_ws_subscription_uses_resolved_endpoint_without_api
     // applied and, because this row states API rates, what the same tokens
     // would have cost - as an equivalent, never as spend.
     let attempt = sampling
-        .admit("gpt-5.6-sol", &api.url_for_path("responses"))
+        .admit("gpt-5.6-terra", &api.url_for_path("responses"))
         .await?;
     let prices: Vec<Snapshot> = fixture.rows("draft_accounting_price_snapshots").await?;
     assert_eq!(prices.len(), 1);
@@ -53,10 +58,10 @@ async fn accounting_responses_ws_subscription_uses_resolved_endpoint_without_api
         prices[0].basis,
         codex_state::accounting::Basis::PlanEquivalent
     );
-    assert_eq!(prices[0].plan_burn_millis, Some(1000));
+    assert_eq!(prices[0].plan_burn_millis, Some(500));
     assert_eq!(prices[0].provider, "openai");
-    assert_eq!(prices[0].model, "gpt-5.6-sol");
-    // $5/M uncached, $30/M output, $0.50/M cached input: the catalogue's own
+    assert_eq!(prices[0].model, "gpt-5.6-terra");
+    // $2/M uncached, $12/M output, $0.20/M cached input: the catalogue's own
     // API-key side for this auth-dependent row.
     assert_eq!(
         (
@@ -65,9 +70,9 @@ async fn accounting_responses_ws_subscription_uses_resolved_endpoint_without_api
             prices[0].rates.read
         ),
         (
-            Some(serde_json::from_value(serde_json::json!("5"))?),
-            Some(serde_json::from_value(serde_json::json!("30"))?),
-            Some(serde_json::from_value(serde_json::json!("0.5"))?)
+            Some(serde_json::from_value(serde_json::json!("2"))?),
+            Some(serde_json::from_value(serde_json::json!("12"))?),
+            Some(serde_json::from_value(serde_json::json!("0.2"))?)
         )
     );
     assert_eq!(attempt.provider, "openai");
@@ -76,7 +81,114 @@ async fn accounting_responses_ws_subscription_uses_resolved_endpoint_without_api
         Some(&auth),
         &provider.to_api_provider(Some(codex_protocol::auth::AuthMode::ApiKey))?,
     );
-    assert!(wrong.validate(&fixture.deferred, None).is_err());
+    // Not the approved route: served unrecorded, and collection closes.
+    assert!(!wrong.validate(&fixture.deferred, /*cached*/ None)?);
+    assert!(fixture.deferred.check().is_err());
+    Ok(())
+}
+
+/// #889 D223: a request admitted without rates (a realtime session) keeps
+/// its basis and binds no rate. Subscription work stays a plan record with no
+/// plan rate or catalogue figure, though this row states both; pay per use is
+/// covered by core's realtime session test.
+#[tokio::test]
+async fn accounting_admission_without_rates_keeps_the_basis() -> anyhow::Result<()> {
+    let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let auth = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.synthetic",
+        "fixture",
+        /*chatgpt_plan_type*/ None,
+    )?;
+    let api = provider.to_api_provider(Some(auth.auth_mode()))?;
+    let fixture = Fixture::new(AccountingMode::Provider {
+        scope: Uuid::new_v4(),
+        provider_id: "openai".into(),
+        wire_api: codex_model_provider_info::WireApi::Responses,
+        approved_endpoint: api.base_url.clone(),
+        approved_query: None,
+        pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
+    })
+    .await?;
+    let sampling = fixture
+        .deferred
+        .resolve(&provider, Some(&auth), &api.url_for_path("responses"))
+        .await?
+        .unwrap();
+    assert!(matches!(sampling.pricing, super::super::Pricing::Plan));
+    sampling
+        .admit_without_rates("gpt-5.6-terra", &api.url_for_path("responses"))
+        .await?;
+    let prices: Vec<Snapshot> = fixture.rows("draft_accounting_price_snapshots").await?;
+    assert_eq!(prices.len(), 1);
+    assert_eq!(
+        (
+            prices[0].basis,
+            &prices[0].rates,
+            prices[0].plan_burn_millis
+        ),
+        (
+            codex_state::accounting::Basis::PlanEquivalent,
+            &codex_state::accounting::Rates::default(),
+            None
+        )
+    );
+    Ok(())
+}
+
+/// Subscription work keeps its basis when the catalogue gives it no figure
+/// (review Major 2): a ChatGPT turn on a model with no catalogue price, and a
+/// priority-tier turn, are each bound to a plan record with no rates, never to
+/// nothing (which reads as pay per use).
+#[tokio::test]
+async fn accounting_subscription_without_a_price_stays_subscription() -> anyhow::Result<()> {
+    let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+    let auth = CodexAuth::from_external_chatgpt_tokens(
+        "header.e30.synthetic",
+        "fixture",
+        /*chatgpt_plan_type*/ None,
+    )?;
+    let api = provider.to_api_provider(Some(auth.auth_mode()))?;
+    let mode = AccountingMode::Provider {
+        scope: Uuid::new_v4(),
+        provider_id: "openai".into(),
+        wire_api: codex_model_provider_info::WireApi::Responses,
+        approved_endpoint: api.base_url.clone(),
+        approved_query: None,
+        pricing: PriceAuthority::Unavailable,
+        basis_source: Default::default(),
+        account: None,
+    };
+    let fixture = Fixture::new(mode).await?;
+    let sampling = fixture
+        .deferred
+        .resolve(&provider, Some(&auth), &api.url_for_path("responses"))
+        .await?
+        .unwrap();
+    for (model, tier) in [
+        ("codex-auto-review", None),
+        ("remote-only", None),
+        ("gpt-5.6-sol", Some("priority")),
+    ] {
+        sampling
+            .admit_with_tier(model, &api.url_for_path("responses"), tier)
+            .await?;
+    }
+    let prices: Vec<Snapshot> = fixture.rows("draft_accounting_price_snapshots").await?;
+    assert_eq!(prices.len(), 3);
+    for price in &prices {
+        assert_eq!(
+            (price.basis, &price.rates, price.plan_burn_millis),
+            (
+                codex_state::accounting::Basis::PlanEquivalent,
+                &codex_state::accounting::Rates::default(),
+                None
+            ),
+            "{}",
+            price.model
+        );
+    }
     Ok(())
 }
 
@@ -141,6 +253,12 @@ impl Fixture {
             .unwrap())
     }
     async fn rows<T: serde::de::DeserializeOwned>(&self, table: &str) -> anyhow::Result<Vec<T>> {
+        // A slow write is put off and written later (#865); wait for the writer.
+        assert!(
+            self.db
+                .flush_accounting(std::time::Duration::from_secs(30))
+                .await
+        );
         let pool = self
             .db
             .sqlite()
@@ -169,11 +287,13 @@ impl Fixture {
         Ok(Admission::new(
             self.resolve().await?,
             provenance(),
-            endpoint(BASE, None)?,
+            endpoint(BASE, /*query*/ None)?,
             Default::default(),
         ))
     }
 }
+// Uses the debug-only stage-one binding fixture.
+#[cfg(debug_assertions)]
 #[tokio::test]
 async fn accounting_responses_ws_stream_guard_checks_live_policy_with_session_state_locked()
 -> anyhow::Result<()> {
@@ -204,7 +324,7 @@ async fn accounting_responses_ws_stream_guard_checks_live_policy_with_session_st
     let admission = Admission::new(
         fixture.resolve().await?,
         provenance(),
-        endpoint(BASE, None)?,
+        endpoint(BASE, /*query*/ None)?,
         client.stage_one_memory_binding.clone(),
     );
     admission.admit("gpt-5.6-sol".into(), /*tier*/ None).await?;
@@ -283,7 +403,7 @@ async fn accounting_responses_ws_mode_scope_and_lazy_bootstrap() -> anyhow::Resu
 #[tokio::test]
 async fn accounting_responses_ws_auth_route_eligibility() -> anyhow::Result<()> {
     let fixture = Fixture::new(mode()).await?;
-    assert!(provenance().validate(&fixture.deferred, None)?);
+    assert!(provenance().validate(&fixture.deferred, /*cached*/ None)?);
     let api = provider().to_api_provider(Some(codex_protocol::auth::AuthMode::ApiKey))?;
     // Eight shapes that disqualify a route. An agent identity is no longer one of
     // them: it is a credential whose economics `turn_mode` decides, and refusing
@@ -312,7 +432,7 @@ async fn accounting_responses_ws_auth_route_eligibility() -> anyhow::Result<()> 
             CodexAuth::from_external_chatgpt_tokens(
                 "header.e30.synthetic",
                 "synthetic-account",
-                None,
+                /*chatgpt_plan_type*/ None,
             )?
         } else {
             auth()
@@ -322,12 +442,12 @@ async fn accounting_responses_ws_auth_route_eligibility() -> anyhow::Result<()> 
             if variant == 5 { None } else { Some(&auth) },
             &api,
         );
-        assert!(!current.validate(&fixture.deferred, None)?);
+        assert!(!current.validate(&fixture.deferred, /*cached*/ None)?);
     }
     fixture.resolve().await?;
     let mut current = provenance();
     current.api_key = false;
-    assert!(current.validate(&fixture.deferred, None).is_err());
+    assert!(!current.validate(&fixture.deferred, /*cached*/ None)?);
     assert!(fixture.deferred.check().is_err());
     Ok(())
 }
@@ -340,7 +460,7 @@ async fn accounting_responses_ws_exact_endpoint_binding() -> anyhow::Result<()> 
             "wss://api.openai.com/v1/responses",
         ),
     ] {
-        assert_eq!(endpoint(http, None)?, ws);
+        assert_eq!(endpoint(http, /*query*/ None)?, ws);
     }
     for bad in [
         "http://user@127.0.0.1/v1",
@@ -348,7 +468,7 @@ async fn accounting_responses_ws_exact_endpoint_binding() -> anyhow::Result<()> 
         "http://127.0.0.1/v1#fragment",
         "ftp://127.0.0.1/v1",
     ] {
-        assert!(endpoint(bad, None).is_err());
+        assert!(endpoint(bad, /*query*/ None).is_err());
     }
     for bad in [
         "ws://127.0.0.1:12346/v1/responses",
@@ -359,7 +479,8 @@ async fn accounting_responses_ws_exact_endpoint_binding() -> anyhow::Result<()> 
         let fixture = Fixture::new(mode()).await?;
         let mut current = provenance();
         current.endpoint = Some(bad.into());
-        assert!(current.validate(&fixture.deferred, None).is_err());
+        assert!(!current.validate(&fixture.deferred, /*cached*/ None)?);
+        assert!(fixture.deferred.check().is_err());
         assert!(
             fixture
                 .rows::<Attempt>("draft_accounting_attempts")
@@ -382,7 +503,7 @@ async fn accounting_responses_ws_cached_connection_provenance() -> anyhow::Resul
             cached.endpoint = None;
         }
         assert_eq!(
-            current.validate(&fixture.deferred, Some(&cached)).is_ok(),
+            current.validate(&fixture.deferred, Some(&cached))?,
             variant == 0
         );
     }
@@ -392,13 +513,17 @@ async fn accounting_responses_ws_cached_connection_provenance() -> anyhow::Resul
 async fn accounting_responses_ws_fallback_keeps_request_and_predecessor() -> anyhow::Result<()> {
     let fixture = Fixture::new(mode()).await?;
     let ws = fixture.admission().await?;
-    let old = ws.admit("gpt-5.6-sol".into(), None).await?;
+    let old = ws.admit("gpt-5.6-sol".into(), /*tier*/ None).await?;
     let sampling = fixture.resolve().await?;
     let http = sampling
-        .admit_with_tier("gpt-5.6-sol", &format!("{BASE}/responses"), None)
+        .admit_with_tier(
+            "gpt-5.6-sol",
+            &format!("{BASE}/responses"),
+            /*tier*/ None,
+        )
         .await?;
     old.observe(
-        2,
+        /*position*/ 2,
         Ok(codex_api::ResponsesUsagePatch {
             input_tokens: codex_api::ResponsesTokenPresence::Number(7),
             ..Default::default()
@@ -423,8 +548,8 @@ async fn accounting_responses_ws_original_price_binding() -> anyhow::Result<()> 
     let fixture = Fixture::new(mode()).await?;
     let admission = fixture.admission().await?;
     for (model, tier) in [
-        ("gpt-5.6-sol", None),
-        ("gpt-6-astra", None),
+        ("gpt-5.3-codex", None),
+        ("codex-auto-review", None),
         ("gpt-5.6-sol", Some("priority")),
         ("alias", None),
         ("remote-only", None),
@@ -433,20 +558,31 @@ async fn accounting_responses_ws_original_price_binding() -> anyhow::Result<()> 
             .admit(model.into(), tier.map(str::to_string))
             .await?;
     }
-    let snapshots = fixture
+    let (snapshots, rateless): (Vec<Snapshot>, Vec<Snapshot>) = fixture
         .rows::<Snapshot>("draft_accounting_price_snapshots")
-        .await?;
+        .await?
+        .into_iter()
+        .partition(|snapshot| snapshot.rates != codex_state::accounting::Rates::default());
     assert_eq!(snapshots.len(), 1);
+    // Every attempt with no price is still bound to its pay-per-use basis, by
+    // a record with no rates (PF-60-S05).
+    assert_eq!(
+        rateless
+            .iter()
+            .map(|snapshot| snapshot.basis)
+            .collect::<Vec<_>>(),
+        vec![codex_state::accounting::Basis::Billed; 4]
+    );
     let source = serde_json::to_vec(&(
         "openai-responses-api-key-bundled-v1",
         "openai",
-        "gpt-5.6-sol",
+        "gpt-5.3-codex",
         "api_key",
         "default",
         "USD/million",
-        5000u32,
-        30000u32,
-        Some(500u32),
+        1750u32,
+        14000u32,
+        Some(175u32),
     ))?;
     assert_eq!(
         snapshots[0].source_reference,
@@ -454,7 +590,7 @@ async fn accounting_responses_ws_original_price_binding() -> anyhow::Result<()> 
     );
     assert_eq!(
         serde_json::to_value(&snapshots[0].rates)?,
-        serde_json::json!({"noncached":"5","output":"30","read":"0.5","write":null})
+        serde_json::json!({"noncached":"1.75","output":"14","read":"0.175","write":null})
     );
     assert_eq!(
         fixture
@@ -463,7 +599,7 @@ async fn accounting_responses_ws_original_price_binding() -> anyhow::Result<()> 
             .len(),
         5
     );
-    admission.admit("gpt-5.6-sol".into(), None).await?;
+    admission.admit("gpt-5.6-sol".into(), /*tier*/ None).await?;
     let later = fixture
         .rows::<Snapshot>("draft_accounting_price_snapshots")
         .await?;
@@ -474,49 +610,52 @@ async fn accounting_responses_ws_original_price_binding() -> anyhow::Result<()> 
 async fn accounting_responses_ws_failure_and_cancellation_latch() -> anyhow::Result<()> {
     let fixture = Fixture::new(mode()).await?;
     let admission = fixture.admission().await?;
-    let permit = crate::accounting::WRITES.acquire().await?;
-    let mut pending = admission.admit("gpt-5.6-sol".into(), None);
-    assert!(poll!(&mut pending).is_pending());
-    drop(pending);
-    drop(permit);
-    // Cancellation before the write permit cannot have committed an intent.
-    assert!(fixture.deferred.check().is_ok());
-    let observer = admission.admit("gpt-5.6-sol".into(), None).await?;
+    let observer = admission.admit("gpt-5.6-sol".into(), /*tier*/ None).await?;
     assert!(
         observer
-            .observe(1, Err(codex_api::InvalidResponsesUsage))
+            .observe(/*position*/ 1, Err(codex_api::InvalidResponsesUsage))
             .await
-            .is_err()
+            .is_ok()
     );
     assert!(fixture.deferred.check().is_err());
-    assert!(admission.admit("gpt-5.6-sol".into(), None).await.is_err());
+    // A closed sampling admits nothing more, but the request still goes out
+    // with an observer that records nothing.
+    let recorded = fixture.rows::<Attempt>("draft_accounting_attempts").await?;
+    let unrecorded = admission.admit("gpt-5.6-sol".into(), /*tier*/ None).await?;
+    unrecorded
+        .observe(
+            /*position*/ 1,
+            Ok(codex_api::ResponsesUsagePatch {
+                input_tokens: codex_api::ResponsesTokenPresence::Number(7),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    assert_eq!(
+        fixture.rows::<Attempt>("draft_accounting_attempts").await?,
+        recorded
+    );
     let slot = super::super::responses::Slot::default();
     let scope =
         super::super::responses::Scope::attach(slot.clone(), Some(fixture.deferred.clone()))?;
     drop(scope);
     assert!(super::super::responses::read(&slot)?.is_none());
 
+    // Opening a sampling writes nothing, so another connection holding the
+    // state DB's write lock does not hold it up.
     let fresh = Fixture::new(mode()).await?;
-    let permit = crate::accounting::WRITES.acquire().await?;
-    let mut bootstrap = Box::pin(fresh.resolve());
-    assert!(poll!(&mut bootstrap).is_pending());
-    drop(bootstrap);
-    drop(permit);
-    assert!(fresh.deferred.check().is_err());
-    assert!(
-        fresh
-            .rows::<Attempt>("draft_accounting_attempts")
-            .await
-            .is_err()
-    );
+    let mut lock = crate::accounting::tests_support::hold_write_lock(&fresh.db).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), fresh.resolve()).await??;
+    fresh.deferred.check()?;
+    sqlx::query("ROLLBACK").execute(&mut *lock).await?;
     let (mut session, _) = crate::session::tests::make_session_and_context().await;
     session.services.state_db = None;
     let failed = DeferredResponsesSampling::new(Arc::new(session), "missing-state".into(), mode());
     assert!(
         failed
             .resolve(&provider(), Some(&auth()), &format!("{BASE}/responses"))
-            .await
-            .is_err()
+            .await?
+            .is_none()
     );
     assert!(failed.check().is_err());
     Ok(())
@@ -574,7 +713,7 @@ fn accounting_websocket_pin_matches_the_client_route() -> anyhow::Result<()> {
         ("api-version".to_string(), "2025-04-01".to_string()),
         ("deployment".to_string(), "fixture".to_string()),
     ]));
-    let api = provider.to_api_provider(None)?;
+    let api = provider.to_api_provider(/*auth_mode*/ None)?;
     let requested = api.websocket_url_for_path("responses")?.to_string();
     let pinned = endpoint(
         "https://example.invalid/v1",
@@ -586,7 +725,7 @@ fn accounting_websocket_pin_matches_the_client_route() -> anyhow::Result<()> {
         "the pin must be the route the client opens"
     );
     assert!(
-        endpoint("https://example.invalid/v1?stray=1", None).is_err(),
+        endpoint("https://example.invalid/v1?stray=1", /*query*/ None).is_err(),
         "a query the configuration did not declare must be refused"
     );
     Ok(())

@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// Names the non-admin sandbox's main gaps next to the option that selects it.
+#[cfg(any(target_os = "windows", test))]
+const LEGACY_SANDBOX_OPTION_DESCRIPTION: &str =
+    "Doesn't block reading your files; its network block can be bypassed";
+
 impl ChatWidget {
     #[cfg(any(target_os = "windows", test))]
     pub(crate) fn windows_sandbox_mode_allowed(&self, mode: WindowsSandboxModeToml) -> bool {
@@ -276,7 +281,7 @@ impl ChatWidget {
         if allow_unelevated {
             items.push(SelectionItem {
                 name: "Use non-admin sandbox (higher risk if prompt injected)".to_string(),
-                description: None,
+                description: Some(LEGACY_SANDBOX_OPTION_DESCRIPTION.to_string()),
                 actions: vec![Box::new(move |tx| {
                     legacy_otel.counter(
                         "codex.windows_sandbox.elevated_prompt_use_legacy",
@@ -353,6 +358,9 @@ impl ChatWidget {
             lines.push(line![
                 "You can still use Corbanu Terminal in a non-admin sandbox. It carries greater risk if prompt injected."
             ]);
+            lines.push(line![
+                "The non-admin sandbox blocks writes and deletes outside your workspace except in low-integrity folders, but it can't stop commands from reading your files and its network block can be bypassed.".bold()
+            ]);
         } else {
             lines.push(line![
                 "Your organization requires the default sandbox before Corbanu Terminal can continue."
@@ -396,7 +404,7 @@ impl ChatWidget {
         if allow_unelevated {
             items.push(SelectionItem {
                 name: "Use Codex with non-admin sandbox".to_string(),
-                description: None,
+                description: Some(LEGACY_SANDBOX_OPTION_DESCRIPTION.to_string()),
                 actions: vec![Box::new({
                     let otel = self.session_telemetry.clone();
                     let preset = legacy_preset;

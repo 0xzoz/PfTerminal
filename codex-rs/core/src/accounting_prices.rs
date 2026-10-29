@@ -1,9 +1,9 @@
 //! Prospective exact estimates from the bundled authority, never model discovery.
 use codex_protocol::openai_models::ModelBilling;
-use codex_protocol::openai_models::ModelOrchestrationMetadata;
 use codex_state::accounting::Basis;
 use codex_state::accounting::Currency;
 use codex_state::accounting::Decimal;
+use codex_state::accounting::LongContext;
 use codex_state::accounting::Rates;
 use codex_state::accounting::Snapshot;
 use codex_state::accounting::SourceKind;
@@ -71,14 +71,22 @@ fn billed(
     );
     let anthropic_write = anthropic_cache_write_milli(provider, input)
         .filter(|_| provider == codex_model_provider_info::ANTHROPIC_PROVIDER_ID);
-    let reference = if free_cache_write {
+    let stated = Stated::of(billing);
+    let reference = if let Some(extended) = stated.reference(&v1)? {
+        extended
+    } else if free_cache_write {
         serde_json::to_vec(&(v1, "cache_write", 0))?
     } else if let Some((lifetime, write)) = anthropic_write {
         serde_json::to_vec(&(v1, lifetime, write))?
     } else {
         serde_json::to_vec(&v1)?
     };
-    snapshot(
+    let write = match stated.write {
+        Some(write) => Some(write),
+        None if free_cache_write => Some(0),
+        None => anthropic_write.map(|(_, write)| write),
+    };
+    let mut prices = snapshot(
         model,
         provider,
         scope,
@@ -87,16 +95,79 @@ fn billed(
             noncached: Some(rate(input)?),
             output: Some(rate(output)?),
             read: read.map(rate).transpose()?,
-            write: if free_cache_write {
-                Some(rate(/*milli*/ 0)?)
-            } else {
-                anthropic_write.map(|(_, write)| rate(write)).transpose()?
-            },
+            write: write.map(rate).transpose()?,
         },
         reference,
         Basis::Billed,
         /*plan_burn_millis*/ None,
-    )
+    )?;
+    stated.bind_long_context(&mut prices)?;
+    Ok(prices)
+}
+
+/// What a catalogue row states beyond input, output and cache-read rates:
+/// its cache-write rate and its long-context tier. A row that states neither
+/// keeps the price identity it had before the catalogue could state them.
+struct Stated {
+    write: Option<u32>,
+    long_context: Option<codex_protocol::openai_models::LongContextRates>,
+}
+
+impl Stated {
+    fn of(billing: &ModelBilling) -> Self {
+        Self {
+            write: billing.api_key_cache_write(),
+            long_context: billing.api_key_long_context(),
+        }
+    }
+
+    /// The price identity extended with the stated rates, or `None` when the
+    /// row states neither.
+    fn reference(&self, v1: &impl serde::Serialize) -> anyhow::Result<Option<Vec<u8>>> {
+        if self.write.is_none() && self.long_context.is_none() {
+            return Ok(None);
+        }
+        let long = self.long_context.map(|tier| {
+            (
+                tier.above_input_tokens,
+                tier.input_milli_usd_per_million_tokens,
+                tier.output_milli_usd_per_million_tokens,
+                tier.cached_input_milli_usd_per_million_tokens,
+                tier.cache_write_milli_usd_per_million_tokens,
+            )
+        });
+        Ok(Some(serde_json::to_vec(&(
+            v1,
+            "stated-v1",
+            self.write,
+            long,
+        ))?))
+    }
+
+    fn bind_long_context(&self, prices: &mut [Snapshot]) -> anyhow::Result<()> {
+        let Some(tier) = self.long_context else {
+            return Ok(());
+        };
+        let long = LongContext {
+            above_input_tokens: i64::from(tier.above_input_tokens).try_into()?,
+            rates: Rates {
+                noncached: Some(rate(tier.input_milli_usd_per_million_tokens)?),
+                read: tier
+                    .cached_input_milli_usd_per_million_tokens
+                    .map(rate)
+                    .transpose()?,
+                write: tier
+                    .cache_write_milli_usd_per_million_tokens
+                    .map(rate)
+                    .transpose()?,
+                output: Some(rate(tier.output_milli_usd_per_million_tokens)?),
+            },
+        };
+        for price in prices {
+            price.long_context = Some(long.clone());
+        }
+        Ok(())
+    }
 }
 
 /// Subscription capacity: the plan rate that applied at dispatch, if the
@@ -155,6 +226,15 @@ pub(super) fn plan_original(
     let write = api_twin
         .and(input)
         .and_then(|input| anthropic_cache_write_milli(provider, input));
+    // A row priced by its own catalogue entry states its own cache-write rate
+    // and long-context tier, if any.
+    let stated = match (api_twin, equivalent) {
+        (None, Some(_)) => Stated::of(&billing),
+        _ => Stated {
+            write: None,
+            long_context: None,
+        },
+    };
     let v1 = (
         "plan-equivalent-bundled-v1",
         provider,
@@ -166,15 +246,20 @@ pub(super) fn plan_original(
         output,
         read,
     );
-    // Rows priced by their own catalogue entry keep their v1 identity.
+    // Rows priced by their own catalogue entry keep their v1 identity unless
+    // they state a cache-write rate or a long-context tier.
     let reference = match (api_twin, write) {
         (Some(api_model), Some((lifetime, write))) => {
             serde_json::to_vec(&(v1, "api_row", api_model, lifetime, write))?
         }
         (Some(api_model), None) => serde_json::to_vec(&(v1, "api_row", api_model))?,
-        (None, _) => serde_json::to_vec(&v1)?,
+        (None, _) => match stated.reference(&v1)? {
+            Some(extended) => extended,
+            None => serde_json::to_vec(&v1)?,
+        },
     };
-    snapshot(
+    let write = write.map(|(_, write)| write).or(stated.write);
+    let mut prices = snapshot(
         model,
         provider,
         scope,
@@ -183,15 +268,48 @@ pub(super) fn plan_original(
             noncached: input.map(rate).transpose()?,
             output: output.map(rate).transpose()?,
             read: read.map(rate).transpose()?,
-            write: write.map(|(_, write)| rate(write)).transpose()?,
+            write: write.map(rate).transpose()?,
         },
         reference,
         Basis::PlanEquivalent,
         burn,
+    )?;
+    stated.bind_long_context(&mut prices)?;
+    Ok(prices)
+}
+
+/// A price record that states only the attempt's billing basis: subscription
+/// work the catalogue gives no figure for, local work, or work on a route with
+/// no declared basis. It carries no rates, so it never invents a number; it
+/// exists so the basis is bound to the attempt even without a price.
+pub(super) fn basis_only(
+    basis: Basis,
+    source: codex_state::accounting::BasisSource,
+    model: &str,
+    provider: &str,
+    scope: Uuid,
+    accepted_at: i64,
+) -> anyhow::Result<Vec<Snapshot>> {
+    let reference = serde_json::to_vec(&("basis-only-v1", provider, model, basis, source))?;
+    snapshot(
+        model,
+        provider,
+        scope,
+        accepted_at,
+        Rates {
+            noncached: None,
+            read: None,
+            write: None,
+            output: None,
+        },
+        reference,
+        basis,
+        /*plan_burn_millis*/ None,
     )
 }
 
-/// The catalogue's billing for exactly this provider's row, or nothing.
+/// The catalogue's billing for exactly this provider's row, or nothing. A
+/// row that is not spawn-eligible still states its published price.
 ///
 /// The slug must be unambiguous and the row must belong to the provider the
 /// attempt actually used: a rate from another provider's row would be a guess
@@ -206,15 +324,9 @@ fn billing_for(
     if matches.next().is_some() {
         return None;
     }
-    let ModelOrchestrationMetadata::Eligible {
-        provider_id,
-        billing,
-        ..
-    } = row.orchestration.as_ref()?
-    else {
-        return None;
-    };
-    (provider_id == provider).then(|| billing.clone())
+    let orchestration = row.orchestration.as_ref()?;
+    let billing = orchestration.accounting_billing()?;
+    (orchestration.provider_id() == provider).then(|| billing.clone())
 }
 
 #[expect(clippy::too_many_arguments)]
@@ -241,6 +353,8 @@ fn snapshot(
         source_kind: SourceKind::NativeCatalog,
         basis,
         plan_burn_millis,
+        basis_source: codex_state::accounting::BasisSource::BuiltIn,
+        long_context: None,
         observed_at_ms: time,
         approved_at_ms: time,
         effective_from_ms: time,
@@ -267,6 +381,66 @@ pub(super) fn responses_original(
     )
 }
 
+/// The path, under the provider's base URL, of OpenAI's image generation endpoint.
+pub(super) const IMAGE_GENERATIONS_PATH: &str = "images/generations";
+
+/// OpenAI's published Standard rates for image generation, in milli-USD per
+/// million tokens: (model, text input, cached text input, image output).
+/// Source: developers.openai.com/api/docs/pricing, image models, read
+/// 2026-10-09. A generation request carries a text prompt and no input image,
+/// so its input is text and its output is image; image input ($8.00 for
+/// gpt-image-2) only arises on the edits endpoint, which is not priced here
+/// because one input rate cannot price a mix of text and image input.
+const OPENAI_IMAGE_GENERATION_RATES: [(&str, u32, u32, u32); 1] =
+    [("gpt-image-2", 5_000, 1_250, 30_000)];
+
+/// Standard-tier rates for one image generation request on an OpenAI API key,
+/// or nothing for a tier, model or provider the published table does not cover.
+pub(super) fn image_generation_original(
+    model: &str,
+    provider: &str,
+    scope: Uuid,
+    accepted_at: i64,
+    tier: Option<&str>,
+) -> anyhow::Result<Vec<Snapshot>> {
+    if provider != codex_model_provider_info::OPENAI_PROVIDER_ID
+        || !matches!(tier, None | Some("default"))
+    {
+        return Ok(Vec::new());
+    }
+    let Some(&(_, input, read, output)) = OPENAI_IMAGE_GENERATION_RATES
+        .iter()
+        .find(|(slug, ..)| *slug == model)
+    else {
+        return Ok(Vec::new());
+    };
+    let reference = serde_json::to_vec(&(
+        "openai-images-api-key-published-v1",
+        provider,
+        model,
+        IMAGE_GENERATIONS_PATH,
+        "USD/million",
+        input,
+        read,
+        output,
+    ))?;
+    snapshot(
+        model,
+        provider,
+        scope,
+        accepted_at,
+        Rates {
+            noncached: Some(rate(input)?),
+            read: Some(rate(read)?),
+            write: None,
+            output: Some(rate(output)?),
+        },
+        reference,
+        Basis::Billed,
+        /*plan_burn_millis*/ None,
+    )
+}
+
 pub(super) fn chat_original(
     model: &str,
     provider: &str,
@@ -279,6 +453,85 @@ pub(super) fn chat_original(
         scope,
         accepted_at,
         "openai-chat-api-key-bundled-v1",
+    )
+}
+
+/// Moonshot's published prices on its Kimi Open Platform
+/// (`https://api.moonshot.ai/v1`), in milli-USD per million tokens: (model,
+/// input, cached input, cache write, output). Source:
+/// platform.kimi.ai/docs/pricing/chat (platform.moonshot.ai redirects there),
+/// read 2026-10-14; the reading is kept in
+/// qa/portfolio/agent-cost-accounting/issue-368/data/.
+///
+/// Cache writes:
+/// - K3 bills them by the cache lifetime the request asks for:
+///   $3.00 for five minutes, $6.00 for one hour. A request that names no
+///   lifetime gets five minutes, and this client never names one (its Chat
+///   Completions body has no `prompt_cache_options`), so every request it
+///   sends is priced at the five-minute rate.
+/// - K2 rows state only a cache-hit and a cache-miss price. A token written
+///   to the cache was not served from it, so it is billed as a miss: the
+///   input price.
+///
+/// The API reports cache reads and writes as separate parts of
+/// `prompt_tokens` (platform.kimi.ai/docs/api/chat, usage fields).
+const MOONSHOT_OPEN_PLATFORM_RATES: [(&str, u32, u32, u32, u32); 4] = [
+    ("kimi-k3", 3_000, 300, 3_000, 15_000),
+    ("kimi-k2.7-code", 950, 190, 950, 4_000),
+    ("kimi-k2.7-code-highspeed", 1_900, 380, 1_900, 8_000),
+    ("kimi-k2.6", 950, 160, 950, 4_000),
+];
+
+/// The cache lifetime this client's requests get on the Moonshot route: none
+/// is named, so the operator's default applies.
+const MOONSHOT_CACHE_TTL: &str = "cache_write_5m";
+
+/// Rates the operator of `route` publishes for `model`, for a request a
+/// user-configured provider sent there on an API key. Nothing for a model the
+/// published table does not list.
+pub(super) fn route_original(
+    route: crate::config::PricedRoute,
+    model: &str,
+    provider: &str,
+    scope: Uuid,
+    accepted_at: i64,
+) -> anyhow::Result<Vec<Snapshot>> {
+    let (table, endpoint) = match route {
+        crate::config::PricedRoute::MoonshotOpenPlatform => {
+            (&MOONSHOT_OPEN_PLATFORM_RATES, "https://api.moonshot.ai/v1")
+        }
+    };
+    let Some(&(_, input, read, write, output)) = table.iter().find(|(slug, ..)| *slug == model)
+    else {
+        return Ok(Vec::new());
+    };
+    // The provider id is the user's name for the route, so it is not part of
+    // the price identity: the same route and model are the same price.
+    let reference = serde_json::to_vec(&(
+        "route-published-v1",
+        endpoint,
+        model,
+        "api_key",
+        "USD/million",
+        input,
+        read,
+        (MOONSHOT_CACHE_TTL, write),
+        output,
+    ))?;
+    snapshot(
+        model,
+        provider,
+        scope,
+        accepted_at,
+        Rates {
+            noncached: Some(rate(input)?),
+            read: Some(rate(read)?),
+            write: Some(rate(write)?),
+            output: Some(rate(output)?),
+        },
+        reference,
+        Basis::Billed,
+        /*plan_burn_millis*/ None,
     )
 }
 

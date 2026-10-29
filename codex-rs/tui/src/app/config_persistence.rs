@@ -31,7 +31,7 @@ async fn build_config_on_runtime_worker(
     }
 }
 
-pub(super) fn resume_model_settings_for_overrides(
+pub(crate) fn resume_model_settings_for_overrides(
     config: &Config,
     harness_overrides: &ConfigOverrides,
 ) -> crate::app_server_session::ResumeModelSettings {
@@ -118,11 +118,19 @@ impl App {
             .harness_overrides(overrides)
             .loader_overrides(self.loader_overrides.clone())
             .cloud_config_bundle(self.cloud_config_bundle.clone());
-        build_config_on_runtime_worker(
+        let mut config = build_config_on_runtime_worker(
             builder,
             format!("Failed to rebuild config for cwd {cwd_display}"),
         )
-        .await
+        .await?;
+        crate::security::launch::verify_reloaded(&config)
+            .await
+            .map_err(color_eyre::eyre::Report::msg)?;
+        crate::resume_launch::apply_inherited_account_to_its_provider(
+            &mut config,
+            self.harness_overrides.inherited_provider_account.as_deref(),
+        );
+        Ok(config)
     }
 
     pub(super) async fn rebuild_config_for_permission_profile(
@@ -175,6 +183,10 @@ impl App {
         app_server: &mut AppServerSession,
         selection: PermissionProfileSelection,
     ) -> bool {
+        if let Some(reason) = crate::security::level::permission_change_block_reason() {
+            self.chat_widget.add_error_message(reason);
+            return false;
+        }
         let PermissionProfileSelection {
             profile_id,
             approval_policy,
@@ -449,6 +461,15 @@ impl App {
         updates: Vec<(Feature, bool)>,
     ) {
         if updates.is_empty() {
+            return;
+        }
+        // Auto-review rewrites approval and sandbox settings.
+        if updates
+            .iter()
+            .any(|(feature, _)| *feature == Feature::GuardianApproval)
+            && let Some(reason) = crate::security::level::permission_change_block_reason()
+        {
+            self.chat_widget.add_error_message(reason);
             return;
         }
 
@@ -1750,6 +1771,7 @@ enabled = false
                 message_history: None,
                 network_proxy: None,
                 rollout_path: Some(PathBuf::new()),
+                provider_account: None,
             });
 
         assert_eq!(app.chat_widget.config_ref().cwd.to_path_buf(), next_cwd);

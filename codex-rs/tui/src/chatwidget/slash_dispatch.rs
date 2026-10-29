@@ -36,10 +36,14 @@ const SIDE_SLASH_COMMAND_UNAVAILABLE_HINT: &str =
     "Press Ctrl+C to return to the main thread first.";
 const GOAL_USAGE_HINT: &str = "Example: /goal improve benchmark coverage";
 const RAW_USAGE: &str = "Usage: /raw [on|off]";
-/// Account usage is an OpenAI account API and needs that sign-in. What a turn
-/// cost is recorded locally for whatever provider served it, so the message
-/// points at the view that does work here rather than dead-ending.
-const USAGE_CHATGPT_LOGIN_REQUIRED: &str = "Sign in with ChatGPT to view OpenAI account usage. For what your turns cost on this provider, run `/usage requests`.";
+/// Account usage is an OpenAI account API and needs that sign-in. Where costs
+/// are recorded locally (`/cost`, developer builds only), the message points
+/// there; other builds have no per-request cost view to point at.
+const USAGE_CHATGPT_LOGIN_REQUIRED: &str = if cfg!(feature = "developer-accounting") {
+    "Sign in with ChatGPT to view OpenAI account usage. For what your turns cost on this provider, run `/cost`."
+} else {
+    "Sign in with ChatGPT to view OpenAI account usage."
+};
 
 fn tasknode_new_chat_id() -> String {
     format!("chat_{}", uuid::Uuid::new_v4().simple())
@@ -362,11 +366,66 @@ impl ChatWidget {
                 self.defer_input_until_settings_applied();
             }
             SlashCommand::Security => {
+                let core = crate::bottom_pane::security_level_picker::CoreLevels {
+                    thread: self.thread_id(),
+                    // #1047: a remote app server (or the local daemon) runs
+                    // this window's sessions in its own process.
+                    sessions_in_this_process: self.remote_connection.is_none(),
+                    configured: crate::legacy_core::security_level_change::configured_level(
+                        &self.config,
+                    ),
+                    outside_user_config:
+                        crate::legacy_core::security_level_change::non_user_level_floor(
+                            &self.config,
+                        ),
+                };
+                // #691/#783: only Windows needs its sandbox set up before
+                // Moderate or Aggressive can be chosen.
+                #[cfg(target_os = "windows")]
+                let windows_sandbox_steps =
+                    crate::windows_sandbox::protected_level_setup_steps(&self.config)
+                        .map(str::to_string);
+                #[cfg(not(target_os = "windows"))]
+                let windows_sandbox_steps = None;
                 self.bottom_pane.show_view(Box::new(
                     crate::bottom_pane::security_view::SecurityView::new(
                         Some(self.config.security_level),
+                        || {
+                            crate::security::current::current_values(
+                                &self.config,
+                                crate::security::current::level_now(&self.config, core.thread),
+                            )
+                        },
+                        || {
+                            self.config
+                                .features
+                                .enabled(codex_features::Feature::ProtectedModePreflight)
+                                .then(|| {
+                                    crate::security::preflight::PreflightInput::from_config(
+                                        &self.config,
+                                    )
+                                })
+                        },
                         self.bottom_pane.list_keymap(),
-                    ),
+                    )
+                    .with_confirmation(core, self.app_event_tx.clone())
+                    .with_moderate_facts(crate::security::moderate::Facts::from_config(
+                        &self.config,
+                    ))
+                    .with_before_restart(|| crate::security::current::before_restart(&self.config))
+                    .with_windows_sandbox_steps(windows_sandbox_steps)
+                    .with_aggressive_home_link(crate::security::home_link::aggressive_blocker(
+                        &self.config.codex_home,
+                        self.config.cwd.as_path(),
+                    ))
+                    .with_inspector(|| {
+                        crate::security::inspector::InspectorInput::from_config(
+                            &self.config,
+                            core.thread,
+                            core.configured,
+                            core.outside_user_config,
+                        )
+                    }),
                 ));
             }
             SlashCommand::Vim => {
@@ -519,7 +578,7 @@ impl ChatWidget {
             // No arguments means the current UTC day, which is the question an
             // operator actually has when they type this.
             SlashCommand::Cost => {
-                self.open_accounting_command("requests", chrono::Utc::now().date_naive());
+                self.open_cost_command("", chrono::Utc::now().date_naive());
             }
             SlashCommand::Ide => {
                 self.handle_ide_command();
@@ -769,12 +828,27 @@ impl ChatWidget {
         match cmd {
             SlashCommand::Usage => {
                 if trimmed.split_whitespace().next() == Some("requests") {
-                    self.open_accounting_command(trimmed, chrono::Utc::now().date_naive());
+                    // `/cost` is developer-only (PF-60-S03): a build that
+                    // records no costs says so instead of opening a view it
+                    // could never fill.
+                    if cfg!(feature = "developer-accounting") {
+                        self.open_accounting_command(trimmed, chrono::Utc::now().date_naive());
+                    } else {
+                        self.add_info_message(
+                            tokens::NO_COST_HISTORY.to_string(),
+                            /*hint*/ None,
+                        );
+                    }
                 } else if self.ensure_usage_command_available() {
                     match tokens::TokenActivityView::parse(trimmed) {
                         Some(view) => self.add_token_activity_output(view),
                         None => self.add_error_message(
-                            "Usage: /usage [daily|weekly|cumulative] or /usage requests [YYYY-MM-DD]".to_string(),
+                            if cfg!(feature = "developer-accounting") {
+                                "Usage: /usage [daily|weekly|cumulative] or /usage requests [YYYY-MM-DD]"
+                            } else {
+                                "Usage: /usage [daily|weekly|cumulative]"
+                            }
+                            .to_string(),
                         ),
                     }
                 }
@@ -785,12 +859,7 @@ impl ChatWidget {
             // previously reachable only as an undocumented argument to a
             // command that hid itself without one.
             SlashCommand::Cost => {
-                let args = if trimmed.is_empty() {
-                    "requests".to_string()
-                } else {
-                    format!("requests {trimmed}")
-                };
-                self.open_accounting_command(&args, chrono::Utc::now().date_naive());
+                self.open_cost_command(trimmed, chrono::Utc::now().date_naive());
             }
             SlashCommand::Ide => {
                 self.handle_ide_command_args(trimmed);

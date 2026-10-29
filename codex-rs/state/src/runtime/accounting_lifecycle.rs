@@ -6,7 +6,7 @@ use codex_protocol::ThreadId;
 use std::collections::BTreeMap;
 
 const DAY_MS: i64 = 86_400_000;
-const REPLAY_MS: i64 = 365 * DAY_MS;
+const REPLAY_MS: i64 = crate::runtime::accounting::REPLAY_MS;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Current<T> {
@@ -57,6 +57,10 @@ pub struct DayTotals {
     /// meaning 1.0x. `unknown` counts plan attempts with no stateable figure.
     pub plan_burn_milli_tokens: Metric,
     pub plan_attempts: i64,
+    /// Attempts that ran on the user's own machine (`Basis::Local`).
+    pub local_attempts: i64,
+    /// Attempts with no declared billing basis (`Basis::Undeclared`).
+    pub undeclared_attempts: i64,
 }
 
 impl DayTotals {
@@ -69,6 +73,24 @@ impl DayTotals {
             totals.add(quote)?;
         }
         Ok(totals)
+    }
+
+    /// Attempts billed per token. Every other attempt - subscription, local or
+    /// undeclared - has no billed price by construction, so it is also counted
+    /// in `unknown_estimates`; `per_use_unknown` takes them back out.
+    pub fn per_use_attempts(&self) -> i64 {
+        self.attempts
+            .saturating_sub(self.plan_attempts)
+            .saturating_sub(self.local_attempts)
+            .saturating_sub(self.undeclared_attempts)
+    }
+
+    /// Pay-per-use attempts with no complete estimate.
+    pub fn per_use_unknown(&self) -> i64 {
+        self.unknown_estimates
+            .saturating_sub(self.plan_attempts)
+            .saturating_sub(self.local_attempts)
+            .saturating_sub(self.undeclared_attempts)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -94,6 +116,21 @@ impl DayTotals {
             .unknown_estimates
             .checked_add(i64::from(quote.all_buckets_priced.is_none()))
             .context("estimate count overflow")?;
+        match quote.basis() {
+            Basis::Local => {
+                self.local_attempts = self
+                    .local_attempts
+                    .checked_add(1)
+                    .context("local attempt count overflow")?;
+            }
+            Basis::Undeclared => {
+                self.undeclared_attempts = self
+                    .undeclared_attempts
+                    .checked_add(1)
+                    .context("undeclared attempt count overflow")?;
+            }
+            Basis::Billed | Basis::PlanEquivalent => {}
+        }
         let plan = quote.is_plan();
         if plan {
             self.equivalent_usd = self.equivalent_usd.add(quote.known_equivalent)?;
@@ -140,13 +177,8 @@ impl<'a> Lifecycle<'a> {
 
     #[cfg_attr(not(test), allow(dead_code))]
     async fn refresh_current(&self, id: Uuid) -> anyhow::Result<Current<()>> {
-        let mut tx = self
-            .estimates
-            .journal
-            .runtime
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let mut tx =
+            crate::runtime::db_lock::begin_immediate(&self.estimates.journal.runtime.pool).await?;
         let result = Journal::refresh_contribution_on_connection(&mut tx, id).await;
         match result {
             Ok(value) => {
@@ -207,13 +239,8 @@ impl<'a> Lifecycle<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     async fn delete_recorded_thread(&self, thread: ThreadId, as_of_ms: i64) -> anyhow::Result<()> {
         ensure!(as_of_ms >= 0, "negative deletion time");
-        let mut tx = self
-            .estimates
-            .journal
-            .runtime
-            .pool
-            .begin_with("BEGIN IMMEDIATE")
-            .await?;
+        let mut tx =
+            crate::runtime::db_lock::begin_immediate(&self.estimates.journal.runtime.pool).await?;
         let result = async {
             if !matches!(retention_fixture_on_connection(&mut tx).await?, RetentionFixture::Absent) {
                 return retention_plan::reduction::atomic::delete_on_connection(&mut tx, thread, as_of_ms).await;
@@ -317,7 +344,10 @@ impl Journal<'_> {
         read_at_ms: i64,
     ) -> anyhow::Result<crate::accounting::InspectionDay> {
         let mut work = crate::runtime::accounting::store::InspectionWork::new(conn).await?;
-        Self::inspect_window_on_connection(conn, owner, day, read_at_ms, None, &mut work).await
+        Self::inspect_window_on_connection(
+            conn, owner, day, read_at_ms, /*window*/ None, &mut work,
+        )
+        .await
     }
 
     pub(in crate::runtime::accounting) async fn inspect_window_on_connection(
@@ -338,7 +368,12 @@ impl Journal<'_> {
             RetentionFixture::Staging => return Ok(InspectionDay::CheckpointLag),
             RetentionFixture::Absent => anyhow::bail!("missing retention schema"),
         };
-        ensure!(read_at_ms >= checkpoint, "backward inspection read");
+        if read_at_ms < checkpoint {
+            return Err(crate::runtime::accounting::store::ClockBehindLedger {
+                behind_ms: checkpoint.saturating_sub(read_at_ms),
+            }
+            .into());
+        }
         if day > checkpoint / DAY_MS {
             return Ok(InspectionDay::CheckpointLag);
         }
@@ -510,11 +545,7 @@ impl Journal<'_> {
             completed_as_of_ms: checkpoint,
             detail_expired_through_ms: (checkpoint >= 90 * DAY_MS)
                 .then(|| checkpoint - 90 * DAY_MS),
-            aggregate_day_floor: if checkpoint < REPLAY_MS {
-                0
-            } else {
-                (checkpoint - REPLAY_MS) / DAY_MS + 1
-            },
+            aggregate_day_floor: crate::runtime::accounting::aggregate_day_floor(checkpoint),
             oldest_recorded_day: sqlx::query_scalar(
                 "SELECT min(day) FROM (
                  SELECT utc_day day FROM draft_accounting_compact_days WHERE thread_id = ?1
@@ -529,9 +560,34 @@ impl Journal<'_> {
             "SELECT EXISTS(SELECT 1 FROM draft_accounting_compact_days WHERE thread_id = ? AND utc_day = ?)",
         ).bind(owner.to_string()).bind(day).fetch_one(&mut *conn).await?;
         // A compact prefix cannot supply detail, but retained raw suffixes can.
-        if day < coverage.aggregate_day_floor
-            || (compact && window.is_none())
-            || (read_at_ms >= 90 * DAY_MS && lower <= read_at_ms - 90 * DAY_MS)
+        // A whole day with nothing recorded for this owner loses no detail to
+        // retention; the tree inspection decides what that emptiness shows.
+        // #1196: so does a range bucket's part of such a day, inside the daily
+        // totals. A raw row elsewhere on the day keeps the window unavailable,
+        // and so does the floor's edge: expiry can run ahead of the checkpoint,
+        // so the floor is taken at the read instead.
+        let recorded = !records.is_empty() || compact;
+        let expired = read_at_ms >= 90 * DAY_MS && lower <= read_at_ms - 90 * DAY_MS;
+        let unrecorded_day = window.is_some()
+            && !recorded
+            && expired
+            && day >= crate::runtime::accounting::aggregate_day_floor(read_at_ms)
+            // Without budget for this check, this day's tree scan and the
+            // start's, the window stays unavailable. Later days and this day's
+            // candidates are not reserved for: a range near the budget can
+            // still become too large, which claims nothing.
+            && work.spare_scan(/*reserve*/ 2)
+            && !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM draft_accounting_attempts
+                 WHERE json_extract(payload, '$.thread_id') = ?
+                 AND json_extract(payload, '$.dispatched_at_ms') / 86400000 = ?)",
+            )
+            .bind(owner.to_string())
+            .bind(day)
+            .fetch_one(&mut *conn)
+            .await?;
+        if (recorded || (window.is_some() && !unrecorded_day))
+            && (day < coverage.aggregate_day_floor || (compact && window.is_none()) || expired)
         {
             return Ok(InspectionDay::DetailUnavailable {
                 coverage,
@@ -596,6 +652,8 @@ impl Journal<'_> {
             unknown_parent_unavailable_threads: 0,
             unknown_parent_requests: BTreeMap::new(),
             other_conversations: None,
+            empty_day: None,
+            recording_gap: false,
             totals,
             requests,
         }))

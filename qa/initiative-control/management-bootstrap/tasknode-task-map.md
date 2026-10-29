@@ -141,6 +141,49 @@ against these tasks.
   `.codex-work/workers-20261002/tasknode-f4bec7e-evidence.md`.
 - Worker record: `.codex-work/workers-20261002/l1v2-bug.result.md`.
 
+## Personal tasks (not PF-80)
+
+### `task_05099d2ec350b875c3b6b638571a22ca`: Draft the AI newsletter section covering NeoClouds, SpaceX/XAI, and AI Capex
+
+- Request: `req_f9052fb2-f908-40de-88e2-4714ca863561`. Reward shown: 2.5. Accepted
+  2026-08-13 (`evt_0fbc65d1fccc1be80982df0a`). Corbanu did not accept it, move it
+  or claim the reward.
+- Work: the AI section for the newsletter Travis writes with Alex, "AI: Everybody
+  Wants to Be the Landlord". It covers AI capex, NeoClouds and SpaceX/xAI, with data
+  current to 2026-10-05, 26 dated sources and a HyperLiquid/Binance angle. An
+  independent agent reviewed it: the first pass failed, the issues were fixed, and the
+  re-review passed. Alex has not reviewed it yet, and it is not published.
+- Deliverable: `.codex-work/workers-20261005/ai-newsletter-section-20261005.md`,
+  sha256 `8b8ac8a1f08f884f8f68890db8f8a0c36bb61f8bc2e88fdb617c19c1b1026b83`.
+- Evidence: one initial submission on 2026-10-06 ~00:46Z (full section text), receipt
+  `task_evt_eabb4ab0-56e9-4800-b0c1-6fbddde18e7a`. Task Node then asked for the
+  file's sha256. One verification response was sent, receipt
+  `task_evt_1f2d6d31-3472-4492-90d8-4395f142d4c1`, and the task read **Rewarded**
+  (2.5 PFT) at 2026-10-06T00:47:11Z. The CLI creates its own idempotency key, so the
+  local guard key, bodies and receipts are in
+  `.codex-work/workers-20261005/tasknode-05099d2/`.
+
+### `task_96e88f7099fd906d9b8080775ab6c402`: Draft the private inference user flow spec for PF Terminal
+
+- Request: `req_e7e9d13a-7aaa-48fd-9be8-741f6346b065`. Reward shown: 2.5.
+  It has been Accepted since 2026-08-12. This worker did not accept or move it.
+- Work: `docs/specs/private-inference-user-flow.md` (draft proposal, not a shipped
+  feature), PR https://github.com/CorbanuCore/CorbanuTerminal/pull/170 (branch
+  `docs/private-inference-user-flow-spec`, base `6bd7fe8413`). Commits
+  `059685a57f`, `36ae77ebe7`, `f7e9fb6964` (file sha256 `b227050e…3fdc39`). Open,
+  not merged.
+- Review: two independent read-only reviews. Round 1 failed 2 criteria with 9
+  findings. Round 2 resolved 8 and left 1 partial, raised 3 new issues, and
+  rated all criteria PASS. All open items were fixed in `f7e9fb6964`.
+- Evidence: submitted once on 2026-10-06 at about 00:53Z, receipt
+  `task_evt_4e144110-eae5-4fa9-8683-ee884407c145`. The verification request
+  asked for the tier tables and the B.3 billing example verbatim. Response
+  receipt: `task_evt_d04d92f3-2be4-4603-8a4d-be08fd8efa10`. Bodies are in
+  `.codex-work/workers-20261005/tasknode-96e88f7-{evidence,verification}.md`.
+- Outcome: **Rewarded** 2026-10-06 00:56Z, 2.25 PFT, tx
+  `6075F5DD81161E15ED333A275EC7B13642626D86B04B6B71CF9954CAD571965B`.
+- Open: product decisions OD1–OD4 and dependencies D1–D3 listed in the spec.
+
 ## Rules for evidence against these tasks
 
 1. Submit evidence only after Task Node shows the task as accepted and

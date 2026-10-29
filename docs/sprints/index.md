@@ -32,16 +32,23 @@ contract. A sprint turns one feature into an exact code-and-evidence checklist.
 - A `ready` or `in_progress` sprint requires an active plan plus an exact
   worktree, branch, and 40-character base commit matching that plan.
 - Parallel implementation must satisfy the allocation rules below; executable
-  dependencies must already be completed and archived.
+  dependencies must already be completed and archived, or (coordinator,
+  2026-10-06) be merged to main behind a default-off flag with the record's
+  `merged_behind_flag` set and its `gate_evidence` file present.
 - A sprint never grants authority beyond its active plan.
 
 ## Bounded parallel implementation
 
-Each of at most three active initiatives has `parallel_sprint_limit: 1` and a
-named `integration_owner`. Across all plans, at most **three** sprints may be
-`in_progress` or `blocked`; blocked work keeps its reservation until explicitly
-returned to draft with a recorded handoff. This is Travis's September 10/11
-operating-model decision, not additional within-plan parallelism.
+Each of at most three active initiatives names an `integration_owner` and
+declares `parallel_sprint_limit` from 1 to 3. A limit above 1 requires
+`parallel_lanes` naming at least that many lanes; each reserved sprint's
+`parallel_lane` must be one of them, and concurrent `write_scope`s must not
+overlap. Travis's 2026-10-06 decision replaced the single executable security
+sprint with three security lanes (broker, untrusted content, TUI); the other
+plans keep a limit of 1. Across all plans at most **five** sprints may be
+`in_progress` or `blocked` (three security lanes plus one per other plan);
+blocked work keeps its reservation until explicitly returned to draft with a
+recorded handoff.
 
 Before a parallel allocation starts:
 
@@ -124,13 +131,15 @@ integration must be explicit, never reported as delivered. Dashboard maintenance
 success does not mean product implementation is running. Process explicit answers
 into canonical records and the unlocked next action without another continue ask.
 
-Root AGENTS.md's September 12 delegation lets the named integrator extend review
-allowances to unblock work, preserving prior usage and recording each extension.
+Going over a review budget needs explicit authorization from Travis or the
+coordinator (root AGENTS.md "Review budget extensions", October 14, 2026, which
+supersedes the September 12 integrator delegation); integrators and workers
+never self-authorize. Preserve prior usage and record each extension.
 One fresh independent review of a material candidate plus scoped corrections is
 normal, not repeated reviews of unchanged clean code. Move on when reviews have
 no substantive unresolved issues. The security owner retains sole implementation
 ownership; applicable functional acceptance is independently executed under the
-root policy. Only review-budget/time holds may be lifted by this delegation.
+root policy. Such an authorization lifts only review-budget/time holds.
 Main merges/pushes, releases, deployments, live Task Node
 actions, new product contracts and paid-service commitments still need their
 separate authority. Current assignments/evidence are in the
@@ -154,12 +163,14 @@ separate authority. Current assignments/evidence are in the
 
 | Plan | Plan status | Current sprints | Execution authority |
 | --- | --- | ---: | --- |
-| [PF-13 / security — workstream 1](../plans/active/p0-security-levels.md) | Active | [52 current sprints](current/p0-security-levels/index.md), 32 completed archives | Accepted main d870c92da and owner allocation ca9774262 reconciled; PF-35 external, PF-27-S04 in progress in its fresh owner worktree |
-| [Accounting — workstream 2](../plans/active/portfolio-agent-cost-accounting.md) | Active | 3 current PF-60 sprints; S01 archived | S02 isolated native-state journal allocated after S01 review and defaults approval; no live collection |
+| [P1 security hardening — workstream 1](../plans/active/p1-security-hardening.md) | Active (2026-10-08) | [32 current sprints](current/p1-security-hardening/index.md), 4 archives | PF-13-S07 `ready` (carried from P0); PF-27-S06 and PF-27-S07 completed and archived 2026-10-08, PF-27-S08 2026-10-09, PF-27-S09 2026-10-10 (accepted with known limits); broker lane free; the rest draft |
+| [P0 security](../plans/completed/main-2026-10-08-p0-security-levels.md) | Completed (closed by decision 2026-10-08) | [2 hosted drafts](current/p0-security-levels/index.md), 53 archives | 20 of 21 core records archived; PF-13-S07 and the milestones moved to P1 |
+| [Accounting — workstream 2](../plans/completed/main-2026-10-10-portfolio-agent-cost-accounting.md) | Completed (closed by decision 2026-10-10) | 0 current; S01–S05 archived | S04 accepted 2026-10-10 with known limits; S05 waiver (a) lifted, (b) carried; collection developer-only |
+| [Accounting follow-ups — workstream 2](../plans/completed/main-2026-10-20-portfolio-agent-cost-accounting-followups.md) | Completed (2026-10-20, without a release) | 0 current; S06–S10 archived 2026-10-16 after Travis's acceptance (S10, #909: 29 passed, 1 failed, 7 blocked of 37). S10 signed off 2026-10-27 (D208) at 35 passed, 0 failed, 2 blocked after re-run R1 (#1411) and owner decisions D113 and D207 (ACC-04, ACC-11, ACC-14 passed by owner decision; blocked on the record); named limits ACC-22 and ACC-35 | Follow-up live run (D25, D3, D16) recorded 2026-10-20 on Tart: 18 passed, 2 failed, 5 blocked of 25; Travis's acceptance pending; new issues #1038, #1039, #1045 |
 | [Task Node — workstream 3](../plans/active/initiative-delivery-control.md) | Active | PF-80-S01, two PF-79 beta drafts, PF-81-S01 visual QA draft | Offline native increments integrated locally; latest validity worker returned for manager review; beta/harness dependencies unchanged |
-| [Unified provider onboarding and management](../plans/proposed/unified-provider-auth.md) | Deferred | [1 current sprint](current/unified-provider-auth/index.md) | PF-58 human accepted for integration; residual automated/native qualification retained separately |
+| [Unified provider onboarding](../plans/completed/main-2026-10-14-unified-provider-auth.md) | Completed (closed 2026-10-14 to free slot 2; flag removal in a [draft plan](../plans/proposed/named-accounts-flag-removal.md)) | [1 current sprint](current/unified-provider-auth/index.md) (PF-58-S01) | PF-84-S01..S06 completed and archived (S06 2026-10-13, limited testing; S02..S06 behind the `named_accounts` flag, flag-removal prerequisites in the draft flag-removal plan); PF-58 residual qualification unchanged |
 | [Arbitrary-model Autoreview](../plans/proposed/arbitrary-model-autoreview.md) | Proposed | [7 draft sprints](current/arbitrary-model-autoreview/index.md) | None until plan activation and sprint worktree allocation |
-| [Prompt-injection firewall and brokered authority](../plans/proposed/prompt-injection-firewall.md) | Proposed | 0 | Historical 72-sprint decomposition remains cancelled; every record maps into the active P0 plan's current work |
+| [Prompt-injection firewall and brokered authority](../plans/proposed/prompt-injection-firewall.md) | Proposed | 0 | Historical 72-sprint decomposition remains cancelled; every record maps into the P0 plan (closed 2026-10-08) and its P1 successor |
 
 ## Machine check
 

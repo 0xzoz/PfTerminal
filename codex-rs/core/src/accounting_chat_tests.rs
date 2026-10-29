@@ -18,7 +18,6 @@ use codex_state::accounting::Observation;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::FutureExt;
 use futures::StreamExt;
-use futures::poll;
 use pretty_assertions::assert_eq;
 use std::sync::atomic::AtomicUsize;
 
@@ -86,6 +85,12 @@ impl Fixture {
         &self,
         query: &'static str,
     ) -> anyhow::Result<Vec<T>> {
+        // A slow write is put off and written later (#865); wait for the writer.
+        assert!(
+            self.db
+                .flush_accounting(std::time::Duration::from_secs(30))
+                .await
+        );
         let pool = self
             .db
             .sqlite()
@@ -121,7 +126,7 @@ async fn accounting_chat_bootstrap_is_lazy_once_and_mode_local() -> anyhow::Resu
 #[tokio::test]
 async fn accounting_chat_direct_auth_and_gateway_eligibility() -> anyhow::Result<()> {
     assert!(legacy_eligible(&provider(), Some(&auth()), &body()));
-    assert!(!legacy_eligible(&provider(), None, &body()));
+    assert!(!legacy_eligible(&provider(), /*auth*/ None, &body()));
     for kind in 0..4 {
         let mut provider = provider();
         match kind {
@@ -180,17 +185,18 @@ async fn accounting_chat_direct_auth_and_gateway_eligibility() -> anyhow::Result
     }
     let fixture = Fixture::new().await?;
     fixture.resolve().await?;
+    // Eligibility lost mid-turn closes collection; the request is still served.
     assert!(
         fixture
             .deferred
             .resolve(
                 &provider(),
-                None,
+                /*auth*/ None,
                 &format!("{ENDPOINT}/chat/completions"),
                 &body()
             )
-            .await
-            .is_err()
+            .await?
+            .is_none()
     );
     assert!(fixture.deferred.check().is_err());
     Ok(())
@@ -231,6 +237,8 @@ fn request() -> Request {
     }
 }
 
+// Uses the debug-only stage-one binding fixture.
+#[cfg(debug_assertions)]
 #[tokio::test]
 async fn accounting_chat_auth_and_guard_before_admission() -> anyhow::Result<()> {
     let fixture = Fixture::new().await?;
@@ -242,7 +250,7 @@ async fn accounting_chat_auth_and_guard_before_admission() -> anyhow::Result<()>
             Some(evidence.clone()),
             "gpt-5.6-sol".into(),
         ),
-        None,
+        /*binding*/ None,
     );
     let api_provider = provider().to_api_provider(Some(codex_protocol::auth::AuthMode::ApiKey))?;
     let client = codex_api::ChatCompletionsClient::new(transport, api_provider, Arc::new(Denied))
@@ -268,7 +276,7 @@ async fn accounting_chat_auth_and_guard_before_admission() -> anyhow::Result<()>
         .with_effective_security_policy(
             codex_security_policy::SecurityLevel::Permissive,
             owner.thread_id,
-            false,
+            /*inherits_from_spawn_parent*/ false,
         )?;
     let owner = Arc::new(owner);
     let memory = crate::memory_stage_one::StageOneMemoryClient::new(
@@ -304,6 +312,8 @@ async fn accounting_chat_auth_and_guard_before_admission() -> anyhow::Result<()>
     Ok(())
 }
 
+// Uses the debug-only stage-one binding fixture.
+#[cfg(debug_assertions)]
 #[tokio::test]
 async fn accounting_chat_borrowed_binding_denies_existing_and_future_clones() -> anyhow::Result<()>
 {
@@ -360,6 +370,8 @@ async fn accounting_chat_borrowed_binding_denies_existing_and_future_clones() ->
     Ok(())
 }
 
+// Uses the debug-only stage-one binding fixture.
+#[cfg(debug_assertions)]
 #[tokio::test]
 async fn accounting_chat_frame_guard_denies_provider_change_before_client_publication()
 -> anyhow::Result<()> {
@@ -472,6 +484,7 @@ async fn accounting_chat_bootstrap_cancel_scope_and_latch() -> anyhow::Result<()
     let (mut session, _) = crate::session::tests::make_session_and_context().await;
     session.services.state_db = None;
     let deferred = DeferredChatSampling::new(Arc::new(session), "missing-state".into(), mode());
+    // No state database: the request goes unrecorded rather than failing.
     assert!(
         deferred
             .resolve(
@@ -480,30 +493,30 @@ async fn accounting_chat_bootstrap_cancel_scope_and_latch() -> anyhow::Result<()
                 &format!("{ENDPOINT}/chat/completions"),
                 &body()
             )
-            .await
-            .is_err()
+            .await?
+            .is_none()
     );
     assert!(deferred.check().is_err());
+    // Opening a sampling writes nothing, so another connection holding the
+    // state DB's write lock does not hold it up.
     let fixture = Fixture::new().await?;
-    let permit = crate::accounting::WRITES.acquire().await?;
-    let mut pending = Box::pin(fixture.resolve());
-    assert!(poll!(&mut pending).is_pending());
-    drop(pending);
-    drop(permit);
-    assert!(fixture.deferred.check().is_err());
-    assert!(!fixture.deferred.sampling.initialized());
-    assert!(fixture.rows::<Attempt>(ATTEMPTS).await.is_err());
+    let mut lock = crate::accounting::tests_support::hold_write_lock(&fixture.db).await?;
+    tokio::time::timeout(std::time::Duration::from_secs(5), fixture.resolve()).await??;
+    fixture.deferred.check()?;
+    assert!(fixture.deferred.sampling.initialized());
+    sqlx::query("ROLLBACK").execute(&mut *lock).await?;
     fixture.db.close().await;
     let fixture = Fixture::new().await?;
     let slot = Slot::default();
     let scope = Scope::attach(slot.clone(), Some(fixture.deferred.clone()))?;
     assert!(read(&slot)?.is_some());
     let evidence = ResponseEvidence::new(fixture.resolve().await?);
+    // Invalid usage closes collection without failing the stream.
     assert!(
         evidence
-            .observe(1, Err(codex_api::InvalidChatUsage))
+            .observe(/*position*/ 1, Err(codex_api::InvalidChatUsage))
             .await
-            .is_err()
+            .is_ok()
     );
     assert!(fixture.deferred.check().is_err());
     drop(scope);
@@ -531,7 +544,7 @@ async fn accounting_chat_response_local_attempt_identity() -> anyhow::Result<()>
     for (evidence, count) in [(&new, 7), (&old, 3)] {
         evidence
             .observe(
-                1,
+                /*position*/ 1,
                 Ok(ChatUsagePatch {
                     input_tokens: ChatTokenPresence::Number(count),
                     ..Default::default()
@@ -702,17 +715,14 @@ async fn accounting_chat_exact_final_endpoint_binding() -> anyhow::Result<()> {
             provider().to_api_provider(Some(codex_protocol::auth::AuthMode::ApiKey))?,
             Arc::new(Mutate(endpoint)),
         );
-        assert!(
-            api.stream_request(body(), Default::default())
-                .await
-                .is_err()
-        );
+        // A final route other than the approved one is sent, but not recorded.
+        assert!(api.stream_request(body(), Default::default()).await.is_ok());
         assert_eq!(
             (
                 sends.load(Ordering::SeqCst),
                 fixture.rows::<Attempt>(ATTEMPTS).await?.len()
             ),
-            (0, 0)
+            (1, 0)
         );
         assert!(fixture.deferred.check().is_err());
     }
@@ -720,7 +730,7 @@ async fn accounting_chat_exact_final_endpoint_binding() -> anyhow::Result<()> {
 }
 
 #[test]
-fn accounting_chat_cache_writes_are_read_only_on_openrouter() -> anyhow::Result<()> {
+fn accounting_chat_cache_writes_are_read_only_where_their_meaning_is_known() -> anyhow::Result<()> {
     use codex_state::accounting::Presence;
     let usage = |write| ChatUsagePatch {
         input_tokens: ChatTokenPresence::Number(8499),
@@ -731,27 +741,66 @@ fn accounting_chat_cache_writes_are_read_only_on_openrouter() -> anyhow::Result<
     };
     // OpenRouter omits the count for models with no cache-write charge.
     assert_eq!(
-        patch(usage(ChatTokenPresence::Missing), "openrouter")?.write,
+        patch(
+            usage(ChatTokenPresence::Missing),
+            "openrouter",
+            /*route*/ None
+        )?
+        .write,
         Presence::Number(0.try_into()?)
     );
     // A reported count is kept there, and an explicit null stays null.
     assert_eq!(
-        patch(usage(ChatTokenPresence::Number(300)), "openrouter")?.write,
+        patch(
+            usage(ChatTokenPresence::Number(300)),
+            "openrouter",
+            /*route*/ None
+        )?
+        .write,
         Presence::Number(300.try_into()?)
     );
     assert_eq!(
-        patch(usage(ChatTokenPresence::Null), "openrouter")?.write,
+        patch(
+            usage(ChatTokenPresence::Null),
+            "openrouter",
+            /*route*/ None
+        )?
+        .write,
         Presence::Null
     );
+    // OpenAI reports writes as a subset of the prompt (#361): kept as reported,
+    // and an absent count stays unknown.
+    for (write, expected) in [
+        (
+            ChatTokenPresence::Number(300),
+            Presence::Number(300.try_into()?),
+        ),
+        (ChatTokenPresence::Null, Presence::Null),
+        (ChatTokenPresence::Missing, Presence::Missing),
+    ] {
+        assert_eq!(
+            patch(usage(write), "openai", /*route*/ None)?.write,
+            expected
+        );
+    }
     // Every other route leaves the count unknown, reported or not: DeepSeek
     // bills written tokens as input, and a disjoint report would fail replay.
-    for provider in ["deepseek", "baseten", "zai", "custom-openrouter"] {
+    for provider in [
+        "deepseek",
+        "baseten",
+        "zai",
+        "custom-openrouter",
+        "openai-custom",
+    ] {
         for write in [
             ChatTokenPresence::Missing,
             ChatTokenPresence::Null,
             ChatTokenPresence::Number(300),
         ] {
-            assert_eq!(patch(usage(write), provider)?.write, Presence::Missing);
+            assert_eq!(
+                patch(usage(write), provider, /*route*/ None)?.write,
+                Presence::Missing
+            );
         }
     }
     Ok(())
@@ -766,26 +815,224 @@ fn accounting_chat_billed_charge_is_recorded_only_from_openrouter() -> anyhow::R
     };
     let stated = codex_state::accounting::Decimal::try_from("0.0123312".to_string())?;
     assert_eq!(
-        patch(usage(Some("0.0123312")), "openrouter")?.billed_usd,
+        patch(usage(Some("0.0123312")), "openrouter", /*route*/ None)?.billed_usd,
         Some(stated)
     );
-    assert_eq!(patch(usage(None), "openrouter")?.billed_usd, None);
+    assert_eq!(
+        patch(usage(None), "openrouter", /*route*/ None)?.billed_usd,
+        None
+    );
     // Beyond the exact type's 18 decimal places: dropped, never rounded, and
     // the token counts still record.
-    let fine = patch(usage(Some("0.0000000000000000001")), "openrouter")?;
+    let fine = patch(
+        usage(Some("0.0000000000000000001")),
+        "openrouter",
+        /*route*/ None,
+    )?;
     assert_eq!(fine.billed_usd, None);
     assert_eq!(
         fine.input,
         codex_state::accounting::Presence::Number(10.try_into()?)
     );
     assert_eq!(
-        patch(usage(Some("0.000018")), "pfterminal-plan")?.billed_usd,
+        patch(
+            usage(Some("0.000018")),
+            "pfterminal-plan",
+            /*route*/ None
+        )?
+        .billed_usd,
         Some(codex_state::accounting::Decimal::try_from(
             "0.000018".to_string()
         )?)
     );
     for provider in ["deepseek", "zai", "custom-openrouter"] {
-        assert_eq!(patch(usage(Some("0.5")), provider)?.billed_usd, None);
+        assert_eq!(
+            patch(usage(Some("0.5")), provider, /*route*/ None)?.billed_usd,
+            None
+        );
+    }
+    Ok(())
+}
+
+/// #368: Moonshot's Kimi Open Platform documents `cache_write_tokens` as the
+/// written part of the prompt, apart from the cached part, so the count is
+/// kept on that route whatever the provider is named, and nowhere else.
+#[test]
+fn accounting_chat_cache_writes_are_read_on_the_moonshot_route() -> anyhow::Result<()> {
+    use crate::config::PricedRoute;
+    use codex_state::accounting::Presence;
+    let usage = |write| ChatUsagePatch {
+        input_tokens: ChatTokenPresence::Number(8499),
+        cached_tokens: ChatTokenPresence::Number(1152),
+        cache_write_tokens: write,
+        output_tokens: ChatTokenPresence::Number(29),
+        ..Default::default()
+    };
+    for provider in ["kimi", "my-moonshot"] {
+        for (write, expected) in [
+            (
+                ChatTokenPresence::Number(7168),
+                Presence::Number(7168.try_into()?),
+            ),
+            (ChatTokenPresence::Null, Presence::Null),
+            // Moonshot leaves out a count that is zero (#368).
+            (ChatTokenPresence::Missing, Presence::Number(0.try_into()?)),
+        ] {
+            assert_eq!(
+                patch(
+                    usage(write),
+                    provider,
+                    Some(PricedRoute::MoonshotOpenPlatform)
+                )?
+                .write,
+                expected
+            );
+        }
+        // The same provider somewhere else keeps the count unknown.
+        assert_eq!(
+            patch(
+                usage(ChatTokenPresence::Number(7168)),
+                provider,
+                /*route*/ None
+            )?
+            .write,
+            Presence::Missing
+        );
+    }
+    Ok(())
+}
+
+/// #368: on the Moonshot route a cache count the API left out of a stated
+/// prompt is zero, a read missing from the prompt details is taken from
+/// `usage.cached_tokens`, and a null stays unknown. Nowhere else does a
+/// missing count become zero or `usage.cached_tokens` count.
+#[test]
+fn accounting_chat_moonshot_counts_left_out_are_zero() -> anyhow::Result<()> {
+    use crate::config::PricedRoute;
+    use codex_state::accounting::Presence;
+    let usage = |input, cached, usage_cached, write| ChatUsagePatch {
+        input_tokens: input,
+        cached_tokens: cached,
+        usage_cached_tokens: usage_cached,
+        cache_write_tokens: write,
+        output_tokens: ChatTokenPresence::Number(11),
+        ..Default::default()
+    };
+    let n = ChatTokenPresence::Number;
+    let missing = ChatTokenPresence::Missing;
+    let null = ChatTokenPresence::Null;
+    let moonshot = Some(PricedRoute::MoonshotOpenPlatform);
+    let zero = Presence::Number(0.try_into()?);
+    let cases = [
+        // (input, details read, usage read, write) -> (read, write)
+        ((n(100), missing, missing, missing), (zero, zero)),
+        (
+            (n(100), missing, n(40), missing),
+            (Presence::Number(40.try_into()?), zero),
+        ),
+        (
+            (n(100), n(30), n(40), n(5)),
+            (
+                Presence::Number(30.try_into()?),
+                Presence::Number(5.try_into()?),
+            ),
+        ),
+        (
+            (n(100), null, n(40), null),
+            (Presence::Null, Presence::Null),
+        ),
+        ((n(100), missing, null, missing), (Presence::Null, zero)),
+        (
+            (missing, missing, missing, missing),
+            (Presence::Missing, Presence::Missing),
+        ),
+    ];
+    // Whatever the provider is named, the route decides.
+    for provider in [
+        "kimi",
+        codex_model_provider_info::OPENAI_PROVIDER_ID,
+        codex_model_provider_info::OPENROUTER_PROVIDER_ID,
+    ] {
+        for ((input, cached, usage_cached, write), (read, written)) in cases {
+            let patch = patch(
+                usage(input, cached, usage_cached, write),
+                provider,
+                moonshot,
+            )?;
+            assert_eq!((patch.read, patch.write), (read, written), "{provider}");
+        }
+    }
+    // Off the route `usage.cached_tokens` never counts and a missing read stays
+    // unknown; only OpenRouter's own write rule makes a missing write zero.
+    for (provider, written) in [
+        ("kimi", Presence::Missing),
+        (
+            codex_model_provider_info::OPENAI_PROVIDER_ID,
+            Presence::Missing,
+        ),
+        (codex_model_provider_info::OPENROUTER_PROVIDER_ID, zero),
+    ] {
+        let patch = patch(
+            usage(n(100), missing, n(40), missing),
+            provider,
+            /*route*/ None,
+        )?;
+        assert_eq!(
+            (patch.read, patch.write),
+            (Presence::Missing, written),
+            "{provider}"
+        );
+    }
+    Ok(())
+}
+
+/// #786 (Travis, 2026-10-14, option a): a reasoning count above the output
+/// count it is part of is recorded as not reported, and the rest of the
+/// report - the charge included - is kept, so replay accepts the record.
+#[test]
+fn accounting_chat_reasoning_above_output_is_not_reported() -> anyhow::Result<()> {
+    use codex_state::accounting::Presence;
+    let usage = |reasoning, output| ChatUsagePatch {
+        input_tokens: ChatTokenPresence::Number(9098),
+        output_tokens: output,
+        reasoning_tokens: reasoning,
+        total_tokens: ChatTokenPresence::Number(9134),
+        billed_usd: Some("0.00274188".to_string()),
+        ..Default::default()
+    };
+    // The real MiniMax M3 report: 37 reasoning tokens of 36 output.
+    let report = patch(
+        usage(ChatTokenPresence::Number(37), ChatTokenPresence::Number(36)),
+        "openrouter",
+        /*route*/ None,
+    )?;
+    assert_eq!(report.reasoning, Presence::Missing);
+    assert_eq!(report.output, Presence::Number(36.try_into()?));
+    assert_eq!(report.input, Presence::Number(9098.try_into()?));
+    assert_eq!(report.total, Presence::Number(9134.try_into()?));
+    assert_eq!(
+        report.billed_usd,
+        Some(codex_state::accounting::Decimal::try_from(
+            "0.00274188".to_string()
+        )?)
+    );
+    // A count within the output, equal included, is kept as reported; so is
+    // a reasoning count with no output count to compare it with.
+    for (reasoning, output, expected) in [
+        (36, Some(36), Presence::Number(36.try_into()?)),
+        (5, Some(36), Presence::Number(5.try_into()?)),
+        (37, None, Presence::Number(37.try_into()?)),
+    ] {
+        let output = output.map_or(ChatTokenPresence::Missing, ChatTokenPresence::Number);
+        assert_eq!(
+            patch(
+                usage(ChatTokenPresence::Number(reasoning), output),
+                "openrouter",
+                /*route*/ None
+            )?
+            .reasoning,
+            expected
+        );
     }
     Ok(())
 }
