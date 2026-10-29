@@ -1386,7 +1386,9 @@ impl DenyAceKind {
                 dacl_has_deny_for_sid(p_dacl, psid, FILE_DELETE_CHILD, inherit_to_subdirs)
             }
             Self::Delete => {
-                dacl_has_deny_for_sid(p_dacl, psid, DELETE, /*require_container_inherit*/ false)
+                dacl_has_deny_for_sid(
+                    p_dacl, psid, DELETE, /*require_container_inherit*/ false,
+                )
             }
         }
     }
