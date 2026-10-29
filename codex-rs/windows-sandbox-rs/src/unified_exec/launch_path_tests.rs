@@ -186,8 +186,11 @@ impl EscapeSweep {
         let since_unix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock after 1970");
+        // A second early: creation times are kept at clock-tick resolution.
+        const MARGIN: u64 = 10_000_000;
         let since = UNIX_EPOCH_AS_FILETIME
-            + u64::try_from(since_unix.as_nanos() / 100).expect("time fits in u64");
+            + u64::try_from(since_unix.as_nanos() / 100).expect("time fits in u64")
+            - MARGIN;
         Self {
             since,
             finished: false,
@@ -252,18 +255,16 @@ fn end_escaped_processes(since: u64) -> SweepResult {
 /// # Safety
 /// Calls Win32 process APIs; the handle is checked and closed here.
 unsafe fn end_if_escaped(name: &str, pid: u32, since: u64, result: &mut SweepResult) {
-    let access = PROCESS_QUERY_LIMITED_INFORMATION
-        | PROCESS_TERMINATE
-        | windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
+    use windows_sys::Win32::System::Threading::OpenProcess;
     // SAFETY: per the caller.
     unsafe {
-        let process = windows_sys::Win32::System::Threading::OpenProcess(access, 0, pid);
-        // Gone, or not this user's to end (so not a legacy command's).
-        if process == 0 {
+        let query = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        // Gone, or not this user's (so not a legacy command's).
+        if query == 0 {
             return;
         }
-        let process = OwnedHandle::from_raw_handle(process as _);
-        let raw = process.as_raw_handle() as HANDLE;
+        let query = OwnedHandle::from_raw_handle(query as _);
+        let raw = query.as_raw_handle() as HANDLE;
         let mut created: FILETIME = std::mem::zeroed();
         let mut exited: FILETIME = std::mem::zeroed();
         let mut kernel: FILETIME = std::mem::zeroed();
@@ -278,7 +279,16 @@ unsafe fn end_if_escaped(name: &str, pid: u32, since: u64, result: &mut SweepRes
         if !ours {
             return;
         }
-        if TerminateProcess(raw, 1) == 0 {
+        let access = PROCESS_TERMINATE | windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
+        let process = OpenProcess(access, 0, pid);
+        if process == 0 {
+            result
+                .left
+                .push(format!("{name}:{pid} open error={}", GetLastError()));
+            return;
+        }
+        let process = OwnedHandle::from_raw_handle(process as _);
+        if TerminateProcess(process.as_raw_handle() as HANDLE, 1) == 0 {
             result
                 .left
                 .push(format!("{name}:{pid} terminate error={}", GetLastError()));
@@ -292,16 +302,18 @@ unsafe fn end_if_escaped(name: &str, pid: u32, since: u64, result: &mut SweepRes
     }
 }
 
-/// Fails if a legacy session left `root` recorded in the integrity-label
-/// registry after it ended.
-fn assert_labels_released(root: &Path) {
-    let canonical = dunce::canonicalize(root).expect("canonical root");
-    let recorded = crate::integrity_leases::recorded_roots().expect("read the label records");
-    assert!(
-        !recorded.contains(&canonical),
-        "{} is still recorded after its sessions ended: {recorded:?}",
-        canonical.display()
-    );
+/// Whether the integrity-label registry still records `root` once its
+/// legacy sessions ended: `None` when it doesn't.
+fn labels_still_recorded(root: &Path) -> Option<String> {
+    let canonical = match dunce::canonicalize(root) {
+        Ok(canonical) => canonical,
+        Err(err) => return Some(format!("canonicalize {}: {err}", root.display())),
+    };
+    match crate::integrity_leases::recorded_roots() {
+        Ok(recorded) if !recorded.contains(&canonical) => None,
+        Ok(recorded) => Some(format!("{} in {recorded:?}", canonical.display())),
+        Err(err) => Some(format!("read the label records: {err:#}")),
+    }
 }
 
 /// Writes [`own_containment`] to the report path in its arguments. Does
@@ -441,6 +453,9 @@ struct LaunchOutcome {
     new_processes: Vec<String>,
     /// What the launch left running outside the sandbox, ended afterwards.
     sweep: SweepResult,
+    /// The test root, if still recorded in the integrity-label registry
+    /// after the test's sessions ended.
+    labels_left: Option<String>,
     stdout: String,
     log: String,
 }
@@ -461,7 +476,6 @@ impl LaunchOutcome {
             "\nlaunch-path {route}: launch={:?} report={:?} new={:?} sweep={:?}",
             self.launch, self.report, self.new_processes, self.sweep
         );
-        self.assert_cleaned_up(route);
         assert!(
             (refused && self.report.is_none()) || contained,
             "{route} left the session: launch={:?} report={:?} new={:?}\nstdout={:?}\n{}",
@@ -471,14 +485,17 @@ impl LaunchOutcome {
             self.stdout,
             self.log
         );
+        self.assert_cleaned_up(route);
     }
 
-    /// Fails if a process the launch left outside the sandbox kept running.
+    /// Fails if a process the launch left outside the sandbox kept running,
+    /// or the test root is still recorded in the integrity-label registry.
     fn assert_cleaned_up(&self, route: &str) {
         assert!(
-            self.sweep.left.is_empty(),
-            "{route} left processes running outside the sandbox: {:?}",
-            self.sweep
+            self.sweep.left.is_empty() && self.labels_left.is_none(),
+            "{route} did not clean up: sweep={:?} labels_left={:?}",
+            self.sweep,
+            self.labels_left
         );
     }
 }
@@ -553,6 +570,8 @@ async fn run_launch(
         report: report_text,
         new_processes,
         sweep: sweep.finish(),
+        // Set once all of the test's sessions have ended.
+        labels_left: None,
         stdout,
         log: sandbox_log(codex_home),
     }
@@ -575,7 +594,7 @@ fn legacy_launch_plain_child_stays_in_session() {
     let _guard = legacy_process_test_guard();
     let root = user_owned_test_root();
     let runtime = current_thread_runtime();
-    let outcome = runtime.block_on(async {
+    let mut outcome = runtime.block_on(async {
         let codex_home = sandbox_home("launch-control");
         let report = root.path().join("control.report");
         run_launch(
@@ -590,12 +609,11 @@ fn legacy_launch_plain_child_stays_in_session() {
         )
         .await
     });
-    assert_labels_released(root.path());
+    outcome.labels_left = labels_still_recorded(root.path());
     println!(
         "\nlaunch-path control: report={:?} sweep={:?}",
         outcome.report, outcome.sweep
     );
-    outcome.assert_cleaned_up("control");
     assert_eq!(
         (
             outcome.launch.as_deref(),
@@ -610,6 +628,7 @@ fn legacy_launch_plain_child_stays_in_session() {
         outcome.stdout,
         outcome.log
     );
+    outcome.assert_cleaned_up("control");
 }
 
 /// #1507 route 1: a legacy command names a process of another, concurrent
@@ -621,7 +640,7 @@ fn legacy_launch_under_another_session_process_stays_in_session() {
     let _guard = legacy_process_test_guard();
     let root = user_owned_test_root();
     let runtime = current_thread_runtime();
-    let outcome = runtime.block_on(async {
+    let mut outcome = runtime.block_on(async {
         let codex_home = sandbox_home("launch-parent");
         let hold_dir = root.path().join("hold");
         fs::create_dir_all(&hold_dir).expect("create hold dir");
@@ -685,7 +704,7 @@ fn legacy_launch_under_another_session_process_stays_in_session() {
                 .await;
         outcome
     });
-    assert_labels_released(root.path());
+    outcome.labels_left = labels_still_recorded(root.path());
     outcome.assert_contained("parent-process attribute", &["open_parent_error=5"]);
 }
 
@@ -709,7 +728,7 @@ fn run_powershell_launch(
     let _guard = legacy_process_test_guard();
     let root = user_owned_test_root();
     let runtime = current_thread_runtime();
-    let outcome = runtime.block_on(async {
+    let mut outcome = runtime.block_on(async {
         let codex_home = sandbox_home(name);
         let report = root.path().join(format!("{name}.report"));
         let encoded = BASE64.encode(
@@ -743,7 +762,7 @@ fn run_powershell_launch(
         )
         .await
     });
-    assert_labels_released(root.path());
+    outcome.labels_left = labels_still_recorded(root.path());
     outcome
 }
 
@@ -829,34 +848,64 @@ Finish-Launch
     let outcome = run_powershell_launch("launch-schtasks", &script, vec![(TASK_ENV, task)]);
     let removed = scheduled.remove();
     outcome.assert_contained("Task Scheduler", &["error=[folder] ", "hr=0x80070003"]);
-    assert!(
-        removed,
-        "the Task Scheduler task {} is still registered",
-        scheduled.0
-    );
+    assert_eq!(removed, Ok(()), "Task Scheduler task {}", scheduled.0);
 }
+
+/// Deletes the task named in `CODEX_1507_TASK` and prints `absent` once
+/// looking it up fails with "not found" (HRESULT 0x80070002).
+const REMOVE_TASK_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+function Codes($err) { for ($e = $err.Exception; $null -ne $e; $e = $e.InnerException) { '{0:X8}' -f $e.HResult } }
+$service = New-Object -ComObject Schedule.Service
+$service.Connect()
+$folder = $service.GetFolder('\')
+try { $folder.DeleteTask($env:CODEX_1507_TASK, 0) } catch { }
+try { $null = $folder.GetTask($env:CODEX_1507_TASK); 'present' } catch {
+  $codes = @(Codes $_)
+  if ($codes -contains '80070002') { 'absent' } else { 'lookup error ' + ($codes -join ',') }
+}
+"#;
 
 /// A Task Scheduler task the sandbox might have registered, removed when
 /// dropped.
 struct ScheduledTask(String);
 
 impl ScheduledTask {
-    /// Deletes the task; true when it is then absent.
-    fn remove(&self) -> bool {
-        let schtasks = system32_exe("schtasks.exe");
-        let _ = std::process::Command::new(&schtasks)
-            .args(["/delete", "/tn", self.0.as_str(), "/f"])
-            .output();
-        std::process::Command::new(&schtasks)
-            .args(["/query", "/tn", self.0.as_str()])
-            .output()
-            .is_ok_and(|query| !query.status.success())
+    /// Deletes the task, then checks that the Task Scheduler no longer has
+    /// it.
+    fn remove(&self) -> Result<(), String> {
+        let encoded = BASE64.encode(
+            REMOVE_TASK_SCRIPT
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect::<Vec<_>>(),
+        );
+        let output =
+            std::process::Command::new(system32_exe("WindowsPowerShell\\v1.0\\powershell.exe"))
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-EncodedCommand",
+                    encoded.as_str(),
+                ])
+                .env(TASK_ENV, &self.0)
+                .output()
+                .map_err(|err| format!("run powershell: {err}"))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.trim() == "absent" {
+            Ok(())
+        } else {
+            Err(format!(
+                "stdout={stdout:?} stderr={:?}",
+                String::from_utf8_lossy(&output.stderr)
+            ))
+        }
     }
 }
 
 impl Drop for ScheduledTask {
     fn drop(&mut self) {
-        self.remove();
+        let _ = self.remove();
     }
 }
 
