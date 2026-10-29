@@ -57,7 +57,7 @@ async fn plan_glm_5_2_standard_and_deep_send_ambient_reasoning() -> anyhow::Resu
         (ReasoningEffort::Medium, "high"),
         (ReasoningEffort::XHigh, "max"),
     ] {
-        let body = plan_glm_request_body(effort).await?;
+        let body = plan_glm_request_body(effort.clone()).await?;
         assert_eq!(body["model"], json!(AMBIENT_DEFAULT_MODEL));
         assert_eq!(
             (
