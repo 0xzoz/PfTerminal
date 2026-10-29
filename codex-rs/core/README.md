@@ -181,8 +181,23 @@ also denies the sandbox `DELETE`, and that folder's parent denies Everyone
 recreate the read-only path (#1506 item 3, D263). Commands can still write
 inside those folders but can't delete or rename the folders themselves; the
 default `.git`, `.codex` and `.agents` protections sit directly in the root
-and don't add these. Not covered (#1506): `.codex` or `.agents` folders that
-don't exist when the session starts (a command can create them). The
+and don't add these. A `.codex` or `.agents` folder at the top of a writable
+root that doesn't exist when a session starts isn't protected, so a command
+can create it (#1506 item 2). Each session records which of them were absent;
+one that exists when the session ends (or, for a session still running, as
+soon as it appears; for one that crashed, at the next sweep) is recorded as
+possibly planted in `planted-metadata.json` next to the integrity-label
+records (D262). Until the user confirms it, Core loads neither its config
+and hooks (the project layer is disabled) nor its skills, and says so at
+startup; the TUI asks whether to load it, and confirming is refused while a
+session that saw it appear still runs. A planted link counts as the folder
+itself (it isn't followed), and a linked worktree's hooks from a planted root
+checkout `.codex` are ignored too. If the records can't be read, no project
+`.codex`/`.agents` content is loaded at all. Anything that creates such a
+folder while a session runs is reported, including the user. Not covered:
+`.codex`/`.agents` folders below the top of a writable root (between the
+project root and the working directory), which commands can create or change
+whether or not they exist. The
 Everyone deny entries are visible in the folder's security settings while a
 session needs them. Each one a session adds is recorded first, in
 `delete-child-denies.json` next to the integrity-label records (#1506 item 1,
