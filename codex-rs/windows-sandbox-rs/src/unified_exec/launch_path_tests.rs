@@ -15,6 +15,11 @@
 //! another legacy session's process as the parent, `ShellBrowserWindow` and
 //! `MMC20.Application` start the child outside the launcher's job; those
 //! tests are ignored until #1507 decides how to close them.
+//!
+//! Refusals are matched on the step and the error code (HRESULT, or WMI's
+//! status name), never on message text, which Windows localizes. Every
+//! launch ends what it left running outside the sandbox, and the tests check
+//! that the Task Scheduler task and the roots' label records are gone.
 
 use super::*;
 use crate::proc_thread_attr::ProcThreadAttributeList;
@@ -23,10 +28,17 @@ use crate::winutil::to_wide;
 use pretty_assertions::assert_eq;
 use windows_sys::Win32::Foundation::BOOL;
 use windows_sys::Win32::Foundation::CloseHandle;
+use windows_sys::Win32::Foundation::FILETIME;
 use windows_sys::Win32::Foundation::GetLastError;
 use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 use windows_sys::Win32::Security::IsTokenRestricted;
 use windows_sys::Win32::Security::TOKEN_QUERY;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::Process32FirstW;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::Process32NextW;
+use windows_sys::Win32::System::Diagnostics::ToolHelp::TH32CS_SNAPPROCESS;
 use windows_sys::Win32::System::JobObjects::IsProcessInJob;
 use windows_sys::Win32::System::JobObjects::JOBOBJECT_BASIC_PROCESS_ID_LIST;
 use windows_sys::Win32::System::JobObjects::JobObjectBasicProcessIdList;
@@ -35,12 +47,15 @@ use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
 use windows_sys::Win32::System::Threading::CreateProcessW;
 use windows_sys::Win32::System::Threading::EXTENDED_STARTUPINFO_PRESENT;
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::Threading::GetProcessTimes;
 use windows_sys::Win32::System::Threading::OpenProcessToken;
 use windows_sys::Win32::System::Threading::PROCESS_CREATE_PROCESS;
 use windows_sys::Win32::System::Threading::PROCESS_INFORMATION;
 use windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION;
+use windows_sys::Win32::System::Threading::PROCESS_TERMINATE;
 use windows_sys::Win32::System::Threading::STARTUPINFOEXW;
 use windows_sys::Win32::System::Threading::STARTUPINFOW;
+use windows_sys::Win32::System::Threading::TerminateProcess;
 
 const REPORT_ENTRY: &str = "unified_exec::tests::launch_paths::launch_path_report_entry";
 const LAUNCHER_ENTRY: &str = "unified_exec::tests::launch_paths::launch_path_launcher_entry";
@@ -49,6 +64,8 @@ const HOLD_ENTRY: &str = "unified_exec::tests::launch_paths::launch_path_hold_en
 /// brokers such as WMI start it without the caller's environment.
 const REPORT_ARG: &str = "codex-1507-report=";
 const LAUNCHER_ARG: &str = "codex-1507-launcher=";
+/// The test process, which runs outside the session.
+const HARNESS_ARG: &str = "codex-1507-harness=";
 /// Replaced with the launcher's process id inside the session.
 const LAUNCHER_PLACEHOLDER: &str = "@LAUNCHER@";
 const LAUNCH_ENV: &str = "CODEX_1507_LAUNCH";
@@ -65,8 +82,11 @@ const NEW_PROCESSES: &str = "new: ";
 /// The start of a report from a child that stayed in the session.
 const CONTAINED: &str = "in_launcher_job=true in_any_job=true low=true restricted=true";
 
-/// What the started child saw of itself.
-fn own_containment(launcher: u32) -> String {
+/// What the started child saw of itself. It is in the launcher's job when
+/// its own job lists the launcher but not the test process: a job lists the
+/// processes of the jobs nested in it, so a job that also holds the test
+/// process is one the session's job is nested in, outside the session.
+fn own_containment(launcher: u32, harness: Option<u32>) -> String {
     // SAFETY: the pseudo handle needs no closing; the token handle is closed below.
     unsafe {
         let mut in_job: BOOL = 0;
@@ -84,7 +104,10 @@ fn own_containment(launcher: u32) -> String {
                 let list = &*(buffer.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST);
                 // The ids follow the two counts, at the second `usize`.
                 let count = (list.NumberOfProcessIdsInList as usize).min(buffer.len() - 1);
-                buffer[1..=count].contains(&(launcher as usize))
+                let ids = &buffer[1..=count];
+                harness.is_some_and(|harness| {
+                    ids.contains(&(launcher as usize)) && !ids.contains(&(harness as usize))
+                })
             };
         let (low, restricted) = token_state(GetCurrentProcess());
         format!(
@@ -133,6 +156,154 @@ fn inspect_pid(name: &str, pid: u32) -> String {
     }
 }
 
+/// Programs a launch can leave running outside any job besides this test
+/// binary (the report entry): the COM servers that start programs.
+const ESCAPE_IMAGES: &[&str] = &["mmc.exe", "explorer.exe", "dllhost.exe"];
+
+/// Ends what a launch left running outside the sandbox: processes started
+/// since the sweep began, at Low integrity, in no job, running this test
+/// binary or one of [`ESCAPE_IMAGES`]. Only a legacy command starts such
+/// processes; another test's sandboxed processes are in their session's job.
+/// [`EscapeSweep::finish`] reports the result; dropping the sweep (a panic)
+/// still ends them.
+struct EscapeSweep {
+    since: u64,
+    finished: bool,
+}
+
+/// What a sweep did.
+#[derive(Debug, Default)]
+struct SweepResult {
+    ended: Vec<String>,
+    /// Processes that are still running, or a failure to look.
+    left: Vec<String>,
+}
+
+impl EscapeSweep {
+    fn start() -> Self {
+        // FILETIME counts 100 ns since 1601; the Unix epoch is this many later.
+        const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+        let since_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after 1970");
+        let since = UNIX_EPOCH_AS_FILETIME
+            + u64::try_from(since_unix.as_nanos() / 100).expect("time fits in u64");
+        Self {
+            since,
+            finished: false,
+        }
+    }
+
+    fn finish(mut self) -> SweepResult {
+        self.finished = true;
+        end_escaped_processes(self.since)
+    }
+}
+
+impl Drop for EscapeSweep {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = end_escaped_processes(self.since);
+        }
+    }
+}
+
+fn end_escaped_processes(since: u64) -> SweepResult {
+    let test_image = std::env::current_exe().ok().and_then(|exe| {
+        exe.file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+    });
+    let mut result = SweepResult::default();
+    // SAFETY: the snapshot handle is checked and closed here; the entry is
+    // sized as the API requires.
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            result
+                .left
+                .push(format!("process snapshot failed: {}", GetLastError()));
+            return result;
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut more = Process32FirstW(snapshot, &mut entry) != 0;
+        while more {
+            let len = entry
+                .szExeFile
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..len]).to_lowercase();
+            if entry.th32ProcessID != std::process::id()
+                && (test_image.as_deref() == Some(name.as_str())
+                    || ESCAPE_IMAGES.contains(&name.as_str()))
+            {
+                end_if_escaped(&name, entry.th32ProcessID, since, &mut result);
+            }
+            more = Process32NextW(snapshot, &mut entry) != 0;
+        }
+        CloseHandle(snapshot);
+    }
+    result
+}
+
+/// Ends process `pid` if it is one of the sweep's (see [`EscapeSweep`]).
+///
+/// # Safety
+/// Calls Win32 process APIs; the handle is checked and closed here.
+unsafe fn end_if_escaped(name: &str, pid: u32, since: u64, result: &mut SweepResult) {
+    let access = PROCESS_QUERY_LIMITED_INFORMATION
+        | PROCESS_TERMINATE
+        | windows_sys::Win32::System::Threading::PROCESS_SYNCHRONIZE;
+    // SAFETY: per the caller.
+    unsafe {
+        let process = windows_sys::Win32::System::Threading::OpenProcess(access, 0, pid);
+        // Gone, or not this user's to end (so not a legacy command's).
+        if process == 0 {
+            return;
+        }
+        let process = OwnedHandle::from_raw_handle(process as _);
+        let raw = process.as_raw_handle() as HANDLE;
+        let mut created: FILETIME = std::mem::zeroed();
+        let mut exited: FILETIME = std::mem::zeroed();
+        let mut kernel: FILETIME = std::mem::zeroed();
+        let mut user: FILETIME = std::mem::zeroed();
+        let mut in_job: BOOL = 0;
+        let ours = GetProcessTimes(raw, &mut created, &mut exited, &mut kernel, &mut user) != 0
+            && ((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+                >= since
+            && token_state(raw).0
+            && IsProcessInJob(raw, 0, &mut in_job) != 0
+            && in_job == 0;
+        if !ours {
+            return;
+        }
+        if TerminateProcess(raw, 1) == 0 {
+            result
+                .left
+                .push(format!("{name}:{pid} terminate error={}", GetLastError()));
+        } else if let Err(err) = wait_for_process_exit(&process, Duration::from_secs(/*secs*/ 10)) {
+            result
+                .left
+                .push(format!("{name}:{pid} did not exit: {err}"));
+        } else {
+            result.ended.push(format!("{name}:{pid}"));
+        }
+    }
+}
+
+/// Fails if a legacy session left `root` recorded in the integrity-label
+/// registry after it ended.
+fn assert_labels_released(root: &Path) {
+    let canonical = dunce::canonicalize(root).expect("canonical root");
+    let recorded = crate::integrity_leases::recorded_roots().expect("read the label records");
+    assert!(
+        !recorded.contains(&canonical),
+        "{} is still recorded after its sessions ended: {recorded:?}",
+        canonical.display()
+    );
+}
+
 /// Writes [`own_containment`] to the report path in its arguments. Does
 /// nothing otherwise.
 #[test]
@@ -146,7 +317,11 @@ fn launch_path_report_entry() {
         .find_map(|arg| arg.strip_prefix(LAUNCHER_ARG))
         .and_then(|pid| pid.parse().ok())
         .unwrap_or(0);
-    fs::write(report, own_containment(launcher)).expect("write launch report");
+    let harness = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix(HARNESS_ARG))
+        .and_then(|pid| pid.parse().ok());
+    fs::write(report, own_containment(launcher, harness)).expect("write launch report");
 }
 
 /// Waits (up to a minute) in a second legacy session, so a launcher can try
@@ -241,6 +416,7 @@ fn report_args(report: &Path) -> String {
         "--nocapture".to_string(),
         quote_windows_arg(&format!("{REPORT_ARG}{}", report.display())),
         format!("{LAUNCHER_ARG}{LAUNCHER_PLACEHOLDER}"),
+        format!("{HARNESS_ARG}{}", std::process::id()),
     ]
     .join(" ")
 }
@@ -263,6 +439,8 @@ struct LaunchOutcome {
     /// Processes the launch started that weren't there before, as seen
     /// from outside the sandbox (PowerShell launches only).
     new_processes: Vec<String>,
+    /// What the launch left running outside the sandbox, ended afterwards.
+    sweep: SweepResult,
     stdout: String,
     log: String,
 }
@@ -280,9 +458,10 @@ impl LaunchOutcome {
             .as_deref()
             .is_some_and(|report| report.starts_with(CONTAINED));
         println!(
-            "\nlaunch-path {route}: launch={:?} report={:?} new={:?}",
-            self.launch, self.report, self.new_processes
+            "\nlaunch-path {route}: launch={:?} report={:?} new={:?} sweep={:?}",
+            self.launch, self.report, self.new_processes, self.sweep
         );
+        self.assert_cleaned_up(route);
         assert!(
             (refused && self.report.is_none()) || contained,
             "{route} left the session: launch={:?} report={:?} new={:?}\nstdout={:?}\n{}",
@@ -291,6 +470,15 @@ impl LaunchOutcome {
             self.new_processes,
             self.stdout,
             self.log
+        );
+    }
+
+    /// Fails if a process the launch left outside the sandbox kept running.
+    fn assert_cleaned_up(&self, route: &str) {
+        assert!(
+            self.sweep.left.is_empty(),
+            "{route} left processes running outside the sandbox: {:?}",
+            self.sweep
         );
     }
 }
@@ -304,6 +492,7 @@ async fn run_launch(
     env: Vec<(&str, String)>,
     report: &Path,
 ) -> LaunchOutcome {
+    let sweep = EscapeSweep::start();
     let mut env_map: HashMap<String, String> = std::env::vars().collect();
     for (key, value) in env {
         env_map.insert(key.to_string(), value);
@@ -363,6 +552,7 @@ async fn run_launch(
         launch,
         report: report_text,
         new_processes,
+        sweep: sweep.finish(),
         stdout,
         log: sandbox_log(codex_home),
     }
@@ -400,7 +590,12 @@ fn legacy_launch_plain_child_stays_in_session() {
         )
         .await
     });
-    println!("\nlaunch-path control: report={:?}", outcome.report);
+    assert_labels_released(root.path());
+    println!(
+        "\nlaunch-path control: report={:?} sweep={:?}",
+        outcome.report, outcome.sweep
+    );
+    outcome.assert_cleaned_up("control");
     assert_eq!(
         (
             outcome.launch.as_deref(),
@@ -430,6 +625,8 @@ fn legacy_launch_under_another_session_process_stays_in_session() {
         let codex_home = sandbox_home("launch-parent");
         let hold_dir = root.path().join("hold");
         fs::create_dir_all(&hold_dir).expect("create hold dir");
+        // Releases the holding session however this test ends.
+        let release = ReleaseHolder(hold_dir.join("hold.release"));
         let mut env_map: HashMap<String, String> = std::env::vars().collect();
         env_map.insert(HOLD_ENV.to_string(), hold_dir.display().to_string());
         let holder = spawn_windows_sandbox_session_legacy(
@@ -482,13 +679,23 @@ fn legacy_launch_under_another_session_process_stays_in_session() {
             &report,
         )
         .await;
-        fs::write(hold_dir.join("hold.release"), "").expect("release holder");
+        fs::write(&release.0, "").expect("release holder");
         let _ =
             collect_stdout_and_exit(holder, codex_home.path(), Duration::from_secs(/*secs*/ 90))
                 .await;
         outcome
     });
+    assert_labels_released(root.path());
     outcome.assert_contained("parent-process attribute", &["open_parent_error=5"]);
+}
+
+/// Writes the holding session's release file when dropped.
+struct ReleaseHolder(PathBuf);
+
+impl Drop for ReleaseHolder {
+    fn drop(&mut self) {
+        let _ = fs::write(&self.0, "");
+    }
 }
 
 /// Runs a Windows PowerShell script as the legacy command. The script sees
@@ -502,7 +709,7 @@ fn run_powershell_launch(
     let _guard = legacy_process_test_guard();
     let root = user_owned_test_root();
     let runtime = current_thread_runtime();
-    runtime.block_on(async {
+    let outcome = runtime.block_on(async {
         let codex_home = sandbox_home(name);
         let report = root.path().join(format!("{name}.report"));
         let encoded = BASE64.encode(
@@ -535,7 +742,9 @@ fn run_powershell_launch(
             &report,
         )
         .await
-    })
+    });
+    assert_labels_released(root.path());
+    outcome
 }
 
 /// Shared PowerShell prologue: `$cmd`, `$exe`, `$args1` and `$dir`, with
@@ -548,7 +757,16 @@ $exe = $env:CODEX_1507_EXE
 $dir = $env:CODEX_1507_DIR
 $before = @(Get-Process | ForEach-Object Id)
 $step = 'create'
-function Report-Error($err) { "launch: started=false error=[$step] " + ($err.Exception.Message -replace '\s+', ' ') }
+# The codes are the HRESULT of each exception in the chain and, for WMI,
+# the CIM status name; neither is localized, unlike the message.
+function Report-Error($err) {
+  $codes = @()
+  for ($e = $err.Exception; $null -ne $e; $e = $e.InnerException) {
+    $codes += 'hr=0x{0:X8}' -f $e.HResult
+    if ($null -ne $e.PSObject.Properties['NativeErrorCode']) { $codes += "cim=$($e.NativeErrorCode)" }
+  }
+  "launch: started=false error=[$step] codes=[$($codes -join ' ')] " + ($err.Exception.Message -replace '\s+', ' ')
+}
 # Keeps the session (and its job) alive until the child reports, then lists
 # the processes the launch added.
 function Finish-Launch {
@@ -574,7 +792,7 @@ Finish-Launch
     );
     run_powershell_launch("launch-wmi", &script, Vec::new()).assert_contained(
         "WMI Win32_Process.Create",
-        &["error=[create] ", "Access denied"],
+        &["error=[create] ", "cim=AccessDenied"],
     );
 }
 
@@ -607,12 +825,39 @@ try {{
 Finish-Launch
 "#
     );
-    let outcome = run_powershell_launch("launch-schtasks", &script, vec![(TASK_ENV, task.clone())]);
-    // Remove the task in case the sandbox could register it.
-    let _ = std::process::Command::new(system32_exe("schtasks.exe"))
-        .args(["/delete", "/tn", task.as_str(), "/f"])
-        .output();
-    outcome.assert_contained("Task Scheduler", &["error=[folder] ", "0x80070003"]);
+    let scheduled = ScheduledTask(task.clone());
+    let outcome = run_powershell_launch("launch-schtasks", &script, vec![(TASK_ENV, task)]);
+    let removed = scheduled.remove();
+    outcome.assert_contained("Task Scheduler", &["error=[folder] ", "hr=0x80070003"]);
+    assert!(
+        removed,
+        "the Task Scheduler task {} is still registered",
+        scheduled.0
+    );
+}
+
+/// A Task Scheduler task the sandbox might have registered, removed when
+/// dropped.
+struct ScheduledTask(String);
+
+impl ScheduledTask {
+    /// Deletes the task; true when it is then absent.
+    fn remove(&self) -> bool {
+        let schtasks = system32_exe("schtasks.exe");
+        let _ = std::process::Command::new(&schtasks)
+            .args(["/delete", "/tn", self.0.as_str(), "/f"])
+            .output();
+        std::process::Command::new(&schtasks)
+            .args(["/query", "/tn", self.0.as_str()])
+            .output()
+            .is_ok_and(|query| !query.status.success())
+    }
+}
+
+impl Drop for ScheduledTask {
+    fn drop(&mut self) {
+        self.remove();
+    }
 }
 
 /// #1507 route 4: out-of-process COM servers that start programs on the
@@ -640,7 +885,7 @@ fn legacy_launch_through_com_shell_windows_stays_in_session() {
         "9BA05972-F6A8-11CF-A442-00A0C90A8F39",
         "$w = $o.Item(); if ($null -eq $w) { throw 'no shell window' }; $w.Document.Application.ShellExecute($exe, $args1, $dir, $null, 0)",
         // Refused at activation, before any Explorer window is needed.
-        &["error=[create] ", "80070005"],
+        &["error=[create] ", "hr=0x80070005"],
     );
 }
 
@@ -652,7 +897,7 @@ fn legacy_launch_through_com_shell_browser_window_stays_in_session() {
         "launch-com-shellbrowserwindow",
         "C08AFD90-F2A1-11D1-8455-00A0C91F3880",
         "$o.Document.Application.ShellExecute($exe, $args1, $dir, $null, 0)",
-        &["80070005"],
+        &["hr=0x80070005"],
     );
 }
 
@@ -664,6 +909,6 @@ fn legacy_launch_through_com_mmc_stays_in_session() {
         "launch-com-mmc",
         "49B2791A-B1AE-4C90-9B8E-E860BA07F889",
         "$o.Document.ActiveView.ExecuteShellCommand($exe, $dir, $args1, '7')",
-        &["80070005"],
+        &["hr=0x80070005"],
     );
 }
