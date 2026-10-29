@@ -2033,9 +2033,9 @@ fn legacy_delete_child_denies_follow_live_sessions() {
     });
     let state = || {
         (
-            has_everyone_delete_child_deny(&root, false),
-            has_everyone_delete_child_deny(&protected, true),
-            has_everyone_delete_child_deny(&preexisting, false),
+            has_everyone_delete_child_deny(&root, /*inherit_to_subdirs*/ false),
+            has_everyone_delete_child_deny(&protected, /*inherit_to_subdirs*/ true),
+            has_everyone_delete_child_deny(&preexisting, /*inherit_to_subdirs*/ false),
         )
     };
     let recorded_here = || {
@@ -2085,15 +2085,15 @@ fn legacy_delete_child_denies_follow_live_sessions() {
     crate::repair_stale_integrity_labels().expect("repair while live");
     let crash_live = (
         ready,
-        has_everyone_delete_child_deny(&crash_root, false),
-        has_everyone_delete_child_deny(&crash_protected, true),
+        has_everyone_delete_child_deny(&crash_root, /*inherit_to_subdirs*/ false),
+        has_everyone_delete_child_deny(&crash_protected, /*inherit_to_subdirs*/ true),
     );
     child.kill().expect("kill the crash child");
     child.wait().expect("wait for the crash child");
     crate::repair_stale_integrity_labels().expect("repair");
     let crash_repaired = (
-        has_everyone_delete_child_deny(&crash_root, false),
-        has_everyone_delete_child_deny(&crash_protected, true),
+        has_everyone_delete_child_deny(&crash_root, /*inherit_to_subdirs*/ false),
+        has_everyone_delete_child_deny(&crash_protected, /*inherit_to_subdirs*/ true),
         recorded_here(),
     );
     // SAFETY: as above.
@@ -2154,14 +2154,14 @@ fn legacy_delete_child_denies_nested_root_keeps_its_own() {
     .expect("nested denies");
     drop(outer_lease);
     let outer_ended = (
-        has_everyone_delete_child_deny(&protected, true),
-        has_everyone_delete_child_deny(&nested, false),
-        has_everyone_delete_child_deny(&inner, true),
+        has_everyone_delete_child_deny(&protected, /*inherit_to_subdirs*/ true),
+        has_everyone_delete_child_deny(&nested, /*inherit_to_subdirs*/ false),
+        has_everyone_delete_child_deny(&inner, /*inherit_to_subdirs*/ true),
     );
     drop(nested_lease);
     let both_ended = (
-        has_everyone_delete_child_deny(&nested, false),
-        has_everyone_delete_child_deny(&inner, true),
+        has_everyone_delete_child_deny(&nested, /*inherit_to_subdirs*/ false),
+        has_everyone_delete_child_deny(&inner, /*inherit_to_subdirs*/ true),
     );
 
     assert_eq!(
