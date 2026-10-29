@@ -533,11 +533,10 @@ struct Snapshot {
     /// it.
     beyond: HashMap<PathBuf, Folder>,
     beyond_states: HashMap<PathBuf, StateRead>,
-    /// What of `beyond` this session's look that saw it reported (by
-    /// `Held::path`).
-    beyond_told: HashSet<PathBuf>,
-    /// What this look reported (by `Held::path`), for `beyond_told`.
-    told: HashSet<PathBuf>,
+    /// What of `beyond` this session's look that saw it reported.
+    beyond_told: HashSet<HeldWhat>,
+    /// What this look reported, for `beyond_told`.
+    told: HashSet<HeldWhat>,
 }
 
 impl Snapshot {
@@ -1071,7 +1070,13 @@ impl Held {
     }
 
     fn path(&self) -> &Path {
-        match &self.what {
+        self.what.path()
+    }
+}
+
+impl HeldWhat {
+    fn path(&self) -> &Path {
+        match self {
             HeldWhat::Link { path } | HeldWhat::HardLink { path } | HeldWhat::Exists { path } => {
                 path
             }
@@ -1079,7 +1084,9 @@ impl Held {
             HeldWhat::Replaced { dot_git, .. } => dot_git,
         }
     }
+}
 
+impl Held {
     /// Whether what was found is still there (looked at again, not by
     /// identity: a freed inode may be reused).
     fn stands(&self) -> bool {
@@ -1486,7 +1493,7 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         cur.told = found
             .iter()
             .filter_map(|finding| Held::of(finding, repo, &cur))
-            .map(|held| held.path().to_path_buf())
+            .map(|held| held.what)
             .collect();
         // Held as before; only the message leaves out what was told already
         // (#943 r8 N2, item 14).
@@ -1666,7 +1673,7 @@ fn told_again(
         return Vec::new();
     };
     let unchanged = |finding: &Finding| {
-        Held::of(finding, repo, cur).is_some_and(|held| last.beyond_told.contains(held.path()))
+        Held::of(finding, repo, cur).is_some_and(|held| last.beyond_told.contains(&held.what))
             && match finding {
                 Finding::Link { path, .. }
                 | Finding::HardLink { path }
@@ -1694,9 +1701,11 @@ fn told_again(
         .into_iter()
         .filter(|finding| {
             Held::of(finding, repo, cur).is_some_and(|mine| {
-                holds
-                    .iter()
-                    .any(|held| held.what == mine.what && held.stands())
+                holds.iter().any(|held| {
+                    held.what == mine.what
+                        && held.git_dirs.iter().any(|dir| repo.git_dirs.contains(dir))
+                        && held.stands()
+                })
             })
         })
         .cloned()
@@ -1731,10 +1740,10 @@ fn carry_beyond(last: Option<&Snapshot>, cur: &mut Snapshot, stale: Option<&[Pat
     let told = last
         .told
         .iter()
-        .filter(|path| stale.iter().any(|stale| path.starts_with(stale)))
+        .filter(|what| stale.iter().any(|stale| what.path().starts_with(stale)))
         .chain(last.beyond_told.iter().filter(|_| same));
-    for path in told {
-        cur.beyond_told.insert(path.clone());
+    for what in told {
+        cur.beyond_told.insert(what.clone());
     }
     for (path, read) in last.states.iter().chain(&last.beyond_states) {
         if path
