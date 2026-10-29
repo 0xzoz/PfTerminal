@@ -73,10 +73,12 @@ const REMOTE_NETWORK_USER_DECISION_TIMEOUT: Duration = Duration::from_secs(10 * 
 /// Budget for this machine to decide one remote network request, or `None`
 /// to leave the decision to the remote proxy (#722, D246).
 ///
-/// Every remote allowlist miss is routed here, so the user gets the same
-/// prompt and failure reporting as locally. Under Guardian that held before.
-/// Remote "limited" mode is not routed for the user: it keeps failing closed
-/// on the remote side, as before.
+/// When the proxy has a policy decider (managed network requirements), a
+/// remote allowlist miss is routed here, so the user gets the same prompt and
+/// failure reporting as locally. Under Guardian that held before. Without a
+/// decider the remote proxy still refuses it silently (fail closed). Remote
+/// "limited" mode is not routed for the user: it keeps failing closed on the
+/// remote side, as before.
 fn remote_network_policy_decision_timeout(
     routes_to_guardian: bool,
     mode: NetworkMode,
