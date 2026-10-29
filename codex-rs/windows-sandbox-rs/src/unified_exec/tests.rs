@@ -1235,8 +1235,8 @@ fn legacy_workspace_write_cannot_move_ancestor_of_nested_carve_out() {
             outer.join("b-renamed").exists(),
         );
         // The unsandboxed user can still rename their own folders.
-        let host_rename = fs::rename(&outer, workspace.join("a-host"))
-            .map_err(|err| err.to_string());
+        let host_rename =
+            fs::rename(&outer, workspace.join("a-host")).map_err(|err| err.to_string());
 
         assert_eq!(
             (sandbox_outcome, host_rename),

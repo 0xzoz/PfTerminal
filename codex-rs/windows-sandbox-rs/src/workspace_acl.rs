@@ -1,3 +1,4 @@
+use crate::acl::add_deny_delete_ace;
 use crate::acl::add_deny_delete_child_ace;
 use crate::acl::add_deny_write_ace;
 use crate::path_normalization::canonicalize_path;
@@ -5,6 +6,7 @@ use crate::token::world_sid;
 use anyhow::Result;
 use std::ffi::c_void;
 use std::path::Path;
+use std::path::PathBuf;
 
 pub fn is_command_cwd_root(root: &Path, canonical_command_cwd: &Path) -> bool {
     canonicalize_path(root) == canonical_command_cwd
@@ -59,6 +61,64 @@ pub unsafe fn deny_delete_child_route(path: &Path) -> Result<()> {
     }
     if path.is_dir() {
         add_deny_delete_child_ace(path, psid, /*inherit_to_subdirs*/ true)?;
+    }
+    Ok(())
+}
+
+/// Folders strictly between `root` and `path`, nearest to `root` first. Both
+/// are canonicalized, so a link in `path` that leaves `root` yields nothing.
+pub(crate) fn ancestors_below_root(path: &Path, root: &Path) -> Vec<PathBuf> {
+    let path = canonicalize_path(path);
+    let root = canonicalize_path(root);
+    if path == root || !path.starts_with(&root) {
+        return Vec::new();
+    }
+    let mut ancestors: Vec<PathBuf> = path
+        .ancestors()
+        .skip(1)
+        .take_while(|ancestor| *ancestor != root.as_path())
+        .map(Path::to_path_buf)
+        .collect();
+    ancestors.reverse();
+    ancestors
+}
+
+/// #1506 item 3 (D263): keeps a legacy sandbox from moving or renaming a
+/// folder between writable root `root` and the explicit read-only carve-out
+/// `path`, which would carry the carve-out away from its deny entries and let
+/// the command recreate it. Each such folder denies `cap_sids` `DELETE` on
+/// itself, and its parent denies Everyone `FILE_DELETE_CHILD` (that directory
+/// only), so neither route to a rename is open. Writes inside those folders
+/// keep working; the sandbox just can't delete or rename the folders
+/// themselves. Unsandboxed renames keep working through the user's own
+/// `DELETE` right. Links are never followed.
+///
+/// # Safety
+/// Caller must ensure every pointer in `cap_sids` is a valid SID.
+pub unsafe fn deny_moving_ancestors(
+    path: &Path,
+    root: &Path,
+    cap_sids: &[*mut c_void],
+) -> Result<()> {
+    let ancestors = ancestors_below_root(path, root);
+    if ancestors.is_empty() {
+        return Ok(());
+    }
+    let mut everyone = world_sid()?;
+    let everyone = everyone.as_mut_ptr() as *mut c_void;
+    for ancestor in &ancestors {
+        if is_reparse_point(ancestor) || !ancestor.is_dir() {
+            continue;
+        }
+        for sid in cap_sids {
+            add_deny_delete_ace(ancestor, *sid)?;
+        }
+        if let Some(parent) = ancestor.parent()
+            && !is_reparse_point(parent)
+            && parent.is_dir()
+        {
+            add_deny_delete_child_ace(parent, everyone, /*inherit_to_subdirs*/ false)?;
+        }
     }
     Ok(())
 }

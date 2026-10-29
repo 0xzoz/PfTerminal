@@ -692,6 +692,16 @@ pub unsafe fn add_deny_delete_child_ace(
     add_deny_ace(path, psid, DenyAceKind::DeleteChild { inherit_to_subdirs })
 }
 
+/// Denies `psid` `DELETE` on `path` itself (not inherited), so a sandbox
+/// whose token carries `psid` can't delete, rename or move it through its own
+/// `DELETE` right (#1506 item 3).
+///
+/// # Safety
+/// Caller must ensure `psid` points to a valid SID and `path` exists.
+pub unsafe fn add_deny_delete_ace(path: &Path, psid: *mut c_void) -> Result<bool> {
+    add_deny_ace(path, psid, DenyAceKind::Delete)
+}
+
 /// PF-27-S06: denies `psid` reads of every file created directly in `path`
 /// from now on (inherit-only, files only, not propagated below the first
 /// level), so a file replaced by rename does not lose the deny. Existing
@@ -1322,12 +1332,15 @@ enum DenyAceKind {
     DeleteChild {
         inherit_to_subdirs: bool,
     },
+    /// `DELETE` on the object itself only (#1506 item 3).
+    Delete,
 }
 
 impl DenyAceKind {
     fn mask(self) -> u32 {
         match self {
             Self::DeleteChild { .. } => FILE_DELETE_CHILD,
+            Self::Delete => DELETE,
             Self::Read | Self::ReadExplicit | Self::ReadNewFiles => {
                 FILE_GENERIC_READ | GENERIC_READ_MASK
             }
@@ -1347,7 +1360,7 @@ impl DenyAceKind {
     fn inheritance(self) -> u32 {
         match self {
             Self::Read | Self::Write => CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE,
-            Self::ReadExplicit => 0,
+            Self::ReadExplicit | Self::Delete => 0,
             Self::ReadNewFiles => {
                 OBJECT_INHERIT_ACE | u32::from(INHERIT_ONLY_ACE) | NO_PROPAGATE_INHERIT_ACE
             }
@@ -1370,18 +1383,20 @@ impl DenyAceKind {
             Self::ReadNewFiles => dacl_has_new_file_read_deny_for_sid(p_dacl, psid),
             Self::Write => dacl_has_write_deny_for_sid(p_dacl, psid),
             Self::DeleteChild { inherit_to_subdirs } => {
-                dacl_has_delete_child_deny_for_sid(p_dacl, psid, inherit_to_subdirs)
+                dacl_has_deny_for_sid(p_dacl, psid, FILE_DELETE_CHILD, inherit_to_subdirs)
             }
+            Self::Delete => dacl_has_deny_for_sid(p_dacl, psid, DELETE, false),
         }
     }
 }
 
-/// Returns true when the DACL already denies `psid` `FILE_DELETE_CHILD` on the
+/// Returns true when the DACL already denies `psid` a right in `mask` on the
 /// object itself and, if `require_container_inherit`, propagates that deny to
 /// subdirectories.
-unsafe fn dacl_has_delete_child_deny_for_sid(
+unsafe fn dacl_has_deny_for_sid(
     p_dacl: *mut ACL,
     psid: *mut c_void,
+    mask: u32,
     require_container_inherit: bool,
 ) -> bool {
     if p_dacl.is_null() {
@@ -1413,7 +1428,7 @@ unsafe fn dacl_has_delete_child_deny_for_sid(
         let base = p_ace as usize;
         let sid_ptr =
             (base + std::mem::size_of::<ACE_HEADER>() + std::mem::size_of::<u32>()) as *mut c_void;
-        if EqualSid(sid_ptr, psid) != 0 && (ace.Mask & FILE_DELETE_CHILD) != 0 {
+        if EqualSid(sid_ptr, psid) != 0 && (ace.Mask & mask) != 0 {
             return true;
         }
     }
