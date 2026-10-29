@@ -1822,7 +1822,10 @@ fn issue_943_an_empty_config_past_the_limit_is_reported_once() {
     assert_eq!(kinds(&check(thread, &repos)), reported);
     assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
     let (message, held) = recheck(thread, "Moderate", &[project.root.as_path()]);
-    assert_eq!((message, held), (None, shown(std::slice::from_ref(&config))));
+    assert_eq!(
+        (message, held),
+        (None, shown(std::slice::from_ref(&config)))
+    );
     fill(&config);
     assert_eq!(kinds(&check(thread, &repos)), reported);
     assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
