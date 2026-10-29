@@ -473,13 +473,13 @@ const TMUX_FOLDERS: &[(&str, &str, char, &str)] = &[
 const TMUX_PREFIX: usize = 3;
 
 /// The `TMUX_FOLDERS` entry `word` names: its alias, or a prefix of its
-/// name.
+/// name; not `display`, `display-message`'s alias.
 fn tmux_folder_command(
     word: &str,
 ) -> Option<&'static (&'static str, &'static str, char, &'static str)> {
     TMUX_FOLDERS.iter().find(|(name, alias, _, _)| {
         work::step();
-        word == *alias || (word.len() >= TMUX_PREFIX && name.starts_with(word))
+        word == *alias || (word.len() >= TMUX_PREFIX && word != "display" && name.starts_with(word))
     })
 }
 

@@ -10174,6 +10174,10 @@ fn issue_1159_equals_words_and_modified_outputs_ask() {
         ("zsh", "noglob nice =sort -o ~/.zshrc f"),
         ("zsh", r"find . -exec =tee -a ~/.zshrc \;"),
         ("zsh", "strace =tee -a ~/.zshrc"),
+        // Review 2: a quoted `#` word; an exec wrapper's options.
+        ("zsh", r"find . -name '#*#' -exec =tee -a ~/.zshrc \;"),
+        ("zsh", "find '#dir' -exec =tee -a ~/.zshrc {} +"),
+        ("zsh", "strace -f =tee -a ~/.zshrc"),
     ];
     let persistence = [
         ("bash", "noglob git log --output=~/.zshrc"),
@@ -10205,6 +10209,9 @@ fn issue_1159_equals_words_and_modified_outputs_ask() {
         "[ \"$a\" = \"$b\" ]",
         "# ===== setup =====",
         "# a == b",
+        "echo hi # ==== x",
+        "find . -name '*.rs' -exec grep -n '==' {} +",
+        "noglob git commit -m '=== x'",
     ] {
         assert_eq!(kind(&["zsh", "-c", command]), None, "{command}");
     }
@@ -10276,6 +10283,8 @@ fn issue_1309_follow_ups_ask() {
         "tmux new -d sh -c 'echo x > out.txt'",
         "tmux send-keys -t x 'new' Enter",
         "tmux new -c /tmp 'echo x > /tmp/out'",
+        "tmux display -p '#S'",
+        "tmux display -d 500 'echo x > .zshenv'",
         "cd ~/w; sh -c 'echo x > out.txt'",
     ] {
         assert_eq!(script(command), None, "{command}");

@@ -2251,7 +2251,7 @@ impl Classifier {
         // or right after a precommand modifier (`noglob =tee …`), it asks.
         // Also before the command after precommand modifiers (`noglob
         // command =tee`), and right after an exec marker or an exec wrapper
-        // (`find . -exec =curl`, `strace =curl`); not in a comment.
+        // (`find . -exec =curl`, `strace =curl`); not on a comment line.
         //
         // #1159 follow-up: the command after zsh's precommand modifiers
         // (`noglob git log --output=~/.zshrc`, `noglob tee -a ~/.zshrc`)
@@ -2281,15 +2281,18 @@ impl Classifier {
                 || outbound::EXEC_WRAPPERS.contains(&basename(word))
                 || unknown_folder::MODIFIERS.contains(&word)
         };
-        if lower
-            .iter()
-            .take_while(|word| !word.starts_with('#'))
-            .enumerate()
-            .any(|(at, word)| {
+        // An exec wrapper's command may be any later word (`strace -f =tee`).
+        let exec_wrapped = lower
+            .get(skipped_to)
+            .is_some_and(|word| outbound::EXEC_WRAPPERS.contains(&basename(word)));
+        if !comment
+            && lower.iter().enumerate().any(|(at, word)| {
                 work::step();
                 word.len() > 1
                     && word.starts_with('=')
-                    && (at < skipped_to || (at > 0 && runs_next(&lower[at - 1])))
+                    && (at < skipped_to
+                        || (exec_wrapped && at > skipped_to)
+                        || (at > 0 && runs_next(&lower[at - 1])))
             })
         {
             self.note(ProtectedActionKind::UnseenCode);
