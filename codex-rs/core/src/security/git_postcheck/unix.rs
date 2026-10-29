@@ -1633,12 +1633,6 @@ enum Walked {
     Exact(Vec<PathBuf>),
 }
 
-/// What a `.git` made again (missing at the last look, now a different one)
-/// is compared with: the last look's folders that are still the same ones,
-/// and empty ones for its own git folders that aren't, so that config,
-/// hooks, remotes and steps there are reported as new (empty ones once
-/// filled). A worktree's `commondir` naming its common folder, still the
-/// same one, isn't new (`git worktree add` again).
 /// #943 item 14: `cur.beyond`. Where `stale` (a `finish`, with the git
 /// folders stored for the repository before it), what `last` saw of those
 /// of them `cur` didn't walk; and `last.beyond` where `cur` walked the same
@@ -1676,22 +1670,30 @@ fn carry_beyond(last: Option<&Snapshot>, cur: &mut Snapshot, stale: Option<&[Pat
     }
 }
 
+/// What a `.git` made again (missing at the last look, now a different one)
+/// is compared with: the last look's folders that are still the same ones,
+/// and empty ones for its own git folders that aren't, so that config,
+/// hooks, remotes and steps there are reported as new (empty ones once
+/// filled). A worktree's `commondir` naming its common folder, still the
+/// same one, isn't new (`git worktree add` again).
 fn remade_baseline(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Snapshot {
     let mut baseline = Snapshot::empty(&cur.dot_git);
     baseline.empty_new = prev.empty_new.clone();
+    // #943 item 14: only while the `.git` is the one it was seen with.
+    let same_git = !prev.went_missing && prev.dot_git == cur.dot_git;
+    let beyond = same_git.then_some(&prev.beyond);
+    let beyond_states = prev.beyond_states.iter().filter(|_| same_git);
     for (dir, folder) in &cur.folders {
         if let Some(old) = prev
             .folders
             .get(dir)
-            .or_else(|| prev.beyond.get(dir))
+            .or_else(|| beyond.and_then(|beyond| beyond.get(dir)))
             .filter(|old| old.dev == folder.dev && old.ino == folder.ino && old.born == folder.born)
         {
             baseline.folders.insert(dir.clone(), old.clone());
         }
     }
-    baseline.states = prev
-        .beyond_states
-        .iter()
+    baseline.states = beyond_states
         .chain(&prev.states)
         .filter(|(path, _)| {
             path.parent()
