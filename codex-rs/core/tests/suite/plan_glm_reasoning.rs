@@ -7,11 +7,15 @@ use codex_model_provider_info::AMBIENT_DEFAULT_MODEL;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
+use codex_protocol::user_input::UserInput;
 use core_test_support::responses::chat_completions_sse;
 use core_test_support::responses::mount_chat_completions_sequence;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -43,7 +47,24 @@ async fn plan_glm_request_body(effort: ReasoningEffort) -> anyhow::Result<Value>
         })
         .build(&server)
         .await?;
-    test.submit_turn("fixture").await?;
+    // Default thread settings keep the configured effort; `submit_turn` would
+    // override it with the collaboration mode's.
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "fixture".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
     let requests = chat.requests();
     assert_eq!(requests.len(), 1);
     Ok(requests[0].body_json())
