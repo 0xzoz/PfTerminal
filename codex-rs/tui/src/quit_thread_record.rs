@@ -72,8 +72,8 @@ mod tests {
 
         let first = ThreadId::new();
         let second = ThreadId::new();
-        record_quit_thread(home.path(), first, 100);
-        record_quit_thread(home.path(), second, 200);
+        record_quit_thread(home.path(), first, /*quit_at*/ 100);
+        record_quit_thread(home.path(), second, /*quit_at*/ 200);
 
         assert_eq!(
             read_quit_thread_record(home.path()),
@@ -97,7 +97,9 @@ mod tests {
             thread_id: ThreadId::new(),
             quit_at: 100,
         };
-        assert!(quit_record_is_current(&record, None));
+        assert!(quit_record_is_current(
+            &record, /*newest_updated_at*/ None
+        ));
         assert!(quit_record_is_current(&record, Some(99)));
         assert!(quit_record_is_current(&record, Some(100)));
         assert!(!quit_record_is_current(&record, Some(101)));
