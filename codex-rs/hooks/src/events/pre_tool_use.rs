@@ -140,7 +140,7 @@ pub(crate) async fn run(
     .await;
     if request.block_if_hook_cannot_start {
         for result in &mut results {
-            block_on_start_failure(result);
+            block_on_start_failure(result, &request.cwd);
         }
     }
 
@@ -222,18 +222,28 @@ fn command_input_json(request: &PreToolUseRequest) -> Result<String, serde_json:
 
 fn cannot_start_block_reason(cause: &str) -> String {
     format!(
-        "a PreToolUse hook could not start on this machine ({cause}). This turn runs on a \
-         remote environment, where a hook that cannot start blocks the action instead of being \
-         skipped"
+        "the hook could not start on this machine ({cause}). On remote work a hook that cannot \
+         start blocks the action instead of being skipped"
     )
 }
 
 /// Turns a hook that could not start into a block (#722, D245).
-fn block_on_start_failure(result: &mut dispatcher::ParsedHandler<PreToolUseHandlerData>) {
+fn block_on_start_failure(
+    result: &mut dispatcher::ParsedHandler<PreToolUseHandlerData>,
+    cwd: &AbsolutePathBuf,
+) {
     let Some(cause) = result.data.start_failure.as_deref() else {
         return;
     };
-    let reason = cannot_start_block_reason(cause);
+    // The usual remote cause: hooks get the remote cwd, which this host lacks.
+    let reason = if cwd.as_path().is_dir() {
+        cannot_start_block_reason(cause)
+    } else {
+        cannot_start_block_reason(&format!(
+            "its working folder {} does not exist here: {cause}",
+            cwd.display()
+        ))
+    };
     result.data.should_block = true;
     result.data.updated_input = None;
     mark_blocked(&mut result.completed.run, &reason);

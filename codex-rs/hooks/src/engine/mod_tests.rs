@@ -1605,10 +1605,18 @@ async fn pre_tool_use_hook_that_cannot_spawn_blocks_only_when_fail_closed() {
     assert!(remote.should_block);
     let reason = remote.block_reason.expect("block reason");
     assert!(
-        reason.starts_with("a PreToolUse hook could not start on this machine ("),
+        reason.starts_with(&format!(
+            "the hook could not start on this machine (its working folder {} does not exist here: ",
+            missing_cwd.display()
+        )),
         "{reason}"
     );
-    assert!(reason.contains("remote environment"), "{reason}");
+    assert!(
+        reason.ends_with(
+            "On remote work a hook that cannot start blocks the action instead of being skipped"
+        ),
+        "{reason}"
+    );
     assert_eq!(remote.hook_events.len(), 1);
     assert_eq!(remote.hook_events[0].run.status, HookRunStatus::Blocked);
     assert_eq!(
@@ -1652,9 +1660,7 @@ async fn pre_tool_use_hook_command_not_found_blocks_when_fail_closed() {
     assert!(outcome.should_block);
     let reason = outcome.block_reason.expect("block reason");
     assert!(
-        reason.starts_with(
-            "a PreToolUse hook could not start on this machine (hook exited with code 127"
-        ),
+        reason.starts_with("the hook could not start on this machine (hook exited with code 127"),
         "{reason}"
     );
     assert_eq!(outcome.hook_events[0].run.status, HookRunStatus::Blocked);
