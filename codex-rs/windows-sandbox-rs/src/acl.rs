@@ -692,8 +692,9 @@ pub unsafe fn add_deny_delete_child_ace(
     add_deny_ace(path, psid, DenyAceKind::DeleteChild { inherit_to_subdirs })
 }
 
-/// Whether `path`'s DACL denies `psid` `FILE_DELETE_CHILD` as
-/// [`add_deny_delete_child_ace`] would leave it (so that call would add nothing).
+/// Whether `path`'s DACL itself (not an inherited copy) denies `psid`
+/// `FILE_DELETE_CHILD` as [`add_deny_delete_child_ace`] would leave it (so
+/// that call would add nothing).
 ///
 /// # Safety
 /// Caller must ensure `psid` points to a valid SID.
@@ -703,7 +704,13 @@ pub unsafe fn has_deny_delete_child_ace(
     inherit_to_subdirs: bool,
 ) -> Result<bool> {
     let (p_dacl, p_sd) = fetch_dacl_handle(path)?;
-    let present = dacl_has_deny_for_sid(p_dacl, psid, FILE_DELETE_CHILD, inherit_to_subdirs);
+    let present = dacl_has_deny_for_sid(
+        p_dacl,
+        psid,
+        FILE_DELETE_CHILD,
+        inherit_to_subdirs,
+        /*explicit_only*/ true,
+    );
     if !p_sd.is_null() {
         LocalFree(p_sd as HLOCAL);
     }
@@ -1433,21 +1440,33 @@ impl DenyAceKind {
             Self::ReadNewFiles => dacl_has_new_file_read_deny_for_sid(p_dacl, psid),
             Self::Write => dacl_has_write_deny_for_sid(p_dacl, psid),
             Self::DeleteChild { inherit_to_subdirs } => {
-                dacl_has_deny_for_sid(p_dacl, psid, FILE_DELETE_CHILD, inherit_to_subdirs)
+                // Only an explicit entry counts: an inherited copy goes when
+                // its parent's entry is removed (#1506 item 1).
+                dacl_has_deny_for_sid(
+                    p_dacl,
+                    psid,
+                    FILE_DELETE_CHILD,
+                    inherit_to_subdirs,
+                    /*explicit_only*/ true,
+                )
             }
-            Self::Delete => dacl_has_deny_for_sid(p_dacl, psid, DELETE, false),
+            Self::Delete => dacl_has_deny_for_sid(
+                p_dacl, psid, DELETE, /*require_container_inherit*/ false,
+                /*explicit_only*/ false,
+            ),
         }
     }
 }
 
 /// Returns true when the DACL already denies `psid` a right in `mask` on the
 /// object itself and, if `require_container_inherit`, propagates that deny to
-/// subdirectories.
+/// subdirectories; with `explicit_only`, an inherited entry doesn't count.
 unsafe fn dacl_has_deny_for_sid(
     p_dacl: *mut ACL,
     psid: *mut c_void,
     mask: u32,
     require_container_inherit: bool,
+    explicit_only: bool,
 ) -> bool {
     if p_dacl.is_null() {
         return false;
@@ -1472,6 +1491,9 @@ unsafe fn dacl_has_deny_for_sid(
             continue;
         }
         if require_container_inherit && (u32::from(hdr.AceFlags) & CONTAINER_INHERIT_ACE) == 0 {
+            continue;
+        }
+        if explicit_only && (hdr.AceFlags & INHERITED_ACE) != 0 {
             continue;
         }
         let ace = &*(p_ace as *const ACCESS_DENIED_ACE);

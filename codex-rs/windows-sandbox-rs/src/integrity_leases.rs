@@ -390,8 +390,10 @@ fn remove_unneeded_denies(registry: &Path, live: &BTreeSet<PathBuf>, log_dir: Op
     };
     let everyone = everyone.as_mut_ptr() as *mut std::ffi::c_void;
     let before = denies.entries.len();
+    let live: Vec<String> = live.iter().map(|root| comparable_path(root)).collect();
     denies.entries.retain(|deny| {
-        if live.iter().any(|root| deny.path.starts_with(root)) {
+        let path = comparable_path(&deny.path);
+        if live.iter().any(|root| path_is_within(&path, root)) {
             return true;
         }
         match std::fs::symlink_metadata(&deny.path) {
@@ -400,6 +402,14 @@ fn remove_unneeded_denies(registry: &Path, live: &BTreeSet<PathBuf>, log_dir: Op
                 return false;
             }
             _ => {}
+        }
+        // Low: a Low-integrity sandbox may be using the folder right now, a
+        // session of another Windows account (whose records these aren't),
+        // say. Otherwise a Low-integrity command can't delete through it
+        // anyway, so the deny isn't needed.
+        // SAFETY: reads the label of an existing folder that is not a link.
+        if !matches!(unsafe { effective_label_is_low(&deny.path) }, Ok(false)) {
+            return true;
         }
         // SAFETY: `everyone` is a valid SID; the path is a folder, not a link.
         match unsafe { remove_deny_delete_child_ace(&deny.path, everyone, deny.inherit_to_subdirs) }
@@ -424,54 +434,101 @@ fn remove_unneeded_denies(registry: &Path, live: &BTreeSet<PathBuf>, log_dir: Op
     }
 }
 
+/// `path` as compared for liveness: without a `\\?\` prefix (which
+/// `dunce` keeps on long paths) and, as Windows paths are, case-insensitive.
+fn comparable_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    let path = if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(&path).to_string()
+    };
+    path.trim_end_matches('\\').to_ascii_lowercase()
+}
+
+/// Whether comparable `path` is `root` or lies below it.
+fn path_is_within(path: &str, root: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('\\'))
+}
+
 /// #1506 item 1 (D261): adds each Everyone `FILE_DELETE_CHILD` deny in
 /// `denies` that isn't there yet, recording it first, so a sweep removes it
 /// once it lies in no live session's root, even after a crash. Links are
 /// never followed. Without usable records the denies are added untracked,
 /// as before, so protection never depends on the records.
-pub(crate) fn add_tracked_delete_child_denies(denies: &[DeleteChildDeny], log_dir: Option<&Path>) {
-    let denies: Vec<DeleteChildDeny> = denies
-        .iter()
-        .filter(|deny| {
-            std::fs::symlink_metadata(&deny.path).is_ok_and(|meta| {
-                meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
-            })
-        })
-        .filter_map(|deny| {
-            Some(DeleteChildDeny {
-                path: dunce::canonicalize(&deny.path).ok()?,
+///
+/// With `required`, every deny must be in place afterwards (as an explicit
+/// entry) or this fails, so the command doesn't start without it (D263's
+/// denies above nested read-only paths); otherwise it is best effort, as
+/// the `.git`/`.codex`/`.agents` denies always were.
+pub(crate) fn add_tracked_delete_child_denies(
+    denies: &[DeleteChildDeny],
+    required: bool,
+    log_dir: Option<&Path>,
+) -> Result<()> {
+    let mut usable = Vec::new();
+    for deny in denies {
+        let is_plain_dir = std::fs::symlink_metadata(&deny.path).is_ok_and(|meta| {
+            meta.is_dir() && meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT == 0
+        });
+        match is_plain_dir
+            .then(|| dunce::canonicalize(&deny.path).ok())
+            .flatten()
+        {
+            Some(path) => usable.push(DeleteChildDeny {
+                path,
                 inherit_to_subdirs: deny.inherit_to_subdirs,
-            })
-        })
-        .collect();
-    if denies.is_empty() {
-        return;
+            }),
+            None if required => anyhow::bail!(
+                "the Windows sandbox could not protect {}: it is not a plain folder",
+                deny.path.display()
+            ),
+            None => {}
+        }
+    }
+    if usable.is_empty() {
+        return Ok(());
     }
     // SAFETY: builds the well-known Everyone SID.
-    let Ok(mut everyone) = (unsafe { crate::token::world_sid() }) else {
-        return;
-    };
+    let mut everyone = unsafe { crate::token::world_sid() }?;
     let everyone = everyone.as_mut_ptr() as *mut std::ffi::c_void;
     let tracked = ensure_registry().and_then(|registry| {
         let lock = lock(&registry)?;
         // SAFETY: `everyone` is a valid SID.
-        let result = unsafe { add_tracked_locked(&registry, &denies, everyone) };
+        let result = unsafe { add_tracked_locked(&registry, &usable, everyone) };
         drop(lock);
         result
     });
     if let Err(err) = tracked {
         log_note(
             &format!(
-                "delete-child denies: adding them untracked, so they stay after the session: {err:#}"
+                "delete-child denies: some may not be recorded, and those stay after the session: {err:#}"
             ),
             log_dir,
         );
-        for deny in &denies {
+        for deny in &usable {
             // SAFETY: as above; the path is an existing folder.
             let _ =
                 unsafe { add_deny_delete_child_ace(&deny.path, everyone, deny.inherit_to_subdirs) };
         }
     }
+    if required {
+        for deny in &usable {
+            // SAFETY: as above.
+            let present =
+                unsafe { has_deny_delete_child_ace(&deny.path, everyone, deny.inherit_to_subdirs) };
+            if !matches!(present, Ok(true)) {
+                anyhow::bail!(
+                    "the Windows sandbox could not add the Everyone delete-child deny on {}",
+                    deny.path.display()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// # Safety
