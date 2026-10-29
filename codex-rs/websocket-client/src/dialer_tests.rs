@@ -218,18 +218,21 @@ async fn environment_proxy_route_honors_no_proxy_in_a_subprocess() {
         "127.0.0.1",
         /*expect_proxy*/ false,
         /*proxy_tls*/ false,
+        /*transport_default*/ false,
     )
     .await;
     assert_no_proxy_subprocess(
         "unrelated.example",
         /*expect_proxy*/ true,
         /*proxy_tls*/ false,
+        /*transport_default*/ false,
     )
     .await;
     assert_no_proxy_subprocess(
         "unrelated.example",
         /*expect_proxy*/ true,
         /*proxy_tls*/ true,
+        /*transport_default*/ false,
     )
     .await;
 }
@@ -241,12 +244,22 @@ async fn environment_proxy_route_honors_no_proxy_ip_ranges_in_a_subprocess() {
         "unrelated.example,127.0.0.0/8",
         /*expect_proxy*/ false,
         /*proxy_tls*/ false,
+        /*transport_default*/ false,
     )
     .await;
     assert_no_proxy_subprocess(
         "10.0.0.0/8",
         /*expect_proxy*/ true,
         /*proxy_tls*/ false,
+        /*transport_default*/ false,
+    )
+    .await;
+    // The transport-default route reads NO_PROXY from the environment.
+    assert_no_proxy_subprocess(
+        "unrelated.example,127.0.0.0/8",
+        /*expect_proxy*/ false,
+        /*proxy_tls*/ false,
+        /*transport_default*/ true,
     )
     .await;
 }
@@ -260,7 +273,10 @@ fn no_proxy_ranges_match_only_ip_hosts_inside_them() {
         )
     };
     assert!(matches("172.16.0.0/12", "ws://172.31.255.1/x"));
-    assert!(matches(" example.com , 10.0.0.0/8 ", "wss://10.2.3.4:8443/x"));
+    assert!(matches(
+        " example.com , 10.0.0.0/8 ",
+        "wss://10.2.3.4:8443/x"
+    ));
     assert!(matches("0.0.0.0/0", "ws://203.0.113.9/x"));
     assert!(matches("fd00::/8", "ws://[fd12::1]:9000/x"));
     assert!(matches("[::1]/128", "ws://[::1]/x"));
@@ -318,9 +334,13 @@ async fn no_proxy_subprocess_probe() {
             request,
             WebSocketConfig::default(),
             Some(tls_config),
-            OutboundProxyRoute::Proxy {
-                url: proxy_url,
-                no_proxy: Some(no_proxy),
+            if std::env::var_os("CODEX_WEBSOCKET_NO_PROXY_PROBE_TRANSPORT_DEFAULT").is_some() {
+                OutboundProxyRoute::TransportDefault
+            } else {
+                OutboundProxyRoute::Proxy {
+                    url: proxy_url,
+                    no_proxy: Some(no_proxy),
+                }
             },
             TcpNodelay::Enabled,
         ),
@@ -472,7 +492,12 @@ async fn start_echo_websocket_server(
     (address, task)
 }
 
-async fn assert_no_proxy_subprocess(no_proxy: &str, expect_proxy: bool, proxy_tls: bool) {
+async fn assert_no_proxy_subprocess(
+    no_proxy: &str,
+    expect_proxy: bool,
+    proxy_tls: bool,
+    transport_default: bool,
+) {
     let (target_acceptor, proxy_acceptor, certificate) = if proxy_tls {
         let (_, acceptor, certificate) = test_tls_configs();
         (Some(acceptor.clone()), Some(acceptor), Some(certificate))
@@ -565,6 +590,10 @@ async fn assert_no_proxy_subprocess(no_proxy: &str, expect_proxy: bool, proxy_tl
             .env("CODEX_WEBSOCKET_NO_PROXY_PROBE_URL", target_url)
             .env("CODEX_WEBSOCKET_NO_PROXY_PROBE_PROXY", proxy_url);
         command.env_remove("CODEX_WEBSOCKET_NO_PROXY_PROBE_CA_DER");
+        command.env_remove("CODEX_WEBSOCKET_NO_PROXY_PROBE_TRANSPORT_DEFAULT");
+        if transport_default {
+            command.env("CODEX_WEBSOCKET_NO_PROXY_PROBE_TRANSPORT_DEFAULT", "1");
+        }
         if let Some(certificate) = certificate {
             let certificate_hex = certificate
                 .as_ref()
