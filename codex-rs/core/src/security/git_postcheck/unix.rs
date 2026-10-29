@@ -533,6 +533,11 @@ struct Snapshot {
     /// it.
     beyond: HashMap<PathBuf, Folder>,
     beyond_states: HashMap<PathBuf, StateRead>,
+    /// What of `beyond` this session's look that saw it reported (by
+    /// `Held::path`).
+    beyond_told: HashSet<PathBuf>,
+    /// What this look reported (by `Held::path`), for `beyond_told`.
+    told: HashSet<PathBuf>,
 }
 
 impl Snapshot {
@@ -552,6 +557,8 @@ impl Snapshot {
             unremembered: HashSet::new(),
             beyond: HashMap::new(),
             beyond_states: HashMap::new(),
+            beyond_told: HashSet::new(),
+            told: HashSet::new(),
         }
     }
 }
@@ -1476,6 +1483,11 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 .iter()
                 .filter_map(|finding| Held::of(finding, repo, &cur)),
         );
+        cur.told = found
+            .iter()
+            .filter_map(|finding| Held::of(finding, repo, &cur))
+            .map(|held| held.path().to_path_buf())
+            .collect();
         // Held as before; only the message leaves out what was told already
         // (#943 r8 N2, item 14).
         let told = told_again(snapshot.as_ref(), repo, &cur, &found);
@@ -1640,8 +1652,8 @@ enum Walked {
 }
 
 /// #943 item 14: findings in folders `last.beyond` holds (a look after a
-/// stale `finish`) that are unchanged from that view and whose hold, from
-/// when they were reported, still stands: the person was told already.
+/// stale `finish`) that the look which saw them there reported, unchanged
+/// since, and whose hold still stands: the person was told already.
 fn told_again(
     last: Option<&Snapshot>,
     repo: &Repo,
@@ -1653,22 +1665,25 @@ fn told_again(
     }) else {
         return Vec::new();
     };
-    let unchanged = |finding: &Finding| match finding {
-        Finding::Link { path, .. }
-        | Finding::HardLink { path }
-        | Finding::Config { path }
-        | Finding::Remote { path } => {
-            let entry = |folders: &HashMap<PathBuf, Folder>| {
-                let folder = folders.get(path.parent()?)?;
-                folder.entries.get(path.file_name()?).cloned()
-            };
-            entry(&last.beyond).is_some_and(|old| entry(&cur.folders) == Some(old))
-        }
-        Finding::Exec { todo, .. } => last
-            .beyond_states
-            .get(todo)
-            .is_some_and(|old| cur.states.get(todo) == Some(old)),
-        Finding::Replaced { .. } | Finding::Incomplete { .. } => false,
+    let unchanged = |finding: &Finding| {
+        Held::of(finding, repo, cur).is_some_and(|held| last.beyond_told.contains(held.path()))
+            && match finding {
+                Finding::Link { path, .. }
+                | Finding::HardLink { path }
+                | Finding::Config { path }
+                | Finding::Remote { path } => {
+                    let entry = |folders: &HashMap<PathBuf, Folder>| {
+                        let folder = folders.get(path.parent()?)?;
+                        folder.entries.get(path.file_name()?).cloned()
+                    };
+                    entry(&last.beyond).is_some_and(|old| entry(&cur.folders) == Some(old))
+                }
+                Finding::Exec { todo, .. } => last
+                    .beyond_states
+                    .get(todo)
+                    .is_some_and(|old| cur.states.get(todo) == Some(old)),
+                Finding::Replaced { .. } | Finding::Incomplete { .. } => false,
+            }
     };
     let candidates: Vec<&Finding> = found.iter().filter(|finding| unchanged(finding)).collect();
     if candidates.is_empty() {
@@ -1688,10 +1703,10 @@ fn told_again(
         .collect()
 }
 
-/// #943 item 14: `cur.beyond`. Where `stale` (a `finish`, with the git
-/// folders stored for the repository before it), what `last` saw of those
-/// of them `cur` didn't walk; and `last.beyond` where `cur` walked the same
-/// git folders. Only while the `.git` is the same one (no look saw it
+/// #943 item 14: `cur.beyond` (and what of it was told). Where `stale` (a
+/// `finish`, with the git folders stored for the repository before it),
+/// what `last` saw of those of them `cur` didn't walk; and `last.beyond`
+/// where `cur` walked the same git folders. Only while the `.git` is the same one (no look saw it
 /// missing).
 fn carry_beyond(last: Option<&Snapshot>, cur: &mut Snapshot, stale: Option<&[PathBuf]>) {
     let Some(last) = last.filter(|last| !last.went_missing && last.dot_git == cur.dot_git) else {
@@ -1712,6 +1727,14 @@ fn carry_beyond(last: Option<&Snapshot>, cur: &mut Snapshot, stale: Option<&[Pat
         if !cur.folders.contains_key(dir) && !cur.beyond.contains_key(dir) {
             cur.beyond.insert(dir.clone(), folder.clone());
         }
+    }
+    let told = last
+        .told
+        .iter()
+        .filter(|path| stale.iter().any(|stale| path.starts_with(stale)))
+        .chain(last.beyond_told.iter().filter(|_| same));
+    for path in told {
+        cur.beyond_told.insert(path.clone());
     }
     for (path, read) in last.states.iter().chain(&last.beyond_states) {
         if path
