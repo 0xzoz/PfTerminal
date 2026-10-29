@@ -1278,14 +1278,8 @@ async fn guardian_receives_exact_trigger_for_single_network_request() -> Result<
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_guardian_network_decisions_are_scoped_to_each_request_and_environment() -> Result<()>
 {
-    // Needs a remote environment, but can't pass against one yet (#708, #722):
-    // the remote executor's proxy rejects the MITM that this fixture's
-    // "limited" mode needs, and it asks the host only for Guardian-reviewed
-    // decisions, so the user is never asked about a remote network request.
-    core_test_support::skip_if_remote!(
-        Ok(()),
-        "a remote executor's proxy can't run limited mode or ask the user (#708)"
-    );
+    // #722 (D246): remote network decisions reach this machine, so the user
+    // is asked as locally. "full" mode: a remote proxy can't run "limited".
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
     skip_if_host_windows!(Ok(()));
     skip_if_no_network!(Ok(()));
@@ -1293,7 +1287,7 @@ async fn remote_guardian_network_decisions_are_scoped_to_each_request_and_enviro
     skip_if_no_remote_env!(Ok(()));
 
     let server = start_mock_server().await;
-    let test = managed_network_unified_exec_test(&server).await?;
+    let test = managed_network_unified_exec_test_in_mode(&server, "full").await?;
     let remote = test.executor_environment().selection().clone();
     assert_eq!(remote.environment_id, REMOTE_ENVIRONMENT_ID);
     let session_call_id = "remote-guardian-session-approval";
@@ -1504,14 +1498,8 @@ async fn remote_guardian_network_decisions_are_scoped_to_each_request_and_enviro
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn approved_network_host_for_one_environment_still_prompts_in_another() -> Result<()> {
-    // Needs a remote environment, but can't pass against one yet (#708, #722):
-    // the remote executor's proxy rejects the MITM that this fixture's
-    // "limited" mode needs, and it asks the host only for Guardian-reviewed
-    // decisions, so the user is never asked about a remote network request.
-    core_test_support::skip_if_remote!(
-        Ok(()),
-        "a remote executor's proxy can't run limited mode or ask the user (#708)"
-    );
+    // #722 (D246): remote network decisions reach this machine, so the user
+    // is asked as locally. "full" mode: a remote proxy can't run "limited".
     skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
     skip_if_host_windows!(Ok(()));
     skip_if_no_network!(Ok(()));
@@ -1519,7 +1507,7 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
     skip_if_no_remote_env!(Ok(()));
 
     let server = start_mock_server().await;
-    let test = managed_network_unified_exec_test(&server).await?;
+    let test = managed_network_unified_exec_test_in_mode(&server, "full").await?;
     let local_cwd = TempDir::new()?;
     let remote_cwd = PathBuf::from(format!(
         "/tmp/codex-network-approval-{}",
@@ -1612,20 +1600,120 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
     Ok(())
 }
 
+/// #722 (D246): a remote network request refused on this machine without a
+/// prompt (approvals off) ends the command as failed, as a local one does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_network_refusal_without_prompt_ends_command_as_failed() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
+    skip_if_host_windows!(Ok(()));
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    skip_if_no_remote_env!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = managed_network_unified_exec_test_in_mode(&server, "full").await?;
+    let remote = test.executor_environment().selection().clone();
+    assert_eq!(remote.environment_id, REMOTE_ENVIRONMENT_ID);
+    let responses = mount_exec_network_turn(
+        &server,
+        "resp-remote-network-never",
+        "exec-remote-network-never",
+        network_fetch_args(REMOTE_ENVIRONMENT_ID),
+    )
+    .await?;
+    submit_managed_network_turn(
+        &test,
+        "fetch from the remote environment with approvals off",
+        vec![remote],
+        ApprovalsReviewer::User,
+        AskForApproval::Never,
+    )
+    .await?;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        wait_for_completion_without_network_prompt(&test),
+    )
+    .await
+    .context("the remote refusal should end the turn without a prompt")?;
+
+    let output = responses
+        .function_call_output_text("exec-remote-network-never")
+        .context("expected remote network output")?;
+    assert!(
+        output.contains(&format!(
+            "Network access to \"{NETWORK_TEST_TARGET}\" was blocked by policy."
+        )),
+        "{output}"
+    );
+    assert!(!output.contains("OK:"), "{output}");
+    Ok(())
+}
+
+/// #722 (D246): remote "limited" mode still fails closed: the command never
+/// gets network, and nobody is asked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_limited_network_mode_still_fails_closed_without_asking() -> Result<()> {
+    skip_if_target_windows!(Ok(()), "uses the POSIX/Python network fixture");
+    skip_if_host_windows!(Ok(()));
+    skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
+    skip_if_no_remote_env!(Ok(()));
+
+    let server = start_mock_server().await;
+    let test = managed_network_unified_exec_test(&server).await?;
+    let remote = test.executor_environment().selection().clone();
+    let responses = mount_exec_network_turn(
+        &server,
+        "resp-remote-network-limited",
+        "exec-remote-network-limited",
+        network_fetch_args(REMOTE_ENVIRONMENT_ID),
+    )
+    .await?;
+    submit_managed_network_turn(
+        &test,
+        "fetch from the remote environment in limited mode",
+        vec![remote],
+        ApprovalsReviewer::User,
+        AskForApproval::OnRequest,
+    )
+    .await?;
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        wait_for_completion_without_network_prompt(&test),
+    )
+    .await
+    .context("remote limited mode should fail without a prompt")?;
+
+    let output = responses
+        .function_call_output_text("exec-remote-network-limited")
+        .context("expected remote network output")?;
+    assert!(!output.contains("OK:"), "{output}");
+    Ok(())
+}
+
 async fn managed_network_unified_exec_test(server: &wiremock::MockServer) -> Result<TestCodex> {
+    managed_network_unified_exec_test_in_mode(server, "limited").await
+}
+
+async fn managed_network_unified_exec_test_in_mode(
+    server: &wiremock::MockServer,
+    mode: &str,
+) -> Result<TestCodex> {
     let home = Arc::new(TempDir::new()?);
     fs::write(
         home.path().join("config.toml"),
-        r#"default_permissions = "workspace"
+        format!(
+            r#"default_permissions = "workspace"
 
 [permissions.workspace.filesystem]
 ":minimal" = "read"
 
 [permissions.workspace.network]
 enabled = true
-mode = "limited"
+mode = "{mode}"
 allow_local_binding = true
-"#,
+"#
+        ),
     )?;
     let approval_policy = AskForApproval::OnRequest;
     let permission_profile = PermissionProfile::workspace_write_with(
