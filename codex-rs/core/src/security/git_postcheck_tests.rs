@@ -1826,6 +1826,12 @@ fn issue_943_an_empty_config_past_the_limit_is_reported_once() {
         (message, held),
         (None, shown(std::slice::from_ref(&config)))
     );
+    // Made again empty before anything noticed it went: still held, not
+    // told again.
+    std::fs::remove_file(&config).expect("removed");
+    std::fs::write(&config, "").expect("empty again");
+    assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
+    assert_eq!(project.held(), shown(std::slice::from_ref(&config)));
     fill(&config);
     assert_eq!(kinds(&check(thread, &repos)), reported);
     assert_eq!(kinds(&check(thread, &repos)), Vec::<String>::new());
@@ -1867,13 +1873,27 @@ fn issue_943_a_stale_finish_does_not_make_the_next_look_report_again() {
     std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("HEAD");
     std::fs::write(git.join("config"), "[core]\n\tfsmonitor = /tmp/run-me\n").expect("config");
     std::fs::write(git.join("hooks/pre-commit"), "#!/bin/sh\n").expect("hook");
+    std::fs::create_dir_all(git.join("rebase-merge")).expect("rebase");
+    let todo = git.join("rebase-merge/git-rebase-todo");
+    std::fs::write(&todo, "exec ./run-me\n").expect("todo");
+    let hard = git.join("description");
+    std::fs::hard_link(project.outside.join("zshrc"), &hard).expect("hard link");
     let git = git.canonicalize().expect("canonical");
+    let (todo, hard) = (
+        git.join("rebase-merge/git-rebase-todo"),
+        git.join("description"),
+    );
     let (message, _) = recheck(thread, "Moderate", &[worktree.as_path()]);
     let message = message.expect("reported");
-    assert!(
-        message.contains(&git.join("config").display().to_string()),
-        "{message}"
-    );
+    for path in [
+        git.join("config"),
+        git.join("hooks"),
+        git.join("rebase-merge"),
+        hard.clone(),
+    ] {
+        let path = path.display().to_string();
+        assert!(message.contains(&path), "{path}: {message}");
+    }
     // Then it plants a link in the old git folder; its own look still
     // reports it.
     let link = worktree_git.join("COMMIT_EDITMSG");
@@ -1884,9 +1904,29 @@ fn issue_943_a_stale_finish_does_not_make_the_next_look_report_again() {
     );
     let (message, _) = recheck(thread, "Moderate", &[worktree.as_path()]);
     assert_eq!(message, None);
-    // The next command, with the git folders found now: nothing again.
+    // The step emptied and the hard link removed: their holds go. Both are
+    // put back the same.
+    std::fs::write(&todo, "").expect("emptied");
+    std::fs::remove_file(&hard).expect("unlinked");
+    let (_, held) = recheck(thread, "Moderate", &[worktree.as_path()]);
+    assert!(!held.contains(&todo.display().to_string()), "{held:?}");
+    std::fs::write(&todo, "exec ./run-me\n").expect("todo again");
+    std::fs::hard_link(project.outside.join("zshrc"), &hard).expect("hard link again");
+    // The next command, with the git folders found now: those two are
+    // reported (and held) again; config and hooks, still held, aren't.
     let fresh = repos(&[worktree.as_path()]);
     assert_eq!(begin(thread, &fresh, "Moderate"), None);
+    assert_eq!(
+        kinds(&check(thread, &fresh)),
+        vec![
+            format!("hard link {}", hard.display()),
+            format!("exec {}", todo.display()),
+        ]
+    );
+    let held = held_for(std::slice::from_ref(&git));
+    for path in shown(&[git.join("config"), git.join("hooks"), todo, hard]) {
+        assert!(held.contains(&path), "{path}: {held:?}");
+    }
     assert_eq!(kinds(&check(thread, &fresh)), Vec::<String>::new());
     std::fs::write(git.join("config.worktree"), "[core]\n").expect("config.worktree");
     assert_eq!(

@@ -528,10 +528,9 @@ struct Snapshot {
     /// #943 item 14: what the last look saw of git folders the repository
     /// names now that this look didn't walk, because it was a `finish` given
     /// the git folders found before its command (another look of this
-    /// session saw the `.git` replaced meanwhile). Only a remade baseline
-    /// reads it, so the look that walks them next isn't compared with
-    /// nothing; kept while later looks walk the same git folders and see
-    /// the same `.git`.
+    /// session saw the `.git` replaced meanwhile). Kept while later looks
+    /// walk the same git folders and see the same `.git`; `told_again` reads
+    /// it.
     beyond: HashMap<PathBuf, Folder>,
     beyond_states: HashMap<PathBuf, StateRead>,
 }
@@ -1444,9 +1443,10 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
             }
             unremembered
         });
-        // #943 r8 N2: reported once, not at every look: not again where this
+        // #943 r8 N2: told once, not at every look: not again where this
         // session's last look reported it (still empty, past the limit) and
-        // that report still holds it. Filled, it is reported (`compare`).
+        // that report still holds it (held again below, as before). Filled,
+        // it is reported (`compare`).
         let repeated: HashSet<PathBuf> = with_global(|global| {
             unremembered
                 .iter()
@@ -1466,7 +1466,6 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
         found.extend(
             unremembered
                 .into_iter()
-                .filter(|path| !repeated.contains(path))
                 .map(|path| Finding::Config { path }),
         );
         // What went again meanwhile (a pack git linked into place) isn't
@@ -1477,6 +1476,13 @@ fn look(thread: ThreadId, repos: &[Repo], first_only: bool, used: bool) -> Vec<F
                 .iter()
                 .filter_map(|finding| Held::of(finding, repo, &cur)),
         );
+        // Held as before; only the message leaves out what was told already
+        // (#943 r8 N2, item 14).
+        let told = told_again(snapshot.as_ref(), repo, &cur, &found);
+        found.retain(|finding| {
+            !told.contains(finding)
+                && !matches!(finding, Finding::Config { path } if repeated.contains(path))
+        });
         // Told each time a look becomes incomplete; held while it is.
         if let Some(why) = &cur.incomplete
             && prev.is_none_or(|prev| prev.incomplete.as_ref() != Some(why))
@@ -1633,6 +1639,55 @@ enum Walked {
     Exact(Vec<PathBuf>),
 }
 
+/// #943 item 14: findings in folders `last.beyond` holds (a look after a
+/// stale `finish`) that are unchanged from that view and whose hold, from
+/// when they were reported, still stands: the person was told already.
+fn told_again(
+    last: Option<&Snapshot>,
+    repo: &Repo,
+    cur: &Snapshot,
+    found: &[Finding],
+) -> Vec<Finding> {
+    let Some(last) = last.filter(|last| {
+        !last.beyond.is_empty() && !last.went_missing && last.dot_git == cur.dot_git
+    }) else {
+        return Vec::new();
+    };
+    let unchanged = |finding: &Finding| match finding {
+        Finding::Link { path, .. }
+        | Finding::HardLink { path }
+        | Finding::Config { path }
+        | Finding::Remote { path } => {
+            let entry = |folders: &HashMap<PathBuf, Folder>| {
+                let folder = folders.get(path.parent()?)?;
+                folder.entries.get(path.file_name()?).cloned()
+            };
+            entry(&last.beyond).is_some_and(|old| entry(&cur.folders) == Some(old))
+        }
+        Finding::Exec { todo, .. } => last
+            .beyond_states
+            .get(todo)
+            .is_some_and(|old| cur.states.get(todo) == Some(old)),
+        Finding::Replaced { .. } | Finding::Incomplete { .. } => false,
+    };
+    let candidates: Vec<&Finding> = found.iter().filter(|finding| unchanged(finding)).collect();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let holds: Vec<Held> = with_global(|global| global.held.iter().cloned().collect());
+    candidates
+        .into_iter()
+        .filter(|finding| {
+            Held::of(finding, repo, cur).is_some_and(|mine| {
+                holds
+                    .iter()
+                    .any(|held| held.what == mine.what && held.stands())
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 /// #943 item 14: `cur.beyond`. Where `stale` (a `finish`, with the git
 /// folders stored for the repository before it), what `last` saw of those
 /// of them `cur` didn't walk; and `last.beyond` where `cur` walked the same
@@ -1679,22 +1734,18 @@ fn carry_beyond(last: Option<&Snapshot>, cur: &mut Snapshot, stale: Option<&[Pat
 fn remade_baseline(repo: &Repo, prev: &Snapshot, cur: &Snapshot) -> Snapshot {
     let mut baseline = Snapshot::empty(&cur.dot_git);
     baseline.empty_new = prev.empty_new.clone();
-    // #943 item 14: only while the `.git` is the one it was seen with.
-    let same_git = !prev.went_missing && prev.dot_git == cur.dot_git;
-    let beyond = same_git.then_some(&prev.beyond);
-    let beyond_states = prev.beyond_states.iter().filter(|_| same_git);
     for (dir, folder) in &cur.folders {
         if let Some(old) = prev
             .folders
             .get(dir)
-            .or_else(|| beyond.and_then(|beyond| beyond.get(dir)))
             .filter(|old| old.dev == folder.dev && old.ino == folder.ino && old.born == folder.born)
         {
             baseline.folders.insert(dir.clone(), old.clone());
         }
     }
-    baseline.states = beyond_states
-        .chain(&prev.states)
+    baseline.states = prev
+        .states
+        .iter()
         .filter(|(path, _)| {
             path.parent()
                 .is_some_and(|dir| baseline.folders.contains_key(dir))
