@@ -160,14 +160,27 @@ Other ways to start a process (#1507), measured on the hosted Windows runner
 (no Explorer running; not yet measured on a desktop): WMI's
 `Win32_Process.Create` refuses a legacy command (access denied), as do
 activating Explorer's `ShellWindows` (E_ACCESSDENIED) and the Task
-Scheduler (opening its task folder fails with 0x80070003).
-Three routes still start a child outside the command's job: naming another
-legacy session's process as the parent (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`;
-the child gets that session's job and token, because every legacy process's
-default DACL lets every legacy command open it with full access), and the
-COM servers `ShellBrowserWindow` (the child runs at Low integrity but with an
-unrestricted token) and `MMC20.Application` (Low, restricted). Closing them
-needs a product decision; their tests are ignored until then.
+Scheduler (opening its task folder fails with 0x80070003). Naming another
+legacy command's process as the parent (`PROC_THREAD_ATTRIBUTE_PARENT_PROCESS`)
+is refused too since D259: each legacy command's token carries its own
+identity SID, and its default DACL (what its processes, threads, token and
+the pipes and other objects it creates without explicit security get)
+grants full access only to the user, SYSTEM and that SID, and read and
+execute to Everyone, the logon SID and the capability SIDs. A legacy command
+writes only through its restricting SIDs, so it keeps full access to its own
+processes but can't open another legacy command's with any write right
+(start a child under it, change its DACL, duplicate its handles, write its
+memory) or adjust its token. Core and other unsandboxed programs keep full
+access through the user SID. Cost: a later legacy command can't write to an
+object an earlier command's leftover process created without explicit
+security (a named pipe or event, say). Not closed: other legacy commands can
+still end its processes (`PROCESS_TERMINATE` comes with execute access), and
+can still duplicate and impersonate its token, which isn't a write right, and
+so write in its writable roots while it runs (#1560). Two routes still start a child
+outside the command's job: the COM servers `ShellBrowserWindow` (the child
+runs at Low integrity but with an unrestricted token) and
+`MMC20.Application` (Low, restricted). Closing them waits on a measurement
+on a real desktop (D260); their tests are ignored until then.
 
 Protected paths that already exist inside writable roots when a session
 starts, such as `.git`, `.codex`, and `.agents`, also get an Everyone deny of
