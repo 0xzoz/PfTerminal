@@ -601,7 +601,7 @@ fn legacy_command_tools_work_with_command_identity() {
         (
             "powershell (ConPTY)",
             vec![
-                powershell.clone(),
+                powershell,
                 "-NoProfile".to_string(),
                 "-Command".to_string(),
                 "& cmd /c echo d259-tty; 'd259-tty-done'".to_string(),
