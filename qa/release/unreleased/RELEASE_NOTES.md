@@ -10,8 +10,8 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   all-zero usage object, so consumers can distinguish "not reported" from a
   measured zero. When usage is reported, the object is unchanged.
 - **A non-null usage does not prove the provider reported this turn.** On a
-  resumed thread, a response without usage still carries the thread's earlier
-  totals, so `usage` is not `null`. When only some of a turn's requests report
+  resumed thread, if this turn's response reports no usage, `usage` still
+  holds the thread's earlier totals. When only some of a turn's requests report
   usage, the totals include only those.
 - **The usage is still the completing thread's own total.** It does not add
   usage from spawned subagents and is not a difference from the start of the
