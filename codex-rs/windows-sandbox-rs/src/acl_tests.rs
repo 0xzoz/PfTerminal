@@ -228,9 +228,11 @@ struct WithoutPrivileges;
 impl WithoutPrivileges {
     fn start() -> Self {
         // SAFETY: plain Win32 calls on the current thread; the token handle is
-        // closed here and the impersonation ends in `drop`.
+        // closed here and the impersonation ends in `drop`, also when an
+        // assertion below fails.
         unsafe {
             assert_ne!(ImpersonateSelf(SecurityImpersonation), 0, "ImpersonateSelf");
+            let guard = Self;
             let mut token: HANDLE = 0;
             assert_ne!(
                 OpenThreadToken(
@@ -252,8 +254,8 @@ impl WithoutPrivileges {
             );
             CloseHandle(token);
             assert_ne!(disabled, 0, "AdjustTokenPrivileges");
+            guard
         }
-        Self
     }
 }
 
