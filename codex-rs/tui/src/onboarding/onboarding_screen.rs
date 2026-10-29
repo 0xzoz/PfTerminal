@@ -257,8 +257,9 @@ impl OnboardingScreen {
             );
             let has_multiple_provider_options = catalog_options.len() > 1;
             // #1563: a chosen but unset Corbanu Plan starts on its own setup row.
-            let highlighted_mode = if config.model_provider_id
-                == codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID
+            let highlighted_mode = if forced_login_method.is_none()
+                && config.model_provider_id
+                    == codex_model_provider_info::PFTERMINAL_PLAN_PROVIDER_ID
                 && catalog_options.contains(&SignInOption::CorbanuPlan)
             {
                 SignInOption::CorbanuPlan

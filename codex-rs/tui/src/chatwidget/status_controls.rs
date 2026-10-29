@@ -281,9 +281,9 @@ impl ChatWidget {
         }
     }
 
-    /// #1563: a key claim yields to `/providers` when that reports the
-    /// current provider not configured (a brokered session reports a key for
-    /// every provider that takes one without reading it).
+    /// #1563: a key claim yields when the turn gate (and `/providers`)
+    /// refuses the current provider as not configured; a brokered session
+    /// reports a key for every provider that takes one without reading it.
     fn status_account_display_for_card(&self) -> Option<StatusAccountDisplay> {
         let display = self.status_account_display.clone();
         if !matches!(display, Some(StatusAccountDisplay::ApiKey { .. })) {
@@ -291,7 +291,10 @@ impl ChatWidget {
         }
         self.model_catalog
             .provider_policy()
-            .and_then(|policy| policy.not_configured_entry_name(&self.config.model_provider_id))
+            .and_then(|policy| {
+                policy
+                    .not_configured_entry_name(&self.config.model_provider_id, self.current_model())
+            })
             .map(|provider| StatusAccountDisplay::NotConfigured { provider })
             .or(display)
     }

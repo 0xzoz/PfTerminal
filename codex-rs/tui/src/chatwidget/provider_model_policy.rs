@@ -150,21 +150,35 @@ impl ProviderModelPolicy {
         )
     }
 
-    /// #1563: the `/providers` name of the entry a runtime provider belongs to,
-    /// when `/providers` reports it not configured.
-    pub(crate) fn not_configured_entry_name(&self, runtime_provider_id: &str) -> Option<String> {
-        let entry = self.host.catalog().entries().iter().find(|entry| {
-            entry
-                .runtime_provider_ids
-                .iter()
-                .any(|id| id.as_str() == runtime_provider_id)
-        })?;
-        let not_configured = self.without_credential.contains(runtime_provider_id)
-            || self.statuses.get(entry.id.as_str()).is_some_and(|status| {
-                status.configuration
-                    == codex_provider_auth::ProviderConfigurationState::NotConfigured
-            });
-        not_configured.then(|| entry.display_name.clone())
+    /// #1563: the `/providers` name of the current provider's entry when the
+    /// turn gate refuses it as not configured.
+    pub(crate) fn not_configured_entry_name(
+        &self,
+        runtime_provider_id: &str,
+        model: &str,
+    ) -> Option<String> {
+        if !matches!(
+            self.current(runtime_provider_id, model),
+            CurrentSelectionDecision::RequireExplicitRecovery {
+                reason: ProviderUseBlocker::NotConfigured,
+                ..
+            }
+        ) {
+            return None;
+        }
+        let canonical = codex_model_provider_info::canonical_provider_id(runtime_provider_id);
+        self.host
+            .catalog()
+            .entries()
+            .iter()
+            .find(|entry| {
+                entry.runtime_provider_ids.iter().any(|id| {
+                    id.as_str() == runtime_provider_id
+                        || codex_model_provider_info::canonical_provider_id(id.as_str())
+                            == canonical
+                })
+            })
+            .map(|entry| entry.display_name.clone())
     }
 
     pub(crate) fn has_ready_configured_provider(&self) -> bool {
