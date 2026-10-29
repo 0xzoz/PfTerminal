@@ -23,8 +23,10 @@ use super::RECURSIVE_READERS;
 use super::WRITERS;
 use super::code_variables;
 use super::has_flag;
+use super::indirect;
 use super::paths::glob_any;
 use super::persistence_command;
+use super::rerun;
 use super::windows_paths;
 use super::work;
 use base64::Engine;
@@ -1049,13 +1051,17 @@ impl Classifier {
         let mut git_config = GitConfigWrites::new(&lower, &[], &[]);
         let mut later = LaterWords::new(&lower);
         let mut named_programs = 0;
+        let mut git_programs_read = false;
         for (index, word) in words.iter().enumerate() {
             work::step();
             let name = names[index];
             // The checks the POSIX pass makes by command name, for names
             // only this reading sees (`C:\Tools\corbanu.exe vault list`).
+            // #1515: `=git` too, where the git option scans stop.
+            let equals_git = indirect::equals_git(&lower[index]);
             let named = CLI_NAMES.contains(&name)
                 || name == "git"
+                || equals_git
                 || matches!(name, "crontab" | "launchctl" | "systemctl")
                 || CREDENTIAL_COMMANDS
                     .iter()
@@ -1075,11 +1081,14 @@ impl Classifier {
                 {
                     self.note(ProtectedActionKind::Persistence);
                 }
-                if name == "git"
-                    && code_variables::git_runs_code_after_git(
+                // #1516: and programs git runs (`grep -O`, `--upload-pack`),
+                // read once per command, as the POSIX pass reads them.
+                if (name == "git" || equals_git)
+                    && (code_variables::git_runs_code_after_git(
                         &words[index + 1..],
                         &words[index + 1..],
-                    )
+                    ) || (!std::mem::replace(&mut git_programs_read, true)
+                        && rerun::git_runs_program(&words[index + 1..], /*subcommand*/ None)))
                 {
                     self.note(ProtectedActionKind::UnseenCode);
                 }
