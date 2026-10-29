@@ -157,8 +157,10 @@ fn inspect_pid(name: &str, pid: u32) -> String {
 }
 
 /// Programs a launch can leave running outside any job besides this test
-/// binary (the report entry): the COM servers that start programs.
-const ESCAPE_IMAGES: &[&str] = &["mmc.exe", "explorer.exe", "dllhost.exe"];
+/// binary (the report entry): the COM servers that start programs, and the
+/// `rundll32` that `ShellBrowserWindow` starts the program through (measured
+/// on the hosted runner, #1507).
+const ESCAPE_IMAGES: &[&str] = &["mmc.exe", "explorer.exe", "dllhost.exe", "rundll32.exe"];
 
 /// Ends what a launch left running outside the sandbox: processes started
 /// since the sweep began, at Low integrity, in no job, running this test
