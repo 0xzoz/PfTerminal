@@ -254,7 +254,11 @@ async fn environment_proxy_route_honors_no_proxy_ip_ranges_in_a_subprocess() {
         /*transport_default*/ false,
     )
     .await;
-    // The transport-default route reads NO_PROXY from the environment.
+}
+
+/// #722 (D247): the transport-default route reads NO_PROXY from the environment.
+#[tokio::test]
+async fn transport_default_route_honors_no_proxy_ip_ranges_in_a_subprocess() {
     assert_no_proxy_subprocess(
         "unrelated.example,127.0.0.0/8",
         /*expect_proxy*/ false,
