@@ -375,6 +375,8 @@ pub(crate) fn apply_legacy_session_acl_rules(
     // #1506 item 1 (D261): the Everyone delete-child denies, added together
     // (tracked) before the command starts.
     let mut delete_child_denies = Vec::new();
+    // D263's, which the command must not start without.
+    let mut required_delete_child_denies = Vec::new();
     unsafe {
         for path in additional_deny_write_paths {
             // Explicit carveouts must exist before the command starts so the
@@ -440,7 +442,7 @@ pub(crate) fn apply_legacy_session_acl_rules(
                 deny_moving_ancestors_below_roots(
                     p,
                     acl_sids.write_root_sids,
-                    &mut delete_child_denies,
+                    &mut required_delete_child_denies,
                 )?;
             }
         }
@@ -503,10 +505,16 @@ pub(crate) fn apply_legacy_session_acl_rules(
             }
         }
     }
-    crate::integrity_leases::add_tracked_delete_child_denies(
+    let _ = crate::integrity_leases::add_tracked_delete_child_denies(
         &delete_child_denies,
+        /*required*/ false,
         Some(log_dir.as_path()),
     );
+    crate::integrity_leases::add_tracked_delete_child_denies(
+        &required_delete_child_denies,
+        /*required*/ true,
+        Some(log_dir.as_path()),
+    )?;
     Ok(lease)
 }
 

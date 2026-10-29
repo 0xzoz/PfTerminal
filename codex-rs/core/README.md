@@ -195,9 +195,12 @@ Everyone deny entries are visible in the folder's security settings while a
 session needs them. Each one a session adds is recorded first, in
 `delete-child-denies.json` next to the integrity-label records (#1506 item 1,
 D261), and removed by the sweep that puts labels back once no live session's
-writable root holds its folder; a session that crashed has its entries
+writable root holds its folder and the folder isn't labelled Low (a Low
+label means a sandbox, perhaps another Windows account's, whose records
+these aren't, may be using it); a session that crashed has its entries
 removed by the next sweep (a later legacy command, or the next TUI or
-app-server start). An entry that was already there and isn't recorded (one
+app-server start). A deny that D263 needs above an explicit nested read-only
+path must be in place, or the command doesn't start. An entry that was already there and isn't recorded (one
 the user made, or one left by a version before this change) is never
 removed. Without usable records the entries are added untracked and stay, as
 before. Unsandboxed deletes normally keep working because they use each

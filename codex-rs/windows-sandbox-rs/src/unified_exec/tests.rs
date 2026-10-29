@@ -1776,7 +1776,10 @@ fn legacy_integrity_crash_child_entry() {
         let denies: Vec<_> = std::env::split_paths(&paths)
             .flat_map(|path| crate::workspace_acl::delete_child_route_denies(&path))
             .collect();
-        crate::integrity_leases::add_tracked_delete_child_denies(&denies, /*log_dir*/ None);
+        crate::integrity_leases::add_tracked_delete_child_denies(
+            &denies, /*required*/ false, /*log_dir*/ None,
+        )
+        .expect("add denies");
     }
     // Own line: libtest prints the test name without a newline first.
     println!("\n{CRASH_CHILD_READY}");
@@ -2046,10 +2049,16 @@ fn legacy_delete_child_denies_follow_live_sessions() {
 
     let first = crate::integrity_leases::acquire(&[canonical(&root)], /*log_dir*/ None)
         .expect("first lease");
-    crate::integrity_leases::add_tracked_delete_child_denies(&route, /*log_dir*/ None);
+    crate::integrity_leases::add_tracked_delete_child_denies(
+        &route, /*required*/ false, /*log_dir*/ None,
+    )
+    .expect("add denies");
     let second = crate::integrity_leases::acquire(&[canonical(&root)], /*log_dir*/ None)
         .expect("second lease");
-    crate::integrity_leases::add_tracked_delete_child_denies(&route, /*log_dir*/ None);
+    crate::integrity_leases::add_tracked_delete_child_denies(
+        &route, /*required*/ false, /*log_dir*/ None,
+    )
+    .expect("add denies");
     let both_live = (state(), recorded_here());
     drop(first);
     let one_live = state();
@@ -2166,6 +2175,52 @@ fn legacy_planted_project_metadata_survives_a_crash() {
             true,
             (false, false),
         )
+/// #1506 item 1 (D261): a root nested inside another session's protected
+/// folder gets its own deny even though it inherits a copy, so it keeps one
+/// when the outer session ends and its entry goes.
+#[test]
+fn legacy_delete_child_denies_nested_root_keeps_its_own() {
+    let _guard = legacy_process_test_guard();
+    let test_root = user_owned_test_root();
+    let canonical = |path: &Path| dunce::canonicalize(path).expect("canonical");
+    let outer = test_root.path().join("outer");
+    let protected = outer.join("protected");
+    let nested = protected.join("nested");
+    let inner = nested.join("inner");
+    fs::create_dir_all(&inner).expect("create test directories");
+
+    let outer_lease = crate::integrity_leases::acquire(&[canonical(&outer)], /*log_dir*/ None)
+        .expect("outer lease");
+    crate::integrity_leases::add_tracked_delete_child_denies(
+        &crate::workspace_acl::delete_child_route_denies(&protected),
+        /*required*/ false,
+        /*log_dir*/ None,
+    )
+    .expect("outer denies");
+    let nested_lease =
+        crate::integrity_leases::acquire(&[canonical(&nested)], /*log_dir*/ None)
+            .expect("nested lease");
+    crate::integrity_leases::add_tracked_delete_child_denies(
+        &crate::workspace_acl::delete_child_route_denies(&inner),
+        /*required*/ true,
+        /*log_dir*/ None,
+    )
+    .expect("nested denies");
+    drop(outer_lease);
+    let outer_ended = (
+        has_everyone_delete_child_deny(&protected, true),
+        has_everyone_delete_child_deny(&nested, false),
+        has_everyone_delete_child_deny(&inner, true),
+    );
+    drop(nested_lease);
+    let both_ended = (
+        has_everyone_delete_child_deny(&nested, false),
+        has_everyone_delete_child_deny(&inner, true),
+    );
+
+    assert_eq!(
+        (outer_ended, both_ended),
+        ((false, true, true), (false, false))
     );
 }
 

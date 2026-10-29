@@ -102,6 +102,7 @@ env:
     legacy_delete_child_denies_are_removed_after_the_session
     legacy_delete_child_denies_follow_live_sessions
     legacy_planted_project_metadata_survives_a_crash
+    legacy_delete_child_denies_nested_root_keeps_its_own
     legacy_read_only_after_workspace_write_cannot_delete
     legacy_crashed_session_labels_are_repaired
     legacy_label_registry_is_closed_to_low_integrity
