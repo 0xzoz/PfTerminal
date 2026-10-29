@@ -6925,6 +6925,132 @@ fn issue_1159_code_variables_and_git_programs_are_unseen_code() {
     assert_eq!(wrong, Vec::<&str>::new());
 }
 
+/// #1516: `git grep -O<pager>` / `--open-files-in-pager[=<pager>]` runs the
+/// pager with the matching files as its arguments (`-O sh` runs them as
+/// scripts). It asks like git's other program-running options, in every
+/// spelling `rerun::git_runs_program` reads.
+#[test]
+fn issue_1516_git_grep_open_files_in_pager_asks() {
+    use ProtectedActionKind::UnseenCode;
+    let mut wrong = Vec::new();
+    for command in [
+        "git grep -O sh x",
+        "git grep -Osh x",
+        "git grep -O./x x",
+        "git grep -nOsh x",
+        "git grep -n -O sh x",
+        "git grep -O x",
+        "git grep --open-files-in-pager=sh x",
+        "git grep --open-files-in-pager x",
+        "git grep --open-files=sh x",
+        "git grep --op=sh x",
+        "git grep x -Osh",
+        "git -C /r grep -O sh x",
+        "git -c color.ui=never grep -Osh x",
+        "git --no-pager grep -Osh x",
+        "git.exe grep -Osh x",
+        "/usr/bin/git grep -Osh x",
+        "git-grep -Osh x",
+        "nice git grep -Osh x",
+        "env git grep -Osh x",
+        "command git grep -Osh x",
+        "echo x && git grep -Osh x",
+        "sh -c 'git grep -Osh x'",
+        "{git,} grep -Osh x",
+        "git grep {-Osh,} x",
+        "git grep -e 'a; b' -Osh x",
+        "git -c 'user.name=a; b' grep -Osh x",
+    ] {
+        if script(command) != Some(UnseenCode) {
+            wrong.push(command.to_string());
+        }
+        if kind(&["/bin/zsh", "-lc", command]) != Some(UnseenCode) {
+            wrong.push(format!("zsh: {command}"));
+        }
+    }
+    for command in [
+        &["git", "grep", "-Osh", "x"][..],
+        &["/bin/zsh", "-lc", "=git grep -Osh x"],
+    ] {
+        if kind(command) != Some(UnseenCode) {
+            wrong.push(command.join(" "));
+        }
+    }
+    // The Windows reading, for git named by its Windows path (and
+    // `--upload-pack`, which it did not read either).
+    for line in [
+        "git grep -Osh x",
+        r"C:\Git\cmd\git.exe grep -Osh x",
+        r"C:\Git\cmd\git.exe clone --upload-pack=./x u",
+    ] {
+        if cmd(line) != Some(UnseenCode) {
+            wrong.push(format!("cmd: {line}"));
+        }
+        if powershell(line) != Some(UnseenCode) {
+            wrong.push(format!("powershell: {line}"));
+        }
+    }
+    for command in [
+        "git grep -n foo",
+        "git grep -o foo",
+        "git grep --only-matching foo",
+        "git grep -i -e foo -- src",
+        "git log -Oorder.txt",
+        "git log --grep=x",
+    ] {
+        if script(command).is_some() {
+            wrong.push(format!("quiet: {command}"));
+        }
+    }
+    assert_eq!(wrong, Vec::<String>::new());
+}
+
+/// #1515: a `=git` an option follows ends git's option scan like `git`
+/// (each such word starts its own), so a line of many stays linear.
+#[test]
+fn issue_1515_equals_git_scans_are_linear() {
+    for (label, unit) in [
+        ("=git words", "=git -c user.name=x "),
+        ("=git values", "-C x =git -C y "),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("git {} status", unit.repeat(1000 * scale));
+            let _ = script(&line);
+            let _ = kind(&["/bin/zsh", "-lc", &line]);
+        });
+    }
+    // The scan from `=git` reads on, so nothing after it is dropped.
+    for command in [
+        "git -c a=b =git -c core.pager=sh log",
+        "git -C x =git -c core.pager=sh log",
+        "git -c a=b =git --exec-path=/tmp/x log",
+        "=git -c a=b =git -c core.pager=sh log",
+        "git -c 'user.name=a =git -x' -c core.pager=sh log",
+        "git -c 'user.name=a =git -c b' -c core.pager=sh log",
+        "nice git -c a=b =git -c core.pager=sh log",
+    ] {
+        for shell in ["/bin/bash", "/bin/zsh"] {
+            assert_eq!(
+                kind(&[shell, "-lc", command]),
+                Some(ProtectedActionKind::UnseenCode),
+                "{shell}: {command}"
+            );
+        }
+    }
+    // And in the Windows reading, whose scans start at `=git` too.
+    for line in [
+        "git -c a=b =git -c core.pager=sh log",
+        "git -C x =git -c core.pager=sh log",
+    ] {
+        assert_eq!(cmd(line), Some(ProtectedActionKind::UnseenCode), "{line}");
+        assert_eq!(
+            powershell(line),
+            Some(ProtectedActionKind::UnseenCode),
+            "{line}"
+        );
+    }
+}
+
 /// #1159: more programs' output files, git writes into folders by operand
 /// or working tree, files named by unseen output, and zsh `=git`.
 #[test]
