@@ -1602,10 +1602,12 @@ async fn approved_network_host_for_one_environment_still_prompts_in_another() ->
         })
         .await?;
     wait_for_turn_complete(&test).await;
-    assert_eq!(
-        remote_responses.function_call_output_text("exec-network-remote"),
-        Some(rejection.to_string())
-    );
+    // The refusal ends the remote command as failed, with the user's reason.
+    let output = remote_responses
+        .function_call_output_text("exec-network-remote")
+        .context("expected remote network output")?;
+    assert!(output.starts_with("exec_command failed"), "{output}");
+    assert!(output.ends_with(rejection), "{output}");
 
     test.fs()
         .remove(
@@ -1660,13 +1662,13 @@ async fn remote_network_refusal_without_prompt_ends_command_as_failed() -> Resul
     let output = responses
         .function_call_output_text("exec-remote-network-never")
         .context("expected remote network output")?;
+    assert!(output.starts_with("exec_command failed"), "{output}");
     assert!(
-        output.contains(&format!(
+        output.ends_with(&format!(
             "Network access to \"{NETWORK_TEST_TARGET}\" was blocked by policy."
         )),
         "{output}"
     );
-    assert!(!output.contains("OK:"), "{output}");
     Ok(())
 }
 
@@ -1708,7 +1710,14 @@ async fn remote_limited_network_mode_still_fails_closed_without_asking() -> Resu
     let output = responses
         .function_call_output_text("exec-remote-network-limited")
         .context("expected remote network output")?;
-    assert!(!output.contains("OK:"), "{output}");
+    assert!(output.starts_with("exec_command failed"), "{output}");
+    assert!(
+        output.ends_with(
+            "remote exec-server network proxy does not support MITM, credential injection, or \
+             MITM hooks"
+        ),
+        "{output}"
+    );
     Ok(())
 }
 
