@@ -174,10 +174,15 @@ starts, such as `.git`, `.codex`, and `.agents`, also get an Everyone deny of
 `FILE_DELETE_CHILD` on the path, its subdirectories, and its parent directory.
 That keeps the sandbox from deleting, moving, or replacing them through the
 parent, which would otherwise let it plant Git hooks or config that later run
-unsandboxed. Not covered (#1506): renaming a writable ancestor of a nested
-protected path (a command can then recreate the path), and `.codex` or
-`.agents` folders that don't exist when the session starts (a command can
-create them). The deny entries are persistent and visible in the folder's
+unsandboxed. For an explicitly configured read-only path nested deeper in a
+writable root (`w\a\b`, say), each folder between the root and it (`w\a`)
+also denies the sandbox `DELETE`, and that folder's parent denies Everyone
+`FILE_DELETE_CHILD`, so a command can't move or rename the folder away and
+recreate the read-only path (#1506 item 3, D263). Commands can still write
+inside those folders but can't delete or rename the folders themselves; the
+default `.git`, `.codex` and `.agents` protections sit directly in the root
+and don't add these. Not covered (#1506): `.codex` or `.agents` folders that
+don't exist when the session starts (a command can create them). The deny entries are persistent and visible in the folder's
 security settings. Unsandboxed deletes normally keep working because they use each
 object's own `DELETE` right; only a delete that relies on the parent's
 `FILE_DELETE_CHILD` is affected. To remove the entries, run

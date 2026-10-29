@@ -1151,6 +1151,111 @@ fn legacy_workspace_write_cannot_delete_or_replace_protected_git_dir() {
     });
 }
 
+/// #1506 item 3 (D263): moving a folder between a writable root and an
+/// explicit nested read-only carve-out carried the carve-out away and let the
+/// command recreate it with its own contents. Those folders can't be moved or
+/// renamed now; writing inside them still works.
+#[test]
+fn legacy_workspace_write_cannot_move_ancestor_of_nested_carve_out() {
+    let _guard = legacy_process_test_guard();
+    let runtime = current_thread_runtime();
+    runtime.block_on(async move {
+        let test_root = user_owned_test_root();
+        let codex_home = sandbox_home("legacy-nested-carve-out");
+        let workspace = test_root.path().join("workspace");
+        let outer = workspace.join("a");
+        let inner = outer.join("b");
+        let carve_out = inner.join("c");
+        fs::create_dir_all(&carve_out).expect("create nested carve-out");
+        let kept = carve_out.join("keep.txt");
+        fs::write(&kept, "original").expect("seed carve-out file");
+        let outer_file = outer.join("other.txt");
+        fs::write(&outer_file, "before").expect("seed outer file");
+
+        let script = codex_home.path().join("move-ancestor.cmd");
+        fs::write(
+            &script,
+            concat!(
+                "@echo off\r\n",
+                "echo after> \"%OUTER%\\other.txt\"\r\n",
+                "move \"%OUTER%\\b\" \"%WORKSPACE%\\b-moved\"\r\n",
+                "ren \"%OUTER%\\b\" b-renamed\r\n",
+                "move \"%OUTER%\" \"%WORKSPACE%\\a-moved\"\r\n",
+                "ren \"%OUTER%\" a-renamed\r\n",
+                "mkdir \"%OUTER%\\b\\c\"\r\n",
+                "echo planted> \"%OUTER%\\b\\c\\keep.txt\"\r\n",
+                "exit /b 0\r\n",
+            ),
+        )
+        .expect("write move-ancestor script");
+        let env_map = HashMap::from([
+            (
+                "WORKSPACE".to_string(),
+                workspace.to_string_lossy().into_owned(),
+            ),
+            ("OUTER".to_string(), outer.to_string_lossy().into_owned()),
+        ]);
+        let carve_outs =
+            [AbsolutePathBuf::from_absolute_path(&carve_out).expect("absolute carve-out")];
+
+        let spawned = spawn_windows_sandbox_session_legacy(
+            &PermissionProfile::workspace_write(),
+            workspace_roots_for(workspace.as_path()).as_slice(),
+            codex_home.path(),
+            vec![
+                "C:\\Windows\\System32\\cmd.exe".to_string(),
+                "/d".to_string(),
+                "/c".to_string(),
+                script.display().to_string(),
+            ],
+            workspace.as_path(),
+            env_map,
+            /*timeout_ms*/ Some(5_000),
+            &[],
+            &carve_outs,
+            /*tty*/ false,
+            /*stdin_open*/ false,
+            /*use_private_desktop*/ true,
+        )
+        .await
+        .expect("spawn legacy move-ancestor session");
+        let (stdout, exit_code) =
+            collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(/*secs*/ 10))
+                .await;
+        let stdout = String::from_utf8_lossy(&stdout);
+        let sandbox_outcome = (
+            exit_code,
+            fs::read_to_string(&kept).ok(),
+            fs::read_to_string(&outer_file).ok(),
+            ["b-moved", "a-moved", "a-renamed"]
+                .iter()
+                .filter(|name| workspace.join(name).exists())
+                .copied()
+                .collect::<Vec<_>>(),
+            outer.join("b-renamed").exists(),
+        );
+        // The unsandboxed user can still rename their own folders.
+        let host_rename =
+            fs::rename(&outer, workspace.join("a-host")).map_err(|err| err.to_string());
+
+        assert_eq!(
+            (sandbox_outcome, host_rename),
+            (
+                (
+                    0,
+                    Some("original".to_string()),
+                    Some("after\r\n".to_string()),
+                    Vec::<&str>::new(),
+                    false,
+                ),
+                Ok(()),
+            ),
+            "stdout={stdout:?}\n{}",
+            sandbox_log(codex_home.path())
+        );
+    });
+}
+
 /// #158: WRITE_RESTRICTED tokens do not restrict FILE_DELETE_CHILD, so the
 /// parent's ACL let the sandbox delete or move anything the user could; the
 /// Low-integrity token keeps deletes and moves inside the writable roots.
