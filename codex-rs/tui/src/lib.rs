@@ -839,16 +839,22 @@ async fn lookup_latest_session_target_with_app_server(
         include_non_interactive,
     )
     .await?
-    .map(|(target, _updated_at)| target))
+    .map(|latest| latest.target))
 }
 
-/// The newest thread in scope and its `updated_at`.
+/// The newest thread in scope, its `updated_at` and the lookup mode that found it.
+struct LatestSessionThread {
+    target: resume_picker::SessionTarget,
+    updated_at: i64,
+    lookup_mode: LatestSessionLookupMode,
+}
+
 async fn lookup_latest_session_thread_with_app_server(
     app_server: &mut AppServerSession,
     config: &Config,
     cwd_filter: Option<&Path>,
     include_non_interactive: bool,
-) -> color_eyre::Result<Option<(resume_picker::SessionTarget, i64)>> {
+) -> color_eyre::Result<Option<LatestSessionThread>> {
     let uses_remote_workspace = app_server.uses_remote_workspace();
     for lookup_mode in [
         LatestSessionLookupMode::StateDbOnly,
@@ -863,15 +869,19 @@ async fn lookup_latest_session_thread_with_app_server(
                 lookup_mode,
             ))
             .await?;
-        let target = response.data.into_iter().find_map(|thread| {
+        let latest = response.data.into_iter().find_map(|thread| {
             let updated_at = thread.updated_at;
-            session_target_from_app_server_thread(thread).map(|target| (target, updated_at))
+            session_target_from_app_server_thread(thread).map(|target| LatestSessionThread {
+                target,
+                updated_at,
+                lookup_mode,
+            })
         });
-        if target
+        if latest
             .as_ref()
-            .is_some_and(|(target, _)| session_target_is_usable(uses_remote_workspace, target))
+            .is_some_and(|latest| session_target_is_usable(uses_remote_workspace, &latest.target))
         {
-            return Ok(target);
+            return Ok(latest);
         }
     }
     Ok(None)
@@ -906,24 +916,61 @@ async fn lookup_resume_last_target_with_app_server(
     .await?;
     let Some(record) = quit_thread_record::read_quit_thread_record(config.codex_home.as_ref())
     else {
-        return Ok(newest.map(|(target, _)| target));
+        return Ok(newest.map(|latest| latest.target));
     };
     if !quit_thread_record::quit_record_is_current(
         &record,
-        newest.as_ref().map(|(_, updated_at)| *updated_at),
+        newest.as_ref().map(|latest| latest.updated_at),
     ) || newest
         .as_ref()
-        .is_some_and(|(target, _)| target.thread_id == record.thread_id)
+        .is_some_and(|latest| latest.target.thread_id == record.thread_id)
     {
-        return Ok(newest.map(|(target, _)| target));
+        return Ok(newest.map(|latest| latest.target));
     }
 
+    // Scan rollouts on disk only when the state DB had no usable newest thread,
+    // as the newest-turn lookup does.
+    let lookup_modes: &[LatestSessionLookupMode] = match &newest {
+        Some(latest) if latest.lookup_mode == LatestSessionLookupMode::StateDbOnly => {
+            &[LatestSessionLookupMode::StateDbOnly]
+        }
+        _ => &[
+            LatestSessionLookupMode::StateDbOnly,
+            LatestSessionLookupMode::ScanAndRepair,
+        ],
+    };
+    match find_thread_in_latest_session_scope(
+        app_server,
+        config,
+        cwd_filter,
+        include_non_interactive,
+        lookup_modes,
+        record.thread_id,
+    )
+    .await
+    {
+        Ok(Some(target)) => return Ok(Some(target)),
+        Ok(None) => {}
+        Err(err) => {
+            // The quit record is optional: fall back to the newest turn.
+            warn!(%err, "failed to look up the thread on screen at the last quit");
+        }
+    }
+    Ok(newest.map(|latest| latest.target))
+}
+
+/// Finds `thread_id` in the same filtered `thread/list` as the newest-turn lookup.
+async fn find_thread_in_latest_session_scope(
+    app_server: &mut AppServerSession,
+    config: &Config,
+    cwd_filter: Option<&Path>,
+    include_non_interactive: bool,
+    lookup_modes: &[LatestSessionLookupMode],
+    thread_id: ThreadId,
+) -> color_eyre::Result<Option<resume_picker::SessionTarget>> {
     let uses_remote_workspace = app_server.uses_remote_workspace();
-    let record_id = record.thread_id.to_string();
-    for lookup_mode in [
-        LatestSessionLookupMode::StateDbOnly,
-        LatestSessionLookupMode::ScanAndRepair,
-    ] {
+    let thread_id = thread_id.to_string();
+    for &lookup_mode in lookup_modes {
         let mut params = latest_session_lookup_params(
             uses_remote_workspace,
             config,
@@ -939,7 +986,7 @@ async fn lookup_resume_last_target_with_app_server(
             if let Some(target) = response
                 .data
                 .into_iter()
-                .filter(|thread| thread.id == record_id)
+                .filter(|thread| thread.id == thread_id)
                 .find_map(session_target_from_app_server_thread)
                 .filter(|target| session_target_is_usable(uses_remote_workspace, target))
             {
@@ -951,7 +998,7 @@ async fn lookup_resume_last_target_with_app_server(
             }
         }
     }
-    Ok(newest.map(|(target, _)| target))
+    Ok(None)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3543,6 +3590,14 @@ mod tests {
             model_provider,
             &other_cwd,
         )?;
+        let other_provider = write_session_rollout(
+            temp_dir.path(),
+            "2025-01-02T08-00-00",
+            "2025-01-02T08:00:00Z",
+            "other provider",
+            "some-other-provider",
+            &project_cwd,
+        )?;
         let mut app_server = AppServerSession::new(
             codex_app_server_client::AppServerClient::InProcess(
                 start_test_embedded_app_server(config.clone()).await?,
@@ -3583,6 +3638,9 @@ mod tests {
         // The quit thread is outside the cwd scope.
         quit_thread_record::record_quit_thread(codex_home, elsewhere, after_every_turn);
         let out_of_scope = resume_last(&mut app_server, &config, scope).await?;
+        // The quit thread ran on another provider.
+        quit_thread_record::record_quit_thread(codex_home, other_provider, after_every_turn);
+        let provider_mismatch = resume_last(&mut app_server, &config, scope).await?;
         // The quit thread no longer exists.
         quit_thread_record::record_quit_thread(codex_home, ThreadId::new(), after_every_turn);
         let missing = resume_last(&mut app_server, &config, scope).await?;
@@ -3595,6 +3653,7 @@ mod tests {
                 fork_last,
                 turn_after_quit,
                 out_of_scope,
+                provider_mismatch,
                 missing
             ],
             [
@@ -3603,9 +3662,80 @@ mod tests {
                 Some(charlie),
                 Some(charlie),
                 Some(charlie),
+                Some(charlie),
                 Some(charlie)
             ]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resume_last_finds_quit_thread_beyond_first_page() -> color_eyre::Result<()> {
+        let temp_dir = TempDir::new()?;
+        let project_cwd = temp_dir.path().join("project");
+        std::fs::create_dir_all(&project_cwd)?;
+        let config = ConfigBuilder::default()
+            .codex_home(temp_dir.path().to_path_buf())
+            .harness_overrides(ConfigOverrides {
+                cwd: Some(project_cwd.clone()),
+                ..Default::default()
+            })
+            .build()
+            .await?;
+        let model_provider = config.model_provider_id.as_str();
+        let alpha = write_session_rollout(
+            temp_dir.path(),
+            "2025-01-01T10-00-00",
+            "2025-01-01T10:00:00Z",
+            "alpha",
+            model_provider,
+            &project_cwd,
+        )?;
+        for index in 0..105 {
+            let (hour, minute) = (index / 60, index % 60);
+            write_session_rollout(
+                temp_dir.path(),
+                &format!("2025-01-02T{hour:02}-{minute:02}-00"),
+                &format!("2025-01-02T{hour:02}:{minute:02}:00Z"),
+                "filler",
+                model_provider,
+                &project_cwd,
+            )?;
+        }
+        let mut app_server = AppServerSession::new(
+            codex_app_server_client::AppServerClient::InProcess(
+                start_test_embedded_app_server(config.clone()).await?,
+            ),
+            ThreadParamsMode::Embedded,
+        );
+        let scope = Some(project_cwd.as_path());
+        let mut first_page = latest_session_lookup_params(
+            /*uses_remote_workspace*/ false,
+            &config,
+            scope,
+            /*include_non_interactive*/ false,
+            LatestSessionLookupMode::StateDbOnly,
+        );
+        first_page.limit = Some(100);
+        let alpha_on_first_page = app_server
+            .thread_list(first_page)
+            .await?
+            .data
+            .iter()
+            .any(|thread| thread.id == alpha.to_string());
+        quit_thread_record::record_quit_thread(config.codex_home.as_ref(), alpha, i64::MAX);
+        let target = lookup_resume_last_target_with_app_server(
+            &mut app_server,
+            &config,
+            scope,
+            /*include_non_interactive*/ false,
+        )
+        .await?
+        .map(|target| target.thread_id);
+        app_server.shutdown().await?;
+
+        assert!(!alpha_on_first_page, "ALPHA should be past the first page");
+        assert_eq!(target, Some(alpha));
         Ok(())
     }
 
