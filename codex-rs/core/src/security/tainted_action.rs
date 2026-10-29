@@ -2260,6 +2260,20 @@ impl Classifier {
             // (`fd --exec=git`).
             let git_word = launched_git.attached(index).unwrap_or(word);
             let is_git = basename(git_word) == "git" || indirect::equals_git(git_word);
+            // #1159: zsh `=git` (`=git.exe`, `=git-config`) the command
+            // reading does not take for a git command word: a wrapper's
+            // option loop skips it (`nice =git log --output=~/.zshrc`), it
+            // follows a command (`sudo =git`, `noglob =git`), or it names a
+            // dashed helper. The output, working-tree and other
+            // command-word checks then never see git: it asks.
+            if word.strip_prefix('=').is_some_and(|rest| {
+                basename(rest) == "git" || git_helpers::git_name(rest).is_some()
+            }) && command
+                .as_ref()
+                .is_none_or(|(at, name)| *at != index || name != "git")
+            {
+                self.note(ProtectedActionKind::UnseenCode);
+            }
             let helper = git_helpers::git_name(git_word);
             let subcommand = helper.as_ref().and_then(Option::as_deref);
             if persistence_command(name, &mut later, index + 1)
