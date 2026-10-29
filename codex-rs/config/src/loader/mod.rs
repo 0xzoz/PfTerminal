@@ -1314,10 +1314,8 @@ async fn load_project_layers(
     let planted = crate::planted_project_metadata();
     for dir in dirs {
         let dot_agents = dir.join(".agents");
-        if crate::is_planted_project_metadata(dot_agents.as_path(), &planted) {
-            startup_warnings.push(
-                crate::planted_project_metadata::planted_project_metadata_reason(&dot_agents),
-            );
+        if dot_agents.as_path().is_dir() && planted.contains(dot_agents.as_path()) {
+            startup_warnings.push(planted.reason(dot_agents.as_path()));
         }
         let dot_codex_abs = dir.join(".codex");
         let dot_codex_uri = PathUri::from_abs_path(&dot_codex_abs);
@@ -1332,15 +1330,20 @@ async fn load_project_layers(
 
         let decision = trust_context.decision_for_dir(&dir);
         let mut disabled_reason = trust_context.disabled_reason_for_decision(&decision);
-        if crate::is_planted_project_metadata(dot_codex_abs.as_path(), &planted) {
-            let reason =
-                crate::planted_project_metadata::planted_project_metadata_reason(&dot_codex_abs);
+        let hooks_config_folder_override = trust_context.root_checkout_hooks_folder_for_dir(&dir);
+        // The root checkout's `.codex` a linked worktree takes hooks from
+        // counts too.
+        if let Some(planted_folder) = [Some(&dot_codex_abs), hooks_config_folder_override.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|folder| planted.contains(folder.as_path()))
+        {
+            let reason = planted.reason(planted_folder.as_path());
             startup_warnings.push(reason.clone());
             disabled_reason = Some(reason);
         }
         // Trusted, and not possibly planted.
         let loads_project_config = disabled_reason.is_none();
-        let hooks_config_folder_override = trust_context.root_checkout_hooks_folder_for_dir(&dir);
         let dot_codex_normalized =
             normalize_path(dot_codex_abs.as_path()).unwrap_or_else(|_| dot_codex_abs.to_path_buf());
         if dot_codex_abs == codex_home_abs || dot_codex_normalized == codex_home_normalized {

@@ -189,8 +189,15 @@ soon as it appears; for one that crashed, at the next sweep) is recorded as
 possibly planted in `planted-metadata.json` next to the integrity-label
 records (D262). Until the user confirms it, Core loads neither its config
 and hooks (the project layer is disabled) nor its skills, and says so at
-startup; the TUI asks whether to load it. Anything that creates such a folder
-while a session runs is reported, including the user. The
+startup; the TUI asks whether to load it, and confirming is refused while a
+session that saw it appear still runs. A planted link counts as the folder
+itself (it isn't followed), and a linked worktree's hooks from a planted root
+checkout `.codex` are ignored too. If the records can't be read, no project
+`.codex`/`.agents` content is loaded at all. Anything that creates such a
+folder while a session runs is reported, including the user. Not covered:
+`.codex`/`.agents` folders below the top of a writable root (between the
+project root and the working directory), which commands can create or change
+whether or not they exist. The
 Everyone deny entries are visible in the folder's security settings while a
 session needs them. Each one a session adds is recorded first, in
 `delete-child-denies.json` next to the integrity-label records (#1506 item 1,

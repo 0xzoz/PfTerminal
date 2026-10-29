@@ -329,7 +329,7 @@ fn skill_roots_from_layer_stack_inner(
         match &layer.name {
             ConfigLayerSource::Project { .. } => {
                 if let Some(repo_fs) = &repo_fs
-                    && !codex_config::is_planted_project_metadata(config_folder.as_path(), &planted)
+                    && !planted.contains(config_folder.as_path())
                 {
                     roots.push(SkillRoot {
                         path: config_folder.join(SKILLS_DIR_NAME),
@@ -417,12 +417,7 @@ async fn repo_agents_skill_roots(
     let planted = codex_config::planted_project_metadata();
     let dirs: Vec<_> = dirs_between_project_root_and_cwd(cwd, &project_root)
         .into_iter()
-        .filter(|dir| {
-            !codex_config::is_planted_project_metadata(
-                dir.join(AGENTS_DIR_NAME).as_path(),
-                &planted,
-            )
-        })
+        .filter(|dir| !planted.contains(dir.join(AGENTS_DIR_NAME).as_path()))
         .collect();
     let mut roots = Vec::new();
     let mut results = futures::stream::iter(dirs)

@@ -521,7 +521,12 @@ impl ChatWidget {
     /// `.agents` folders of this project that appeared while a non-admin
     /// sandbox command ran. Until confirmed, Core ignores them.
     pub(crate) fn maybe_prompt_planted_project_metadata(&mut self) {
-        let planted = codex_config::planted_project_metadata();
+        // Unreadable records can't be confirmed; the startup warning says so.
+        let codex_config::PlantedProjectMetadata::Known(planted) =
+            codex_config::planted_project_metadata()
+        else {
+            return;
+        };
         let cwd = self.config.cwd.as_path();
         let here: Vec<PathBuf> = planted
             .into_iter()

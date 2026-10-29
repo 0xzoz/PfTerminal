@@ -181,7 +181,14 @@ pub(crate) fn acquire(roots: &[PathBuf], log_dir: Option<&Path>) -> Result<Integ
 }
 
 fn acquire_locked(lease: &mut IntegrityLease, wanted: &BTreeSet<PathBuf>) -> Result<()> {
-    prune_planted(&lease.registry, &lease.absent_metadata)?;
+    // Damaged records don't stop commands: Core then loads no project
+    // metadata at all (see `planted_project_metadata`).
+    if let Err(err) = prune_planted(&lease.registry, &lease.absent_metadata) {
+        log_note(
+            &format!("planted metadata: {err:#}"),
+            lease.log_dir.as_deref(),
+        );
+    }
     // Registered first: whatever happens below, a sweep can undo it.
     lease.session = Some(create_session(
         &lease.registry,
@@ -263,13 +270,18 @@ impl IntegrityLease {
         // the next sweep puts the labels back.
         let lock = lock(&self.registry)?;
         drop(file);
-        // Closed now: a sweep that finds it left behind removes it.
-        let _ = std::fs::remove_file(&path);
-        record_planted(
+        // Closed now: a sweep that finds it left behind removes it. The
+        // folders it saw appear are recorded first; if that fails, the file
+        // stays for a later sweep to try again.
+        if record_planted(
             &self.registry,
             &self.absent_metadata,
             self.log_dir.as_deref(),
-        );
+        )
+        .is_ok()
+        {
+            let _ = std::fs::remove_file(&path);
+        }
         let mut labels = load_labels(&self.registry)?;
         sweep(&self.registry, &mut labels, self.log_dir.as_deref())?;
         drop(lock);
@@ -355,13 +367,15 @@ fn sweep(registry: &Path, labels: &mut Labels, log_dir: Option<&Path>) -> Result
         let record = std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<SessionRecord>(&bytes).ok());
+        // D262: record what the session saw appear before its file can go
+        // (live or not). If the records can't be written, they can't be read
+        // either, most likely, and Core then loads no project metadata.
+        if let Some(record) = &record {
+            let _ = record_planted(registry, &record.absent_metadata, log_dir);
+        }
         match std::fs::remove_file(&path) {
             // Its session ended without releasing the lease.
-            Ok(()) => {
-                if let Some(record) = &record {
-                    record_planted(registry, &record.absent_metadata, log_dir);
-                }
-            }
+            Ok(()) => {}
             Err(err) => match record {
                 Some(record) if err.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
                     live.extend(record.roots);
@@ -426,13 +440,13 @@ fn absent_project_metadata(roots: &[PathBuf]) -> Vec<PathBuf> {
 /// D262: records each of `absent` (absent when a session started) that exists
 /// now, whoever made it: a sandboxed command may have planted it. Called
 /// with the registry locked.
-fn record_planted(registry: &Path, absent: &[PathBuf], log_dir: Option<&Path>) {
+fn record_planted(registry: &Path, absent: &[PathBuf], log_dir: Option<&Path>) -> Result<()> {
     let appeared: Vec<&PathBuf> = absent
         .iter()
         .filter(|path| std::fs::symlink_metadata(path).is_ok())
         .collect();
     if appeared.is_empty() {
-        return;
+        return Ok(());
     }
     let result = load_planted(registry).and_then(|mut planted| {
         let before = planted.entries.len();
@@ -452,7 +466,7 @@ fn record_planted(registry: &Path, absent: &[PathBuf], log_dir: Option<&Path>) {
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    match result {
+    match &result {
         Ok(()) => log_note(
             &format!(
                 "project metadata appeared while a sandboxed command ran; Core won't load it until confirmed: {paths}"
@@ -464,6 +478,7 @@ fn record_planted(registry: &Path, absent: &[PathBuf], log_dir: Option<&Path>) {
             log_dir,
         ),
     }
+    result
 }
 
 /// D262 (#1506 item 2): the `.codex`/`.agents` folders that appeared while a
@@ -481,21 +496,7 @@ pub fn planted_project_metadata() -> Result<Vec<PathBuf>> {
         entries: mut planted,
         confirmed,
     } = load_planted(&registry)?;
-    for entry in
-        std::fs::read_dir(&registry).with_context(|| format!("list {}", registry.display()))?
-    {
-        let name = entry?.file_name().to_string_lossy().into_owned();
-        if !(name.starts_with(SESSION_PREFIX) && name.ends_with(SESSION_SUFFIX)) {
-            continue;
-        }
-        // A live session's file is shared for reading; one that can't be
-        // read now has ended.
-        let Some(record) = std::fs::read(registry.join(&name))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<SessionRecord>(&bytes).ok())
-        else {
-            continue;
-        };
+    for record in session_records(&registry)? {
         planted.extend(
             record.absent_metadata.into_iter().filter(|path| {
                 !confirmed.contains(path) && std::fs::symlink_metadata(path).is_ok()
@@ -511,9 +512,24 @@ pub fn planted_project_metadata() -> Result<Vec<PathBuf>> {
 
 /// D262: the user checked `path` (one of [`planted_project_metadata`]) and
 /// wants it loaded. Returns whether it was recorded.
+///
+/// Refused while a session that saw it appear still runs: that session's
+/// processes could still change it after the user checked it.
 pub fn confirm_planted_project_metadata(path: &Path) -> Result<bool> {
     let registry = ensure_registry()?;
     let lock = lock(&registry)?;
+    // Records what ended sessions saw and drops their files, so only live
+    // sessions' files remain.
+    let mut labels = load_labels(&registry)?;
+    sweep(&registry, &mut labels, /*log_dir*/ None)?;
+    for record in session_records(&registry)? {
+        if record.absent_metadata.iter().any(|absent| absent == path) {
+            anyhow::bail!(
+                "a non-admin sandbox command that may have created {} is still running; confirm it once that command has ended",
+                path.display()
+            );
+        }
+    }
     let mut planted = load_planted(&registry)?;
     let removed = planted.entries.remove(path);
     // A session still running that saw it appear must not record it again.
@@ -539,6 +555,27 @@ fn prune_planted(registry: &Path, absent: &[PathBuf]) -> Result<()> {
         save_json(registry, PLANTED_FILE, &planted)?;
     }
     Ok(())
+}
+
+/// The records of the session files in `registry` that can be read (a live
+/// session's file is shared for reading).
+fn session_records(registry: &Path) -> Result<Vec<SessionRecord>> {
+    let mut records = Vec::new();
+    for entry in
+        std::fs::read_dir(registry).with_context(|| format!("list {}", registry.display()))?
+    {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with(SESSION_PREFIX) && name.ends_with(SESSION_SUFFIX)) {
+            continue;
+        }
+        if let Some(record) = std::fs::read(registry.join(&name))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<SessionRecord>(&bytes).ok())
+        {
+            records.push(record);
+        }
+    }
+    Ok(records)
 }
 
 fn load_planted(registry: &Path) -> Result<PlantedMetadata> {

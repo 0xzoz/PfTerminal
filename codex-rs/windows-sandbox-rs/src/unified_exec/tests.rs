@@ -2175,6 +2175,9 @@ fn legacy_planted_project_metadata_survives_a_crash() {
             true,
             (false, false),
         )
+    );
+}
+
 /// #1506 item 1 (D261): a root nested inside another session's protected
 /// folder gets its own deny even though it inherits a copy, so it keeps one
 /// when the outer session ends and its entry goes.

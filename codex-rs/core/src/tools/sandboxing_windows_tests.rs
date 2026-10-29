@@ -297,17 +297,28 @@ async fn sec_win_1506_planted_project_config_is_not_loaded() {
         load().await,
     );
 
-    for folder in [".codex", ".agents"] {
-        codex_windows_sandbox::confirm_planted_project_metadata(&project.join(folder))
-            .expect("confirm");
-    }
+    let agents_planted =
+        || codex_config::planted_project_metadata().contains(&project.join(".agents"));
+    let agents_before = agents_planted();
+    codex_windows_sandbox::confirm_planted_project_metadata(&project.join(".codex"))
+        .expect("confirm .codex");
     let after_confirming = load().await;
+    // Confirming one folder leaves the other planted.
+    let agents_after_codex = agents_planted();
+    codex_windows_sandbox::confirm_planted_project_metadata(&project.join(".agents"))
+        .expect("confirm .agents");
+    let agents_after = agents_planted();
 
     assert_eq!(
-        (before_confirming, after_confirming),
+        (
+            before_confirming,
+            after_confirming,
+            (agents_before, agents_after_codex, agents_after),
+        ),
         (
             (0, true, (Some("fixture-user".to_string()), Some(true))),
             (Some("planted".to_string()), Some(false)),
+            (true, true, false),
         )
     );
 }
