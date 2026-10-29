@@ -48,14 +48,15 @@ fn fill_large_repo(root: &Path, dirs: usize, files: usize, objects: usize) -> us
 /// workspace-write command on `root`; prints each command's time to start
 /// and to exit, the total, and how long the last release took.
 ///
-/// What the numbers include: `spawn` is the lease acquire (the #158 Low
-/// label spreading over the tree, D261's tracked denies) and the start;
-/// `exit` adds running the command and, for a command that leaves nothing
-/// running, the release (label put back, denies removed). The command gets
-/// this process's environment, so `%TEMP%` is a writable root too, as in a
-/// real session; the small workspace's numbers show that fixed part. An
-/// `exit` near 2 s means the release moved to a background thread and the
-/// next command reused the lease, which under-counts.
+/// What the numbers include (both from the command's start): `spawn` is
+/// the ACL setup (the #158 Low label spreading over the tree, D261's tracked
+/// denies, the capability entries; the first command also labels `.git`
+/// Medium once), the token and the start; `exit` adds running the command
+/// and, for a command that leaves nothing running, the release (label put
+/// back, denies removed). `%TEMP%` is a writable root too, as in a real
+/// session; the small workspace's numbers show that fixed part. An `exit`
+/// about 2 s past `spawn` means the release moved to a background thread and
+/// the next command reused the lease, which under-counts.
 fn time_commands(label: &str, root: &Path) {
     let runtime = current_thread_runtime();
     let codex_home = sandbox_home("d285-cost");
