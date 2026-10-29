@@ -9726,6 +9726,18 @@ fn issue_1309_login_wrappers_patterns_and_loaders_ask() {
         "fc -l -s; sh -c 'echo x >> .zshenv'",
         "fc -ls; sh -c 'echo x >> .zshenv'",
         "r; sh -c 'echo x >> .zshenv'",
+        // Review 2: a keep option after the program is the program's;
+        // run0; other commands behind a modifier.
+        "pkexec sh -c 'echo x >> .zshenv' --keep-cwd",
+        "systemd-run sh -c 'echo x >> home/fixture/.zshenv' -d",
+        "systemd-run -u x sh -c 'echo x >> .zshenv' --scope",
+        "run0 -u me sh -c 'echo x >> .zshenv'",
+        "noglob builtin cd ~; sh -c 'echo x >> .zshenv'",
+        "noglob command cd ~; sh -c 'echo x >> .zshenv'",
+        "noglob eval 'cd ~'; sh -c 'echo x >> .zshenv'",
+        "noglob source ./f; sh -c 'echo x >> .zshenv'",
+        "noglob enable -n cd; cd /tmp; sh -c 'echo x >> .zshenv'",
+        "noglob fc -s; sh -c 'echo x >> .zshenv'",
     ] {
         assert_eq!(
             script(command),
@@ -9740,6 +9752,9 @@ fn issue_1309_login_wrappers_patterns_and_loaders_ask() {
         "systemd-run --scope sh -c 'echo x > out.txt'",
         "systemd-run --user --same-dir sh -c 'echo x > out.txt'",
         "pkexec --keep-cwd sh -c 'echo x > out.txt'",
+        "pkexec --user me --keep-cwd sh -c 'echo x > out.txt'",
+        "systemd-run -u x -p Nice=5 --scope sh -c 'echo x > out.txt'",
+        "noglob builtin echo; sh -c 'echo x > out.txt'",
         "[ -d build ] || mkdir build; sh -c 'echo x > out.txt'",
         "[[ -n x ]] && sh -c 'echo x > out.txt'",
         "f() { :; }; f; sh -c 'echo x > out.txt'",
@@ -9755,5 +9770,23 @@ fn issue_1309_login_wrappers_patterns_and_loaders_ask() {
         "noglob() { echo $(( $1 )); }; noglob 'a[$(touch ~/.zshrc)]'",
     ] {
         assert!(script(command).is_some(), "{command}");
+    }
+}
+
+/// #1309: the login, keep-option, modifier and pattern checks stay linear.
+#[test]
+fn issue_1309_login_and_modifier_checks_are_linear() {
+    for (label, unit, suffix) in [
+        ("keep options", "pkexec ", "--keep-cwd sh -c 'echo x'"),
+        ("valued options", "systemd-run -u ", "sh -c 'echo x'"),
+        ("logins", "sudo -i su - ", "sh -c 'echo x'"),
+        ("modifiers", "noglob nocorrect ", "cd /b; sh -c 'echo x'"),
+        ("patterns", "c?; [c]d; ", "sh -c 'echo x'"),
+        ("fc", "fc -l -l ", "; sh -c 'echo x'"),
+    ] {
+        work::assert_linear(label, |scale| {
+            let line = format!("{}{suffix}", unit.repeat(200 * scale));
+            let _ = script(&line);
+        });
     }
 }

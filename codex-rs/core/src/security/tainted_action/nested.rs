@@ -366,13 +366,7 @@ impl Classifier {
                 && let Some((index, name)) = &command_at
                 && (unknown_folder::pattern_word(&texts[*index])
                     || (unknown_folder::MODIFIERS.contains(&name.as_str())
-                        && texts[index + 1..]
-                            .iter()
-                            .find(|text| !unknown_folder::MODIFIERS.contains(&text.as_str()))
-                            .is_some_and(|text| {
-                                unknown_folder::CHANGERS.contains(&basename(text))
-                                    || unknown_folder::pattern_word(text)
-                            })))
+                        && unknown_folder::modified_change(&texts[index + 1..])))
             {
                 folders.unchecked = true;
                 found.before_change = found.scripts.len();
