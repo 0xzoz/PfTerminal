@@ -194,8 +194,10 @@ fn borrow_report(pid: u32, path: &Path) -> String {
             return format!("own_write={own} borrow=impersonate_err{error}");
         }
         let write = write_result(path);
+        // With the other command's identity, its processes are writable too.
+        let create_process = open_result(pid, 0x0080);
         RevertToSelf();
-        format!("impersonated write={write}")
+        format!("impersonated write={write} create_process={create_process}")
     };
     format!("own_write={own} borrow={borrowed}")
 }
@@ -304,6 +306,16 @@ async fn run_legacy(
     argv: Vec<String>,
     env: &[(&str, String)],
 ) -> (String, i32) {
+    run_legacy_with_tty(root, codex_home, argv, env, /*tty*/ false).await
+}
+
+async fn run_legacy_with_tty(
+    root: &Path,
+    codex_home: &Path,
+    argv: Vec<String>,
+    env: &[(&str, String)],
+    tty: bool,
+) -> (String, i32) {
     let mut env_map: HashMap<String, String> = std::env::vars().collect();
     for (key, value) in env {
         env_map.insert((*key).to_string(), value.clone());
@@ -318,7 +330,7 @@ async fn run_legacy(
         /*timeout_ms*/ Some(90_000),
         &[],
         &[],
-        /*tty*/ false,
+        tty,
         /*stdin_open*/ false,
         /*use_private_desktop*/ true,
     )
@@ -439,10 +451,12 @@ fn legacy_command_cannot_write_to_another_commands_process() {
     );
 }
 
-/// A legacy command on another workspace can't write there by impersonating
-/// that workspace's legacy command's token. It can, before and after D259:
-/// `TOKEN_DUPLICATE` isn't a write right, so the restricting SIDs don't
-/// decide it (#1560).
+/// A legacy command on another workspace can't write there, or open that
+/// workspace's legacy command's process for `PROCESS_CREATE_PROCESS` (the
+/// parent-process route D259 closes), by impersonating that command's token.
+/// It can, before and after D259: `TOKEN_DUPLICATE` isn't a write right, so
+/// the restricting SIDs don't decide it, and the borrowed token carries the
+/// other command's identity (#1560).
 #[test]
 #[ignore = "#1560: impersonating another workspace's command token writes there (measured on CI before and after D259); closing it needs an owner decision"]
 fn legacy_command_cannot_borrow_another_workspaces_command_token() {
@@ -478,7 +492,9 @@ fn legacy_command_cannot_borrow_another_workspaces_command_token() {
         )
     });
     assert!(
-        line.starts_with("own_write=err") && !target.exists(),
+        line.starts_with("own_write=err")
+            && !target.exists()
+            && !line.contains("create_process=ok"),
         "a legacy command wrote another workspace through its command's token: {line}"
     );
 }
@@ -539,7 +555,8 @@ fn git_for_windows(relative: &str) -> Option<PathBuf> {
 }
 
 /// D259 doesn't break common tools in a legacy command: a cmd pipeline,
-/// Windows PowerShell calling a native program, and `git init`. (Git Bash
+/// Windows PowerShell calling a native program (with and without ConPTY),
+/// and `git init`. (Git Bash
 /// and `git commit` fail in a legacy session on the hosted runner before
 /// D259 already, #1561.)
 #[test]
@@ -552,7 +569,11 @@ fn legacy_command_tools_work_with_command_identity() {
     let runtime = current_thread_runtime();
     let codex_home = sandbox_home("d259-tools");
     let home = codex_home.path();
-    let cases: Vec<(&str, Vec<String>, &[&str])> = vec![
+    let powershell = system32_exe("WindowsPowerShell\\v1.0\\powershell.exe")
+        .display()
+        .to_string();
+    // (name, argv, expected output, ConPTY)
+    let cases: Vec<(&str, Vec<String>, &[&str], bool)> = vec![
         (
             "cmd pipeline",
             vec![
@@ -562,13 +583,12 @@ fn legacy_command_tools_work_with_command_identity() {
                 "echo d259-pipe| findstr d259 2>&1".to_string(),
             ],
             &["d259-pipe"],
+            false,
         ),
         (
             "powershell",
             vec![
-                system32_exe("WindowsPowerShell\\v1.0\\powershell.exe")
-                    .display()
-                    .to_string(),
+                powershell.clone(),
                 "-NoProfile".to_string(),
                 "-Command".to_string(),
                 "$x = & cmd /c echo d259-ps; $x | Select-String d259 | ForEach-Object { $_.Line }; \
@@ -576,6 +596,18 @@ fn legacy_command_tools_work_with_command_identity() {
                     .to_string(),
             ],
             &["d259-ps", "d259-ps-done"],
+            false,
+        ),
+        (
+            "powershell (ConPTY)",
+            vec![
+                powershell.clone(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "& cmd /c echo d259-tty; 'd259-tty-done'".to_string(),
+            ],
+            &["d259-tty", "d259-tty-done"],
+            true,
         ),
         (
             "git init",
@@ -585,11 +617,13 @@ fn legacy_command_tools_work_with_command_identity() {
                 "-q".to_string(),
             ],
             &[],
+            false,
         ),
     ];
     let mut failures = Vec::new();
-    for (name, argv, expected) in cases {
-        let (stdout, exit_code) = runtime.block_on(run_legacy(root.path(), home, argv, &[]));
+    for (name, argv, expected, tty) in cases {
+        let (stdout, exit_code) =
+            runtime.block_on(run_legacy_with_tty(root.path(), home, argv, &[], tty));
         println!("\nd259 tool {name}: exit={exit_code} stdout={stdout:?}");
         if exit_code != 0 || !expected.iter().all(|part| stdout.contains(part)) {
             failures.push(format!("{name}: exit={exit_code} stdout={stdout:?}"));

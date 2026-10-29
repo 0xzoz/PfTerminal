@@ -171,12 +171,18 @@ writes only through its restricting SIDs, so it keeps full access to its own
 processes but can't open another legacy command's with any write right
 (start a child under it, change its DACL, duplicate its handles, write its
 memory) or adjust its token. Core and other unsandboxed programs keep full
-access through the user SID. Cost: a later legacy command can't write to an
-object an earlier command's leftover process created without explicit
-security (a named pipe or event, say). Not closed: other legacy commands can
+access through the user SID. Cost: a legacy command can't write to an object
+that another legacy command's process (a concurrent one, or one left running
+by an earlier command) created without explicit security, such as a named
+pipe, event or section a shared daemon serves; nor to a file it created in a
+folder without inheritable entries. Not closed: other legacy commands can
 still end its processes (`PROCESS_TERMINATE` comes with execute access), and
-can still duplicate and impersonate its token, which isn't a write right, and
-so write in its writable roots while it runs (#1560). Two routes still start a child
+can still duplicate and impersonate its token (`TOKEN_DUPLICATE` isn't a
+write right). The borrowed token carries the command's identity, so with it
+they can write to its processes again, including starting a child in its job
+through the parent-process route, and write in its writable roots while it
+runs (#1560). The boundary D259 draws between legacy commands holds only once
+#1560 is closed. Two routes still start a child
 outside the command's job: the COM servers `ShellBrowserWindow` (the child
 runs at Low integrity but with an unrestricted token) and
 `MMC20.Application` (Low, restricted). Closing them waits on a measurement

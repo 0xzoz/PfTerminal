@@ -355,8 +355,11 @@ unsafe fn enable_single_privilege(h_token: HANDLE, name: &str) -> Result<()> {
     Ok(())
 }
 
-/// # Safety
-/// Caller must close the returned token handle; base_token must be a valid primary token.
+/// A read-only restricted token with the pre-D259 default DACL (no
+/// per-command identity): legacy commands use
+/// [`create_legacy_token_with_caps_from`] instead. Kept for tests that probe
+/// Core's or the broker's objects from a restricted token.
+///
 /// # Safety
 /// Caller must close the returned token handle; base_token must be a valid primary token.
 pub unsafe fn create_readonly_token_with_cap_from(
@@ -390,7 +393,11 @@ pub unsafe fn create_workspace_write_token_with_caps_from(
 /// `PROCESS_CREATE_PROCESS` (to start a child in that command's job),
 /// `WRITE_DAC`, `PROCESS_DUP_HANDLE` or memory writes. Before D259 the default
 /// DACL granted Everyone and the logon SID, both restricting SIDs of every
-/// legacy token, `GENERIC_ALL`.
+/// legacy token, `GENERIC_ALL`. Not closed: `TOKEN_DUPLICATE` isn't a write
+/// right, so another legacy command can still impersonate this command's
+/// token, and with it (it carries `psid_command`) write to this command's
+/// processes and writable roots (#1560). Read/execute still includes
+/// `PROCESS_TERMINATE`.
 ///
 /// # Safety
 /// Caller must close the returned token handle; base_token must be a valid primary token,
@@ -564,7 +571,10 @@ unsafe fn create_token(
         return Err(err);
     }
 
-    enable_single_privilege(new_token, "SeChangeNotifyPrivilege")?;
+    if let Err(err) = enable_single_privilege(new_token, "SeChangeNotifyPrivilege") {
+        CloseHandle(new_token);
+        return Err(err);
+    }
     Ok(new_token)
 }
 
