@@ -47,6 +47,15 @@ fn fill_large_repo(root: &Path, dirs: usize, files: usize, objects: usize) -> us
 /// Runs `cmd /c exit 0` [`COMMANDS`] times back to back as a legacy
 /// workspace-write command on `root`; prints each command's time to start
 /// and to exit, the total, and how long the last release took.
+///
+/// What the numbers include: `spawn` is the lease acquire (the #158 Low
+/// label spreading over the tree, D261's tracked denies) and the start;
+/// `exit` adds running the command and, for a command that leaves nothing
+/// running, the release (label put back, denies removed). The command gets
+/// this process's environment, so `%TEMP%` is a writable root too, as in a
+/// real session; the small workspace's numbers show that fixed part. An
+/// `exit` near 2 s means the release moved to a background thread and the
+/// next command reused the lease, which under-counts.
 fn time_commands(label: &str, root: &Path) {
     let runtime = current_thread_runtime();
     let codex_home = sandbox_home("d285-cost");
@@ -92,12 +101,19 @@ fn time_commands(label: &str, root: &Path) {
     let loop_ms = total.elapsed().as_millis();
     let release = Instant::now();
     let canonical = dunce::canonicalize(root).expect("canonical root");
-    while crate::integrity_leases::recorded_roots()
-        .unwrap_or_default()
-        .iter()
-        .any(|recorded| recorded == &canonical || recorded == root)
-        && release.elapsed() < Duration::from_secs(/*secs*/ 600)
-    {
+    loop {
+        let recorded =
+            crate::integrity_leases::recorded_roots().expect("read the integrity-label records");
+        if !recorded
+            .iter()
+            .any(|recorded| recorded == &canonical || recorded == root)
+        {
+            break;
+        }
+        assert!(
+            release.elapsed() < Duration::from_secs(/*secs*/ 600),
+            "the last lease was not released"
+        );
         std::thread::sleep(Duration::from_millis(/*millis*/ 50));
     }
     println!(
@@ -114,7 +130,12 @@ fn legacy_acl_cost_on_a_large_workspace() {
     let _guard = legacy_process_test_guard();
     let small = user_owned_test_root();
     let created = Instant::now();
-    let small_files = fill_large_repo(small.path(), 1, 1, 1);
+    let small_files = fill_large_repo(
+        small.path(),
+        /*dirs*/ 1,
+        /*files*/ 1,
+        /*objects*/ 1,
+    );
     println!(
         "\nd285-cost small repo: files={small_files} in {}ms",
         created.elapsed().as_millis()
@@ -123,7 +144,12 @@ fn legacy_acl_cost_on_a_large_workspace() {
     let large = user_owned_test_root();
     let created = Instant::now();
     // 50,000 worktree files and 51,200 under .git/objects.
-    let large_files = fill_large_repo(large.path(), 400, 125, 200);
+    let large_files = fill_large_repo(
+        large.path(),
+        /*dirs*/ 400,
+        /*files*/ 125,
+        /*objects*/ 200,
+    );
     println!(
         "\nd285-cost large repo: files={large_files} in {}ms",
         created.elapsed().as_millis()
@@ -140,8 +166,13 @@ fn legacy_acl_cost_on_a_large_workspace() {
 fn legacy_acl_call_cost_on_a_large_workspace() {
     let _guard = legacy_process_test_guard();
     let large = user_owned_test_root();
-    let files = fill_large_repo(large.path(), 400, 125, 200);
-    let mut everyone = unsafe { crate::token::world_sid() }.expect("Everyone SID");
+    let files = fill_large_repo(
+        large.path(),
+        /*dirs*/ 400,
+        /*files*/ 125,
+        /*objects*/ 200,
+    );
+    let mut everyone = everyone_sid();
     let everyone = everyone.as_mut_ptr().cast::<std::ffi::c_void>();
     let git = large.path().join(".git");
     let mut lines = Vec::new();
