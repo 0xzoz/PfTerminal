@@ -2195,6 +2195,17 @@ See the Corbanu Terminal keymap documentation for supported actions and examples
             }
         };
         let exit_resumable_thread = app.exit_resumable_thread();
+        // D243 (#1412): the conversation on screen at quit is the one
+        // `resume --last` reopens.
+        if matches!(exit_reason, ExitReason::UserRequested)
+            && let Some(thread) = exit_resumable_thread.as_ref()
+        {
+            crate::quit_thread_record::record_quit_thread(
+                app.config.codex_home.as_ref(),
+                thread.thread_id,
+                chrono::Utc::now().timestamp(),
+            );
+        }
         let thread_id = exit_resumable_thread
             .as_ref()
             .map(|thread| thread.thread_id)
