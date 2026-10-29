@@ -236,6 +236,37 @@ pub(super) fn input_runs(texts: &[String], data: bool) -> bool {
     })
 }
 
+/// #1276 follow-up: whether a launcher's input may run as a program or as
+/// code in the text `eval` (its words joined) or `trap` (each operand) runs
+/// as a shell line, read with its program positions: such text is walked
+/// as quoted data when it holds no quotes of its own (`eval 'xargs env <
+/// f'`, `trap 'parallel < cmds' EXIT`). Text with quotes is judged as the
+/// script `eval` runs. Each line is read once: leading `eval` words of its
+/// commands are skipped (`eval eval xargs env`).
+pub(super) fn evaluated_input_runs(name: &str, args: &[String]) -> bool {
+    let lines = match name {
+        "eval" => vec![args.join(" ")],
+        // A signal name read as a command only over-matches.
+        "trap" => args.to_vec(),
+        _ => return false,
+    };
+    lines.iter().any(|line| {
+        work::step();
+        quoted::commands(line).commands.iter().any(|command| {
+            work::step();
+            let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
+            let start = texts
+                .iter()
+                .position(|text| {
+                    work::step();
+                    text != "eval"
+                })
+                .unwrap_or(texts.len());
+            input_runs(&texts[start..], /*data*/ false)
+        })
+    })
+}
+
 /// For each word, whether it is where a program may start: a command word,
 /// a wrapper's, or one an exec wrapper or `-exec` runs. `None` past the
 /// places read.
@@ -272,6 +303,57 @@ fn command_words(words: &[String], added: bool) -> Vec<String> {
 /// script`, runs its input lines as commands. `program`: the launcher is
 /// at a program position.
 fn xargs(words: &[String], xjobs: bool, program: bool, launched: &mut Vec<Launched>) {
+    let mut fills = Fills::default();
+    let mut start = 0;
+    // #1276 follow-up: after a value an option this reading does not know
+    // may take, xargs' options are read on (`xargs --frob x -I% %`).
+    for reading in 0.. {
+        work::step();
+        if reading == MAX_LAUNCHED {
+            launched.push(Launched::Lines);
+            return;
+        }
+        let Some((at, unsure)) = xargs_options(words, start, xjobs, program, &mut fills, launched)
+        else {
+            return;
+        };
+        if at >= words.len() {
+            if xjobs && program {
+                launched.push(Launched::Lines);
+            }
+            return;
+        }
+        // Without a replacement string, input words go after the command's.
+        let added = program && fills.replacements.is_empty();
+        if unsure && at + 1 < words.len() {
+            launched.push(Launched::Words(
+                command_words(&words[at + 1..], added),
+                fills.clone(),
+            ));
+        }
+        launched.push(Launched::Words(
+            command_words(&words[at..], added),
+            fills.clone(),
+        ));
+        if !(unsure && words.get(at + 1).is_some_and(|word| word.starts_with('-'))) {
+            return;
+        }
+        start = at + 1;
+    }
+}
+
+/// Reads `xargs`/`xjobs` options in `words` from `start`, adding the
+/// replacement strings they set to `fills`: where the command starts, and
+/// whether the option before it is one this reading does not know. `None`
+/// once xjobs' `-s` gave its script (pushed to `launched`).
+fn xargs_options(
+    words: &[String],
+    start: usize,
+    xjobs: bool,
+    program: bool,
+    fills: &mut Fills,
+    launched: &mut Vec<Launched>,
+) -> Option<(usize, bool)> {
     const XARGS_VALUED: &[&str] = &[
         "arg-file",
         "delimiter",
@@ -292,10 +374,9 @@ fn xargs(words: &[String], xjobs: bool, program: bool, launched: &mut Vec<Launch
         "help",
         "version",
     ];
-    let mut fills = Fills::default();
     // The word before the command is an option this reading does not know.
     let mut unsure = false;
-    let mut at = 0;
+    let mut at = start;
     while let Some(word) = words.get(at) {
         work::step();
         if word == "--" {
@@ -336,7 +417,7 @@ fn xargs(words: &[String], xjobs: bool, program: bool, launched: &mut Vec<Launch
                 if program {
                     launched.push(Launched::Lines);
                 }
-                return;
+                return None;
             }
             if valued.contains(letter) {
                 let value = if rest.is_empty() {
@@ -363,21 +444,7 @@ fn xargs(words: &[String], xjobs: bool, program: bool, launched: &mut Vec<Launch
             }
         }
     }
-    if at >= words.len() {
-        if xjobs && program {
-            launched.push(Launched::Lines);
-        }
-        return;
-    }
-    // Without a replacement string, input words go after the command's.
-    let added = program && fills.replacements.is_empty();
-    if unsure && at + 1 < words.len() {
-        launched.push(Launched::Words(
-            command_words(&words[at + 1..], added),
-            fills.clone(),
-        ));
-    }
-    launched.push(Launched::Words(command_words(&words[at..], added), fills));
+    Some((at, unsure))
 }
 
 /// GNU `parallel`'s replacement-string options, by full name (`-I`,
@@ -464,6 +531,10 @@ struct ParallelOptions {
     file_input: bool,
     piped: bool,
     info: bool,
+    /// Replacement strings `-I` may set bundled after other letters
+    /// (`-kI@`): input may be put where they are, but they do not keep
+    /// input from being added after the words as well.
+    bundled: Vec<String>,
 }
 
 /// Reads `parallel`'s options in `words` from `start`, adding replacement
@@ -475,6 +546,7 @@ fn parallel_options(words: &[String], start: usize, fills: &mut Fills) -> Parall
         file_input: false,
         piped: false,
         info: false,
+        bundled: Vec::new(),
     };
     while let Some(word) = words.get(read.at) {
         work::step();
@@ -497,6 +569,17 @@ fn parallel_options(words: &[String], start: usize, fills: &mut Fills) -> Parall
         if option == "--parens" {
             // Other placeholder brackets.
             fills.any = true;
+        }
+        // #1276 follow-up: `-I` bundled after other letters (`-kI@`) may
+        // set one too; the option is still read as one this reading does
+        // not know (below).
+        if let Some(group) = option
+            .strip_prefix('-')
+            .filter(|group| !group.starts_with('-'))
+            && let Some(at) = group.find('I').filter(|at| *at > 0)
+            && at + 1 < group.len()
+        {
+            read.bundled.push(group[at + 1..].to_string());
         }
         // `-I%` attached too.
         let attached_replacement = option.strip_prefix("-I").filter(|rest| !rest.is_empty());
@@ -548,6 +631,7 @@ const MAX_PARALLEL_READINGS: usize = 4;
 /// after it too.
 fn parallel(words: &[String], program: bool, launched: &mut Vec<Launched>) {
     let mut fills = Fills::new(Placeholder::Braced);
+    let mut bundled = Vec::new();
     let mut start = 0;
     for reading in 0..MAX_PARALLEL_READINGS {
         work::step();
@@ -571,9 +655,11 @@ fn parallel(words: &[String], program: bool, launched: &mut Vec<Launched>) {
             }
             return;
         }
+        bundled.extend(read.bundled);
         launched.push(parallel_line(
             &words[at..end],
             fills.clone(),
+            &bundled,
             read.piped,
             program,
         ));
@@ -588,7 +674,14 @@ fn parallel(words: &[String], program: bool, launched: &mut Vec<Launched>) {
 
 /// A `parallel` line: input goes where its placeholders are, else (unless
 /// piped, and for a launcher at a program position) after its words.
-fn parallel_line(words: &[String], fills: Fills, piped: bool, program: bool) -> Launched {
+/// `bundled`: more places, which do not count for that.
+fn parallel_line(
+    words: &[String],
+    mut fills: Fills,
+    bundled: &[String],
+    piped: bool,
+    program: bool,
+) -> Launched {
     let placed = words.iter().any(|word| {
         work::step();
         fills.placed(word)
@@ -596,6 +689,10 @@ fn parallel_line(words: &[String], fills: Fills, piped: bool, program: bool) -> 
     let mut words = words.to_vec();
     if !placed && !piped && program {
         words.push(ADDED.to_string());
+    }
+    for replacement in bundled {
+        work::step();
+        fills.push(replacement);
     }
     Launched::Line {
         words,
@@ -609,6 +706,21 @@ fn parallel_line(words: &[String], fills: Fills, piped: bool, program: bool) -> 
 /// placeholders are (and `-v name=value` names more: `{name}`). Without a
 /// command it prints its input.
 fn rush(words: &[String], launched: &mut Vec<Launched>) {
+    rush_reading(words, /*escape_symbols*/ false, launched);
+    // #1276 follow-up: `-Q`/`--escape-symbols` take a value too; read
+    // both ways, so a word read as the line before stays in it.
+    if words.iter().any(|word| {
+        work::step();
+        word.starts_with("--escape-symbols")
+            || (word.starts_with('-') && !word.starts_with("--") && word.contains('Q'))
+    }) {
+        rush_reading(words, /*escape_symbols*/ true, launched);
+    }
+}
+
+/// One reading of `rush`'s words; `escape_symbols`: `-Q` and
+/// `--escape-symbols` take a value.
+fn rush_reading(words: &[String], escape_symbols: bool, launched: &mut Vec<Launched>) {
     /// rush's long flags that take a value.
     const VALUED: &[&str] = &[
         "jobs",
@@ -652,7 +764,7 @@ fn rush(words: &[String], launched: &mut Vec<Launched>) {
                 .split_once('=')
                 .map_or((long, None), |(option, value)| (option, Some(value)));
             piped |= option == "pipe";
-            if VALUED.contains(&option) {
+            if VALUED.contains(&option) || (escape_symbols && option == "escape-symbols") {
                 let value = value.or_else(|| {
                     at += 1;
                     words.get(at - 1).map(String::as_str)
@@ -669,7 +781,7 @@ fn rush(words: &[String], launched: &mut Vec<Launched>) {
         };
         for (index, letter) in group.char_indices() {
             work::step();
-            if !"jrtCDndJiovT".contains(letter) {
+            if !("jrtCDndJiovT".contains(letter) || (escape_symbols && letter == 'Q')) {
                 continue;
             }
             let rest = &group[index + letter.len_utf8()..];
@@ -779,7 +891,9 @@ fn fd_exec(word: &str) -> (bool, Option<&str>) {
 /// For each of a launched command's words, whether a program may start
 /// there: its command word and wrappers', or every word after an exec
 /// wrapper, or the word after a finder's exec option. Not after `--`,
-/// which ends options (`xargs -I{} git checkout -- {}`). `None` past
+/// which ends options (`xargs -I{} git checkout -- {}`), unless the `--`
+/// is where the command word was read to be: after a wrapper's operands
+/// (#1276 follow-up: `xargs -I% flock l -- %`). `None` past
 /// `outbound::MAX_JUDGED_POSITIONS` starts.
 fn launched_programs(words: &[String]) -> Option<Vec<bool>> {
     let wrapped = indirect::command_word(words)
@@ -793,7 +907,8 @@ fn launched_programs(words: &[String]) -> Option<Vec<bool>> {
                 words[start - 1].as_str(),
                 "-exec" | "-execdir" | "-ok" | "-okdir"
             );
-        if !(start == 0 || wrapped || exec) {
+        let ended = start > 0 && programs[start - 1] && words[start - 1] == "--";
+        if !(start == 0 || wrapped || exec || ended) {
             continue;
         }
         starts += 1;
@@ -810,9 +925,14 @@ fn launched_programs(words: &[String]) -> Option<Vec<bool>> {
 
 /// `env -S'% x'` (`-iS'…'`, `--split-string=…`): env splits the string
 /// into the words it runs. The words with every such string split, once,
-/// and whether there was one; env's options end at its command.
-fn env_split(words: &[String], options: usize) -> Option<Vec<String>> {
+/// and whether there was one; env's options end at its command. With them,
+/// whether a split `S` may be in another option's value instead (`env
+/// -uSSH_AUTH_SOCK`: a letter before it in its group takes a value).
+fn env_split(words: &[String], options: usize) -> Option<(Vec<String>, bool)> {
+    /// env's short options (GNU, BSD) that take a value.
+    const VALUED: &[char] = &['u', 'C', 'a', 'P', 'L', 'U'];
     let mut env = false;
+    let mut doubtful = false;
     let mut split = false;
     let mut split_next = false;
     let mut expanded = Vec::with_capacity(words.len());
@@ -835,6 +955,7 @@ fn env_split(words: &[String], options: usize) -> Option<Vec<String>> {
         } else if let Some(group) = word.strip_prefix('-')
             && let Some(at) = group.find('S')
         {
+            doubtful |= group[..at].contains(VALUED);
             let value = &group[at + 1..];
             if value.is_empty() {
                 split_next = true;
@@ -854,7 +975,7 @@ fn env_split(words: &[String], options: usize) -> Option<Vec<String>> {
         env |= basename(&word.to_lowercase()) == "env";
     }
     expanded.extend(words[options..].iter().cloned());
-    split.then_some(expanded)
+    split.then_some((expanded, doubtful))
 }
 
 /// Whether input reaches the program `words` run (or a wrapper's, or one
@@ -877,9 +998,26 @@ fn words_run(words: &[String], fills: &Fills, depth: usize) -> bool {
     }
     let command = indirect::command_word(words);
     let options = command.as_ref().map_or(words.len(), |(at, _)| at + 1);
-    if let Some(expanded) = env_split(words, options) {
-        // Judged once as the words env runs.
-        return words_run(&expanded, fills, depth + 1);
+    // Judged once as the words env runs, and (#1276 follow-up) as written
+    // when the `S` may be in another option's value (`env
+    // -uSSH_AUTH_SOCK`).
+    if let Some((expanded, doubtful)) = env_split(words, options) {
+        if words_run(&expanded, fills, depth + 1) {
+            return true;
+        }
+        if !doubtful {
+            return false;
+        }
+    }
+    // #1276 follow-up: a `--` read as the command word after a wrapper's
+    // operands ends its options; the command is after it (`xargs -I% flock
+    // l -- python3 -c '…%…'`).
+    if let Some((index, name)) = &command
+        && name == "--"
+        && *index > 0
+        && words_run(&words[index + 1..], fills, depth + 1)
+    {
+        return true;
     }
     // Input added after words that only wrap is the program (`xargs env`).
     if command.as_ref().is_none_or(|(at, _)| words[*at] == ADDED)
