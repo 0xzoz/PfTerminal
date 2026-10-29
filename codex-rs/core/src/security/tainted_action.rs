@@ -2243,6 +2243,22 @@ impl Classifier {
                 ..launched_git::Marks::default()
             },
         );
+        // #1159 follow-up: zsh's `=word` runs the program `word` on the
+        // path (`=$X`, `=$(…)`: one the classifier cannot see). The command
+        // reading skips such a word as an assignment, so that program is
+        // never judged (`=$X log --output=~/.zshrc`, `echo x | =tee -a
+        // ~/.zshrc`, `nice =sort -o ~/.zshrc f`): before the command word,
+        // or right after a precommand modifier (`noglob =tee …`), it asks.
+        let skipped_to = command.as_ref().map_or(lower.len(), |(at, _)| *at);
+        if lower.iter().enumerate().any(|(at, word)| {
+            work::step();
+            word.len() > 1
+                && word.starts_with('=')
+                && (at < skipped_to
+                    || (at > 0 && unknown_folder::MODIFIERS.contains(&lower[at - 1].as_str())))
+        }) {
+            self.note(ProtectedActionKind::UnseenCode);
+        }
         let mut later = LaterWords::new(&lower);
         let mut git_programs_read = false;
         // Not only at command position: wrappers (`nice -n 5`, `sudo -u x`,
@@ -2408,6 +2424,28 @@ impl Classifier {
                 hidden[*index] || folders.unchecked || unchecked.iter().any(|word| *word);
             outputs::output_files(name, &words[index + 1..], unchecked)
         });
+        // #1159 follow-up: the command after zsh's precommand modifiers
+        // (`noglob git log --output=~/.zshrc`, `noglob tee -a ~/.zshrc`)
+        // writes too. The modifier stays the command word, as before (a
+        // function may have its name): this only adds what it writes.
+        let modified = command
+            .as_ref()
+            .filter(|(_, name)| unknown_folder::MODIFIERS.contains(&name.as_str()))
+            .and_then(|(index, _)| {
+                let after = words[index + 1..]
+                    .iter()
+                    .position(|word| {
+                        work::step();
+                        !unknown_folder::MODIFIERS.contains(&word.as_str())
+                    })
+                    .map_or(words.len(), |offset| index + 1 + offset);
+                indirect::command_word(&words[after..]).map(|(at, name)| (after + at, name))
+            });
+        let modified_outputs = modified.as_ref().and_then(|(index, name)| {
+            let unchecked =
+                hidden[*index] || folders.unchecked || unchecked.iter().any(|word| *word);
+            outputs::output_files(name, &words[index + 1..], unchecked)
+        });
         if command
             .as_ref()
             .is_some_and(|(index, name)| outputs::joins_names(name, &words[index + 1..]))
@@ -2417,7 +2455,12 @@ impl Classifier {
         let writer = command.as_ref().map(|(index, name)| {
             (
                 *index,
-                WRITERS.contains(&name.as_str()) || outputs.is_some(),
+                WRITERS.contains(&name.as_str())
+                    || outputs.is_some()
+                    || modified_outputs.is_some()
+                    || modified
+                        .as_ref()
+                        .is_some_and(|(_, name)| WRITERS.contains(&name.as_str())),
             )
         });
         let path_writer = command
@@ -2556,7 +2599,12 @@ impl Classifier {
         {
             self.note(ProtectedActionKind::Persistence);
         }
-        for file in outputs.iter().flatten().chain(&wrapper_outputs) {
+        for file in outputs
+            .iter()
+            .flatten()
+            .chain(&wrapper_outputs)
+            .chain(modified_outputs.iter().flatten())
+        {
             work::step();
             if outputs::unseen_place(file) {
                 self.note_or_hold(ProtectedActionKind::Persistence, self.temp_place(file));
