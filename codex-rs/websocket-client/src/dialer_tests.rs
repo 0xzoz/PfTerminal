@@ -283,7 +283,9 @@ fn no_proxy_ranges_match_only_ip_hosts_inside_them() {
     ));
     assert!(matches("0.0.0.0/0", "ws://203.0.113.9/x"));
     assert!(matches("fd00::/8", "ws://[fd12::1]:9000/x"));
-    assert!(matches("[::1]/128", "ws://[::1]/x"));
+    assert!(matches("::1/128", "ws://[::1]/x"));
+    assert!(!matches("[::1]/128", "ws://[::1]/x"));
+    assert!(!matches("10.0.0.0/+8", "ws://10.0.0.1/x"));
     assert!(!matches("172.16.0.0/12", "ws://172.32.0.1/x"));
     assert!(!matches("10.0.0.0/8", "ws://exec-server.internal/x"));
     assert!(!matches("10.0.0.0/8", "ws://[::ffff:10.0.0.1]/x"));

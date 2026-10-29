@@ -207,14 +207,14 @@ fn no_proxy_range_matches(no_proxy: &str, request: &Request) -> bool {
         .any(|(network, prefix)| ip_in_range(ip, network, prefix))
 }
 
-/// Parses an `address/prefix` entry, for example `172.16.0.0/12` or `fd00::/8`.
+/// Parses an `address/prefix` entry, for example `172.16.0.0/12` or `fd00::/8`,
+/// accepting the same forms as the HTTP client's matcher (no brackets or signs).
 fn parse_ip_range(entry: &str) -> Option<(IpAddr, u32)> {
     let (address, prefix) = entry.split_once('/')?;
-    let address = address
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .parse::<IpAddr>()
-        .ok()?;
+    let address = address.parse::<IpAddr>().ok()?;
+    if prefix.is_empty() || !prefix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
     let prefix = prefix.parse::<u32>().ok()?;
     let max_prefix = if address.is_ipv4() { 32 } else { 128 };
     (prefix <= max_prefix).then_some((address, prefix))
