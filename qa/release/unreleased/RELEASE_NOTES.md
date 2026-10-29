@@ -219,6 +219,14 @@ them into `qa/release/<version>/RELEASE_NOTES.md` and empties this file.
   (Grok 4.6 and 4.5, DeepSeek V4 Pro and V4 Flash 0731 on OpenRouter, and
   GPT-5.5 on OpenAI) are still served and unchanged.
 
+## `NO_PROXY` IP ranges apply to WebSocket connections
+
+- **WebSocket connections now honour IP-range entries in `NO_PROXY`** (#722,
+  D247), such as `172.16.0.0/12`. A connection to an IP address inside a
+  listed range now goes direct, as HTTP requests already did, instead of
+  through `HTTP_PROXY`/`HTTPS_PROXY`. Host names are matched by name only (they
+  are not resolved to check ranges), as before.
+
 ## Interrupting a tool on a busy machine keeps its elapsed time
 
 - **The model now always sees how long an interrupted tool ran** (#1467,
