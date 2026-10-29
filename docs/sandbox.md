@@ -22,7 +22,10 @@ using at that moment.
 - Network access by programs that ignore proxy settings: the network block
   only sets proxy variables and offline settings for common tools.
 - A few ways of starting programs that leave the command's job, so cancelling
-  doesn't end them (see #1507 in `codex-rs/core/README.md`).
+  doesn't end them (see #1507 in `codex-rs/core/README.md`; measured on a
+  server without a desktop session, not yet on a desktop).
+- Drives without Windows permissions, such as FAT or exFAT USB drives: neither
+  sandbox can protect files there.
 
 The default sandbox runs commands as a separate account with a firewall-based
 network block, and protects more.
