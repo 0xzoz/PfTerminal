@@ -243,7 +243,9 @@ async fn sec_win_1506_planted_project_config_is_not_loaded() {
         unelevated_tool_launch_script(
             &base,
             &cwd,
-            "mkdir .codex && (echo model = \"planted\")> .codex\\config.toml && mkdir .agents\\skills",
+            // A TOML literal string: cmd doesn't understand the `\"` the
+            // argument quoting would give a double quote.
+            "mkdir .codex && (echo model = 'planted')> .codex\\config.toml && mkdir .agents\\skills",
         )
         .expect("planting launch"),
         /*stdout_stream*/ None,
