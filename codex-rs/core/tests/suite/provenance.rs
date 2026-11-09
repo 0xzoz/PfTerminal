@@ -529,7 +529,6 @@ async fn pf_30_s02_taint_survives_a_one_off_approval() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// PF-30-S03 fixture: one turn whose model calls `first`, then `second`.
 /// #1976 (D491): on Windows without its sandbox, as in these tests,
 /// Moderate refuses each command before anyone is asked.
 fn assert_windows_refusal(
@@ -549,6 +548,7 @@ fn assert_windows_refusal(
     }
 }
 
+/// PF-30-S03 fixture: one turn whose model calls `first`, then `second`.
 async fn pf_30_s03_two_call_turn(
     level: SecurityLevel,
     approval: codex_protocol::protocol::AskForApproval,
