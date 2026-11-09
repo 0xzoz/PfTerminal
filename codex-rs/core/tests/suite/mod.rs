@@ -94,6 +94,7 @@ mod hooks_mcp;
 mod image_rollout;
 mod issue_1087;
 mod issue_1139;
+mod issue_1976;
 #[path = "issue_1355_tests.rs"]
 mod issue_1355;
 mod issue_443;
