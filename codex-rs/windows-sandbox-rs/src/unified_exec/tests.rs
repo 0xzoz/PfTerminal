@@ -389,13 +389,17 @@ fn wait_for_frame_count(frames_path: &Path, expected_frames: usize) -> Vec<Messa
     }
 }
 
-/// #1931: budgets for the short cmd scripts that the legacy protection tests
-/// run. They only bound a hung command. On a loaded Windows runner one such
-/// script ran past a 5 s timeout, was killed (exit code 1) and failed its test
-/// although every protection held. The tests still require exit code 0, so
-/// each script must reach its last line.
-const LEGACY_SCRIPT_TIMEOUT_MS: u64 = 60_000;
-const LEGACY_SCRIPT_WAIT: Duration = Duration::from_secs(/*secs*/ 90);
+// #1931: budgets for the short cmd commands and scripts the legacy tests below
+// run. They only bound a hung command. On a loaded Windows runner one such
+// script ran past a 5 s timeout, was killed (exit code 1) and failed its test
+// although every protection held. The tests still require exit code 0, so each
+// script must reach its last line.
+
+/// Session timeout for a legacy test command (#1931).
+const LEGACY_COMMAND_TIMEOUT_MS: u64 = 60_000;
+/// How long a legacy test waits for that command's exit; longer than the
+/// timeout, so a hung command is reported as killed (exit code 1).
+const LEGACY_COMMAND_WAIT: Duration = Duration::from_secs(/*secs*/ 90);
 
 async fn collect_stdout_and_exit(
     spawned: codex_utils_pty::SpawnedProcess,
@@ -454,7 +458,7 @@ fn legacy_non_tty_cmd_emits_output() {
             ],
             cwd.as_path(),
             session_temp_env(codex_home.path()),
-            Some(5_000),
+            /*timeout_ms*/ Some(LEGACY_COMMAND_TIMEOUT_MS),
             &[],
             &[],
             /*tty*/ false,
@@ -465,7 +469,7 @@ fn legacy_non_tty_cmd_emits_output() {
         .expect("spawn legacy non-tty cmd session");
         println!("cmd spawn returned");
         let (stdout, exit_code) =
-            collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(10)).await;
+            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_COMMAND_WAIT).await;
         println!("cmd collect returned exit_code={exit_code}");
         let stdout = String::from_utf8_lossy(&stdout);
         assert_eq!(exit_code, 0, "stdout={stdout:?}");
@@ -1390,7 +1394,7 @@ fn run_legacy_delete_fixture(
             ],
             workspace.as_path(),
             env_map,
-            /*timeout_ms*/ Some(LEGACY_SCRIPT_TIMEOUT_MS),
+            /*timeout_ms*/ Some(LEGACY_COMMAND_TIMEOUT_MS),
             &[],
             &[],
             /*tty*/ false,
@@ -1400,7 +1404,7 @@ fn run_legacy_delete_fixture(
         .await
         .expect("spawn legacy delete session");
         let (stdout, exit_code) =
-            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_SCRIPT_WAIT).await;
+            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_COMMAND_WAIT).await;
         let stdout = String::from_utf8_lossy(&stdout);
         let canonical_workspace = dunce::canonicalize(&workspace).expect("canonical workspace");
         // SAFETY: reads the label of a folder this test made.
@@ -1515,7 +1519,7 @@ fn legacy_workspace_write_cannot_delete_or_replace_protected_git_dir() {
             ],
             workspace.as_path(),
             with_session_temp(codex_home.path(), env_map),
-            /*timeout_ms*/ Some(LEGACY_SCRIPT_TIMEOUT_MS),
+            /*timeout_ms*/ Some(LEGACY_COMMAND_TIMEOUT_MS),
             &[],
             &[],
             /*tty*/ false,
@@ -1525,7 +1529,7 @@ fn legacy_workspace_write_cannot_delete_or_replace_protected_git_dir() {
         .await
         .expect("spawn legacy replace-git session");
         let (stdout, exit_code) =
-            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_SCRIPT_WAIT).await;
+            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_COMMAND_WAIT).await;
         let stdout = String::from_utf8_lossy(&stdout);
         let sandbox_outcome = (
             exit_code,
@@ -1618,7 +1622,7 @@ fn legacy_workspace_write_cannot_move_ancestor_of_nested_carve_out() {
             ],
             workspace.as_path(),
             with_session_temp(codex_home.path(), env_map),
-            /*timeout_ms*/ Some(LEGACY_SCRIPT_TIMEOUT_MS),
+            /*timeout_ms*/ Some(LEGACY_COMMAND_TIMEOUT_MS),
             &[],
             &carve_outs,
             /*tty*/ false,
@@ -1628,7 +1632,7 @@ fn legacy_workspace_write_cannot_move_ancestor_of_nested_carve_out() {
         .await
         .expect("spawn legacy move-ancestor session");
         let (stdout, exit_code) =
-            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_SCRIPT_WAIT).await;
+            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_COMMAND_WAIT).await;
         let stdout = String::from_utf8_lossy(&stdout);
         let sandbox_outcome = (
             exit_code,
@@ -1762,7 +1766,7 @@ fn run_legacy_script(
             ],
             workspace,
             env_map,
-            /*timeout_ms*/ Some(LEGACY_SCRIPT_TIMEOUT_MS),
+            /*timeout_ms*/ Some(LEGACY_COMMAND_TIMEOUT_MS),
             &[],
             &[],
             /*tty*/ false,
@@ -1772,7 +1776,7 @@ fn run_legacy_script(
         .await
         .expect("spawn legacy session");
         let (_stdout, exit_code) =
-            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_SCRIPT_WAIT).await;
+            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_COMMAND_WAIT).await;
         exit_code
     })
 }
@@ -2595,7 +2599,7 @@ fn legacy_delete_child_denies_are_removed_after_the_session() {
             ],
             workspace.as_path(),
             with_session_temp(codex_home.path(), env_map),
-            /*timeout_ms*/ Some(LEGACY_SCRIPT_TIMEOUT_MS),
+            /*timeout_ms*/ Some(LEGACY_COMMAND_TIMEOUT_MS),
             &[],
             &carve_outs,
             /*tty*/ false,
@@ -2605,7 +2609,7 @@ fn legacy_delete_child_denies_are_removed_after_the_session() {
         .await
         .expect("spawn legacy session");
         let (stdout, exit_code) =
-            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_SCRIPT_WAIT).await;
+            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_COMMAND_WAIT).await;
         let stdout = String::from_utf8_lossy(&stdout);
         let denies_left: Vec<(PathBuf, bool)> = [
             (workspace.clone(), false),
@@ -3299,7 +3303,7 @@ fn legacy_command_log_redacts_credentials() {
             ],
             cwd.as_path(),
             session_temp_env(codex_home.path()),
-            Some(5_000),
+            /*timeout_ms*/ Some(LEGACY_COMMAND_TIMEOUT_MS),
             &[],
             &[],
             /*tty*/ false,
@@ -3309,7 +3313,7 @@ fn legacy_command_log_redacts_credentials() {
         .await
         .expect("spawn legacy credential command");
         let (stdout, exit_code) =
-            collect_stdout_and_exit(spawned, codex_home.path(), Duration::from_secs(10)).await;
+            collect_stdout_and_exit(spawned, codex_home.path(), LEGACY_COMMAND_WAIT).await;
         let stdout = String::from_utf8_lossy(&stdout);
         assert_eq!(exit_code, 0, "stdout={stdout:?}");
         assert_sandbox_log_redacted(codex_home.path(), &stdout);
