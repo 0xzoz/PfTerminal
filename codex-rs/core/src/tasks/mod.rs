@@ -88,7 +88,7 @@ enum MailboxTurnEnd {
     /// The turn ended on its own.
     Completed,
     /// The turn returned an error (a turn-aborted one included); its leftover input is
-    /// submitted again.
+    /// still recorded or submitted again afterwards.
     Failed,
     /// An interrupt, a replacing turn or a shutdown stopped the turn.
     Aborted,
@@ -1083,10 +1083,10 @@ impl Session {
         let (message_ids, unrecorded_message_ids) = {
             let mut turn_state = turn_state.lock().await;
             let message_ids = turn_state.take_mailbox_message_ids();
+            let unrecorded_message_ids =
+                turn_state.take_unrecorded_mailbox_message_ids(&message_ids);
             let unrecorded_message_ids = match end {
-                MailboxTurnEnd::Aborted => {
-                    turn_state.take_unrecorded_mailbox_message_ids(&message_ids)
-                }
+                MailboxTurnEnd::Aborted => unrecorded_message_ids,
                 MailboxTurnEnd::Completed | MailboxTurnEnd::Failed => Vec::new(),
             };
             (message_ids, unrecorded_message_ids)
@@ -1102,8 +1102,13 @@ impl Session {
         // session, so that reloading the agent does not hand it over again: mailbox recovery
         // requeues a Submitted row of a replaced session, which is meant for a session that
         // died (crash recovery, #1058/#1545) and still is. The transition only moves a row that
-        // is still Submitted, so a row the turn did record is left as it is.
+        // is still Submitted. A message this session applied to its history is left as it is
+        // even when its row is still Submitted (its rollout did not flush, or the abort landed
+        // before the row moved on): recovery decides about it, as before.
         for message_id in unrecorded_message_ids {
+            if self.has_applied_agent_message_id(&message_id).await {
+                continue;
+            }
             match state_db
                 .transition_agent_message(
                     &message_id,
