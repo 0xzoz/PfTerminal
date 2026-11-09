@@ -283,6 +283,9 @@ fn d484_glob_loop_variables_that_may_name_an_option_ask() {
         "for d in a b; do for f in *; do tar rf a.tar \"$f\"; done; done",
         "if [ -d x ]; then for f in *; do rg data \"$f\"; done; fi",
         "while :; do for f in *; do sort -o out \"$f\"; done; break; done",
+        "for f\nin *\ndo tar rf a.tar \"$f\"; done",
+        "time -p for f in *; do tar rf a.tar \"$f\"; done",
+        "coproc for f in *; do tar rf a.tar \"$f\"; done",
         // Past eight loop names, any variable may be one.
         "for a in *; do :; done; for b in *; do :; done; for c in *; do :; done; \
          for d in *; do :; done; for e in *; do :; done; for g in *; do :; done; \
@@ -324,6 +327,8 @@ fn d484_other_loop_variables_stay_quiet() {
         "for f; do tar rf a.tar \"$ff\"; done",
         "for f in *; do tar rf a.tar -- \"${f%.txt}\"; done",
         "for f in *; do tar rf a.tar \"$p/$f\"; done",
+        "for f\nin ./*\ndo tar rf a.tar \"$f\"; done",
+        "for f\ndo tar rf a.tar \"$f\"; done",
     ];
     assert_eq!(wrong(&lines, None), Vec::<String>::new());
 }
@@ -370,6 +375,13 @@ fn d484_xargs_fed_by_a_listing_asks() {
         "find . -print0 | grep -e -z x | xargs -0 tar cf a.tar",
         "find . -fprint /dev/stdout -print0 | xargs -0 tar cf a.tar",
         "find . -print0 | uniq -u | xargs -0 rg data",
+        "find . -print0 | uniq -d | xargs -0 rg data",
+        "find . -print0 | uniq -D | xargs -0 rg data",
+        "find . -print0 | uniq --rep | xargs -0 rg data",
+        "find . -print0 | uniq -u -f -z | xargs -0 rg data",
+        "find . -print0 | xargs -0 --delimiter=x rg data",
+        "find . -print0 | xargs -0 --delimiter x rg data",
+        "find . -print0 | xargs -0d'\\n' rg data",
         "find . -print0 | xargs -0 -d '\\n' rg data",
         // xargs' own reading of its options, without a listing.
         "xargs -J % tar rf a.tar % * < list",

@@ -508,29 +508,35 @@ struct GlobLoop {
 pub(super) struct GlobLoops {
     loops: Vec<GlobLoop>,
     any: bool,
+    /// A `for NAME` whose `in` may start the next command (bash reads
+    /// `for f` and `in *` on lines of their own).
+    pending: Option<String>,
 }
 
 const MAX_GLOB_LOOPS: usize = 8;
 
 /// Reserved words the reading keeps before a loop in the same command.
 const LOOP_PREFIXES: &[&str] = &[
-    "!", "if", "then", "elif", "else", "do", "while", "until", "time", "{",
+    "!", "if", "then", "elif", "else", "do", "while", "until", "time", "{", "coproc",
 ];
 
 impl GlobLoops {
     /// Takes in a simple command (`for f in *`). zsh's `for f (*)` and
     /// `foreach f (*)`, which this reading cuts at `(`, count as `*`.
     pub(super) fn read(&mut self, command: &Command) {
+        let pending = self.pending.take();
         // Past reserved words that may start it (`do for f in *`, `then
-        // for …`).
-        let skipped = command
-            .words
-            .iter()
-            .take_while(|word| {
-                work::step();
-                LOOP_PREFIXES.contains(&word.text.as_str())
-            })
-            .count();
+        // for …`, `time -p for …`).
+        let mut skipped = 0;
+        while let Some(word) = command.words.get(skipped) {
+            work::step();
+            let time_option =
+                word.text == "-p" && skipped > 0 && command.words[skipped - 1].text == "time";
+            if !(LOOP_PREFIXES.contains(&word.text.as_str()) || time_option) {
+                break;
+            }
+            skipped += 1;
+        }
         let words = &command.words[skipped..];
         let keyword = words.first().is_some_and(|word| {
             matches!(
@@ -538,8 +544,23 @@ impl GlobLoops {
                 "for" | "select" | "foreach"
             )
         });
-        let Some(name) = words.get(1).filter(|_| keyword).map(|word| &word.text) else {
-            return;
+        // `for f` then `in *` (a newline between them).
+        let (name, list) = match (pending, command.words.first()) {
+            (Some(name), Some(first)) if first.text == "in" => (name, Some(&command.words[1..])),
+            _ => {
+                let Some(name) = words
+                    .get(1)
+                    .filter(|_| keyword)
+                    .map(|word| word.text.clone())
+                else {
+                    return;
+                };
+                let list = words
+                    .get(2)
+                    .is_some_and(|word| word.text == "in")
+                    .then(|| &words[3..]);
+                (name, list)
+            }
         };
         if name.is_empty()
             || !name
@@ -549,8 +570,8 @@ impl GlobLoops {
             return;
         }
         let (mut glob, mut dash, mut open) = (false, false, false);
-        if words.get(2).is_some_and(|word| word.text == "in") {
-            for word in words[3..].iter().take_while(|word| word.text != "do") {
+        if let Some(list) = list {
+            for word in list.iter().take_while(|word| word.text != "do") {
                 work::step();
                 glob |= word.globs;
                 if may_match_option(word) {
@@ -560,21 +581,20 @@ impl GlobLoops {
             }
         } else if words.len() == 2 && command.cut {
             (glob, dash, open) = (true, true, true);
+        } else if words.len() == 2 {
+            self.pending = Some(name);
+            return;
         }
         if !glob {
             return;
         }
-        if let Some(known) = self.loops.iter_mut().find(|known| known.name == *name) {
+        if let Some(known) = self.loops.iter_mut().find(|known| known.name == name) {
             known.dash |= dash;
             known.open |= open;
         } else if self.loops.len() == MAX_GLOB_LOOPS {
             self.any = true;
         } else {
-            self.loops.push(GlobLoop {
-                name: name.clone(),
-                dash,
-                open,
-            });
+            self.loops.push(GlobLoop { name, dash, open });
         }
     }
 
