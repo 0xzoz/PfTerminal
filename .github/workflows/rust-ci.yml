@@ -262,7 +262,6 @@ jobs:
     uses: ./.github/workflows/rust-ci-changed-crate-tests.yml
     with:
       packages: ${{ needs.changed.outputs.changed_crate_test_packages }}
-    secrets: inherit
 
   # Native Windows Bazel tests of codex-tui, codex-core, codex-state and
   # codex-login on PRs that change one of them (#636, owner decision
