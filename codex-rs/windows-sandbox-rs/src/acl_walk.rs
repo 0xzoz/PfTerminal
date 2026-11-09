@@ -385,7 +385,7 @@ pub(crate) unsafe fn open_relative(dir: HANDLE, name: &[u16], access: u32) -> Re
         dir,
         name,
         access | FILE_READ_ATTRIBUTES,
-        0,
+        /*object_attributes*/ 0,
         FILE_OPEN_REPARSE_POINT,
     )
     .map_err(|status| {
@@ -453,7 +453,7 @@ pub(crate) unsafe fn open_itself(
         dir,
         name,
         access | FILE_READ_ATTRIBUTES,
-        0,
+        /*object_attributes*/ 0,
         FILE_OPEN_REPARSE_POINT,
     )
     .map_err(|status| std::io::Error::from_raw_os_error(RtlNtStatusToDosError(status) as i32))
@@ -469,7 +469,7 @@ pub(crate) unsafe fn link_target_at(dir: HANDLE, name: &[u16]) -> Option<String>
     const TAG_SYMLINK: u32 = 0xA000_000C;
     const TAG_MOUNT_POINT: u32 = 0xA000_0003;
     const SYMLINK_FLAG_RELATIVE: u32 = 1;
-    let link = open_itself(dir, name, 0).ok()?;
+    let link = open_itself(dir, name, /*access*/ 0).ok()?;
     let mut buffer = vec![0_u8; 16 * 1024];
     let mut returned = 0_u32;
     if DeviceIoControl(
