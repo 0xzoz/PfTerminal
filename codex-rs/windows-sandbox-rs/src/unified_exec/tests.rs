@@ -3421,6 +3421,10 @@ mod token_boundary;
 #[path = "env_case_tests.rs"]
 mod env_case;
 
+/// #1909: a legacy spawn cancelled while a blocking step runs.
+#[path = "legacy_cancel_tests.rs"]
+mod legacy_cancel;
+
 /// D285: what the per-command ACL work costs on a large workspace.
 #[path = "acl_cost_tests.rs"]
 mod acl_cost;
