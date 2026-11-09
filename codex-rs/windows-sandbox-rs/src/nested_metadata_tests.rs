@@ -382,6 +382,65 @@ fn contents_record_a_junction_by_its_target() {
     );
 }
 
+/// #1909 item 4: the folders read at one session's start or end share one
+/// budget; the ones read past it differ every time (so they are flagged),
+/// the ones before it are recorded as usual.
+#[test]
+fn contents_share_one_budget() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dunce::canonicalize(dir.path()).expect("canonical");
+    for name in ["a", "b"] {
+        let folder = root.join(name).join(".codex");
+        std::fs::create_dir_all(&folder).expect("create");
+        for file in ["1.md", "2.md", "3.md"] {
+            std::fs::write(folder.join(file), "abcd").expect("write");
+        }
+    }
+    let (a, b) = (root.join("a\\.codex"), root.join("b\\.codex"));
+    let truncated = |prints: &crate::git_watch::Prints| {
+        prints
+            .values()
+            .any(|print| print.starts_with("truncated at"))
+    };
+
+    let entries = ContentBudget::with_limits(5, u64::MAX);
+    let by_entries = (
+        contents_within(&a, &entries) == contents(&a),
+        truncated(&contents_within(&b, &entries)),
+    );
+    let bytes = ContentBudget::with_limits(usize::MAX, 20);
+    let by_bytes = (
+        contents_within(&a, &bytes) == contents(&a),
+        truncated(&contents_within(&b, &bytes)),
+    );
+
+    assert_eq!((by_entries, by_bytes), ((true, true), (true, true)));
+}
+
+/// #1909 item 4: nested folders that are each within the per-folder limits
+/// but together over the total are flagged at the session's end, though
+/// nothing in them changed (before, each was compared in full).
+#[test]
+fn nested_folders_over_the_total_are_flagged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dunce::canonicalize(dir.path()).expect("canonical");
+    // Five folders of 60 MiB each: within the 64 MiB per folder, over the
+    // 256 MiB total.
+    for n in 0..5 {
+        let folder = root.join(format!("p{n}\\.codex"));
+        std::fs::create_dir_all(&folder).expect("create");
+        let file = std::fs::File::create(folder.join("big.bin")).expect("create file");
+        file.set_len(60 * 1024 * 1024).expect("size");
+    }
+    let found = find(std::slice::from_ref(&root));
+    assert_eq!(found.entries.len(), 5);
+    let before = with_contents(found.entries.clone());
+
+    let flagged = appeared(&before, find(std::slice::from_ref(&root)).entries);
+
+    assert!(!flagged.is_empty(), "nothing flagged past the total");
+}
+
 /// #1896 item 3: a legacy entry is written without `contents`, and a record
 /// from before it reads back as one.
 #[test]

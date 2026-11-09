@@ -31,7 +31,7 @@ const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 pub(crate) struct NestedMetadata {
     pub(crate) path: PathBuf,
     pub(crate) identity: Option<FileIdentity>,
-    /// #1896 item 3: what was inside it ([`contents`]), for an elevated
+    /// #1896 item 3: what was inside it ([`contents_within`]), for an elevated
     /// session (`None` otherwise: a legacy session keeps it unchanged).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) contents: Option<crate::git_watch::Prints>,
@@ -39,14 +39,20 @@ pub(crate) struct NestedMetadata {
 
 impl NestedMetadata {
     /// Whether `path`, the file `identity` now, is still this entry: the
-    /// same file, with the same contents when they were recorded.
-    fn unchanged(&self, path: &Path, identity: Option<FileIdentity>) -> bool {
+    /// same file, with the same contents when they were recorded (read
+    /// within `budget`).
+    fn unchanged(
+        &self,
+        path: &Path,
+        identity: Option<FileIdentity>,
+        budget: &ContentBudget,
+    ) -> bool {
         same_path(&self.path, path)
             && self.identity == identity
             && self
                 .contents
                 .as_ref()
-                .is_none_or(|before| *before == contents(path))
+                .is_none_or(|before| *before == contents_within(path, budget))
     }
 }
 
@@ -351,12 +357,13 @@ pub(crate) fn to_protect(found: &[NestedMetadata]) -> Vec<NestedMetadata> {
 
 /// The entries of `now` that aren't in `before` as the same file.
 pub(crate) fn appeared(before: &[NestedMetadata], now: Vec<NestedMetadata>) -> Vec<PathBuf> {
+    let budget = ContentBudget::default();
     now.into_iter()
         .filter(|entry| {
             entry.identity.is_none()
                 || !before
                     .iter()
-                    .any(|old| old.unchanged(&entry.path, entry.identity))
+                    .any(|old| old.unchanged(&entry.path, entry.identity, &budget))
         })
         .map(|entry| entry.path)
         .collect()
@@ -380,23 +387,90 @@ pub(crate) fn appeared_in_session(
         return false;
     }
     let now = identity(folder);
-    now.is_none() || !before.iter().any(|old| old.unchanged(folder, now))
+    let budget = ContentBudget::default();
+    now.is_none() || !before.iter().any(|old| old.unchanged(folder, now, &budget))
 }
 
-/// Entries [`contents`] looks at in one folder, all levels together; past
+/// Entries [`contents_within`] looks at in one folder, all levels together; past
 /// that it differs every time.
 const MAX_CONTENT_ENTRIES: usize = 20_000;
-/// Bytes of file content [`contents`] reads in one folder; past that it
+/// Bytes of file content [`contents_within`] reads in one folder; past that it
 /// differs every time.
 const MAX_CONTENT_BYTES: u64 = 64 * 1024 * 1024;
 
+/// #1909 item 4: entries [`contents_within`] looks at in all the folders of one
+/// session's start or end together; past that, each folder still being read
+/// differs every time.
+const MAX_TOTAL_CONTENT_ENTRIES: usize = 100_000;
+/// #1909 item 4: bytes of file content read in all the folders together;
+/// past that, as for entries.
+const MAX_TOTAL_CONTENT_BYTES: u64 = 256 * 1024 * 1024;
+
+/// #1909 item 4: what [`contents_within`] may still look at across several folders
+/// (read on several threads at once). Going over never stops a command: the
+/// folders past it count as changed.
+pub(crate) struct ContentBudget {
+    entries: std::sync::atomic::AtomicUsize,
+    bytes: std::sync::atomic::AtomicU64,
+    max_entries: usize,
+    max_bytes: u64,
+}
+
+impl Default for ContentBudget {
+    fn default() -> Self {
+        Self::with_limits(MAX_TOTAL_CONTENT_ENTRIES, MAX_TOTAL_CONTENT_BYTES)
+    }
+}
+
+impl ContentBudget {
+    fn with_limits(max_entries: usize, max_bytes: u64) -> Self {
+        Self {
+            entries: std::sync::atomic::AtomicUsize::new(0),
+            bytes: std::sync::atomic::AtomicU64::new(0),
+            max_entries,
+            max_bytes,
+        }
+    }
+
+    /// Counts one more entry; false once there have been too many.
+    fn take_entry(&self) -> bool {
+        self.entries
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(1)
+            <= self.max_entries
+    }
+
+    /// Counts `bytes` more of file content; false once there have been
+    /// too many.
+    fn take_bytes(&self, bytes: u64) -> bool {
+        self.bytes
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed)
+            .saturating_add(bytes)
+            <= self.max_bytes
+    }
+}
+
 /// #1896 item 3 (D425): `entries` (from [`find`]) with what is inside each
-/// identified one ([`contents`]), several at a time.
+/// identified one ([`contents_within`]), several at a time, all within one
+/// [`ContentBudget`].
 pub(crate) fn with_contents(entries: Vec<NestedMetadata>) -> Vec<NestedMetadata> {
+    with_contents_within(entries, &ContentBudget::default())
+}
+
+fn with_contents_within(
+    entries: Vec<NestedMetadata>,
+    budget: &ContentBudget,
+) -> Vec<NestedMetadata> {
     crate::par_map::par_map(&entries, |entry| NestedMetadata {
-        contents: entry.identity.map(|_| contents(&entry.path)),
+        contents: entry.identity.map(|_| contents_within(&entry.path, budget)),
         ..entry.clone()
     })
+}
+
+/// [`contents_within`] a budget of its own.
+#[cfg(test)]
+pub(crate) fn contents(folder: &Path) -> crate::git_watch::Prints {
+    contents_within(folder, &ContentBudget::default())
 }
 
 /// What is inside the `.codex`/`.agents` folder `folder`: each entry at any
@@ -405,15 +479,16 @@ pub(crate) fn with_contents(entries: Vec<NestedMetadata>) -> Vec<NestedMetadata>
 /// reads only the file itself), a link by its target only (never followed),
 /// a folder as `dir`. A `folder` that is a file is its content (read the
 /// same way). A folder that can't be listed, a name that isn't valid
-/// Unicode, or more than [`MAX_CONTENT_ENTRIES`]
-/// entries or [`MAX_CONTENT_BYTES`] of files make it differ every time.
-pub(crate) fn contents(folder: &Path) -> crate::git_watch::Prints {
+/// Unicode, more than [`MAX_CONTENT_ENTRIES`] entries or
+/// [`MAX_CONTENT_BYTES`] of files, or going over `budget` (shared with the
+/// other folders, #1909 item 4) make it differ every time.
+fn contents_within(folder: &Path, budget: &ContentBudget) -> crate::git_watch::Prints {
     let mut prints = crate::git_watch::Prints::new();
     // A `.codex`/`.agents` that is a file: its content.
     if let Ok(metadata) = std::fs::symlink_metadata(folder)
         && !metadata.is_dir()
     {
-        let print = if metadata.len() > MAX_CONTENT_BYTES {
+        let print = if metadata.len() > MAX_CONTENT_BYTES || !budget.take_bytes(metadata.len()) {
             crate::git_watch::truncated()
         } else {
             crate::git_watch::unfollowed_file_print(folder)
@@ -430,7 +505,7 @@ pub(crate) fn contents(folder: &Path) -> crate::git_watch::Prints {
         };
         for entry in entries {
             seen += 1;
-            if seen > MAX_CONTENT_ENTRIES {
+            if seen > MAX_CONTENT_ENTRIES || !budget.take_entry() {
                 prints.insert(String::new(), crate::git_watch::truncated());
                 return prints;
             }
@@ -459,7 +534,7 @@ pub(crate) fn contents(folder: &Path) -> crate::git_watch::Prints {
                 }
                 Ok(metadata) => {
                     bytes = bytes.saturating_add(metadata.len());
-                    let print = if bytes > MAX_CONTENT_BYTES {
+                    let print = if bytes > MAX_CONTENT_BYTES || !budget.take_bytes(metadata.len()) {
                         crate::git_watch::truncated()
                     } else {
                         crate::git_watch::unfollowed_file_print(&path)

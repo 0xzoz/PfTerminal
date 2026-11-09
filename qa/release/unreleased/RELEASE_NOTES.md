@@ -887,6 +887,13 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   through once per command start or end instead of twice (once as a
   repository, once through its work tree's `.git` file), with the same
   result: about 3% off each (0.51 s to 0.49–0.50 s with 100 projects).
+- **Default (elevated) sandbox: the planted-folder watch has a total limit
+  across nested `.codex` and `.agents` folders** (#1909). It already stopped
+  looking through one such folder past 20,000 entries or 64 MiB of files. It
+  now also stops past 100,000 entries or 256 MiB across all of them at a
+  command's start or end. As with the per-folder limits, the folders it
+  can't finish are flagged after every command; the command itself is never
+  blocked.
 - **Default (elevated) sandbox setup no longer fails now and then where
   Windows requires complex passwords** (#1776). Setup gives the sandbox's
   user accounts a fresh random password, and about one setup in 4,500 drew
