@@ -20,6 +20,10 @@ use serde::Serialize;
 
 /// Prefix of the error message returned when the address policy blocks a request.
 pub const HTTP_ADDRESS_POLICY_DENIED_PREFIX: &str = "http/request blocked by address policy";
+/// Error message when a policy-bearing request is not sent because the
+/// executor would not enforce the policy.
+pub const HTTP_ADDRESS_POLICY_UNSUPPORTED: &str =
+    "the remote executor does not enforce HTTP address policies; update it to a version that does";
 
 /// Cloud instance-metadata and similar host-local service addresses. These are
 /// blocked even where their class (private, unique-local) would be allowed.
@@ -113,8 +117,9 @@ impl HttpAddressPolicy {
     }
 }
 
-/// Unwraps IPv4 addresses embedded in IPv4-mapped, IPv4-compatible, NAT64
-/// (`64:ff9b::/96`) and 6to4 (`2002::/16`) IPv6 addresses.
+/// Unwraps IPv4 addresses embedded in IPv4-mapped, IPv4-translated
+/// (`::ffff:0:0/96`), IPv4-compatible, NAT64 (`64:ff9b::/96`) and 6to4
+/// (`2002::/16`) IPv6 addresses.
 fn canonical(addr: IpAddr) -> IpAddr {
     let IpAddr::V6(v6) = addr else {
         return addr;
@@ -122,7 +127,9 @@ fn canonical(addr: IpAddr) -> IpAddr {
     let [a, b, c, d, e, f, g, h] = v6.segments();
     let low = Ipv4Addr::from((u32::from(g) << 16) | u32::from(h));
     match [a, b, c, d, e, f] {
-        [0, 0, 0, 0, 0, 0xffff] | [0x64, 0xff9b, 0, 0, 0, 0] => IpAddr::V4(low),
+        [0, 0, 0, 0, 0, 0xffff] | [0, 0, 0, 0, 0xffff, 0] | [0x64, 0xff9b, 0, 0, 0, 0] => {
+            IpAddr::V4(low)
+        }
         [0, 0, 0, 0, 0, 0] if !v6.is_loopback() && !v6.is_unspecified() => IpAddr::V4(low),
         [0x2002, ..] => IpAddr::V4(Ipv4Addr::from((u32::from(b) << 16) | u32::from(c))),
         _ => addr,

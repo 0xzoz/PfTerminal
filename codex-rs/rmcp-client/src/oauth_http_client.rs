@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_exec_server::HTTP_ADDRESS_POLICY_DENIED_PREFIX;
+use codex_exec_server::HTTP_ADDRESS_POLICY_UNSUPPORTED;
 use codex_exec_server::HttpAddressClass;
 use codex_exec_server::HttpAddressPolicy;
 use codex_exec_server::HttpClient;
@@ -39,6 +40,8 @@ enum OAuthHttpClientAdapterError {
          (see \"MCP OAuth Address Policy\" in docs/config.md)"
     )]
     AddressPolicy(String),
+    #[error("MCP OAuth request not sent: {HTTP_ADDRESS_POLICY_UNSUPPORTED}")]
+    AddressPolicyUnsupported,
 }
 
 /// Outbound address policy for OAuth requests made for the MCP server at
@@ -175,6 +178,11 @@ impl OAuthHttpClientAdapter {
             .await
             .map_err(|error| {
                 let message = error.to_string();
+                if message.contains(HTTP_ADDRESS_POLICY_UNSUPPORTED) {
+                    return oauth_http_client_error(
+                        OAuthHttpClientAdapterError::AddressPolicyUnsupported,
+                    );
+                }
                 match message.find(HTTP_ADDRESS_POLICY_DENIED_PREFIX) {
                     Some(start) => {
                         oauth_http_client_error(OAuthHttpClientAdapterError::AddressPolicy(

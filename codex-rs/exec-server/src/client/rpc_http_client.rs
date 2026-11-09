@@ -16,7 +16,7 @@ use super::response_body_stream::HttpBodyStreamRegistration;
 use crate::HttpClient;
 use crate::client::ExecServerClient;
 use crate::client::ExecServerError;
-use crate::protocol::HTTP_ADDRESS_POLICY_DENIED_PREFIX;
+use crate::protocol::HTTP_ADDRESS_POLICY_UNSUPPORTED;
 use crate::protocol::HTTP_REQUEST_METHOD;
 use crate::protocol::HttpRequestParams;
 use crate::protocol::HttpRequestResponse;
@@ -38,10 +38,9 @@ impl ExecServerClient {
                 .capabilities
                 .http_address_policy
         {
-            return Err(ExecServerError::Protocol(format!(
-                "{HTTP_ADDRESS_POLICY_DENIED_PREFIX}: the remote executor does not enforce \
-                 address policies; update it to a version that does"
-            )));
+            return Err(ExecServerError::Protocol(
+                HTTP_ADDRESS_POLICY_UNSUPPORTED.to_string(),
+            ));
         }
         Ok(())
     }

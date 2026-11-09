@@ -15,6 +15,7 @@ fn classifies_addresses() {
         ("127.1.2.3", HttpAddressClass::Loopback),
         ("::1", HttpAddressClass::Loopback),
         ("::ffff:127.0.0.1", HttpAddressClass::Loopback),
+        ("::ffff:0:127.0.0.1", HttpAddressClass::Loopback),
         ("10.1.2.3", HttpAddressClass::Private),
         ("172.16.0.1", HttpAddressClass::Private),
         ("192.168.1.1", HttpAddressClass::Private),

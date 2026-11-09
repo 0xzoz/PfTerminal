@@ -175,7 +175,7 @@ async fn http_request_with_address_policy_requires_executor_support() -> Result<
     assert!(
         error
             .to_string()
-            .contains(codex_exec_server::HTTP_ADDRESS_POLICY_DENIED_PREFIX),
+            .contains(codex_exec_server::HTTP_ADDRESS_POLICY_UNSUPPORTED),
         "{error}"
     );
     drop(client);

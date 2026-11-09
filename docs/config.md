@@ -377,8 +377,11 @@ A server named by a host name that resolves to a loopback or private address
 alias) can't use OAuth: even discovery on its own host is refused, so such a
 server that doesn't use OAuth shows its auth status as unknown, with a
 warning at startup. Use the server's IP address in `url` where its certificate
-allows that. A remote executor that predates this policy refuses OAuth
-requests instead of sending them unchecked.
+allows that. A server URL of `0.0.0.0` allows only `0.0.0.0` itself, so use
+`localhost` or `127.0.0.1` if its OAuth endpoints are on loopback. Corbanu
+does not send OAuth requests through a remote executor that predates this
+policy; sign-in fails with `MCP OAuth request not sent: ...` until the
+executor is updated.
 
 <a id="telegram"></a>
 

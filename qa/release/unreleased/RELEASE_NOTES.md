@@ -1034,8 +1034,8 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   your local machine, private network or cloud metadata service.** OAuth
   discovery, client registration, token and refresh requests (and each
   redirect) now go only to public addresses, unless the MCP server's own URL
-  is `localhost` or a loopback or private IP; then those addresses are
-  allowed too. Link-local and cloud metadata addresses (`169.254.169.254`,
+  is `localhost`, a `*.localhost` name, or a loopback or private IP; then
+  those addresses are allowed too. Link-local and cloud metadata addresses (`169.254.169.254`,
   `fd00:ec2::254`) and metadata host names are refused unless the server URL
   is that very IP address. Host names are checked after DNS resolution, and
   the request connects only to the address that was checked. Before, an MCP
@@ -1051,6 +1051,6 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   `MCP OAuth request blocked: ...`, and a server there that doesn't use OAuth
   shows auth status unknown with a startup warning. Using the server's IP
   address in `url` works where its certificate allows that. With an HTTP
-  proxy, only IP literals and host names themselves are checked. A remote
-  executor from before this change refuses OAuth requests instead of sending
-  them unchecked. Details: `docs/config.md#mcp-oauth-addresses`.
+  proxy, only IP literals and host names themselves are checked. Corbanu does
+  not send OAuth requests through a remote executor from before this change
+  (sign-in fails until it is updated). Details: `docs/config.md#mcp-oauth-addresses`.

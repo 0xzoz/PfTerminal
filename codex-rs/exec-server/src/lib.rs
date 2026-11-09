@@ -165,6 +165,7 @@ pub use protocol::FsWalkResponse;
 pub use protocol::FsWriteFileParams;
 pub use protocol::FsWriteFileResponse;
 pub use protocol::HTTP_ADDRESS_POLICY_DENIED_PREFIX;
+pub use protocol::HTTP_ADDRESS_POLICY_UNSUPPORTED;
 pub use protocol::HttpAddressClass;
 pub use protocol::HttpAddressPolicy;
 pub use protocol::HttpHeader;
