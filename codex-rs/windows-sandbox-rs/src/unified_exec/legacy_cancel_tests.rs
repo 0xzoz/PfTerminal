@@ -143,11 +143,13 @@ fn cancelled_during(step: usize) -> Vec<(u32, u32)> {
     waiting.iter().copied().zip(after).collect()
 }
 
-/// Each object loses exactly the handle the dropped step held.
+/// Whether, for each object, only this test's copy is still open once the
+/// dropped step's result was dropped (while the step waited there were
+/// more, among them the step's own).
 fn closed(counts: &[(u32, u32)]) -> Vec<bool> {
     counts
         .iter()
-        .map(|(waiting, after)| *after + 1 == *waiting)
+        .map(|(waiting, after)| *waiting > 1 && *after == 1)
         .collect()
 }
 
