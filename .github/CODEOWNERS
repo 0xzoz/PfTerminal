@@ -101,12 +101,19 @@
 /codex-rs/.cargo/audit.toml @corbanu-security
 /.github/workflows/cargo-deny.yml @corbanu-security
 # Security CI (D465): workflows that run security checks, and the scripts only they run.
+# Not owned (changed too often): rust-ci.yml and rust-ci-full.yml, which call
+# rust-ci-core-security.yml; see the handoff, section 4.
 /.github/workflows/codeql.yml @corbanu-security
 /.github/workflows/credential-boundary-canary.yml @corbanu-security
 /.github/workflows/rust-ci-core-security.yml @corbanu-security
 /.github/workflows/security-ingress-contract.yml @corbanu-security
 /.github/workflows/security-platform-contract.yml @corbanu-security
 /.github/workflows/windows-security-probes.yml @corbanu-security
+# The required-checks gate and the setup actions the security workflows run.
+/.github/workflows/blocking-ci.yml @corbanu-security
+/.github/scripts/check_ci_results.py @corbanu-security
+/.github/actions/setup-ci/ @corbanu-security
+/.github/actions/check-clean-worktree/ @corbanu-security
 /.github/scripts/run-at-medium-integrity.ps1 @corbanu-security
 /scripts/security-credential-canary @corbanu-security
 /scripts/security_credential_canary.py @corbanu-security

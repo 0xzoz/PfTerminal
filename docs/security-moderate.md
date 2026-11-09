@@ -166,7 +166,8 @@ variables, after any you set, and `ext` is taken out of a
 see it, doesn't run. This needs git 2.31 or later. It is an extra layer
 under the checks above, not a replacement: `git remote-ext` and
 `--upload-pack` run a program without the `ext` transport, and settings given
-on git's command line (`-c`, `--config-env`) come after it.
+on git's command line (`-c`, `--config-env`) or in `GIT_CONFIG_PARAMETERS`
+come after it.
 
 Known limits (D476):
 
@@ -174,8 +175,13 @@ Known limits (D476):
   or `~/.bashrc`), or a remote executor's own environment, aren't seen. A
   `GIT_ALLOW_PROTOCOL` exported there that lists `ext` keeps allowing it,
   since git then follows that list, and this setting may take the place of
-  a `GIT_CONFIG_*` entry set there. Don't list `ext` in
-  `GIT_ALLOW_PROTOCOL` in your start-up files.
+  a `GIT_CONFIG_*` entry set there. Start-up files the command's shell
+  reads after the setting is added can also remove it, by setting
+  `GIT_CONFIG_COUNT` or its entries: `~/.zshenv` for every zsh command,
+  `$BASH_ENV` for bash, and the login files (`~/.zprofile`,
+  `~/.bash_profile`, `~/.profile`) when a command runs without the shell
+  snapshot, for example in a folder other than the turn's. Don't set
+  `GIT_ALLOW_PROTOCOL` or `GIT_CONFIG_*` in your start-up files.
 - A command session started before the untrusted content (one the agent
   still writes to with `write_stdin`) keeps the environment it started
   with, so git run in it later doesn't get this setting. Commands started
