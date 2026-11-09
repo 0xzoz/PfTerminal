@@ -326,28 +326,43 @@ fn sec_win_1896_elevated_records_only_watch_flags_changes_inside_nested_metadata
 }
 
 /// Takes the writable-root grants back off `%LOCALAPPDATA%` (inherited by
-/// `%TEMP%`, which later tests check), even if the test fails.
+/// `%TEMP%`, which later tests check), even if the test fails. `icacls`
+/// can't name the capability SID (no account has it), so through the ACL
+/// API.
 struct LocalAppDataGrants {
     local_app_data: PathBuf,
     cap_sid: String,
+    removed: bool,
+}
+
+impl LocalAppDataGrants {
+    /// Removes them; whether none is left.
+    fn remove(&mut self) -> bool {
+        self.removed = true;
+        let group = crate::winutil::string_from_sid_bytes(
+            &crate::winutil::resolve_sid(crate::token::SANDBOX_USERS_GROUP).expect("group"),
+        )
+        .expect("group sid");
+        let sids: Vec<crate::token::LocalSid> = [group.as_str(), self.cap_sid.as_str()]
+            .into_iter()
+            .map(|sid| crate::token::LocalSid::from_string(sid).expect("sid"))
+            .collect();
+        let psids: Vec<_> = sids.iter().map(crate::token::LocalSid::as_ptr).collect();
+        // SAFETY: valid SIDs; the folder exists.
+        unsafe {
+            let removed = crate::acl::remove_explicit_allow_aces(&self.local_app_data, &psids);
+            let left = crate::acl::has_explicit_allow_aces(&self.local_app_data, &psids);
+            println!("D453 cleanup: removed={removed:?} left={left:?}");
+            matches!(left, Ok(false))
+        }
+    }
 }
 
 impl Drop for LocalAppDataGrants {
     fn drop(&mut self) {
-        let output = std::process::Command::new(system32_exe("icacls.exe"))
-            .arg(&self.local_app_data)
-            .args([
-                "/remove:g",
-                crate::token::SANDBOX_USERS_GROUP,
-                &format!("*{}", self.cap_sid),
-            ])
-            .output()
-            .expect("run icacls");
-        println!(
-            "D453 cleanup: {}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        if !self.removed {
+            self.remove();
+        }
     }
 }
 
@@ -375,7 +390,7 @@ fn sec_win_1896_elevated_command_cannot_edit_the_records_folder() {
     assert!(reset.status.success(), "icacls /reset: {reset:?}");
     let root = user_owned_test_root();
     let workspace = canonical(root.path());
-    let _grants = LocalAppDataGrants {
+    let mut grants = LocalAppDataGrants {
         cap_sid: crate::workspace_write_cap_sid_for_root(
             codex_home.path(),
             &workspace,
@@ -383,6 +398,7 @@ fn sec_win_1896_elevated_command_cannot_edit_the_records_folder() {
         )
         .expect("cap SID"),
         local_app_data: local_app_data.clone(),
+        removed: false,
     };
     let workload = local_app_data.join(format!("d453-workload-{}", std::process::id()));
     let moved = local_app_data.join("CorbanuTerminalSandbox-d453");
@@ -441,6 +457,11 @@ fn sec_win_1896_elevated_command_cannot_edit_the_records_folder() {
     let created_exists = created.exists();
     let _ = fs::remove_file(&created);
     let _ = fs::remove_dir_all(&workload);
+    assert!(
+        grants.remove(),
+        "the root's grants are still on {}",
+        local_app_data.display()
+    );
     let result = result.unwrap_or_else(|err| {
         panic!(
             "run elevated capture: {err:#}\n{}",
