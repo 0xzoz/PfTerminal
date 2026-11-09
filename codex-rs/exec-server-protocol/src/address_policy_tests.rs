@@ -30,6 +30,7 @@ fn classifies_addresses() {
         ("169.254.170.2", HttpAddressClass::Blocked),
         ("100.100.100.200", HttpAddressClass::Blocked),
         ("fd00:ec2::254", HttpAddressClass::Blocked),
+        ("fd20:ce::254", HttpAddressClass::Blocked),
         ("0.0.0.0", HttpAddressClass::Blocked),
         ("::", HttpAddressClass::Blocked),
         ("224.0.0.1", HttpAddressClass::Blocked),
@@ -99,4 +100,25 @@ fn policy_round_trips_and_defaults() {
         serde_json::from_value::<HttpAddressPolicy>(json).unwrap(),
         policy
     );
+}
+
+#[test]
+fn host_names_follow_the_policy() {
+    let public = HttpAddressPolicy::default();
+    let loopback = HttpAddressPolicy {
+        allow_loopback: true,
+        ..HttpAddressPolicy::default()
+    };
+    assert!(public.allows_host_name("example.com"));
+    for host in ["localhost", "LOCALHOST.", "dev.localhost"] {
+        assert!(!public.allows_host_name(host), "{host}");
+        assert!(loopback.allows_host_name(host), "{host}");
+    }
+    for host in [
+        "metadata",
+        "Metadata.Google.Internal.",
+        "metadata.azure.internal",
+    ] {
+        assert!(!loopback.allows_host_name(host), "{host}");
+    }
 }

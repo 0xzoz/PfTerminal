@@ -5,6 +5,9 @@
 //! - in a remote environment, that means the remote runtime after the
 //!   orchestrator has forwarded `http/request` over JSON-RPC
 
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use codex_exec_server_protocol::JSONRPCErrorError;
@@ -28,6 +31,7 @@ use super::response_body_stream::send_body_delta;
 use crate::HttpClient;
 use crate::client::ExecServerError;
 use crate::protocol::HTTP_ADDRESS_POLICY_DENIED_PREFIX;
+use crate::protocol::HttpAddressPolicy;
 use crate::protocol::HttpHeader;
 use crate::protocol::HttpRedirectPolicy;
 use crate::protocol::HttpRequestBodyDeltaNotification;
@@ -44,7 +48,13 @@ pub struct RouteAwareHttpClient {
     http_client_factory: HttpClientFactory,
     follow_redirects: RouteAwareClientPool,
     stop_redirects: RouteAwareClientPool,
+    filtered: Arc<Mutex<HashMap<FilteredPoolKey, RouteAwareClientPool>>>,
 }
+
+type FilteredPoolKey = (HttpAddressPolicy, HttpRedirectPolicy);
+
+/// Distinct address policies kept with their pools; one per MCP server origin class.
+const MAX_FILTERED_POOLS: usize = 16;
 
 /// Streaming response state held between the initial HTTP response and
 /// downstream body-delta forwarding.
@@ -63,6 +73,7 @@ impl RouteAwareHttpClient {
     pub fn new(http_client_factory: HttpClientFactory) -> Self {
         Self {
             http_client_factory: http_client_factory.clone(),
+            filtered: Arc::new(Mutex::new(HashMap::new())),
             follow_redirects: RouteAwareClientPool::with_chatgpt_cloudflare_cookies_without_request_logging(
                 http_client_factory.clone(),
                 // Delegated HTTP targets arbitrary endpoints; route class only labels diagnostics.
@@ -87,8 +98,19 @@ impl RouteAwareHttpClient {
             };
             return RouteAwareHttpRequestRunner { client };
         };
+        let key = (policy, params.redirect_policy);
+        let mut filtered = self
+            .filtered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(client) = filtered.get(&key) {
+            return RouteAwareHttpRequestRunner {
+                client: client.clone(),
+            };
+        }
+        let (policy, redirect_policy) = key.clone();
         let factory = self.http_client_factory.clone();
-        let client = match params.redirect_policy {
+        let client = match redirect_policy {
             HttpRedirectPolicy::Follow => {
                 RouteAwareClientPool::with_chatgpt_cloudflare_cookies_without_request_logging(
                     factory,
@@ -103,13 +125,18 @@ impl RouteAwareHttpClient {
             }
         };
         let resolved_policy = policy.clone();
+        let literal_policy = policy.clone();
         let filter = ResolvedAddressFilter::new(
             move |addr| resolved_policy.allows_resolved(addr),
-            move |addr| policy.allows_literal(addr),
-        );
-        RouteAwareHttpRequestRunner {
-            client: client.with_resolved_address_filter(filter),
+            move |addr| literal_policy.allows_literal(addr),
+        )
+        .with_host_name_check(move |host| policy.allows_host_name(host));
+        let client = client.with_resolved_address_filter(filter);
+        if filtered.len() >= MAX_FILTERED_POOLS {
+            filtered.clear();
         }
+        filtered.insert(key, client.clone());
+        RouteAwareHttpRequestRunner { client }
     }
 }
 

@@ -30,13 +30,23 @@ const METADATA_IPV4: [Ipv4Addr; 5] = [
     Ipv4Addr::new(100, 100, 100, 200),
     Ipv4Addr::new(168, 63, 129, 16),
 ];
-const METADATA_IPV6: [Ipv6Addr; 2] = [
+const METADATA_IPV6: [Ipv6Addr; 3] = [
     Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x254),
     Ipv6Addr::new(0xfd00, 0xec2, 0, 0, 0, 0, 0, 0x23),
+    Ipv6Addr::new(0xfd20, 0xce, 0, 0, 0, 0, 0, 0x254),
+];
+/// Host names of cloud instance-metadata services, refused before resolving
+/// (a proxy would resolve them on its own host).
+const METADATA_HOST_NAMES: [&str; 5] = [
+    "metadata",
+    "metadata.google.internal",
+    "metadata.azure.internal",
+    "instance-data",
+    "instance-data.ec2.internal",
 ];
 
 /// Which non-public destinations an executor-side HTTP request may reach.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpAddressPolicy {
     /// Allow loopback addresses (`127.0.0.0/8`, `::1`).
@@ -78,6 +88,20 @@ impl HttpAddressPolicy {
             HttpAddressClass::Loopback => self.allow_loopback,
             HttpAddressClass::Private => self.allow_private,
             HttpAddressClass::LinkLocal | HttpAddressClass::Blocked => false,
+        }
+    }
+
+    /// Whether a URL may name `host` (a DNS name, not an IP literal) at all.
+    /// Applies even when a proxy resolves the name: metadata service names are
+    /// always refused, and `localhost` names unless loopback is allowed.
+    pub fn allows_host_name(&self, host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        if METADATA_HOST_NAMES.contains(&host.as_str()) {
+            false
+        } else if host == "localhost" || host.ends_with(".localhost") {
+            self.allow_loopback
+        } else {
+            true
         }
     }
 

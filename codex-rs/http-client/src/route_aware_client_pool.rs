@@ -615,14 +615,13 @@ impl RouteAwareClientPool {
         let route = resolve_route(request_url.to_string())
             .await
             .map_err(RouteAwareClientPoolError::Resolve)?;
-        let clients = match self.clients.lock() {
-            Ok(clients) => clients,
+        let cached = match self.clients.lock() {
+            Ok(clients) => clients.get(&route).cloned(),
             Err(error) => panic!("route-aware client cache lock should not be poisoned: {error}"),
         };
-        if let Some(client) = clients.get(&route) {
-            return Ok((route, client.clone()));
+        if let Some(client) = cached {
+            return Ok((route, client));
         }
-        drop(clients);
 
         let mut client_builder = match self.http_client_factory.outbound_proxy_policy() {
             OutboundProxyPolicy::ReqwestDefault if self.address_filter.is_none() => {
@@ -638,17 +637,38 @@ impl RouteAwareClientPool {
                 OutboundProxyRoute::Proxy { url, .. } => {
                     filter.clone().exempting_proxies([url.clone()])
                 }
-                OutboundProxyRoute::TransportDefault => filter.clone().exempting_env_proxies(),
+                OutboundProxyRoute::TransportDefault => {
+                    // The transport may also use the platform's system proxy, whose
+                    // name it resolves through the filter; exempt it as resolved here.
+                    let system_route =
+                        HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy)
+                            .resolve_proxy_route_async(request_url.to_string())
+                            .await;
+                    let system_proxy = match system_route {
+                        Ok(OutboundProxyRoute::Proxy { url, .. }) => Some(url),
+                        _ => None,
+                    };
+                    filter
+                        .clone()
+                        .exempting_env_proxies()
+                        .exempting_proxies(system_proxy)
+                }
             };
             client_builder = client_builder.resolved_address_filter(filter);
         }
+        // The legacy fallback can end in a bare client without the filter.
+        let custom_ca_fallback = if self.address_filter.is_some() {
+            CustomCaFallback::Disabled
+        } else {
+            self.custom_ca_fallback
+        };
         #[expect(
             deprecated,
             reason = "explicitly opted-in pools preserve the legacy custom-CA fallback"
         )]
         let client = match (
             self.http_client_factory.outbound_proxy_policy(),
-            self.custom_ca_fallback,
+            custom_ca_fallback,
         ) {
             (OutboundProxyPolicy::ReqwestDefault, CustomCaFallback::LegacyTransportDefault) => {
                 client_builder.build_with_transport_default_proxy_and_custom_ca_fallback()

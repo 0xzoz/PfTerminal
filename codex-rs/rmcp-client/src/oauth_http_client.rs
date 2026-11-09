@@ -34,9 +34,9 @@ enum OAuthHttpClientAdapterError {
     #[error("OAuth HTTP response body exceeds {maximum_bytes} bytes")]
     ResponseBodyTooLarge { maximum_bytes: usize },
     #[error(
-        "MCP OAuth request blocked: {0}. OAuth discovery, registration and token requests may \
-         reach loopback or private addresses only when the MCP server URL itself names one \
-         (localhost or an IP literal), and never link-local or cloud metadata addresses"
+        "MCP OAuth request blocked: {0}. OAuth requests may reach loopback or private \
+         addresses only when the MCP server URL itself is localhost or such an IP address \
+         (see \"MCP OAuth Address Policy\" in docs/config.md)"
     )]
     AddressPolicy(String),
 }

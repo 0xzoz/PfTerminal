@@ -3,9 +3,11 @@
 //! Host names are resolved by a filtering DNS resolver installed in the
 //! transport, so the client connects only to addresses that passed the check
 //! (no window for DNS rebinding between check and connect). IP-literal URLs,
-//! which the transport never resolves, are checked by the pool before each
-//! request and redirect hop. Proxy hosts are exempt: a proxied request
-//! resolves only the proxy's name, and the proxy resolves the target.
+//! which the transport never resolves, and host names themselves (for names a
+//! proxy would resolve) are checked by the pool before each request and
+//! redirect hop. Proxy hosts are exempt from the resolved-address check: a
+//! proxied request resolves only the proxy's name, and the proxy resolves the
+//! target, so with a proxy only literals and host names are checked.
 
 use std::fmt;
 use std::net::IpAddr;
@@ -20,6 +22,7 @@ use reqwest::dns::Resolve;
 use reqwest::dns::Resolving;
 
 type AddressPredicate = Arc<dyn Fn(IpAddr) -> bool + Send + Sync>;
+type HostNamePredicate = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 type Lookup = Arc<dyn Fn(String) -> Resolving + Send + Sync>;
 
 const PROXY_ENV_VARS: [&str; 6] = [
@@ -36,6 +39,7 @@ const PROXY_ENV_VARS: [&str; 6] = [
 pub struct ResolvedAddressFilter {
     allows_resolved: AddressPredicate,
     allows_literal: AddressPredicate,
+    allows_host_name: HostNamePredicate,
     exempt_hosts: Arc<[String]>,
     lookup: Lookup,
 }
@@ -49,16 +53,21 @@ impl fmt::Debug for ResolvedAddressFilter {
     }
 }
 
-/// A request was refused because its destination address is not allowed.
+/// A request was refused because its destination is not allowed.
 #[derive(Debug, Clone, thiserror::Error)]
-#[error("`{host}` resolves only to addresses this request may not connect to ({addresses})")]
-pub struct DisallowedAddressError {
-    host: String,
-    addresses: String,
+pub enum DisallowedAddressError {
+    #[error("`{0}` is an address this request may not connect to")]
+    Literal(IpAddr),
+    #[error("the host name `{0}` is not allowed for this request")]
+    HostName(String),
+    #[error("`{host}` resolves only to addresses this request may not connect to ({addresses})")]
+    Resolved { host: String, addresses: String },
+    #[error("the URL has no host")]
+    MissingHost,
 }
 
 impl DisallowedAddressError {
-    fn new(host: &str, addresses: &[IpAddr]) -> Self {
+    fn resolved(host: &str, addresses: &[IpAddr]) -> Self {
         let addresses = if addresses.is_empty() {
             "no addresses".to_string()
         } else {
@@ -68,7 +77,7 @@ impl DisallowedAddressError {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        Self {
+        Self::Resolved {
             host: host.to_string(),
             addresses,
         }
@@ -85,9 +94,19 @@ impl ResolvedAddressFilter {
         Self {
             allows_resolved: Arc::new(allows_resolved),
             allows_literal: Arc::new(allows_literal),
+            allows_host_name: Arc::new(|_| true),
             exempt_hosts: Arc::new([]),
             lookup: Arc::new(system_lookup),
         }
+    }
+
+    /// Also checks DNS host names before any request, including proxied ones.
+    pub fn with_host_name_check(
+        mut self,
+        allows_host_name: impl Fn(&str) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.allows_host_name = Arc::new(allows_host_name);
+        self
     }
 
     /// Replaces the system resolver, for tests that need fixed DNS answers.
@@ -135,24 +154,23 @@ impl ResolvedAddressFilter {
         )
     }
 
-    /// Checks an IP-literal URL host. Host names are checked when resolved.
+    /// Checks a URL's host: IP literals by address, host names by name.
+    /// Host names' addresses are checked when resolved.
     pub(crate) fn check_url(&self, url: &Url) -> Result<(), DisallowedAddressError> {
         let Some(host) = url.host_str() else {
-            return Err(DisallowedAddressError::new("", &[]));
+            return Err(DisallowedAddressError::MissingHost);
         };
         // `Url` normalizes IPv4 literals (`0x7f.1` is `127.0.0.1`) and
         // brackets IPv6 ones.
-        let Ok(ip) = host
+        match host
             .trim_start_matches('[')
             .trim_end_matches(']')
             .parse::<IpAddr>()
-        else {
-            return Ok(());
-        };
-        if (self.allows_literal)(ip) {
-            Ok(())
-        } else {
-            Err(DisallowedAddressError::new(&ip.to_string(), &[ip]))
+        {
+            Ok(ip) if (self.allows_literal)(ip) => Ok(()),
+            Ok(ip) => Err(DisallowedAddressError::Literal(ip)),
+            Err(_) if (self.allows_host_name)(host) => Ok(()),
+            Err(_) => Err(DisallowedAddressError::HostName(host.to_string())),
         }
     }
 
@@ -169,7 +187,8 @@ impl Resolve for FilteringResolver {
         let filter = self.0.clone();
         Box::pin(async move {
             let host = normalize_host(name.as_str());
-            let resolved: Vec<SocketAddr> = (filter.lookup)(host.clone()).await?.collect();
+            let resolved: Vec<SocketAddr> =
+                (filter.lookup)(name.as_str().to_string()).await?.collect();
             if filter.exempt_hosts.contains(&host) {
                 return Ok(Box::new(resolved.into_iter()) as Addrs);
             }
@@ -178,7 +197,7 @@ impl Resolve for FilteringResolver {
                 .partition(|addr| (filter.allows_resolved)(addr.ip()));
             if allowed.is_empty() {
                 let rejected: Vec<IpAddr> = rejected.iter().map(SocketAddr::ip).collect();
-                let error = DisallowedAddressError::new(&host, &rejected);
+                let error = DisallowedAddressError::resolved(&host, &rejected);
                 tracing::warn!("{error}");
                 return Err(Box::new(error) as Box<dyn std::error::Error + Send + Sync>);
             }

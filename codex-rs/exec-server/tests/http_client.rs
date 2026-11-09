@@ -4,7 +4,10 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
+use codex_exec_server::EnvironmentCapabilities;
+use codex_exec_server::EnvironmentInfo;
 use codex_exec_server::ExecServerClient;
+use codex_exec_server::HttpAddressPolicy;
 use codex_exec_server::HttpHeader;
 use codex_exec_server::HttpRedirectPolicy;
 use codex_exec_server::HttpRequestBodyDeltaNotification;
@@ -42,6 +45,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 const CLIENT_NAME: &str = "test-exec-server-client";
 const HTTP_REQUEST_METHOD: &str = "http/request";
+const ENVIRONMENT_INFO_METHOD: &str = "environment/info";
 const HTTP_REQUEST_BODY_DELTA_METHOD: &str = "http/request/bodyDelta";
 const INITIALIZE_METHOD: &str = "initialize";
 const INITIALIZED_METHOD: &str = "initialized";
@@ -117,6 +121,91 @@ async fn http_request_forces_buffered_request_params() -> Result<()> {
 
     drop(client);
     server.finish().await?;
+    Ok(())
+}
+
+/// What this tests: a policy-bearing request is refused, not sent without its
+/// policy, when the executor does not advertise `httpAddressPolicy` (#1947),
+/// and is forwarded with the policy when it does.
+#[tokio::test]
+async fn http_request_with_address_policy_requires_executor_support() -> Result<()> {
+    let policy = HttpAddressPolicy {
+        allow_loopback: true,
+        allow_private: false,
+        allowed_address: None,
+    };
+    let params = HttpRequestParams {
+        method: "GET".to_string(),
+        url: "https://example.test/oauth".to_string(),
+        headers: Vec::new(),
+        body: None,
+        timeout_ms: None,
+        redirect_policy: HttpRedirectPolicy::Stop,
+        request_id: "oauth-request".to_string(),
+        stream_response: false,
+        address_policy: Some(policy.clone()),
+    };
+    let environment_info = |http_address_policy| {
+        let mut info = EnvironmentInfo::local();
+        info.capabilities = EnvironmentCapabilities {
+            http_address_policy,
+            ..EnvironmentCapabilities::default()
+        };
+        info
+    };
+
+    let old_executor = spawn_scripted_exec_server(move |mut peer| async move {
+        let request = peer.read_request(ENVIRONMENT_INFO_METHOD).await?;
+        peer.write_response(request.id, environment_info(false))
+            .await?;
+        // The client must not send `http/request` after this.
+        let next = timeout(Duration::from_millis(300), peer.read_message()).await;
+        assert!(
+            !matches!(next, Ok(Ok(JSONRPCMessage::Request(_)))),
+            "policy-bearing request reached an executor that ignores the policy"
+        );
+        Ok(())
+    })
+    .await?;
+    let client = old_executor.connect_client().await?;
+    let error = timeout(TEST_TIMEOUT, client.http_request(params.clone()))
+        .await
+        .context("gated http/request should finish")?
+        .expect_err("an executor without the capability must not get the request");
+    assert!(
+        error
+            .to_string()
+            .contains(codex_exec_server::HTTP_ADDRESS_POLICY_DENIED_PREFIX),
+        "{error}"
+    );
+    drop(client);
+    old_executor.finish().await?;
+
+    let expected_policy = policy.clone();
+    let new_executor = spawn_scripted_exec_server(move |mut peer| async move {
+        let request = peer.read_request(ENVIRONMENT_INFO_METHOD).await?;
+        peer.write_response(request.id, environment_info(true))
+            .await?;
+        let (request_id, params) = peer.read_http_request().await?;
+        assert_eq!(params.address_policy, Some(expected_policy));
+        peer.write_response(
+            request_id,
+            HttpRequestResponse {
+                status: 204,
+                headers: Vec::new(),
+                body: Vec::new().into(),
+            },
+        )
+        .await
+    })
+    .await?;
+    let client = new_executor.connect_client().await?;
+    let response = timeout(TEST_TIMEOUT, client.http_request(params))
+        .await
+        .context("http/request should complete")??;
+    assert_eq!(response.status, 204);
+    drop(client);
+    new_executor.finish().await?;
     Ok(())
 }
 

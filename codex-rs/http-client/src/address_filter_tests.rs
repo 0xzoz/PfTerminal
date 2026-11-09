@@ -82,14 +82,16 @@ async fn literal_address_is_checked_before_connecting() {
     let (addr, connections) = spawn_server(OK.to_string());
     let pool = pool(ResolvedAddressFilter::new(|_| false, |_| false));
 
-    assert_disallowed(get(&pool, &format!("http://{addr}/")).await);
-    assert_disallowed(
-        get(
-            &pool,
-            &format!("http://[::ffff:127.0.0.1]:{}/", addr.port()),
-        )
-        .await,
-    );
+    let port = addr.port();
+    for url in [
+        format!("http://{addr}/"),
+        format!("http://[::ffff:127.0.0.1]:{port}/"),
+        format!("http://2130706433:{port}/"),
+        format!("http://0x7f.1:{port}/"),
+        format!("http://0177.0.0.1:{port}/"),
+    ] {
+        assert_disallowed(get(&pool, &url).await);
+    }
     assert_eq!(connections.load(Ordering::SeqCst), 0);
 }
 
@@ -114,8 +116,12 @@ async fn host_name_resolving_to_disallowed_address_is_refused() {
     .await
     .expect_err("loopback answer should be refused");
     assert!(
-        error.to_string().contains("`rebind.test` resolves only to"),
-        "{error}"
+        matches!(
+            &error,
+            RouteAwareRequestError::DisallowedAddress(DisallowedAddressError::Resolved { host, .. })
+                if host == "rebind.test"
+        ),
+        "{error:?}"
     );
     assert_eq!(connections.load(Ordering::SeqCst), 0);
 }
@@ -178,4 +184,54 @@ async fn proxy_hosts_are_exempt_from_resolved_address_checks() {
     let addrs: Vec<SocketAddr> = resolve("proxy.test").await.unwrap().collect();
     assert_eq!(addrs, vec![SocketAddr::from(([127, 0, 0, 1], 0))]);
     assert!(resolve("target.test").await.is_err());
+}
+
+#[tokio::test]
+async fn host_names_are_checked_before_resolving() {
+    let (addr, connections) = spawn_server(OK.to_string());
+    let filter = ResolvedAddressFilter::new(|_| true, |_| true)
+        .with_lookup(|_| vec![IpAddr::from([127, 0, 0, 1])])
+        .with_host_name_check(|host| !host.trim_end_matches('.').eq_ignore_ascii_case("metadata"));
+    let pool = pool(filter);
+
+    for host in ["metadata", "METADATA."] {
+        let error = get(&pool, &format!("http://{host}:{}/", addr.port()))
+            .await
+            .expect_err("metadata host name should be refused");
+        assert!(
+            matches!(
+                error,
+                RouteAwareRequestError::DisallowedAddress(DisallowedAddressError::HostName(_))
+            ),
+            "{error:?}"
+        );
+    }
+    assert_eq!(connections.load(Ordering::SeqCst), 0);
+}
+
+/// Through a proxy, the proxy's own name is exempt from the resolved-address
+/// check while the target's host name is still checked.
+#[tokio::test]
+async fn proxied_requests_check_target_names_and_exempt_the_proxy() {
+    let (proxy_addr, proxy_connections) = spawn_server(OK.to_string());
+    let target = "http://target.test/via-proxy";
+    let blocked_target = "http://metadata/via-proxy";
+    for url in [target, blocked_target] {
+        crate::cache_system_proxy_route_for_test(
+            url,
+            format!("http://proxy.test:{}", proxy_addr.port()),
+        );
+    }
+    let filter = ResolvedAddressFilter::new(|_| false, |_| false)
+        .with_lookup(|_| vec![IpAddr::from([127, 0, 0, 1])])
+        .with_host_name_check(|host| host != "metadata");
+    let pool = RouteAwareClientPool::new(
+        HttpClientFactory::new(OutboundProxyPolicy::RespectSystemProxy),
+        ClientRouteClass::Other,
+    )
+    .with_resolved_address_filter(filter);
+
+    assert_eq!(get(&pool, target).await.unwrap(), "ok");
+    assert_disallowed(get(&pool, blocked_target).await);
+    assert_eq!(proxy_connections.load(Ordering::SeqCst), 1);
 }

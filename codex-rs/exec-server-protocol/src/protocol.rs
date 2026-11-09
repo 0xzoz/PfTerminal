@@ -109,6 +109,10 @@ pub struct EnvironmentCapabilities {
     /// Whether capability discovery applies the filesystem sandbox sent with each root.
     #[serde(default)]
     pub capability_discovery_sandbox: bool,
+    /// Whether `http/request` enforces `addressPolicy`. Clients must not send
+    /// a policy-bearing request to an executor without it.
+    #[serde(default)]
+    pub http_address_policy: bool,
 }
 
 /// Status returned by an initialized exec-server connection.
@@ -141,6 +145,7 @@ impl EnvironmentInfo {
             capabilities: EnvironmentCapabilities {
                 network_proxy_launch: true,
                 capability_discovery_sandbox: true,
+                http_address_policy: true,
             },
         }
     }
@@ -613,7 +618,7 @@ pub struct HttpHeader {
 }
 
 /// Redirect behavior for an executor-side HTTP request.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HttpRedirectPolicy {
     /// Follow redirects using the HTTP client's normal limits.

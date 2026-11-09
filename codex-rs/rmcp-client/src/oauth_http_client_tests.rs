@@ -168,6 +168,7 @@ async fn public_server_cannot_reach_loopback_literal() {
     for url in [
         format!("http://{addr}/.well-known/oauth-authorization-server"),
         format!("http://[::ffff:127.0.0.1]:{}/register", addr.port()),
+        format!("http://2130706433:{}/token", addr.port()),
     ] {
         assert_blocked(send(&adapter, "GET", &url, OAuthHttpRedirectPolicy::Stop).await);
     }
@@ -177,16 +178,11 @@ async fn public_server_cannot_reach_loopback_literal() {
 #[tokio::test]
 async fn public_server_cannot_reach_host_name_resolving_to_loopback() {
     let (addr, connections) = spawn_server(OK.to_string());
-    let url = format!("http://localhost:{}/token", addr.port());
-    assert_blocked(
-        send(
-            &adapter(PUBLIC_SERVER),
-            "POST",
-            &url,
-            OAuthHttpRedirectPolicy::Follow,
-        )
-        .await,
-    );
+    let adapter = adapter(PUBLIC_SERVER);
+    for host in ["localhost", "localhost.", "dev.localhost"] {
+        let url = format!("http://{host}:{}/token", addr.port());
+        assert_blocked(send(&adapter, "POST", &url, OAuthHttpRedirectPolicy::Follow).await);
+    }
     assert_eq!(connections.load(Ordering::SeqCst), 0);
 }
 
@@ -199,6 +195,9 @@ async fn metadata_addresses_are_blocked_even_for_private_servers() {
         "http://[fd00:ec2::254]/latest/meta-data/",
         "http://169.254.1.1/",
         "http://0.0.0.0/",
+        "http://[::]/",
+        "http://metadata.google.internal/computeMetadata/v1/",
+        "http://metadata/",
     ] {
         assert_blocked(send(&adapter, "GET", url, OAuthHttpRedirectPolicy::Stop).await);
     }

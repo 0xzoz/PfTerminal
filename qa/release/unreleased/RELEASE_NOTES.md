@@ -1036,13 +1036,21 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   redirect) now go only to public addresses, unless the MCP server's own URL
   is `localhost` or a loopback or private IP; then those addresses are
   allowed too. Link-local and cloud metadata addresses (`169.254.169.254`,
-  `fd00:ec2::254`) are always refused. Host names are checked after DNS
-  resolution, and the request connects only to the address that was checked.
-  Before, an MCP server could point these requests at a host name that
-  resolves to an internal address (blind SSRF; RUSTSEC-2026-0457 residual).
-- Not changed: public MCP servers and local ones named by `localhost` or an
-  IP address sign in as before. **Changed:** an MCP server configured by a host
-  name that resolves to a private address (for example a company intranet
-  name) can no longer use OAuth endpoints on private addresses; the sign-in
-  fails with `MCP OAuth request blocked: ...`. Using the server's IP address
-  in `url` works where its certificate allows that. Details: `docs/config.md#mcp-oauth-addresses`.
+  `fd00:ec2::254`) and metadata host names are refused unless the server URL
+  is that very IP address. Host names are checked after DNS resolution, and
+  the request connects only to the address that was checked. Before, an MCP
+  server could point these requests at a host name that resolves to an
+  internal address (blind SSRF). rmcp's own fix for this
+  (RUSTSEC-2026-0457, rmcp 3.7+) does not cover the OAuth HTTP client
+  Corbanu uses, whatever the rmcp version.
+- Not changed: public MCP servers, and local ones named by `localhost` or an
+  IP address, sign in as before.
+- **Changed:** an MCP server named by a host name that resolves to a loopback
+  or private address (an intranet name, `host.docker.internal`, a `.local`
+  name, an `/etc/hosts` alias) can no longer use OAuth; sign-in fails with
+  `MCP OAuth request blocked: ...`, and a server there that doesn't use OAuth
+  shows auth status unknown with a startup warning. Using the server's IP
+  address in `url` works where its certificate allows that. With an HTTP
+  proxy, only IP literals and host names themselves are checked. A remote
+  executor from before this change refuses OAuth requests instead of sending
+  them unchecked. Details: `docs/config.md#mcp-oauth-addresses`.
