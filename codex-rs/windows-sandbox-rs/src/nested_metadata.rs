@@ -187,6 +187,8 @@ fn find_bounded(roots: &[PathBuf], budget: &mut usize) -> Found {
 pub(crate) struct Pending {
     path: PathBuf,
     parent: Option<std::sync::Arc<crate::acl::walk::Handle>>,
+    /// The file it must still be when opened, if one was recorded.
+    expected: Option<FileIdentity>,
 }
 
 impl Pending {
@@ -194,6 +196,16 @@ impl Pending {
         Self {
             path: path.to_path_buf(),
             parent: None,
+            expected: None,
+        }
+    }
+
+    /// The folder `path` listed in the open folder `parent`.
+    fn child(path: PathBuf, parent: &std::sync::Arc<crate::acl::walk::Handle>) -> Self {
+        Self {
+            path,
+            parent: Some(std::sync::Arc::clone(parent)),
+            expected: None,
         }
     }
 
@@ -203,13 +215,26 @@ impl Pending {
     /// (a junction, say, perhaps to a network share) fails to open, and
     /// nothing behind it is reached.
     fn open(&self) -> std::io::Result<crate::acl::walk::Handle> {
-        match &self.parent {
-            None => open_by_path(&self.path),
+        let handle = match &self.parent {
+            None => open_by_path(&self.path, FOLDER_LIST),
             // SAFETY: the parent folder is open.
             Some(parent) => unsafe {
-                crate::acl::walk::open_folder_unfollowed(parent.0, &wide_name(&self.path))
+                crate::acl::walk::open_folder_unfollowed(
+                    parent.0,
+                    &wide_name(&self.path),
+                    crate::acl::walk::FolderAccess::List,
+                )
             },
+        }?;
+        if let Some(expected) = self.expected {
+            // SAFETY: the handle is open.
+            let (volume, id) = unsafe { handle.identity() }
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+            if (FileIdentity { volume, id }) != expected {
+                return Err(std::io::Error::other("not the folder recorded"));
+            }
         }
+        Ok(handle)
     }
 
     /// Whether the folder is gone (its parent no longer holds its name).
@@ -226,16 +251,21 @@ impl Pending {
     }
 }
 
-/// The folder `path` open for listing, following links as a path open does.
-fn open_by_path(path: &Path) -> std::io::Result<crate::acl::walk::Handle> {
+/// [`open_by_path`] access to list a folder (`FILE_LIST_DIRECTORY`).
+const FOLDER_LIST: u32 = 0x1;
+/// [`open_by_path`] access to open what is inside (`FILE_TRAVERSE`).
+const FOLDER_TRAVERSE: u32 = 0x20;
+
+/// The folder `path` open for `access` ([`FOLDER_LIST`] or
+/// [`FOLDER_TRAVERSE`]), following links as a path open does.
+fn open_by_path(path: &Path, access: u32) -> std::io::Result<crate::acl::walk::Handle> {
     use std::os::windows::fs::OpenOptionsExt as _;
     use std::os::windows::io::IntoRawHandle as _;
-    const FILE_LIST_DIRECTORY: u32 = 0x1;
     const FILE_READ_ATTRIBUTES: u32 = 0x80;
     const SYNCHRONIZE: u32 = 0x0010_0000;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     let file = std::fs::OpenOptions::new()
-        .access_mode(FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .access_mode(access | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
         .share_mode(0x7)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;
@@ -244,7 +274,8 @@ fn open_by_path(path: &Path) -> std::io::Result<crate::acl::walk::Handle> {
 
 /// #1909: the folder holding `path` (absolute), reached one folder at a time
 /// from the top of its volume, following no link, and the last name of
-/// `path`; `None` if any folder on the way can't be opened that way.
+/// `path`; `None` if any folder on the way can't be opened that way (also a
+/// folder a volume is mounted on: such a path counts as changed every time).
 fn open_parent_unfollowed(path: &Path) -> Option<(crate::acl::walk::Handle, Vec<u16>)> {
     use std::os::windows::ffi::OsStrExt as _;
     use std::path::Component;
@@ -260,10 +291,17 @@ fn open_parent_unfollowed(path: &Path) -> Option<(crate::acl::walk::Handle, Vec<
         }
     }
     let last = names.pop()?;
-    let mut dir = open_by_path(&top).ok()?;
+    let mut dir = open_by_path(&top, FOLDER_TRAVERSE).ok()?;
     for name in names {
         // SAFETY: `dir` is open.
-        dir = unsafe { crate::acl::walk::open_folder_unfollowed(dir.0, &name) }.ok()?;
+        dir = unsafe {
+            crate::acl::walk::open_folder_unfollowed(
+                dir.0,
+                &name,
+                crate::acl::walk::FolderAccess::Traverse,
+            )
+        }
+        .ok()?;
     }
     Some((dir, last))
 }
@@ -299,25 +337,25 @@ unsafe fn identity_at(
     Some(FileIdentity { volume, id })
 }
 
-/// An entry of a listed folder: its name, its kind and its size.
-type Entry = (Vec<u16>, std::io::Result<crate::acl::walk::Attributes>, u64);
+/// An entry of a listed folder: its name and its kind.
+type Entry = (Vec<u16>, std::io::Result<crate::acl::walk::Attributes>);
 
-/// The entries of `dir` (open for listing) with their sizes; a reparse
+/// The entries of `dir` (open for listing); a reparse
 /// point's attributes and tag are asked of the entry itself, since a listing
 /// that shows one may not carry its tag (#1672).
 fn entries_of(dir: &crate::acl::walk::Handle) -> anyhow::Result<Vec<Entry>> {
     // SAFETY: the folder is open for listing.
-    let listed = unsafe { crate::acl::walk::list_with_sizes(dir.0) }?;
+    let listed = unsafe { crate::acl::walk::list(dir.0) }?;
     Ok(listed
         .into_iter()
-        .map(|(name, attributes, size)| {
+        .map(|(name, attributes)| {
             let attributes = if attributes.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
                 // SAFETY: the folder is open.
                 unsafe { attributes_at(dir.0, &name) }
             } else {
                 Ok(attributes)
             };
-            (name, attributes, size)
+            (name, attributes)
         })
         .collect())
 }
@@ -347,7 +385,7 @@ fn list(dir: Pending, top: bool, found: &mut Found, budget: &mut usize, stack: &
     // Whether this folder already has its note, and its unlistable
     // record, for a name that isn't valid Unicode.
     let (mut noted, mut unlisted) = (false, false);
-    for (wide, metadata, _size) in entries {
+    for (wide, metadata) in entries {
         *budget = budget.saturating_sub(1);
         // D420: a name that isn't valid Unicode can't be recorded
         // (the records are JSON), so what is below it isn't walked
@@ -426,10 +464,7 @@ fn list(dir: Pending, top: bool, found: &mut Found, budget: &mut usize, stack: &
             // leave an ordinary folder unwatched.
             && !name.eq_ignore_ascii_case(".git")
         {
-            stack.push(Pending {
-                path,
-                parent: Some(std::sync::Arc::clone(&handle)),
-            });
+            stack.push(Pending::child(path, &handle));
         }
     }
     if !top && git_candidate && crate::git_watch::is_git_directory(&dir) {
@@ -578,9 +613,11 @@ fn contents_of(folder: &Path, expected: Option<FileIdentity>) -> crate::git_watc
         return prints;
     }
     let (mut seen, mut bytes) = (0_usize, 0_u64);
+    // Checked again on the handle it is listed through.
     let top = Pending {
         path: folder.to_path_buf(),
         parent: Some(std::sync::Arc::new(parent)),
+        expected,
     };
     let mut stack = vec![(top, String::new())];
     while let Some((dir, prefix)) = stack.pop() {
@@ -593,7 +630,7 @@ fn contents_of(folder: &Path, expected: Option<FileIdentity>) -> crate::git_watc
             prints.insert(prefix, crate::git_watch::truncated());
             continue;
         };
-        for (wide, metadata, _size) in entries {
+        for (wide, metadata) in entries {
             seen += 1;
             if seen > MAX_CONTENT_ENTRIES {
                 prints.insert(String::new(), crate::git_watch::truncated());
@@ -608,13 +645,7 @@ fn contents_of(folder: &Path, expected: Option<FileIdentity>) -> crate::git_watc
             match metadata.map(crate::acl::walk::Attributes::kind) {
                 Ok(Kind::Folder) => {
                     prints.insert(child.clone(), "dir".to_string());
-                    stack.push((
-                        Pending {
-                            path,
-                            parent: Some(std::sync::Arc::clone(&handle)),
-                        },
-                        format!("{child}\\"),
-                    ));
+                    stack.push((Pending::child(path, &handle), format!("{child}\\")));
                 }
                 // A link by its target, never read through: it may name a
                 // network share (reading it would send the person's

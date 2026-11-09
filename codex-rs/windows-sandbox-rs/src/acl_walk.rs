@@ -365,6 +365,7 @@ unsafe extern "system" {
 
 const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
 const FILE_DIRECTORY_FILE: u32 = 0x1;
+const FILE_TRAVERSE: u32 = 0x20;
 /// `OBJ_DONT_REPARSE`: the open fails at any reparse point the I/O manager
 /// would follow (a junction or symbolic link); one a filter serves (a
 /// cloud-file or ProjFS folder) still opens.
@@ -388,23 +389,34 @@ pub(crate) unsafe fn open_relative(dir: HANDLE, name: &[u16], access: u32) -> Re
     })
 }
 
-/// #1909: opens the folder `name` of the open folder `dir` for listing
+/// What [`open_folder_unfollowed`] opens a folder for.
+#[derive(Clone, Copy)]
+pub(crate) enum FolderAccess {
+    /// Listing it.
+    List,
+    /// Only opening what is inside it (a folder on the way).
+    Traverse,
+}
+
+/// #1909: opens the folder `name` of the open folder `dir` for `access`
 /// (with synchronous I/O), the way a path open would but following no link:
 /// a junction or symbolic link (perhaps swapped in after the folder was
 /// checked) fails with `ERROR_REPARSE_POINT_ENCOUNTERED`, so nothing behind
 /// it, such as a network share, is ever opened; a folder a filter serves (a
 /// cloud-file or ProjFS placeholder) opens as that filter presents it.
-pub(crate) unsafe fn open_folder_unfollowed(dir: HANDLE, name: &[u16]) -> std::io::Result<Handle> {
+pub(crate) unsafe fn open_folder_unfollowed(
+    dir: HANDLE,
+    name: &[u16],
+    access: FolderAccess,
+) -> std::io::Result<Handle> {
     plain_name(name)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
-    nt_open(
-        dir,
-        name,
-        FILE_LIST_DIRECTORY,
-        OBJ_DONT_REPARSE,
-        FILE_DIRECTORY_FILE,
-    )
-    .map_err(|status| std::io::Error::from_raw_os_error(RtlNtStatusToDosError(status) as i32))
+    let access = match access {
+        FolderAccess::List => FILE_LIST_DIRECTORY,
+        FolderAccess::Traverse => FILE_TRAVERSE,
+    };
+    nt_open(dir, name, access, OBJ_DONT_REPARSE, FILE_DIRECTORY_FILE)
+        .map_err(|status| std::io::Error::from_raw_os_error(RtlNtStatusToDosError(status) as i32))
 }
 
 /// Fails unless `name` is one plain name: never empty, a path or a stream
@@ -545,17 +557,8 @@ unsafe fn nt_open(
 /// synchronous I/O) as (name, attributes and reparse tag), without `.` and
 /// `..`. A link's attributes are its own.
 pub(crate) unsafe fn list(dir: HANDLE) -> Result<Vec<(Vec<u16>, Attributes)>> {
-    Ok(list_with_sizes(dir)?
-        .into_iter()
-        .map(|(name, attributes, _size)| (name, attributes))
-        .collect())
-}
-
-/// [`list`], with each entry's size (a file's length).
-pub(crate) unsafe fn list_with_sizes(dir: HANDLE) -> Result<Vec<(Vec<u16>, Attributes, u64)>> {
     // `FILE_FULL_DIR_INFO`'s offsets; `EaSize` holds a reparse point's tag.
     const NEXT: usize = 0;
-    const END_OF_FILE: usize = 40;
     const ATTRIBUTES: usize = 56;
     const NAME_BYTES: usize = 60;
     const EA_SIZE: usize = 64;
@@ -596,8 +599,7 @@ pub(crate) unsafe fn list_with_sizes(dir: HANDLE) -> Result<Vec<(Vec<u16>, Attri
                 0
             };
             if name != [dot] && name != [dot, dot] {
-                let size = std::ptr::read_unaligned(entry.add(END_OF_FILE) as *const u64);
-                out.push((name, Attributes { attributes, tag }, size));
+                out.push((name, Attributes { attributes, tag }));
             }
             if next == 0 {
                 break;
