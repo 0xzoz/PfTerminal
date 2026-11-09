@@ -112,6 +112,14 @@ enum PendingTransport {
     },
 }
 
+type PendingHandshake = BoxFuture<
+    'static,
+    std::result::Result<
+        RunningService<RoleClient, ElicitationClientService>,
+        ClientInitializeError,
+    >,
+>;
+
 enum ClientState {
     Connecting {
         transport: Option<PendingTransport>,
@@ -1125,16 +1133,7 @@ impl RmcpClient {
         pending_transport: PendingTransport,
         client_service: ElicitationClientService,
         lifecycle: ClientLifecycleMode,
-    ) -> (
-        BoxFuture<
-            'static,
-            std::result::Result<
-                RunningService<RoleClient, ElicitationClientService>,
-                ClientInitializeError,
-            >,
-        >,
-        Option<OAuthPersistor>,
-    ) {
+    ) -> (PendingHandshake, Option<OAuthPersistor>) {
         match pending_transport {
             PendingTransport::InProcess { transport } => (
                 client_service
