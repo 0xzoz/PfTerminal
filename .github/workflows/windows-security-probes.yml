@@ -152,6 +152,8 @@ env:
     cloud_placeholder::legacy_cloud_placeholders_at_or_above_a_read_only_path_cannot_be_moved
     cloud_placeholder::legacy_cloud_placeholder_root_gets_its_label_back
     cloud_placeholder::legacy_nested_project_metadata_in_cloud_placeholders_is_watched
+    legacy_cancel::legacy_spawn_cancelled_while_preparing_closes_its_token
+    legacy_cancel::legacy_spawn_cancelled_while_starting_closes_its_handles
 
 jobs:
   probes:
