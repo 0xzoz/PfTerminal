@@ -21,6 +21,7 @@ use super::indirect;
 use super::may_be_built;
 use super::quoted::Command;
 use super::quoted::Word;
+use super::shell::UNSEEN_OUTPUT;
 use super::shell::basename;
 use super::work;
 
@@ -87,9 +88,6 @@ pub(super) fn xargs_runs_option(
     loops: &GlobLoops,
     feed: Feed,
 ) -> bool {
-    if feed == Feed::Other {
-        return false;
-    }
     // The first `xargs` the command runs reads the pipeline.
     let Some(start) = indirect::programs(texts).into_iter().find(|&index| {
         work::step();
@@ -100,20 +98,17 @@ pub(super) fn xargs_runs_option(
     let Some(input) = xargs_input(texts, start + 1) else {
         return false;
     };
-    if feed == Feed::FindNul && input.nul {
-        return false;
-    }
+    // Without names that may be options, its command's own words are still
+    // judged (`xargs -J % tar rf a.tar *`, which `indirect` reads as `%`).
+    let fed = match feed {
+        Feed::Other => None,
+        Feed::FindNul if input.nul => None,
+        _ => Some(input.replace),
+    };
     let Some((offset, name)) = indirect::command_word(&texts[input.command..]) else {
         return false;
     };
-    runs_option(
-        &name,
-        input.command + offset,
-        texts,
-        words,
-        loops,
-        Some(input.replace),
-    )
+    runs_option(&name, input.command + offset, texts, words, loops, fed)
 }
 
 /// The scan of [`runs_option_glob`]; `fed`: `xargs`' input, added after the
@@ -193,17 +188,132 @@ const LISTERS: &[&str] = &["ls", "gls"];
 const FINDERS: &[&str] = &["find", "gfind"];
 const XARGS: &[&str] = &["xargs", "gxargs"];
 
-/// Stages that pass on `find -print0`'s names unchanged or drop some.
-const NUL_FILTERS: &[&str] = &[
-    "grep", "egrep", "fgrep", "ggrep", "sort", "gsort", "head", "ghead", "tail", "gtail", "uniq",
-    "guniq", "tee",
-];
-
 /// `find` words that print other text or run a command whose output joins
 /// the names (`-exec basename {} ;`).
 const FIND_OUTPUTS: &[&str] = &[
-    "printf", "-exec", "-execdir", "-ok", "-okdir", "-ls", "-fls", "-print",
+    "printf", "-exec", "-execdir", "-ok", "-okdir", "-ls", "-fls", "-print", "-fprint",
 ];
+
+/// Filters whose options' values may be the next word, by the letters and
+/// long options that take one (so `grep -e -z` is not `-z`).
+const NUL_FILTERS: &[(&str, &str, &[&str])] = &[
+    (
+        "grep",
+        "efmABCdD",
+        &[
+            "regexp",
+            "file",
+            "max-count",
+            "after-context",
+            "before-context",
+            "context",
+            "label",
+            "include",
+            "exclude",
+            "exclude-dir",
+            "exclude-from",
+            "binary-files",
+            "directories",
+            "devices",
+        ],
+    ),
+    (
+        "sort",
+        "kotTS",
+        &[
+            "key",
+            "output",
+            "field-separator",
+            "temporary-directory",
+            "buffer-size",
+            "parallel",
+            "files0-from",
+            "batch-size",
+            "compress-program",
+            "random-source",
+        ],
+    ),
+    (
+        "tail",
+        "ncs",
+        &[
+            "lines",
+            "bytes",
+            "pid",
+            "sleep-interval",
+            "max-unchanged-stats",
+        ],
+    ),
+];
+
+/// Whether a pipeline stage passes on `find -print0`'s names with each
+/// still starting where find started it: `tee`, `head` and `uniq` (which
+/// keep or drop whole lines or a tail), or `grep`, `sort` and `tail` that
+/// read NUL-ended records (`-z`, `--zero-terminated`, `--null-data`) and
+/// keep them whole (not `grep -o`, `tail -c`). Line-based ones may start
+/// an item at a newline in a name (`./x<newline>--checkpoint-action=…`).
+fn keeps_nul_names(name: &str, args: &[String]) -> bool {
+    // GNU tools as Homebrew installs them (`gsort`); `grep` itself starts
+    // with `g`.
+    let name = match name.strip_prefix('g') {
+        Some(rest @ ("grep" | "egrep" | "fgrep" | "sort" | "tail" | "head" | "uniq" | "tee")) => {
+            rest
+        }
+        _ => name,
+    };
+    let name = match name {
+        "egrep" | "fgrep" => "grep",
+        "tee" | "head" | "uniq" => return true,
+        name => name,
+    };
+    let Some((_, value_letters, value_longs)) =
+        NUL_FILTERS.iter().find(|(filter, _, _)| *filter == name)
+    else {
+        return false;
+    };
+    let (mut zero, mut cut) = (false, false);
+    let mut index = 0;
+    while let Some(word) = args.get(index) {
+        work::step();
+        index += 1;
+        if word == "--" {
+            break;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            let (option, value) = match long.split_once('=') {
+                Some((option, value)) => (option, Some(value)),
+                None => (long, None),
+            };
+            // Only the full names count as NUL-ended reading; any
+            // abbreviation counts as cutting or taking a value.
+            zero |= option == "zero-terminated" || (name == "grep" && option == "null-data");
+            let abbreviates = |full: &str| !option.is_empty() && full.starts_with(option);
+            cut |= (name == "grep" && abbreviates("only-matching"))
+                || (name == "tail" && abbreviates("bytes"));
+            if value.is_none() && value_longs.iter().any(|long| abbreviates(long)) {
+                index += 1;
+            }
+            continue;
+        }
+        let Some(letters) = word.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
+            continue;
+        };
+        for (offset, letter) in letters.char_indices() {
+            work::step();
+            match letter {
+                'z' => zero = true,
+                'o' if name == "grep" => cut = true,
+                'c' if name == "tail" => cut = true,
+                _ => {}
+            }
+            if value_letters.contains(letter) {
+                index += usize::from(offset + letter.len_utf8() == letters.len());
+                break;
+            }
+        }
+    }
+    zero && !cut
+}
 
 /// What each of `commands` gets from the pipeline stages before it: the
 /// most open [`Feed`] of any of them.
@@ -216,7 +326,6 @@ pub(super) fn feeds(commands: &[Command]) -> Vec<Feed> {
         };
         let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
         let command_at = indirect::command_word(&texts);
-        let name = command_at.as_ref().map(|(_, name)| name.as_str());
         let own = match &command_at {
             Some((_, name)) if LISTERS.contains(&name.as_str()) => Feed::Listing,
             Some((at, name)) if FINDERS.contains(&name.as_str()) => {
@@ -231,11 +340,14 @@ pub(super) fn feeds(commands: &[Command]) -> Vec<Feed> {
             }
             _ => Feed::Other,
         };
-        // A stage other than a filter may change `find`'s names
-        // (`xargs -0 basename -z`).
-        let passed = match feeds[index] {
-            Feed::FindNul if !name.is_some_and(|name| NUL_FILTERS.contains(&name)) => Feed::Listing,
-            feed => feed,
+        // A stage other than such a filter may change `find`'s names
+        // (`xargs -0 basename -z`, `sort`, `grep -zo`).
+        let passed = match (feeds[index], &command_at) {
+            (Feed::FindNul, Some((at, name))) if keeps_nul_names(name, &texts[at + 1..]) => {
+                Feed::FindNul
+            }
+            (Feed::FindNul, _) => Feed::Listing,
+            (feed, _) => feed,
         };
         feeds[to] = feeds[to].max(passed).max(own);
     }
@@ -438,6 +550,10 @@ impl GlobLoops {
             return None;
         }
         let text = word.text.as_str();
+        // `"$x$f"`: values before it may be empty; a `/` before it starts
+        // the word.
+        let built_start = text.starts_with(['$', '`']) || text.starts_with(UNSEEN_OUTPUT);
+        let slash = text.find('/');
         let mut found: Option<bool> = None;
         for (at, _) in text.match_indices('$') {
             work::step();
@@ -464,7 +580,7 @@ impl GlobLoops {
             let option = if word.splits {
                 // Split into words, one of which may start anywhere in it.
                 Some(true)
-            } else if at > 0 {
+            } else if at > 0 && !(built_start && slash.is_none_or(|slash| slash > at)) {
                 None
             } else if kept {
                 // `${f%.txt}` may end anywhere in the value.

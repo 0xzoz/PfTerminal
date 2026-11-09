@@ -278,6 +278,7 @@ fn d484_glob_loop_variables_that_may_name_an_option_ask() {
         "for f in ./*; do tar rf a.tar $f; done",
         "for f in ./*.rs; do rg data x$f; done",
         "for f in *.txt; do rg data \"${f%.txt}\"; done",
+        "for f in *; do tar rf a.tar \"$p$f\"; done",
         // Past eight loop names, any variable may be one.
         "for a in *; do :; done; for b in *; do :; done; for c in *; do :; done; \
          for d in *; do :; done; for e in *; do :; done; for g in *; do :; done; \
@@ -317,6 +318,7 @@ fn d484_other_loop_variables_stay_quiet() {
         "for f in *; do echo \"$f\"; done; tar rf a.tar \"$g\"",
         "for f; do tar rf a.tar \"$ff\"; done",
         "for f in *; do tar rf a.tar -- \"${f%.txt}\"; done",
+        "for f in *; do tar rf a.tar \"$p/$f\"; done",
     ];
     assert_eq!(wrong(&lines, None), Vec::<String>::new());
 }
@@ -354,6 +356,16 @@ fn d484_xargs_fed_by_a_listing_asks() {
         // find's names changed or joined by other output.
         "find . -print0 -exec basename {} \\; | xargs -0 tar cf a.tar",
         "find . -print0 | xargs -0 basename -z | xargs -0 tar cf a.tar",
+        // Line-based filters may start an item at a newline in a name.
+        "find . -print0 | sort | xargs -0 tar cf a.tar",
+        "find . -print0 | tail -n 5 | xargs -0 tar cf a.tar",
+        "find . -print0 | grep -a x | xargs -0 tar cf a.tar",
+        "find . -print0 | grep -zoE '[^/]+$' | xargs -0 tar cf a.tar",
+        "find . -print0 | tail -zc 100 | xargs -0 tar cf a.tar",
+        "find . -print0 | grep -e -z x | xargs -0 tar cf a.tar",
+        "find . -fprint /dev/stdout -print0 | xargs -0 tar cf a.tar",
+        // xargs' own reading of its options, without a listing.
+        "xargs -J % tar rf a.tar % * < list",
     ];
     assert_eq!(
         wrong(&lines, Some(ProtectedActionKind::UnseenCode)),
@@ -367,6 +379,9 @@ fn d484_other_xargs_input_stays_quiet() {
         "find . -print0 | xargs -0 tar cf a.tar",
         "find . -print0 | xargs -n 1 -0 tar cf a.tar",
         "find . -print0 | grep -z x | xargs -0 tar cf a.tar",
+        "find . -print0 | sort -z | head -n 3 | xargs -0 tar cf a.tar",
+        "find . -print0 | gsort --zero-terminated -k 1 | uniq | xargs -0 tar cf a.tar",
+        "find . -print0 | tail -z -n 3 | tee l | xargs -0 tar cf a.tar",
         "find . -print0 | xargs --nu tar cf a.tar",
         "find . -name '*.txt' -print0 | xargs --null rg data",
         "ls | xargs tar cf a.tar --",
@@ -405,6 +420,16 @@ fn issue_1912_and_1910_scans_are_linear() {
             "-0 -n 1 ",
         ),
         ("feeds", "ls {}| xargs tar cf a.tar --", "| grep x "),
+        (
+            "nul-filters",
+            "find . -print0 {}| xargs -0 tar cf a.tar --",
+            "| sort -z -k 1 ",
+        ),
+        (
+            "nul-options",
+            "find . -print0 | grep {} x | xargs -0 tar cf a.tar --",
+            "-z -e y --reg z ",
+        ),
     ] {
         work::assert_linear(label, |scale| {
             let _ = verdicts(&line.replace("{}", &word.repeat(200 * scale)));
