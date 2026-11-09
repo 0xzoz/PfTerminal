@@ -54,8 +54,9 @@ struct Outcome {
     hook_written: bool,
     config_changed: bool,
     denials: Vec<(&'static str, &'static str)>,
-    /// The project's `.git` folder.
-    git: std::path::PathBuf,
+    /// Whether a warning names the hook file, by whatever spelling of its
+    /// path (checked while the project folder exists).
+    names_hook: bool,
 }
 
 async fn run_1139(level: SecurityLevel, command: Command) -> anyhow::Result<Outcome> {
@@ -151,11 +152,13 @@ async fn run_1139(level: SecurityLevel, command: Command) -> anyhow::Result<Outc
     .collect();
     Ok(Outcome {
         output,
-        warnings,
         hook_written: git.join("hooks/pre-commit").exists(),
         config_changed: std::fs::read_to_string(git.join("config"))?.contains("injected1139"),
+        names_hook: warnings
+            .iter()
+            .any(|warning| names_file(warning, &git.join("hooks").join("pre-commit"))),
+        warnings,
         denials,
-        git,
     })
 }
 
@@ -168,7 +171,7 @@ fn level_warnings(outcome: &Outcome) -> Vec<&String> {
 }
 
 /// Whether `warning` is Moderate's "blocked writing" warning for `file`,
-/// whose folder exists, by whatever spelling of its path.
+/// whose folder must exist, by whatever spelling of its path.
 fn names_file(warning: &str, file: &std::path::Path) -> bool {
     let Some(rest) = warning.strip_prefix("Security level Moderate blocked writing `") else {
         return false;
@@ -204,9 +207,7 @@ async fn issue_1139_moderate_git_folder_writes_name_the_level() -> anyhow::Resul
                 // PowerShell reports the hook it could not write by its full
                 // path, which the warning names; compare it as a file, as
                 // TEMP may be spelled with short names (#1967).
-                Command::Hook if cfg!(windows) => {
-                    names_file(warnings[0], &moderate.git.join("hooks").join("pre-commit"))
-                }
+                Command::Hook if cfg!(windows) => moderate.names_hook,
                 _ => warnings[0].starts_with(&format!(
                     "Security level Moderate blocked writing `{path}`: under Moderate"
                 )),
