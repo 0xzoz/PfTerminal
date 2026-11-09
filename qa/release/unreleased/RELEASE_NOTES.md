@@ -1027,3 +1027,15 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   `icacls "%TEMP%" /remove:g *S-1-5-21-…` (with the `*`) removes one. Remove
   only such bare-SID entries. If one was your Corbanu home's, the sandbox adds
   it back the next time it runs.
+
+## Project config can't move Corbanu's databases or logs (D483, #1945)
+
+- **A project's `.codex/config.toml` no longer sets `sqlite_home` or
+  `log_dir`.** Corbanu ignores them there and shows a startup warning naming
+  them, as it already did for provider URLs, `notify` and `otel`. Before, a
+  trusted repository could choose where thread history, memories, state and
+  logs were written (into the repository itself, for example), and have
+  Corbanu open state databases it shipped.
+- Not changed: `sqlite_home` and `log_dir` in your user config, with `-c`, in
+  managed config or requirements, and `CODEX_SQLITE_HOME`, work as before. If
+  a project of yours set them, move them to your user config.
