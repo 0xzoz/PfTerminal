@@ -42,8 +42,8 @@ python3 scripts/release/release_notes.py assemble --version <version>
 
 This writes `qa/release/<version>/RELEASE_NOTES.md` (appending after any notes
 already there), and deletes the fragments it used. It refuses a section heading
-that file already has; merge those by hand. The version must be `x.y.z`,
-`x.y.z-alpha.N` or `x.y.z-beta.N`, as the release workflow requires. Sections appear in the order
-of the first fragment, by file name, that uses each heading; entries within a
-section follow file-name order. The `0000-NN-*` fragments hold the notes that
+that file already has; merge those by hand. The version follows the release
+workflow's pattern (`x.y.z`, `x.y.z-alpha.N` or `x.y.z-beta.N`). Sections
+appear in the order of the first fragment, by file name, that uses each heading;
+entries within a section follow file-name order. The `0000-NN-*` fragments hold the notes that
 were in the old shared file, in their original order.

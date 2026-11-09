@@ -52,6 +52,7 @@ class ReleaseNotesTest(unittest.TestCase):
         self.write("two.md", "## A\n\n- x\n\n## B\n\n- y\n")
         self.write("title.md", "## A\n\n# Title\n")
         self.write("space.md", "## A\n\n- x \n")
+        self.write("fence.md", "## A\n\n- x\n```\n## B\n")
         _, errors = release_notes.load(self.root)
         text = "\n".join(errors)
         for needle in [
@@ -62,6 +63,7 @@ class ReleaseNotesTest(unittest.TestCase):
             "two.md:5: one '## ' section",
             "title.md:3: '# ' titles",
             "space.md:3: trailing whitespace",
+            "fence.md: a ``` code block is never closed",
         ]:
             self.assertIn(needle, text)
         self.assertEqual(self.run_cli("check"), 1)

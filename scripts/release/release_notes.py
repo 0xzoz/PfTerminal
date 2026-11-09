@@ -72,6 +72,8 @@ def parse(path: Path, root: Path) -> tuple[Fragment | None, list[str]]:
             errors.append(f"{shown}:{number}: '# ' titles are added at release time")
         if number > first + 1 and line.startswith("## "):
             errors.append(f"{shown}:{number}: one '## ' section per fragment")
+    if fence:
+        errors.append(f"{shown}: a {fence} code block is never closed")
     if errors:
         return None, errors
     return Fragment(path, lines[0][3:].strip(), body), []
@@ -144,8 +146,8 @@ def main(argv: list[str] | None = None) -> int:
     if not fragments:
         print("error: no fragments to assemble", file=sys.stderr)
         return 1
-    # The release workflow's forms: x.y.z, x.y.z-alpha.N, x.y.z-beta.N.
-    if not re.fullmatch(r"\d+\.\d+\.\d+(-(alpha|beta)\.\d+)?", args.version):
+    # The release workflow's pattern (corbanu-terminal-release.yml).
+    if not re.fullmatch(r"\d+\.\d+\.\d+(-(alpha|beta)(\.\d+)?)?", args.version):
         print(f"error: bad version {args.version!r}", file=sys.stderr)
         return 1
     target = args.root / "qa/release" / args.version / "RELEASE_NOTES.md"
