@@ -29,10 +29,13 @@ shows a startup warning that names them:
   `apps_mcp_product_sku`, `experimental_realtime_ws_base_url`,
   `experimental_realtime_webrtc_call_base_url`, `otel` and
   `features.respect_system_proxy`;
-- which local commands run: `notify`, `profile` and `profiles`;
-- where Corbanu keeps its state databases and logs: `sqlite_home` and `log_dir`
-  (D483, #1945). Otherwise a repository could have thread history, memories and
-  logs written into itself, or have Corbanu open databases it ships.
+- which command runs on notifications: `notify`;
+- which config profile applies: `profile` and `profiles`;
+- where Corbanu keeps its state databases and logs: `sqlite_home` and
+  `log_dir`. Otherwise a repository could have thread history, memories and
+  logs written into itself, or have Corbanu open databases it ships;
+- config locks: `debug.config_lockfile`, because replaying a lock replaces the
+  whole config, the settings above included.
 
 Set them in your user config (`CODEX_HOME/config.toml`), with `-c` on the
 command line, or in managed config. `CODEX_SQLITE_HOME` still works too.
