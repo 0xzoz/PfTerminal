@@ -105,8 +105,12 @@ class ChangedCrateTestsWorkflowTest(unittest.TestCase):
         self.assertRegex(
             rust_ci, r"(?ms)^  results:\n.*?^        changed_crate_tests,$"
         )
-        self.assertIn(
-            "[[ '${{ needs.changed_crate_tests.result }}' == 'success' ]]", rust_ci
+        check = "[[ '${{ needs.changed_crate_tests.result }}' == 'success' ]]"
+        self.assertIn(check, rust_ci)
+        # Before the "no relevant changes" exit: a canary path outside
+        # codex-rs/ and .github/ sets no area flag.
+        self.assertLess(
+            rust_ci.index(check), rust_ci.index("echo 'No relevant changes")
         )
         self.assertIn(
             "NEEDS_CHANGED_OUTPUTS_CHANGED_CRATE_TEST_PACKAGES: "

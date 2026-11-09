@@ -580,6 +580,12 @@ jobs:
           # Every decision below reads its outputs.
           [[ '${{ needs.changed.result }}' == 'success' ]] || { echo 'changed failed'; exit 1; }
 
+          # Required whenever it runs, checked before the early exit below: a
+          # canary path such as scripts/codex_package/rg sets no area flag.
+          if [[ -n "${NEEDS_CHANGED_OUTPUTS_CHANGED_CRATE_TEST_PACKAGES}" ]]; then
+            [[ '${{ needs.changed_crate_tests.result }}' == 'success' ]] || { echo 'changed_crate_tests failed'; exit 1; }
+          fi
+
           # If nothing relevant changed (PR touching only root README, etc.),
           # declare success regardless of other jobs.
           if [[ "${NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT}" != 'true' && "${NEEDS_CHANGED_OUTPUTS_CODEX}" != 'true' && "${NEEDS_CHANGED_OUTPUTS_WORKFLOWS}" != 'true' ]]; then
@@ -590,11 +596,6 @@ jobs:
           # Required whenever it runs (PRs touching its crates, see `changed`).
           if [[ "${NEEDS_CHANGED_OUTPUTS_WINDOWS_NATIVE_TESTS}" == 'true' ]]; then
             [[ '${{ needs.windows_native_tests.result }}' == 'success' ]] || { echo 'windows_native_tests failed'; exit 1; }
-          fi
-
-          # Required whenever it runs (PRs changing files under a tested crate).
-          if [[ -n "${NEEDS_CHANGED_OUTPUTS_CHANGED_CRATE_TEST_PACKAGES}" ]]; then
-            [[ '${{ needs.changed_crate_tests.result }}' == 'success' ]] || { echo 'changed_crate_tests failed'; exit 1; }
           fi
 
           # Required whenever it runs (PRs touching schema crates or generator inputs).

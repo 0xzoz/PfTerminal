@@ -123,7 +123,9 @@ jobs:
         run: |
           set -euo pipefail
           read -r -a packages <<< "$PACKAGES"
-          read -r -a helpers <<< "$(python3 ../.github/scripts/changed_crate_test_packages.py --helpers "${packages[@]}")"
+          # Separate assignment, so a script failure fails the step.
+          helper_args="$(python3 ../.github/scripts/changed_crate_test_packages.py --helpers "${packages[@]}")"
+          read -r -a helpers <<< "$helper_args"
           if (( ${#helpers[@]} == 0 )); then
             echo "No helpers needed."
             exit 0
