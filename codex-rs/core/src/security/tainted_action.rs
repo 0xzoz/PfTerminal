@@ -45,6 +45,7 @@ mod loader_variables;
 mod mktemp;
 mod named_shell;
 mod nested;
+mod option_globs;
 mod outbound;
 mod outputs;
 mod paths;
@@ -434,6 +435,47 @@ pub(crate) fn classify_as_named(
     codex_home: &Path,
 ) -> Option<ProtectedActionKind> {
     classify_as_named_with(action, codex_home, dirs::home_dir().as_deref())
+}
+
+/// #1897 follow-up: a hint for the approval prompt when the line pushes a
+/// branch named by a variable (`git push origin "$b"`), which asks because
+/// git would read a value starting with `-` as an option. Text only; it
+/// decides nothing.
+pub(crate) const PUSH_BRANCH_HINT: &str = "Tip: git may read a branch in a variable after `git \
+     push` (`git push origin \"$b\"`) as an option; `HEAD:\"$b\"` or `-- \"$b\"` avoids that and \
+     this prompt.";
+
+/// [`PUSH_BRANCH_HINT`] for an action judged `kind`, when its text has
+/// `git`, then `push`, then a word starting with `$` (after quotes) in the
+/// same command.
+pub(crate) fn approval_hint(
+    action: &ApprovalAction,
+    kind: ProtectedActionKind,
+) -> Option<&'static str> {
+    let (ApprovalAction::Shell { command, .. } | ApprovalAction::ExecCommand { command, .. }) =
+        action
+    else {
+        return None;
+    };
+    if kind != ProtectedActionKind::UnseenCode {
+        return None;
+    }
+    // 0: none yet; 1: after `git`; 2: after `git … push`.
+    let mut state = 0;
+    for word in command.iter().flat_map(|part| part.split_whitespace()) {
+        work::step();
+        if basename(word) == "git" {
+            state = 1;
+        } else if state == 1 && word == "push" {
+            state = 2;
+        } else if state == 2 && word.trim_start_matches(['"', '\'']).starts_with('$') {
+            return Some(PUSH_BRANCH_HINT);
+        }
+        if word.ends_with([';', '&', '|']) || matches!(word, "&&" | "||") {
+            state = 0;
+        }
+    }
+    None
 }
 
 pub(super) fn classify_with(
@@ -3951,3 +3993,7 @@ mod tainted_action_linear_tests;
 #[cfg(test)]
 #[path = "tainted_action_git_ext_tests.rs"]
 mod tainted_action_git_ext_tests;
+
+#[cfg(test)]
+#[path = "tainted_action_option_glob_tests.rs"]
+mod tainted_action_option_glob_tests;
