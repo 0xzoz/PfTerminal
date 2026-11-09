@@ -43,8 +43,8 @@ other folders that let everyone do so (such as the machine key folders under
   your own account, and Windows decides who may read a program from that
   alone. We accept this for now (D433) and will look at it again together
   with the borrowing (#1560). If you work in several projects at once, use
-  the default sandbox: a change awaiting security sign-off (#1800) stops its
-  commands reading each other's memory (see "Default sandbox: commands can
+  the default sandbox: a change awaiting security sign-off (#1800) will stop
+  its commands reading each other's memory (see "Default sandbox: commands can
   read other projects' running commands" below). The default sandbox
   doesn't prevent borrowing yet either (#1560, #1648), so until both are
   closed, avoid running commands in several projects at once.
@@ -307,8 +307,10 @@ removed when the session ends. We accept these limits (D444):
 - The non-admin sandbox doesn't get a folder of its own: its commands still
   use `%TEMP%` itself, as before.
 - Running an older version of Corbanu Terminal puts back the old access to
-  the whole of `%TEMP%`. The next session of this version takes it away
-  again.
+  the whole of `%TEMP%`. The next session of this version that runs a
+  default sandbox command takes it away again, where it can: if you can't
+  change `%TEMP%`'s permissions, the old access stays (the Corbanu home's
+  `.sandbox` log says so).
 
 **How to switch to the default sandbox.**
 
