@@ -945,6 +945,10 @@ fn system_time_to_unix_ms(time: SystemTime) -> i64 {
 #[path = "local_file_system_path_uri_tests.rs"]
 mod path_uri_tests;
 
+#[cfg(test)]
+#[path = "local_file_system_unsandboxed_refusal_tests.rs"]
+mod unsandboxed_refusal_tests;
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
