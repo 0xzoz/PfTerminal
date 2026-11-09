@@ -259,12 +259,112 @@ fn issue_1897_push_hint_names_the_quiet_forms() {
 }
 
 #[test]
+fn d484_glob_loop_variables_that_may_name_an_option_ask() {
+    let lines = [
+        "for f in *; do tar rf a.tar \"$f\"; done",
+        "for f in *.txt; do tar rf a.tar \"$f\"; done",
+        "for f in a.txt *; do gtar rf a.tar \"${f}\"; done",
+        "for f in *; do rg data \"$f\"; done",
+        "for f in *; do sed -i s/a/b/ \"$f\"; done",
+        "for f in *; do sort -o out \"$f\"; done",
+        "for f in *; do rsync -a \"$f\" host:dst/; done",
+        "for f in *.md; do sed -i '' s/a/b/ \"${f%.md}.md\"; done",
+        "select f in *; do tar rf a.tar \"$f\"; done",
+        "for f in *; do :; done; tar rf a.tar \"$f\"",
+        "for f in *; do xargs tar rf a.tar \"$f\" < list; done",
+        // A changed start, or a split, may start with `-` from any glob.
+        "for f in ./*; do tar rf a.tar \"${f#./}\"; done",
+        "for f in src/*; do tar rf a.tar \"${f##*/}\"; done",
+        "for f in ./*; do tar rf a.tar $f; done",
+        "for f in ./*.rs; do rg data x$f; done",
+    ];
+    assert_eq!(
+        wrong(&lines, Some(ProtectedActionKind::UnseenCode)),
+        Vec::<String>::new()
+    );
+    for line in ["for f (*) tar rf a.tar $f", "foreach f (*)\ntar rf a.tar \"$f\"\nend"] {
+        assert_eq!(
+            classify_with(
+                &action("zsh", line),
+                &fixture(HOME),
+                Some(&fixture(USER_HOME))
+            ),
+            Some(ProtectedActionKind::UnseenCode),
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn d484_other_loop_variables_stay_quiet() {
+    let lines = [
+        "for f in ./*; do tar rf a.tar \"$f\"; done",
+        "for f in src/*.c; do tar rf a.tar \"$f\"; done",
+        "for f in *; do tar rf a.tar -- \"$f\"; done",
+        "for f in *; do tar rf a.tar \"./$f\"; done",
+        "for f in *.rs; do rg data \"$f\"; done",
+        "for f in *; do wc -l \"$f\"; done",
+        "for f in a b; do tar rf a.tar \"$f\"; done",
+        "for f in *; do echo \"$f\"; done; tar rf a.tar \"$g\"",
+        "for f; do tar rf a.tar \"$ff\"; done",
+    ];
+    assert_eq!(wrong(&lines, None), Vec::<String>::new());
+}
+
+#[test]
+fn d484_xargs_fed_by_a_listing_asks() {
+    let lines = [
+        "ls | xargs tar cf a.tar",
+        "ls *.txt | xargs sed -i s/a/b/",
+        "ls | xargs rg data",
+        "ls -t | head -3 | xargs tar cf a.tar",
+        "ls | xargs -n1 sort -o out",
+        "find . -name '*.txt' | xargs tar cf a.tar",
+        "find . -type f | xargs -0 rg data",
+        "find . -print0 | xargs tar cf a.tar",
+        "find . -printf '%f\\0' -print0 | xargs -0 tar cf a.tar",
+        "ls | xargs -I{} tar rf a.tar {}",
+        "ls | xargs -I % tar rf a.tar %",
+        "ls | xargs -0I{} tar rf a.tar {}.bak",
+        "ls | xargs --replace={} tar rf a.tar {}",
+        "ls | xargs -i rsync -a {} host:dst/",
+        "ls | sudo xargs sed -i s/a/b/",
+    ];
+    assert_eq!(
+        wrong(&lines, Some(ProtectedActionKind::UnseenCode)),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn d484_other_xargs_input_stays_quiet() {
+    let lines = [
+        "find . -print0 | xargs -0 tar cf a.tar",
+        "find . -name '*.txt' -print0 | xargs --null rg data",
+        "ls | xargs tar cf a.tar --",
+        "find . | xargs rg data --",
+        "ls | xargs -I{} tar rf a.tar ./{}",
+        "ls | xargs -I{} tar rf a.tar -- {}",
+        "git ls-files | xargs tar cf a.tar",
+        "ls | xargs wc -l",
+        "ls | tar cf a.tar -T -",
+        "ls; xargs tar cf a.tar < list",
+        "ls | xargs -I{} echo tar {}",
+    ];
+    assert_eq!(wrong(&lines, None), Vec::<String>::new());
+}
+
+#[test]
 fn issue_1912_and_1910_scans_are_linear() {
     for (label, line, word) in [
         ("tar-globs", "tar cf a.tar {} *", "*.txt "),
         ("tar-plain", "tar cf a.tar {} *", "a.txt "),
         ("sed-dashes", "sed -i s/a/b/ {} -- *", "-- "),
         ("git-refmap", "git fetch {} e\"$r\"", "--refmap='x y' "),
+        ("loop-words", "for f in * ./*; do tar rf a.tar {} -- \"$f\"; done", "\"$f$g$f\" "),
+        ("loop-names", "{}tar rf a.tar -- x", "for f in *; do :; done; "),
+        ("xargs-options", "ls | xargs {} tar rf a.tar -- x", "-0 -n 1 "),
+        ("feeds", "ls {}| xargs tar cf a.tar --", "| grep x "),
     ] {
         work::assert_linear(label, |scale| {
             let _ = verdicts(&line.replace("{}", &word.repeat(200 * scale)));
