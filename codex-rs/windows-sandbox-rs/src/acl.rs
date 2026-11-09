@@ -1285,11 +1285,6 @@ pub(crate) enum Unfollowed {
 /// file.
 pub(crate) fn open_unfollowed(path: &Path) -> Unfollowed {
     use std::os::windows::fs::OpenOptionsExt as _;
-    use std::os::windows::io::AsRawHandle as _;
-    use std::os::windows::io::FromRawHandle as _;
-    use windows_sys::Win32::Storage::FileSystem::FileAttributeTagInfo;
-    use windows_sys::Win32::Storage::FileSystem::ReOpenFile;
-    const NAME_SURROGATE: u32 = 0x2000_0000;
     let Ok(file) = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
@@ -1298,6 +1293,29 @@ pub(crate) fn open_unfollowed(path: &Path) -> Unfollowed {
     else {
         return Unfollowed::Refused;
     };
+    unfollowed_from(file)
+}
+
+/// #1909: [`open_unfollowed`] for the entry `name` of the open folder `dir`,
+/// opened relative to it: nothing above it is looked up again, so a folder
+/// on the way swapped for a link can't steer the read either.
+pub(crate) fn open_unfollowed_at(dir: HANDLE, name: &[u16]) -> Unfollowed {
+    use std::os::windows::io::FromRawHandle as _;
+    // SAFETY: `dir` is an open folder.
+    let Ok(handle) = (unsafe { walk::open_relative(dir, name, FILE_GENERIC_READ) }) else {
+        return Unfollowed::Refused;
+    };
+    // SAFETY: a handle this function now owns.
+    unfollowed_from(unsafe { std::fs::File::from_raw_handle(handle.into_raw() as _) })
+}
+
+/// [`open_unfollowed`] once `file` (opened as itself, not followed) is open.
+fn unfollowed_from(file: std::fs::File) -> Unfollowed {
+    use std::os::windows::io::AsRawHandle as _;
+    use std::os::windows::io::FromRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::FileAttributeTagInfo;
+    use windows_sys::Win32::Storage::FileSystem::ReOpenFile;
+    const NAME_SURROGATE: u32 = 0x2000_0000;
     let handle = file.as_raw_handle() as HANDLE;
     // SAFETY: the handle is open for the call.
     let Ok(info) = (unsafe { file_info(handle) }) else {

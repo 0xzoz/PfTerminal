@@ -1,6 +1,46 @@
 use super::*;
 use pretty_assertions::assert_eq;
 
+type ListHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync>;
+
+/// #1909: called (on any walk thread) with each folder just before it is
+/// opened to be listed; tests filter by their own folder.
+static BEFORE_LIST: std::sync::Mutex<Option<ListHook>> = std::sync::Mutex::new(None);
+
+pub(crate) fn before_list(path: &Path) {
+    let hook = BEFORE_LIST
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(hook) = hook {
+        hook(path);
+    }
+}
+
+/// Runs `body` with `hook` called on each folder just before it is listed.
+fn with_before_list<T>(
+    hook: impl Fn(&Path) + Send + Sync + 'static,
+    body: impl FnOnce() -> T,
+) -> T {
+    *BEFORE_LIST.lock().expect("hook") = Some(std::sync::Arc::new(hook));
+    let result = body();
+    *BEFORE_LIST.lock().expect("hook") = None;
+    result
+}
+
+/// Swaps the folder `path` for a junction to `target` once, as a process a
+/// command left running could, if `path` is `swap`.
+fn swap_folder_once(swap: PathBuf, target: PathBuf) -> impl Fn(&Path) + Send + Sync + 'static {
+    let done = std::sync::atomic::AtomicBool::new(false);
+    move |path| {
+        if same_path(path, &swap) && !done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let aside = swap.with_extension("aside");
+            std::fs::rename(&swap, aside).expect("move the folder aside");
+            junction(&swap, &target);
+        }
+    }
+}
+
 fn junction(link: &Path, target: &Path) {
     let status = std::process::Command::new("cmd")
         .args(["/d", "/c", "mklink", "/J"])
@@ -379,6 +419,63 @@ fn contents_record_a_junction_by_its_target() {
     assert_eq!(
         prints,
         vec![("j".to_string(), format!("link to {}", outside.display()))]
+    );
+}
+
+/// #1909: a folder swapped for a junction after the walk found it is not
+/// listed through the junction (which could lead to a network share): it
+/// counts as unlistable, and what lies behind the junction isn't reported.
+#[test]
+fn find_does_not_list_through_a_junction_swapped_in() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dunce::canonicalize(dir.path()).expect("canonical");
+    let outside = tempfile::tempdir().expect("outside");
+    let outside = dunce::canonicalize(outside.path()).expect("canonical outside");
+    std::fs::create_dir_all(outside.join(".codex")).expect("create outside");
+    let swapped = root.join("a\\sub");
+    std::fs::create_dir_all(&swapped).expect("create");
+
+    let found = with_before_list(swap_folder_once(swapped.clone(), outside), || {
+        find(std::slice::from_ref(&root))
+    });
+
+    assert_eq!(
+        (
+            found.unlistable,
+            found
+                .entries
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<Vec<_>>(),
+        ),
+        (vec![swapped], Vec::new())
+    );
+}
+
+/// #1909: a folder inside a `.codex` folder swapped for a junction after it
+/// was found is not listed through the junction; it differs every time.
+#[test]
+fn contents_do_not_list_through_a_junction_swapped_in() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dunce::canonicalize(dir.path()).expect("canonical");
+    let folder = root.join("a\\.codex");
+    let swapped = folder.join("skills");
+    std::fs::create_dir_all(&swapped).expect("create");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(&outside).expect("create");
+    std::fs::write(outside.join("secret.md"), "s\n").expect("write");
+
+    let prints = with_before_list(swap_folder_once(swapped, outside), || contents(&folder));
+
+    let names: Vec<&str> = prints.keys().map(String::as_str).collect();
+    assert_eq!(
+        (
+            names,
+            prints
+                .get("skills\\")
+                .is_some_and(|print| print.starts_with("truncated at")),
+        ),
+        (vec!["skills", "skills\\"], true)
     );
 }
 

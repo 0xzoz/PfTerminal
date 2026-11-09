@@ -185,6 +185,13 @@ impl Attributes {
 }
 
 impl Handle {
+    /// The handle, now the caller's to close.
+    pub(crate) fn into_raw(self) -> HANDLE {
+        let handle = self.0;
+        std::mem::forget(self);
+        handle
+    }
+
     /// Opens `path` with `access`, the link itself if it is one.
     pub(crate) unsafe fn open(path: &Path, access: u32) -> Result<Self> {
         Self::open_with(
@@ -353,9 +360,15 @@ unsafe extern "system" {
         share_access: u32,
         open_options: u32,
     ) -> i32;
+    fn RtlNtStatusToDosError(status: i32) -> u32;
 }
 
 const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x20;
+const FILE_DIRECTORY_FILE: u32 = 0x1;
+/// `OBJ_DONT_REPARSE`: the open fails at any reparse point the I/O manager
+/// would follow (a junction or symbolic link); one a filter serves (a
+/// cloud-file or ProjFS folder) still opens.
+const OBJ_DONT_REPARSE: u32 = 0x1000;
 const FILE_OPEN_FOR_BACKUP_INTENT: u32 = 0x4000;
 const FILE_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const FILE_READ_ATTRIBUTES: u32 = 0x80;
@@ -366,13 +379,74 @@ const FILE_FULL_DIRECTORY_RESTART_INFO: i32 = 15;
 /// attribute reads and synchronous I/O), the entry itself if it is a link.
 /// The name is matched exactly, as [`list`] returned it.
 pub(crate) unsafe fn open_relative(dir: HANDLE, name: &[u16], access: u32) -> Result<Handle> {
-    // One plain name: never empty, a path or a stream (`name:stream`).
+    plain_name(name)?;
+    nt_open(dir, name, access, 0, FILE_OPEN_REPARSE_POINT).map_err(|status| {
+        anyhow!(
+            "opening {} failed: {status:#x}",
+            String::from_utf16_lossy(name)
+        )
+    })
+}
+
+/// #1909: opens the folder `name` of the open folder `dir` for listing
+/// (with synchronous I/O), the way a path open would but following no link:
+/// a junction or symbolic link (perhaps swapped in after the folder was
+/// checked) fails with `ERROR_REPARSE_POINT_ENCOUNTERED`, so nothing behind
+/// it, such as a network share, is ever opened; a folder a filter serves (a
+/// cloud-file or ProjFS placeholder) opens as that filter presents it.
+pub(crate) unsafe fn open_folder_unfollowed(dir: HANDLE, name: &[u16]) -> std::io::Result<Handle> {
+    plain_name(name)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
+    nt_open(
+        dir,
+        name,
+        FILE_LIST_DIRECTORY,
+        OBJ_DONT_REPARSE,
+        FILE_DIRECTORY_FILE,
+    )
+    .map_err(|status| std::io::Error::from_raw_os_error(RtlNtStatusToDosError(status) as i32))
+}
+
+/// Fails unless `name` is one plain name: never empty, a path or a stream
+/// (`name:stream`).
+fn plain_name(name: &[u16]) -> Result<()> {
     let separators = [u16::from(b'\\'), u16::from(b'/'), u16::from(b':')];
     if name.is_empty() || name.iter().any(|c| *c == 0 || separators.contains(c)) {
         bail!("{:?} is not a plain name", String::from_utf16_lossy(name));
     }
-    let bytes = u16::try_from(std::mem::size_of_val(name))
+    u16::try_from(std::mem::size_of_val(name))
         .map_err(|_| anyhow!("a name of {} characters is too long", name.len()))?;
+    Ok(())
+}
+
+/// #1909: [`open_relative`] with the error Windows gives (so a missing
+/// entry reads as `NotFound`).
+pub(crate) unsafe fn open_itself(
+    dir: HANDLE,
+    name: &[u16],
+    access: u32,
+) -> std::io::Result<Handle> {
+    plain_name(name)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
+    nt_open(dir, name, access, 0, FILE_OPEN_REPARSE_POINT)
+        .map_err(|status| std::io::Error::from_raw_os_error(RtlNtStatusToDosError(status) as i32))
+}
+
+/// `NtOpenFile` of the plain name `name` ([`plain_name`]) in the open folder
+/// `dir` with `access` plus attribute reads and synchronous I/O; the
+/// NTSTATUS when it fails.
+unsafe fn nt_open(
+    dir: HANDLE,
+    name: &[u16],
+    access: u32,
+    object_attributes: u32,
+    options: u32,
+) -> std::result::Result<Handle, i32> {
+    // STATUS_OBJECT_NAME_INVALID.
+    const NAME_INVALID: i32 = 0xC000_0033_u32 as i32;
+    let Ok(bytes) = u16::try_from(std::mem::size_of_val(name)) else {
+        return Err(NAME_INVALID);
+    };
     let mut name_buf = name.to_vec();
     let unicode = UnicodeString {
         length: bytes,
@@ -383,7 +457,7 @@ pub(crate) unsafe fn open_relative(dir: HANDLE, name: &[u16], access: u32) -> Re
         length: std::mem::size_of::<ObjectAttributes>() as u32,
         root_directory: dir,
         object_name: &unicode,
-        attributes: 0,
+        attributes: object_attributes,
         security_descriptor: std::ptr::null(),
         security_quality_of_service: std::ptr::null(),
     };
@@ -398,16 +472,13 @@ pub(crate) unsafe fn open_relative(dir: HANDLE, name: &[u16], access: u32) -> Re
         &attributes,
         &mut io,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT | FILE_OPEN_REPARSE_POINT,
+        FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT | options,
     );
     if status != 0 || handle == 0 {
         if handle != 0 {
             CloseHandle(handle);
         }
-        bail!(
-            "opening {} failed: {status:#x}",
-            String::from_utf16_lossy(name)
-        );
+        return Err(if status != 0 { status } else { NAME_INVALID });
     }
     Ok(Handle(handle))
 }
@@ -416,8 +487,17 @@ pub(crate) unsafe fn open_relative(dir: HANDLE, name: &[u16], access: u32) -> Re
 /// synchronous I/O) as (name, attributes and reparse tag), without `.` and
 /// `..`. A link's attributes are its own.
 pub(crate) unsafe fn list(dir: HANDLE) -> Result<Vec<(Vec<u16>, Attributes)>> {
+    Ok(list_with_sizes(dir)?
+        .into_iter()
+        .map(|(name, attributes, _size)| (name, attributes))
+        .collect())
+}
+
+/// [`list`], with each entry's size (a file's length).
+pub(crate) unsafe fn list_with_sizes(dir: HANDLE) -> Result<Vec<(Vec<u16>, Attributes, u64)>> {
     // `FILE_FULL_DIR_INFO`'s offsets; `EaSize` holds a reparse point's tag.
     const NEXT: usize = 0;
+    const END_OF_FILE: usize = 40;
     const ATTRIBUTES: usize = 56;
     const NAME_BYTES: usize = 60;
     const EA_SIZE: usize = 64;
@@ -458,7 +538,8 @@ pub(crate) unsafe fn list(dir: HANDLE) -> Result<Vec<(Vec<u16>, Attributes)>> {
                 0
             };
             if name != [dot] && name != [dot, dot] {
-                out.push((name, Attributes { attributes, tag }));
+                let size = std::ptr::read_unaligned(entry.add(END_OF_FILE) as *const u64);
+                out.push((name, Attributes { attributes, tag }, size));
             }
             if next == 0 {
                 break;

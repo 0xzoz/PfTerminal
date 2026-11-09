@@ -980,6 +980,14 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   link that is already in a git folder is still read through, as git
   reads it. A file Windows can't read as itself (for example a placeholder
   whose provider isn't running) now counts as changed after every command.
+- **The planted-folder watch lists only the folders it checked** (#1909,
+  both sandboxes). The watch now opens each folder below the writable
+  folders, and each folder and file inside a nested `.codex` or `.agents`
+  folder, through the folder it was found in, following no link. Before, a
+  process a command left running could swap a folder for a junction or
+  symbolic link after the check, and Corbanu would list what it points to,
+  which could be a network share. Such a folder is now recorded as
+  unreadable, so it is flagged.
 
 ## Windows sandbox: capability SIDs are recorded under a lock (#1871)
 

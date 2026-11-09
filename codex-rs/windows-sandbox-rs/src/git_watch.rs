@@ -660,9 +660,25 @@ pub(crate) fn unfollowed_file_print(path: &Path) -> String {
 /// reparse point other than a link that can't be read as itself differs
 /// every time, so a change to it is never missed.
 fn unfollowed_print(path: &Path) -> String {
+    unfollowed_print_with(path, || open_unfollowed(path))
+}
+
+/// #1909: [`unfollowed_print`] of the entry `name`, at `path`, of the open
+/// folder `dir`, opened relative to that folder.
+#[cfg(windows)]
+pub(crate) fn unfollowed_print_at(
+    dir: windows_sys::Win32::Foundation::HANDLE,
+    name: &[u16],
+    path: &Path,
+) -> String {
+    unfollowed_print_with(path, || opened(crate::acl::open_unfollowed_at(dir, name)))
+}
+
+/// [`unfollowed_print`] of the file at `path` that `open` opens.
+fn unfollowed_print_with(path: &Path, open: impl FnOnce() -> Opened) -> String {
     #[cfg(test)]
     tests::before_read(path);
-    let (file, links) = match open_unfollowed(path) {
+    let (file, links) = match open() {
         Opened::File(file, links) => (file, links),
         // Marked as before when the name has others (or can't be counted).
         Opened::Refused if link_count(path).is_none_or(|count| count > 1) => {
@@ -692,7 +708,12 @@ enum Opened {
 /// The file at `path` itself, not followed if it is a link.
 #[cfg(windows)]
 fn open_unfollowed(path: &Path) -> Opened {
-    match crate::acl::open_unfollowed(path) {
+    opened(crate::acl::open_unfollowed(path))
+}
+
+#[cfg(windows)]
+fn opened(unfollowed: crate::acl::Unfollowed) -> Opened {
+    match unfollowed {
         crate::acl::Unfollowed::File(file, links) => Opened::File(file, Some(u64::from(links))),
         crate::acl::Unfollowed::Refused => Opened::Refused,
         crate::acl::Unfollowed::Unsure => Opened::Unsure,
