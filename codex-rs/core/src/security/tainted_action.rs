@@ -1525,10 +1525,12 @@ struct Classifier {
     /// (`'a; b'`, `'a ( b'`, `a\;b`).
     quoted_text: bool,
     /// #1910: a word the word lexer read in this line (or one that runs it)
-    /// holds text it does not show. Until then it has resolved every
-    /// expansion (`r=origin; git fetch "$r"`), so the quote-aware reading
-    /// leaves remotes to it. The lines it reads for itself (a script, joined
-    /// literals) do not count.
+    /// holds text it does not show. Until then it has given a value to every
+    /// expansion it read (`r=origin; git fetch "$r"`), so the quote-aware
+    /// reading leaves remotes to it. That value comes from the assignments it
+    /// read, which may be misread from quoted text (`echo 'x;r=o'`) or may
+    /// not run (`(r=origin)`); those are on `main` already. The lines it
+    /// reads for itself (a script, joined literals) do not count.
     lexed_unseen: bool,
     /// D258: the line (or one that runs it) holds more than plain words,
     /// operators, quotes and well-formed brace groups ([`brace_plain`]). The

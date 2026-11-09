@@ -1242,12 +1242,12 @@ impl Classifier {
                     // the word lexer may split (`--refmap='x y'`), drop (`-o
                     // ''`) or end the command at (`-o 'a;b'`), so its operands
                     // do not line up with git's; this reading's do. Unless
-                    // the word lexer resolved every expansion in the line.
+                    // the word lexer gave every expansion in the line a value
+                    // (from the assignments it read).
                     seen: !(word.dynamic
                         && self.lexed_unseen
-                        && at
-                            .checked_sub(1)
-                            .is_some_and(|before| words[before].quoted_before)),
+                        && at > 0
+                        && words[at - 1].quoted_before),
                     loose: (word.dynamic && word.splits)
                         // A glob whose first characters may match `-` (`*`,
                         // `-*`, `"-"*`).

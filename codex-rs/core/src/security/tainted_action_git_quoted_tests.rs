@@ -115,6 +115,9 @@ fn issue_1910_remote_after_other_quoted_text_asks() {
     let lines = [
         "git fetch -o '' e\"$r\"",
         "git fetch -o \"\" e\"$r\"",
+        // Review round 1: an empty ANSI-C value, a wrapper's empty value.
+        "git fetch -o $'' e\"$r\"",
+        "env -u '' git fetch e\"$r\"",
         "git fetch --refmap '' e\"$r\"",
         "git fetch -o 'a;b' e\"$r\"",
         "git fetch -o 'a|b' e\"$r\"",
@@ -134,6 +137,9 @@ fn issue_1910_remote_after_other_quoted_text_asks() {
 #[test]
 fn issue_1910_shown_remotes_after_quoted_values_stay_quiet() {
     let lines = [
+        // Review round 1: no quoted text before `$r`, so the word lexer's
+        // value for it counts, whatever comes after.
+        "r=origin; git fetch \"$r\" HEAD:\"$b\"",
         "r=origin; git fetch --refmap='x y' \"$r\"",
         "r=origin; git fetch --refmap='x y' e\"$r\"",
         "r=origin; git pull --shallow-since='2 days ago' \"$r\" main",
