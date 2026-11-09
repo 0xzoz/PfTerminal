@@ -63,7 +63,7 @@ red status noise without testing the code.
   (`windows-integration-tests.yml`), its known-failure list or script, or
   `codex-rs/.config/nextest.toml` runs both. They run
   `cargo nextest run -p <crate> --test '*'` on windows-2022 (msvc). The first
-  native run found 12 codex-core and 19 codex-app-server failures (#1967,
+  native runs found 13 codex-core and 19 codex-app-server failures (#1967,
   #1968, #1969); they are listed in
   `.github/windows-integration-known-failures.txt`, excluded, and named in the
   job summary, so any other failure turns the job red. It is a separate

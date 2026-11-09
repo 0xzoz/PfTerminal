@@ -1,7 +1,8 @@
 # Integration tests (tests/*.rs) that fail on native Windows, excluded from the
 # non-blocking windows-integration-tests.yml workflow (#1856). Each one failed
-# both nextest attempts on windows-2022 (scratch run 42626867876) and still
-# runs on Linux.
+# both nextest attempts on windows-2022 (scratch runs 42626867876, 42634961756
+# and this PR's run) and still runs on Linux. The two git_enrichment tests fail
+# intermittently (each failed in two of three runs).
 # Format: <cargo package> <exact nextest test name> #<issue>
 # Remove a line once its test passes on Windows; a line naming a test that no
 # longer exists fails .github/scripts/test_windows_integration_known_failures.py.
@@ -16,6 +17,7 @@ codex-core suite::provenance::pf_30_s03_vault_command_after_untrusted_content_ne
 codex-core suite::client::amazon_bedrock_proxy_uses_command_auth_and_custom_headers #1968
 codex-core suite::client::provider_auth_command_refreshes_after_401 #1968
 codex-core suite::client::provider_auth_command_supplies_bearer_token #1968
+codex-core suite::git_enrichment::concurrent_turns_keep_distinct_worktree_and_repository_metadata #1968
 codex-core suite::git_enrichment::startup_prewarm_skips_git_enrichment_and_user_turn_observes_fresh_state #1968
 codex-core suite::windows_sandbox::windows_elevated_enforces_deny_read_and_protects_setup_marker #1968
 
