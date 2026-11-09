@@ -51,6 +51,17 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
+      # A PR changing most crates (an upstream sync) builds nearly the whole
+      # workspace with debug info; that filled the runner's disk in the #1972
+      # trial. Drop preinstalled SDKs this job never uses, as bazel.yml does.
+      - name: Free runner disk space
+        working-directory: .
+        run: |
+          df -h /
+          for dir in /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost; do
+            if [[ -d "$dir" ]]; then sudo rm -r -- "$dir"; fi
+          done
+          df -h /
       # bubblewrap: sandboxed commands in tests, as in rust-ci-full's nextest job.
       - name: Install Linux build dependencies
         working-directory: .
