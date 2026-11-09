@@ -122,7 +122,8 @@ jobs:
       - name: Build the test helpers
         run: |
           set -euo pipefail
-          read -r -a helpers <<< "$(python3 ../.github/scripts/changed_crate_test_packages.py --helpers $PACKAGES)"
+          read -r -a packages <<< "$PACKAGES"
+          read -r -a helpers <<< "$(python3 ../.github/scripts/changed_crate_test_packages.py --helpers "${packages[@]}")"
           if (( ${#helpers[@]} == 0 )); then
             echo "No helpers needed."
             exit 0
@@ -132,8 +133,9 @@ jobs:
       - name: cargo nextest run
         run: |
           set -euo pipefail
+          read -r -a packages <<< "$PACKAGES"
           args=()
-          for package in $PACKAGES; do
+          for package in "${packages[@]}"; do
             args+=(-p "$package")
           done
           echo "Packages: $PACKAGES"

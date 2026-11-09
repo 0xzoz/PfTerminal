@@ -72,11 +72,14 @@ doesn't change (through a dependency) shows up on `main`.
   `cargo nextest run -p <crate>...` (unit and integration tests) for every
   `codex-rs` crate under which the PR changes any file
   (`.github/scripts/changed_crate_test_packages.py`). It does not add the
-  crates that depend on them. It first builds the helper binaries some suites
+  crates that depend on them, and a `Cargo.lock`-only change runs nothing. It
+  runs codex-core's remote-aware tests locally, without postmerge's Docker
+  remote environment. It first builds the helper binaries some suites
   start from other crates (`codex`, the code-mode host, the Linux sandbox, the
   rmcp-client test servers, the wallet daemon) and installs the packaged
-  ripgrep. A change to the job itself or to `rust-ci.yml` runs
-  `codex-rmcp-client`'s tests. It uses postmerge's
+  ripgrep. A change to the job itself, `rust-ci.yml`, the workspace
+  `Cargo.toml`, the toolchain or nextest config runs `codex-rmcp-client`'s
+  tests. It uses postmerge's
   `ci-test` profile and restores its sccache (saves nothing). Before this no
   Linux or macOS PR job ran most crates' tests: #1963 went green while
   breaking two rmcp-client tests. Part of `CI results (required)` whenever it

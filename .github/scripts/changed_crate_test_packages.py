@@ -6,7 +6,9 @@ Before this, no Linux or macOS PR job ran most crates' tests: the full Linux
 suite runs only postmerge, so a PR that broke its own crate's tests (#1963
 broke two codex-rmcp-client tests) went green. A package is selected when the
 PR changes any file under it (sources, tests, fixtures, snapshots or its
-Cargo.toml). Dependent crates are not added; postmerge covers them.
+Cargo.toml); a crate nested in another (`exec-server/tests/support`) selects
+both. Crates depending on a changed crate are not added, and a change to
+Cargo.lock alone selects nothing; postmerge covers those.
 
 A change to this job itself selects CANARY_PACKAGE, which also needs a helper
 binary from another crate, so the PR proves the whole path still works.
@@ -18,22 +20,27 @@ arguments for helper binaries the given packages' tests need.
 import argparse
 import sys
 from pathlib import Path
+from pathlib import PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from argument_comment_lint_packages import ROOT  # noqa: E402
 from argument_comment_lint_packages import changed_files  # noqa: E402
-from argument_comment_lint_packages import package_for  # noqa: E402
 from argument_comment_lint_packages import workspace_packages  # noqa: E402
 
 CANARY_PACKAGE = "codex-rmcp-client"
 # Editing any of these runs the canary's tests.
 JOB_PATHS = (
+    ".github/actions/check-clean-worktree/",
     ".github/actions/setup-ci/",
     ".github/scripts/argument_comment_lint_packages.py",
     ".github/scripts/changed_crate_test_packages.py",
     ".github/workflows/rust-ci-changed-crate-tests.yml",
     ".github/workflows/rust-ci.yml",
+    "codex-rs/.config/nextest.toml",
+    "codex-rs/Cargo.toml",
+    "codex-rs/rust-toolchain.toml",
+    "scripts/codex_package/rg",
 )
 # Binaries from other packages that a package's tests start through
 # `codex_utils_cargo_bin::cargo_bin` (Bazel's `extra_binaries`). Cargo builds
@@ -54,6 +61,8 @@ HELPER_BINARIES = {
     "codex-rmcp-client": (("codex-cli", "codex"),),
     "codex-tui": (
         ("codex-cli", "codex"),
+        # The containment tests (#743) skip without it.
+        ("codex-linux-sandbox", "codex-linux-sandbox"),
         ("codex-wallet-daemon", "corbanu-walletd"),
     ),
 }
@@ -62,9 +71,10 @@ HELPER_BINARIES = {
 def selected_packages(files: list[str], packages: dict[str, str]) -> list[str]:
     selected = set()
     for path in files:
-        package = package_for(path, packages)
-        if package is not None:
-            selected.add(package)
+        for parent in PurePosixPath(path).parents:
+            package = packages.get(str(parent))
+            if package is not None:
+                selected.add(package)
         if path.startswith(JOB_PATHS):
             selected.add(CANARY_PACKAGE)
     return sorted(selected)

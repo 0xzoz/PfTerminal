@@ -12,7 +12,8 @@ from changed_crate_test_packages import workspace_packages
 
 PACKAGES = {
     "codex-rs/core": "codex-core",
-    "codex-rs/core/tests/common": "core_test_support",
+    "codex-rs/exec-server": "codex-exec-server",
+    "codex-rs/exec-server/tests/support": "codex-exec-server-test-support",
     "codex-rs/rmcp-client": "codex-rmcp-client",
     "codex-rs/utils/string": "codex-utils-string",
 }
@@ -34,17 +35,26 @@ class ChangedCrateTestPackagesTest(unittest.TestCase):
             ["codex-core", "codex-rmcp-client", "codex-utils-string"],
         )
 
-    def test_nested_package_wins(self) -> None:
+    def test_nested_package_selects_both(self) -> None:
         self.assertEqual(
-            selected_packages(["codex-rs/core/tests/common/lib.rs"], PACKAGES),
-            ["core_test_support"],
+            selected_packages(["codex-rs/exec-server/tests/support/lib.rs"], PACKAGES),
+            ["codex-exec-server", "codex-exec-server-test-support"],
         )
+        # The real workspace has that nesting.
+        packages = workspace_packages(ROOT)
+        self.assertEqual(
+            packages["codex-rs/exec-server/tests/support"],
+            "codex-exec-server-test-support",
+        )
+        self.assertEqual(packages["codex-rs/exec-server"], "codex-exec-server")
 
     def test_job_changes_select_the_canary(self) -> None:
         for path in (
             ".github/workflows/rust-ci-changed-crate-tests.yml",
             ".github/workflows/rust-ci.yml",
             ".github/scripts/changed_crate_test_packages.py",
+            "codex-rs/.config/nextest.toml",
+            "scripts/codex_package/rg",
         ):
             with self.subTest(path=path):
                 self.assertEqual(selected_packages([path], PACKAGES), [CANARY_PACKAGE])
@@ -60,6 +70,7 @@ class ChangedCrateTestPackagesTest(unittest.TestCase):
             helper_build_args(["codex-rmcp-client", "codex-tui"]),
             [
                 *("-p", "codex-cli", "--bin", "codex"),
+                *("-p", "codex-linux-sandbox", "--bin", "codex-linux-sandbox"),
                 *("-p", "codex-wallet-daemon", "--bin", "corbanu-walletd"),
             ],
         )
