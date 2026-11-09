@@ -153,13 +153,16 @@ async fn issue_1976_windows_without_its_sandbox_refuses_commands_and_file_tools(
         let expected = format!("Security level {name} refused this command");
         let ok = if refused {
             command.output.contains(&expected)
-                && command.output.contains("/setup-default-sandbox")
+                && command.output.contains("Set up default sandbox")
                 && !command.output.contains(RAN)
                 && command.warnings.iter().any(|w| w.starts_with(&expected))
         } else {
             command.output.contains(RAN)
                 && !command.output.contains("Security level")
-                && command.warnings.iter().all(|w| !w.contains("Windows sandbox"))
+                && command
+                    .warnings
+                    .iter()
+                    .all(|w| !w.contains("Windows sandbox"))
         };
         if !ok {
             wrong.push(format!(
@@ -172,7 +175,7 @@ async fn issue_1976_windows_without_its_sandbox_refuses_commands_and_file_tools(
         let ok = if refused {
             !image.attached
                 && image.output.contains(&expected)
-                && image.output.contains("/setup-default-sandbox")
+                && image.output.contains("Set up default sandbox")
         } else {
             image.attached
         };

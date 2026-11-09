@@ -15,9 +15,12 @@ Aggressive on such a computer, Corbanu Terminal refuses every agent command
 up; the person also sees it when the session starts. The session still
 starts, so you can set the sandbox up or change the level:
 
-- In the TUI, open `/permissions`, choose Default and pick "Set up default
-  sandbox", or run `/setup-default-sandbox` (it needs Administrator
-  permission). Or set `[windows] sandbox = "elevated"` as below.
+- In the TUI, open `/permissions`, choose a mode that uses the sandbox (such
+  as "Ask for approval") and pick "Set up default sandbox" (it needs
+  Administrator permission). A session keeps the Windows sandbox it started
+  with, so start a new session with `/new` afterwards.
+- Or set `[windows] sandbox = "elevated"` as below; it applies from the next
+  session.
 - Or switch to Permissive in `/security` (it applies after a restart).
 
 This covers every way a level arrives: a `[security]` level in any config

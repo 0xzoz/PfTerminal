@@ -54,8 +54,9 @@ fn issue_1976_refusals_name_the_level_and_the_setup_steps() {
             );
             for part in [
                 "Set up default sandbox",
-                "/setup-default-sandbox",
                 "Administrator",
+                "/new",
+                "`[windows]`",
                 "switch to Permissive in /security",
             ] {
                 assert!(text.contains(part), "{part}: {text}");

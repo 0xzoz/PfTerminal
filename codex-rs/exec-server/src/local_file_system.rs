@@ -112,7 +112,10 @@ pub(crate) fn refuse_without_platform_sandbox(
     if codex_sandboxing::get_platform_sandbox(windows_sandbox_enabled).is_some() {
         return Ok(());
     }
-    Err(io::Error::new(io::ErrorKind::PermissionDenied, refusal.clone()))
+    Err(io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        refusal.clone(),
+    ))
 }
 
 impl LocalFileSystem {

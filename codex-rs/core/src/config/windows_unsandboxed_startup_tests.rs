@@ -24,7 +24,12 @@ async fn load(case: Case) -> std::io::Result<(SecurityLevel, Vec<String>)> {
     let home = root.join("home");
     let project = root.join("project");
     let managed = root.join("managed");
-    for dir in [&home, &project.join(".codex"), &managed, &root.join("account")] {
+    for dir in [
+        &home,
+        &project.join(".codex"),
+        &managed,
+        &root.join("account"),
+    ] {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(project.join(".git"), "")?;
@@ -67,27 +72,66 @@ async fn load(case: Case) -> std::io::Result<(SecurityLevel, Vec<String>)> {
 
 #[tokio::test]
 async fn issue_1976_every_protected_level_source_gets_the_windows_notice() -> std::io::Result<()> {
-    let stored_moderate =
-        serde_json::to_vec(&recovery::DurableSecurityState::new(
-            SecurityLevel::Moderate,
-            RevocationState::new(),
-        ))?;
+    let stored_moderate = serde_json::to_vec(&recovery::DurableSecurityState::new(
+        SecurityLevel::Moderate,
+        RevocationState::new(),
+    ))?;
     let moderate = "[security]\nversion = 1\nlevel = \"moderate\"\n";
     let aggressive = "[security]\nversion = 1\nlevel = \"aggressive\"\n";
     let cases = [
-        ("user", Case { user: moderate, ..Default::default() }, SecurityLevel::Moderate),
-        ("managed", Case { managed: aggressive, ..Default::default() }, SecurityLevel::Aggressive),
-        ("project", Case { project: moderate, ..Default::default() }, SecurityLevel::Moderate),
-        ("stored", Case { stored: Some(stored_moderate), ..Default::default() }, SecurityLevel::Moderate),
-        ("unreadable store", Case { stored: Some(b"not json".to_vec()), ..Default::default() }, SecurityLevel::Aggressive),
+        (
+            "user",
+            Case {
+                user: moderate,
+                ..Default::default()
+            },
+            SecurityLevel::Moderate,
+        ),
+        (
+            "managed",
+            Case {
+                managed: aggressive,
+                ..Default::default()
+            },
+            SecurityLevel::Aggressive,
+        ),
+        (
+            "project",
+            Case {
+                project: moderate,
+                ..Default::default()
+            },
+            SecurityLevel::Moderate,
+        ),
+        (
+            "stored",
+            Case {
+                stored: Some(stored_moderate),
+                ..Default::default()
+            },
+            SecurityLevel::Moderate,
+        ),
+        (
+            "unreadable store",
+            Case {
+                stored: Some(b"not json".to_vec()),
+                ..Default::default()
+            },
+            SecurityLevel::Aggressive,
+        ),
     ];
     let mut wrong = Vec::new();
     for (source, case, expected) in cases {
         let (level, notices) = load(case).await?;
-        let name = if expected == SecurityLevel::Aggressive { "Aggressive" } else { "Moderate" };
-        let notified = notices.len() == 1
-            && notices[0].starts_with(&format!("Security level {name} needs"));
-        if level != expected || notified != cfg!(windows) || (!cfg!(windows) && !notices.is_empty()) {
+        let name = if expected == SecurityLevel::Aggressive {
+            "Aggressive"
+        } else {
+            "Moderate"
+        };
+        let notified =
+            notices.len() == 1 && notices[0].starts_with(&format!("Security level {name} needs"));
+        if level != expected || notified != cfg!(windows) || (!cfg!(windows) && !notices.is_empty())
+        {
             wrong.push(format!("{source}: {level:?} {notices:?}"));
         }
     }
@@ -104,7 +148,11 @@ async fn issue_1976_no_notice_under_permissive_or_with_a_windows_sandbox() -> st
         "[security]\nversion = 1\nlevel = \"moderate\"\n[windows]\nsandbox = \"elevated\"\n",
         "[security]\nversion = 1\nlevel = \"aggressive\"\n[windows]\nsandbox = \"unelevated\"\n",
     ] {
-        let (_, notices) = load(Case { user, ..Default::default() }).await?;
+        let (_, notices) = load(Case {
+            user,
+            ..Default::default()
+        })
+        .await?;
         assert_eq!(notices, Vec::<String>::new(), "{user}");
     }
     Ok(())
