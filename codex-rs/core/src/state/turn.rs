@@ -145,21 +145,21 @@ impl TurnState {
         &mut self,
         inputs: impl IntoIterator<Item = &'a TurnInput>,
     ) {
-        self.taken_mailbox_message_ids.extend(
-            inputs
-                .into_iter()
-                .filter_map(|input| match input {
-                    TurnInput::InterAgentCommunication(communication) => {
-                        communication.message_id.clone()
-                    }
-                    TurnInput::UserInput { .. } | TurnInput::ResponseItem(_) => None,
-                }),
-        );
+        self.taken_mailbox_message_ids
+            .extend(inputs.into_iter().filter_map(|input| match input {
+                TurnInput::InterAgentCommunication(communication) => {
+                    communication.message_id.clone()
+                }
+                TurnInput::UserInput { .. } | TurnInput::ResponseItem(_) => None,
+            }));
     }
 
     /// #1952 (D485): the mailbox messages this turn took but never recorded (`recorded` holds
     /// those it did), leaving out any still deferred to re-admission, which outlives the turn.
-    pub(crate) fn take_unrecorded_mailbox_message_ids(&mut self, recorded: &[String]) -> Vec<String> {
+    pub(crate) fn take_unrecorded_mailbox_message_ids(
+        &mut self,
+        recorded: &[String],
+    ) -> Vec<String> {
         let taken = std::mem::take(&mut self.taken_mailbox_message_ids);
         taken
             .into_iter()
