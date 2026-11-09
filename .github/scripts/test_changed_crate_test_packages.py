@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import re
 import unittest
 
 from changed_crate_test_packages import CANARY_PACKAGE
@@ -64,6 +65,60 @@ class ChangedCrateTestPackagesTest(unittest.TestCase):
             package for helpers in HELPER_BINARIES.values() for package, _ in helpers
         }
         self.assertEqual(named - names, set())
+
+
+class ChangedCrateTestsWorkflowTest(unittest.TestCase):
+    """#1972: PRs run their changed crates' tests on Linux, as a required job."""
+
+    def workflow(self, name: str) -> str:
+        return (ROOT / ".github" / "workflows" / name).read_text()
+
+    def test_rust_ci_runs_and_requires_the_job(self) -> None:
+        rust_ci = self.workflow("rust-ci.yml")
+        self.assertIn(
+            'python3 .github/scripts/changed_crate_test_packages.py "$BASE_SHA" "$HEAD_SHA"',
+            rust_ci,
+        )
+        self.assertRegex(
+            rust_ci,
+            r"(?ms)^  changed_crate_tests:\n.*?"
+            r"if: \$\{\{ needs\.changed\.outputs\.changed_crate_test_packages != '' \}\}\n"
+            r"    uses: \./\.github/workflows/rust-ci-changed-crate-tests\.yml\n",
+        )
+        self.assertRegex(
+            rust_ci, r"(?ms)^  results:\n.*?^        changed_crate_tests,$"
+        )
+        self.assertIn(
+            "[[ '${{ needs.changed_crate_tests.result }}' == 'success' ]]", rust_ci
+        )
+        self.assertIn(
+            "NEEDS_CHANGED_OUTPUTS_CHANGED_CRATE_TEST_PACKAGES: "
+            "${{ needs.changed.outputs.changed_crate_test_packages }}",
+            rust_ci,
+        )
+
+    def test_job_runs_nextest_within_budget_and_saves_no_cache(self) -> None:
+        job = self.workflow("rust-ci-changed-crate-tests.yml")
+        self.assertIn("timeout-minutes: 75", job)
+        self.assertRegex(
+            job, r"cargo nextest run --locked .*--no-fail-fast --no-tests=pass"
+        )
+        self.assertIn("actions/cache/restore@", job)
+        self.assertNotIn("actions/cache/save@", job)
+        self.assertNotRegex(job, r"uses: actions/cache@")
+
+    def test_job_restores_the_core_security_linux_sccache(self) -> None:
+        def keys(text: str) -> list[str]:
+            return re.findall(r"(?m)^ +key: (sccache-core-security-.+)$", text)
+
+        saved = keys(self.workflow("rust-ci-core-security.yml"))[0]
+        restored = keys(self.workflow("rust-ci-changed-crate-tests.yml"))[0]
+        self.assertEqual(
+            restored,
+            saved.replace("${{ inputs.runner }}", "ubuntu-24.04").replace(
+                "${{ inputs.target }}", "${{ env.TARGET }}"
+            ),
+        )
 
 
 if __name__ == "__main__":

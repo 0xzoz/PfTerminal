@@ -34,6 +34,7 @@ JOB_PATHS = (
     ".github/scripts/argument_comment_lint_packages.py",
     ".github/scripts/changed_crate_test_packages.py",
     ".github/workflows/rust-ci-changed-crate-tests.yml",
+    ".github/workflows/rust-ci.yml",
 )
 # Too slow for one PR runner: codex-core has its PR security suites
 # (rust-ci-core-security.yml); all three run in full postmerge.
