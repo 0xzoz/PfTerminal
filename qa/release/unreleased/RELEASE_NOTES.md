@@ -673,6 +673,27 @@ names is now checked within a fixed size budget; past it, its output files
 count as one unknown file, the cautious reading (#1587, #1132, thanks to
 @0xzoz).
 
+## Moderate and Aggressive: no git `ext::` transport after untrusted content
+
+- **Commands run after untrusted content get git's `protocol.ext.allow=never`**
+  (D447, #1876, #1910). It is set in the command's environment
+  (`GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>`), after any
+  entries you set there yourself, and `ext` is dropped from a
+  `GIT_ALLOW_PROTOCOL` list. It outranks every git config file, so an
+  `ext::` remote stored in `.git/config` or `.gitmodules` can't run its
+  command even where the repository's own config allows `ext`. It is an
+  extra layer under the command checks, and needs git 2.31 or later. It
+  doesn't stop `git remote-ext` or `--upload-pack`, which run a program
+  without the `ext` transport (the checks from #1897 ask for those), nor
+  config git reads after it: `git -c protocol.ext.allow=...` or
+  `--config-env` on the line, or `GIT_CONFIG_PARAMETERS`. A
+  `GIT_ALLOW_PROTOCOL` list that held only `ext` is left empty, which
+  allows no git transport. A command session started before the untrusted
+  content keeps its environment. Git variables that only your shell's
+  startup files set (and so only the shell snapshot restores) aren't seen:
+  a `GIT_ALLOW_PROTOCOL` set there keeps `ext`, and the entry may take the
+  place of a `GIT_CONFIG_KEY_<n>` set there.
+
 ## Bare git repositories a command plants
 
 - **New advice in `docs/sandbox.md`** (#1775). A sandboxed command can make a
@@ -746,6 +767,24 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   link to a folder holding another writable folder of the profile. Replace
   the link with a folder; see "A writable folder inside a read-only one" in
   `docs/sandbox.md`.
+- **Non-admin sandbox: `command/exec` runs from a `subst` drive, an 8.3
+  short name or a differently cased path** (#1766, D398).
+  It (and the exec server) refused such a working folder with "cannot enforce split writable root
+  sets directly", because it compared the folders by spelling. It now
+  compares their real paths, so these commands run as they would from the
+  real path, with the same read-only folders. A working folder that leads
+  out of the workspace is still refused. The agent's own commands and the
+  default (elevated) sandbox weren't affected.
+- **Non-admin sandbox: `command/exec` refuses a working folder on a network
+  with a clear message** (D446). A mapped network drive or a UNC path
+  (`\\server\share\...`), as the command's or the sandbox's working folder,
+  is refused with "... is a network folder (a UNC path or a mapped network
+  drive)", for any sandboxed permission profile, read-only included. In
+  #1866's measurement the non-admin sandbox's commands couldn't write
+  through a network path, so such a command ran as if the folder were
+  read-only. Use a folder on a local drive. `\\localhost` paths were
+  already refused (#1863). The agent's own commands and file tools, the
+  exec server and the default (elevated) sandbox are unchanged.
 - **Non-admin sandbox: a writable folder inside a protected `.git`, `.codex`
   or `.agents` folder is refused for older workspace-write profiles too**
   (#1810, D331). A profile in the older workspace-write format, for example
@@ -835,6 +874,19 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   38,000-file repository, 0.5–0.7 s on a `repo` client with 100 projects) and
   the credential watch's first scan, ran on the thread that drives other
   tasks; it now runs on its own. What is flagged is unchanged.
+- **Non-admin sandbox: starting a command no longer holds up other work**
+  (#1909). Its preparation (the command's token, the folder permissions
+  and labels, and the planted-folder walk) and the start of the command
+  itself ran on the thread that drives other tasks: in our measurements
+  each command held it for about 2–4 s on a 38,000-file repository and
+  4–8 s on a `repo` client with 100 projects. They now run on their own,
+  in the same order; other tasks wait at most a few tens of milliseconds.
+  What is flagged is unchanged.
+- **Both sandboxes: the planted-folder watch is a little faster in a `repo`
+  client** (#1909). Each git folder in `.repo\projects` is now looked
+  through once per command start or end instead of twice (once as a
+  repository, once through its work tree's `.git` file), with the same
+  result: about 3% off each (0.51 s to 0.49–0.50 s with 100 projects).
 - **Default (elevated) sandbox setup no longer fails now and then where
   Windows requires complex passwords** (#1776). Setup gives the sandbox's
   user accounts a fresh random password, and about one setup in 4,500 drew
@@ -925,6 +977,17 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   inherited with exact case, so an inherited `Term` next to Corbanu's `TERM`
   reached the command twice and either value could count. Corbanu's value
   now replaces every inherited spelling, as in the sandboxes since #1805.
+- **The planted-folder watch reads only the file it checked** (#1909, both
+  sandboxes). When the watch records a file's content (inside a nested
+  `.codex` or `.agents` folder, in a repository's git folder, or a file a
+  git config names), it now opens the file it checked itself, so a link
+  swapped in after the check is not followed. Before, a process a command
+  left running could swap the file for a symbolic link in that moment, and
+  Corbanu would read through it, for example from a network share. Such a
+  swapped file is now recorded as unreadable, so the change is flagged. A
+  link that is already in a git folder is still read through, as git
+  reads it. A file Windows can't read as itself (for example a placeholder
+  whose provider isn't running) now counts as changed after every command.
 
 ## Windows sandbox: capability SIDs are recorded under a lock (#1871)
 

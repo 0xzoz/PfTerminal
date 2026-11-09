@@ -4012,3 +4012,7 @@ mod tainted_action_git_ext_tests;
 #[cfg(test)]
 #[path = "tainted_action_option_glob_tests.rs"]
 mod tainted_action_option_glob_tests;
+
+#[cfg(test)]
+#[path = "tainted_action_timing_probe_tests.rs"]
+mod tainted_action_timing_probe_tests;
