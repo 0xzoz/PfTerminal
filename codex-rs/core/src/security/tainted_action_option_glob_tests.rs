@@ -106,6 +106,10 @@ fn issue_1912_globs_that_may_name_an_option_ask() {
         "sort *",
         "gsort -u x *",
         "rsync -a * /tmp/dst/",
+        "TAR cf a.tar *",
+        "timeout 9 tar cf a.tar *",
+        "nice -n 5 tar cf a.tar *",
+        "sed -ne=* a.txt",
     ];
     assert_eq!(
         wrong(&lines, Some(ProtectedActionKind::UnseenCode)),
@@ -120,6 +124,7 @@ fn issue_1912_zsh_globs_ask() {
         "tar cf a.tar *(.)",
         "rg data ^a.txt",
         "rg data *~a.rs",
+        "tar cf a.tar x#-*",
     ] {
         assert_eq!(
             classify_with(
@@ -155,6 +160,7 @@ fn issue_1912_globs_that_cannot_name_an_option_stay_quiet() {
         "rg -g '*.rs' data",
         "rg --glob=*.rs data",
         "sed -i s/a/b/ -- *",
+        "sed -- s/a/b/ *",
         "sed -i s/a/b/ src/*.md",
         "sed -i 's/*/x/' a.txt",
         "sort -- *",
@@ -176,6 +182,11 @@ fn issue_1910_quoted_value_with_spaces_does_not_hide_the_remote() {
         "git clone -c 'user.name=A B' e\"$r\"",
         "git fetch --refmap=\"x y\" e\"$r\"",
         "git push --push-option='a b' e\"$r\"",
+        "git fetch --refmap='x,y' e\"$r\"",
+        "git fetch --refmap=x,y e\"$r\"",
+        "git fetch --refmap='x(y' e\"$r\"",
+        // Asks on main too (`git_runs_code_after_git`); kept asking.
+        "git -C 'a b' \"$s\" *",
     ];
     assert_eq!(
         wrong(&lines, Some(ProtectedActionKind::UnseenCode)),
@@ -186,6 +197,7 @@ fn issue_1910_quoted_value_with_spaces_does_not_hide_the_remote() {
         "git fetch --refmap='x y' origin main",
         "git push origin HEAD:\"$b\"",
         "git push origin -- \"$b\"",
+        "git push origin refs/heads/\"$b\"",
         "git commit -m 'a b' && git push origin HEAD:\"$b\"",
     ];
     assert_eq!(wrong(&quiet, None), Vec::<String>::new());
@@ -212,6 +224,8 @@ fn issue_1897_push_hint_names_the_quiet_forms() {
         "git fetch origin \"$b\"",
         "git push origin main; echo \"$b\"",
         "echo push \"$b\"",
+        "git push \"$r\" main",
+        "git push origin main\necho \"$b\"",
     ] {
         assert_eq!(hint(line), None, "{line}");
     }

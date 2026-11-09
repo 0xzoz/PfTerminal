@@ -441,13 +441,14 @@ pub(crate) fn classify_as_named(
 /// branch named by a variable (`git push origin "$b"`), which asks because
 /// git would read a value starting with `-` as an option. Text only; it
 /// decides nothing.
-pub(crate) const PUSH_BRANCH_HINT: &str = "Tip: git may read a branch in a variable after `git \
-     push` (`git push origin \"$b\"`) as an option; `HEAD:\"$b\"` or `-- \"$b\"` avoids that and \
-     this prompt.";
+pub(crate) const PUSH_BRANCH_HINT: &str = "Tip: git may read a branch held in a variable after \
+     `git push` (`git push origin \"$b\"`) as an option; `refs/heads/\"$b\"` or `-- \"$b\"` \
+     names it as a branch and avoids that check.";
 
-/// [`PUSH_BRANCH_HINT`] for an action judged `kind`, when its text has
-/// `git`, then `push`, then a word starting with `$` (after quotes) in the
-/// same command.
+/// [`PUSH_BRANCH_HINT`] for an action judged `kind`, when one of its
+/// command lines has `git`, then `push`, then, after the first operand
+/// (the remote), a word starting with `$` (after quotes) in the same
+/// command.
 pub(crate) fn approval_hint(
     action: &ApprovalAction,
     kind: ProtectedActionKind,
@@ -460,19 +461,27 @@ pub(crate) fn approval_hint(
     if kind != ProtectedActionKind::UnseenCode {
         return None;
     }
-    // 0: none yet; 1: after `git`; 2: after `git … push`.
-    let mut state = 0;
-    for word in command.iter().flat_map(|part| part.split_whitespace()) {
+    for line in command.iter().flat_map(|part| part.split('\n')) {
         work::step();
-        if basename(word) == "git" {
-            state = 1;
-        } else if state == 1 && word == "push" {
-            state = 2;
-        } else if state == 2 && word.trim_start_matches(['"', '\'']).starts_with('$') {
-            return Some(PUSH_BRANCH_HINT);
-        }
-        if word.ends_with([';', '&', '|']) || matches!(word, "&&" | "||") {
-            state = 0;
+        // None: no `git … push` yet; Some(n): after it, with n operands.
+        let (mut git, mut operands) = (false, None);
+        for word in line.split_whitespace() {
+            work::step();
+            match operands {
+                Some(n) if !word.starts_with('-') => {
+                    if n >= 1 && word.trim_start_matches(['"', '\'']).starts_with('$') {
+                        return Some(PUSH_BRANCH_HINT);
+                    }
+                    operands = Some(n + 1);
+                }
+                Some(_) => {}
+                None if basename(word) == "git" => git = true,
+                None if git && word == "push" => operands = Some(0),
+                None => {}
+            }
+            if word.ends_with([';', '&', '|']) || matches!(word, "&&" | "||") {
+                (git, operands) = (false, None);
+            }
         }
     }
     None

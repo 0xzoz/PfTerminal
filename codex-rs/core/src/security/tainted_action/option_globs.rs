@@ -2,9 +2,10 @@
 //! in a folder holding files named `--checkpoint=1` and
 //! `--checkpoint-action=exec=sh x` runs `sh x`; so does `rg data *` with
 //! `--pre=sh`, `sed -i s/a/b/ *` with `--expression=1e sh x`, and `sort`'s
-//! and `rsync`'s program options. These commands read options after their
-//! operands, so a glob before `--` that may make such a word asks, as one
-//! the line does not show. `./*`, `src/*`, `"$PWD"/*` and `--exclude=*.log`
+//! and `rsync`'s program options. The GNU tools read options after their
+//! operands; BSD `tar` and `sed` read them up to the first operand, which a
+//! name starting with `-` usually sorts before. So a glob before `--` that
+//! may make such a word asks, as one the line does not show. `./*`, `src/*`, `"$PWD"/*` and `--exclude=*.log`
 //! cannot start with an option name; `*`, `*.txt`, `-*`, `?*` and `[-]*`
 //! can (for `rg` and `sort`, only a glob that ends in its pattern: see
 //! [`PROGRAM_RUNNERS`]). Git's transports are judged in `rerun`.
@@ -24,12 +25,13 @@ const LINE_RUNNERS: &[&str] = &["tar", "gtar", "bsdtar", "sed", "gsed", "rsync"]
 /// Commands with an option whose value is a program name, looked up on
 /// `PATH` (`rg --pre`, `sort --compress-program`): a glob with literal
 /// text after its pattern (`*.rs`) can only name a program ending in it,
-/// which a file name cannot give a folder for.
+/// which a file name cannot give a folder for (a `PATH` holding `.` or an
+/// empty entry would; that is not judged here).
 const PROGRAM_RUNNERS: &[&str] = &["rg", "sort", "gsort"];
 
 /// Characters at which a word's text stops being literal for this check:
 /// glob characters, braces and extended-glob groups.
-const PATTERN: &[char] = &['*', '?', '[', '^', '{', '(', '@', '!', '+'];
+const PATTERN: &[char] = &['*', '?', '[', '^', '{', '(', '@', '!', '+', '#'];
 
 /// Characters a pattern may end with (`*`, `x?`, `[ab]`, `@(a|b)`,
 /// `{a,*}`).
@@ -43,8 +45,10 @@ fn ends_open(text: &str) -> bool {
 }
 
 /// Old-style `tar` letters that take the next word as their value
-/// (`tar cf -- *`: `--` is the archive).
-const TAR_VALUE_LETTERS: &str = "bCfFgHIKLNTVX";
+/// (`tar cf -- *`: `--` is the archive): GNU tar's (as in `rerun`) and
+/// bsdtar's `s` and `W`. An extra letter only reads `--` as a value, which
+/// asks.
+const TAR_VALUE_LETTERS: &str = "bCfFgHIKLNTVXsW";
 
 /// Whether the command whose command word is at `at` (lowercase basename
 /// `name`) is a [`LINE_RUNNERS`] or [`PROGRAM_RUNNERS`] command given a
@@ -90,15 +94,26 @@ pub(super) fn runs_option_glob(name: &str, at: usize, texts: &[String], words: &
 
 /// Whether the shell may glob `word` into one that starts with `-` and
 /// names an option: its literal text before the first pattern character
-/// is empty, an option name without `=` (`-*`, `--pre*`), or a value the
-/// line does not show (`$d*`).
+/// (less a character zsh's `#` makes optional) is empty, an option name
+/// not ending its value at `=` (`-*`, `--pre*`, `-ne=*`: a short option's
+/// value may be the `=`), or a value the line does not show (`$d*`;
+/// `"$d"/*` holds such a value as a folder, like `"$d"` alone, which is not
+/// judged here).
 fn may_match_option(word: &Word) -> bool {
     if !word.globs {
         return false;
     }
     let text = word.text.as_str();
-    let prefix = &text[..text.find(PATTERN).unwrap_or(text.len())];
+    let end = text.find(PATTERN).unwrap_or(text.len());
+    let mut prefix = &text[..end];
+    // zsh's `x#`, `x##` and `x(#c0,1)` make the `x` before them optional.
+    if text[end..].starts_with('#') || text[end..].starts_with("(#") {
+        prefix = prefix
+            .char_indices()
+            .last()
+            .map_or(prefix, |(last, _)| &prefix[..last]);
+    }
     prefix.is_empty()
-        || (prefix.starts_with('-') && !prefix.contains('='))
+        || (prefix.starts_with('-') && !(prefix.starts_with("--") && prefix.contains('=')))
         || (may_be_built(prefix) && !prefix.contains('/'))
 }

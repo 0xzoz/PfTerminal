@@ -1241,8 +1241,10 @@ impl Classifier {
         // origin *`).
         if !git_starts.is_empty() {
             // #1910: the word lexer splits a quoted value at its blanks and
-            // separators (`--refmap='x y'`), so past one `simple_command`
-            // miscounts the operands and may not take the remote for one.
+            // separators (`--refmap='x y'`), and any word at a comma
+            // (`--refmap=x,y`), and reads quoted brackets, backticks and
+            // `$(` as code, so past one `simple_command` may miscount the
+            // operands and not take the remote for one.
             let mut lexer_split = false;
             let marks: Vec<rerun::GitWordMark> = words
                 .iter()
@@ -1252,10 +1254,11 @@ impl Classifier {
                     // unless it may have miscounted (#1910: `git fetch
                     // --refmap='x y' e"$r"`).
                     let seen = !(lexer_split && word.dynamic);
-                    lexer_split |= word.quoted
-                        && word
-                            .text
-                            .contains([' ', '\t', '\n', ';', '|', '&', '<', '>']);
+                    lexer_split |= word.text.contains(',')
+                        || (word.quoted
+                            && word.text.contains([
+                                ' ', '\t', '\n', ';', '|', '&', '<', '>', '(', ')', '`',
+                            ]));
                     rerun::GitWordMark {
                         seen,
                         loose: (word.dynamic && word.splits)
