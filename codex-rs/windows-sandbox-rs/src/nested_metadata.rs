@@ -401,11 +401,12 @@ pub(crate) fn with_contents(entries: Vec<NestedMetadata>) -> Vec<NestedMetadata>
 
 /// What is inside the `.codex`/`.agents` folder `folder`: each entry at any
 /// depth by its path from `folder`, a file by its content
-/// ([`crate::git_watch::file_print`], which marks hard links), a link by its
-/// target only (never followed), a folder as `dir`. A `folder` that is a
-/// file is its content. A folder that can't be listed, a name that isn't
-/// valid Unicode, or more than [`MAX_CONTENT_ENTRIES`] entries or
-/// [`MAX_CONTENT_BYTES`] of files make it differ every time.
+/// ([`crate::git_watch::unfollowed_file_print`], which marks hard links and
+/// reads only the file itself), a link by its target only (never followed),
+/// a folder as `dir`. A `folder` that is a file is its content (read the
+/// same way). A folder that can't be listed, a name that isn't valid
+/// Unicode, or more than [`MAX_CONTENT_ENTRIES`]
+/// entries or [`MAX_CONTENT_BYTES`] of files make it differ every time.
 pub(crate) fn contents(folder: &Path) -> crate::git_watch::Prints {
     let mut prints = crate::git_watch::Prints::new();
     // A `.codex`/`.agents` that is a file: its content.
@@ -415,7 +416,7 @@ pub(crate) fn contents(folder: &Path) -> crate::git_watch::Prints {
         let print = if metadata.len() > MAX_CONTENT_BYTES {
             crate::git_watch::truncated()
         } else {
-            crate::git_watch::file_print(folder)
+            crate::git_watch::unfollowed_file_print(folder)
         };
         prints.insert(String::new(), print);
         return prints;
@@ -461,7 +462,7 @@ pub(crate) fn contents(folder: &Path) -> crate::git_watch::Prints {
                     let print = if bytes > MAX_CONTENT_BYTES {
                         crate::git_watch::truncated()
                     } else {
-                        crate::git_watch::file_print(&path)
+                        crate::git_watch::unfollowed_file_print(&path)
                     };
                     prints.insert(child, print);
                 }
@@ -590,6 +591,7 @@ pub(crate) fn bare_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
 /// or `commondir` names are looked into when they lie in `roots`. #1877:
 /// several repositories at a time.
 pub(crate) fn repo_states(paths: &[PathBuf], roots: &[PathBuf]) -> Vec<RepoState> {
+    let folders = crate::git_watch::FolderPrints::default();
     crate::par_map::par_map(paths, |path| {
         let link =
             std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink());
@@ -597,7 +599,7 @@ pub(crate) fn repo_states(paths: &[PathBuf], roots: &[PathBuf]) -> Vec<RepoState
             path: path.clone(),
             identity: if link { None } else { identity(path) },
             link,
-            prints: crate::git_watch::fingerprint(path, roots),
+            prints: crate::git_watch::fingerprint_with(path, roots, &folders),
         }
     })
 }

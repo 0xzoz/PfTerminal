@@ -62,6 +62,24 @@
   link to a folder holding another writable folder of the profile. Replace
   the link with a folder; see "A writable folder inside a read-only one" in
   `docs/sandbox.md`.
+- **Non-admin sandbox: `command/exec` runs from a `subst` drive, an 8.3
+  short name or a differently cased path** (#1766, D398).
+  It (and the exec server) refused such a working folder with "cannot enforce split writable root
+  sets directly", because it compared the folders by spelling. It now
+  compares their real paths, so these commands run as they would from the
+  real path, with the same read-only folders. A working folder that leads
+  out of the workspace is still refused. The agent's own commands and the
+  default (elevated) sandbox weren't affected.
+- **Non-admin sandbox: `command/exec` refuses a working folder on a network
+  with a clear message** (D446). A mapped network drive or a UNC path
+  (`\\server\share\...`), as the command's or the sandbox's working folder,
+  is refused with "... is a network folder (a UNC path or a mapped network
+  drive)", for any sandboxed permission profile, read-only included. In
+  #1866's measurement the non-admin sandbox's commands couldn't write
+  through a network path, so such a command ran as if the folder were
+  read-only. Use a folder on a local drive. `\\localhost` paths were
+  already refused (#1863). The agent's own commands and file tools, the
+  exec server and the default (elevated) sandbox are unchanged.
 - **Non-admin sandbox: a writable folder inside a protected `.git`, `.codex`
   or `.agents` folder is refused for older workspace-write profiles too**
   (#1810, D331). A profile in the older workspace-write format, for example
@@ -151,6 +169,19 @@
   38,000-file repository, 0.5–0.7 s on a `repo` client with 100 projects) and
   the credential watch's first scan, ran on the thread that drives other
   tasks; it now runs on its own. What is flagged is unchanged.
+- **Non-admin sandbox: starting a command no longer holds up other work**
+  (#1909). Its preparation (the command's token, the folder permissions
+  and labels, and the planted-folder walk) and the start of the command
+  itself ran on the thread that drives other tasks: in our measurements
+  each command held it for about 2–4 s on a 38,000-file repository and
+  4–8 s on a `repo` client with 100 projects. They now run on their own,
+  in the same order; other tasks wait at most a few tens of milliseconds.
+  What is flagged is unchanged.
+- **Both sandboxes: the planted-folder watch is a little faster in a `repo`
+  client** (#1909). Each git folder in `.repo\projects` is now looked
+  through once per command start or end instead of twice (once as a
+  repository, once through its work tree's `.git` file), with the same
+  result: about 3% off each (0.51 s to 0.49–0.50 s with 100 projects).
 - **Default (elevated) sandbox setup no longer fails now and then where
   Windows requires complex passwords** (#1776). Setup gives the sandbox's
   user accounts a fresh random password, and about one setup in 4,500 drew
@@ -241,3 +272,14 @@
   inherited with exact case, so an inherited `Term` next to Corbanu's `TERM`
   reached the command twice and either value could count. Corbanu's value
   now replaces every inherited spelling, as in the sandboxes since #1805.
+- **The planted-folder watch reads only the file it checked** (#1909, both
+  sandboxes). When the watch records a file's content (inside a nested
+  `.codex` or `.agents` folder, in a repository's git folder, or a file a
+  git config names), it now opens the file it checked itself, so a link
+  swapped in after the check is not followed. Before, a process a command
+  left running could swap the file for a symbolic link in that moment, and
+  Corbanu would read through it, for example from a network share. Such a
+  swapped file is now recorded as unreadable, so the change is flagged. A
+  link that is already in a git folder is still read through, as git
+  reads it. A file Windows can't read as itself (for example a placeholder
+  whose provider isn't running) now counts as changed after every command.
