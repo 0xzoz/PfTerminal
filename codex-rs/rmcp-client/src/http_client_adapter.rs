@@ -141,12 +141,10 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
             )?;
         }
 
-        let maximum_response_bytes = (mcp_method.as_deref() == Some(DiscoverRequestMethod::VALUE)
-            || headers
-                .get(HEADER_MCP_PROTOCOL_VERSION)
-                .and_then(|value| value.to_str().ok())
-                == Some(ProtocolVersion::V_2026_07_28.as_str()))
-        .then_some(MAX_MCP_STDIO_LINE_BYTES);
+        // Custom HTTP clients do not inherit rmcp's built-in response-body
+        // cap. Apply the same bounded collection to legacy initialize and
+        // error responses before authentication or protocol negotiation.
+        let maximum_response_bytes = Some(MAX_MCP_STDIO_LINE_BYTES);
         let redirect_policy = if mcp_method.as_deref() == Some(DiscoverRequestMethod::VALUE) {
             HttpRedirectPolicy::Stop
         } else {
