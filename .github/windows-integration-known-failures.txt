@@ -1,8 +1,10 @@
 # Integration tests (tests/*.rs) that fail on native Windows, excluded from the
 # non-blocking windows-integration-tests.yml workflow (#1856). Each one failed
-# both nextest attempts on windows-2022 (scratch runs 42626867876, 42634961756
-# and this PR's run) and still runs on Linux. The two git_enrichment tests fail
-# intermittently (each failed in two of three runs).
+# both nextest attempts on windows-2022 in at least one run (scratch runs
+# 42626867876 and 42634961756, PR #1970 run 42637232129) and still runs on
+# Linux. The git_enrichment tests are intermittent: concurrent_turns passed in
+# 42626867876 and failed in the other two; startup_prewarm failed in
+# 42626867876 and passed in 42634961756.
 # Format: <cargo package> <exact nextest test name> #<issue>
 # Remove a line once its test passes on Windows; a line naming a test that no
 # longer exists fails .github/scripts/test_windows_integration_known_failures.py.
