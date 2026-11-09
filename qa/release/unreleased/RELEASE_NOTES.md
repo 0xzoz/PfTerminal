@@ -895,6 +895,11 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   common under domain policy), so setup failed with
   `helper_user_create_or_update_failed`. Passwords now always hold
   upper-case and lower-case letters, digits and symbols.
+- **Checked: the planted-folder watch doesn't follow a file re-marked as a
+  link just before it reopens it** (#1909, both sandboxes). On Windows
+  Server 2022 and 2025 and on Windows 11, reopening a file from its handle
+  refuses to follow a link, so the opening raised in review isn't there. A
+  new test keeps it that way. No behaviour change.
 - **Non-admin sandbox: links can't undo a read-only path** (#1645, D293,
   #1542; #1670, #1667). A command doesn't start when a configured read-only
   path, or a folder above it, is a link (junction, symbolic link or mount

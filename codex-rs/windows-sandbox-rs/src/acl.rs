@@ -1323,6 +1323,8 @@ pub(crate) fn open_unfollowed(path: &Path) -> Unfollowed {
     {
         return Unfollowed::Refused;
     }
+    #[cfg(test)]
+    crate::git_watch::tests::before_reopen(path);
     // SAFETY: the handle is open for the call.
     let reopened = unsafe {
         ReOpenFile(
