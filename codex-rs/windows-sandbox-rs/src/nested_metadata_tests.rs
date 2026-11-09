@@ -568,7 +568,7 @@ fn contents_do_not_list_through_a_parent_swapped_in() {
     std::fs::rename(root.join("a"), root.join("a.aside")).expect("move aside");
     junction(&root.join("a"), &outside);
 
-    let prints = contents_of(&folder, recorded);
+    let prints = contents_of(&folder, recorded, &ContentBudget::default());
 
     assert_eq!(
         (
@@ -601,7 +601,9 @@ fn contents_do_not_list_a_folder_replaced_after_the_check() {
         }
     };
 
-    let prints = with_before_list(swap, || contents_of(&folder, recorded));
+    let prints = with_before_list(swap, || {
+        contents_of(&folder, recorded, &ContentBudget::default())
+    });
 
     assert_eq!(
         (
