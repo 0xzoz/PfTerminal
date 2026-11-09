@@ -18,6 +18,7 @@
 //! operands are not judged here.
 
 use super::indirect;
+use super::shell::basename;
 use super::may_be_built;
 use super::quoted::Command;
 use super::quoted::Word;
@@ -178,7 +179,7 @@ fn fed_input(texts: &[String], at: usize, feed: Feed) -> Option<Option<String>> 
     let start = indirect::programs(texts)
         .into_iter()
         .rev()
-        .find(|&index| index < at && basename_lower(&texts[index]) == "xargs")?;
+        .find(|&index| index < at && basename(&texts[index]).eq_ignore_ascii_case("xargs"))?;
     let (mut replace, mut nul) = (None, false);
     let mut index = start + 1;
     while index < at {
@@ -211,6 +212,12 @@ fn fed_input(texts: &[String], at: usize, feed: Feed) -> Option<Option<String>> 
                         replace = Some(value.to_string());
                         break;
                     }
+                    // A value, in the rest of the word or the next one
+                    // (`-n 1`, `-d '\n'`, `-E -0`).
+                    _ if XARGS_VALUE_LETTERS.contains(letter) => {
+                        index += usize::from(rest.is_empty());
+                        break;
+                    }
                     _ => {}
                 }
             }
@@ -224,9 +231,9 @@ fn fed_input(texts: &[String], at: usize, feed: Feed) -> Option<Option<String>> 
     Some(replace.filter(|replace| !replace.is_empty()))
 }
 
-fn basename_lower(word: &str) -> String {
-    word.rsplit('/').next().unwrap_or(word).to_lowercase()
-}
+/// `xargs` letters (GNU and BSD) whose value is the next word when the
+/// rest of theirs is empty.
+const XARGS_VALUE_LETTERS: &str = "adELnPsRS";
 
 /// A loop variable taken from a glob, and what that glob may give it.
 struct GlobLoop {

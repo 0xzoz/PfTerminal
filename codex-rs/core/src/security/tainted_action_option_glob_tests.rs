@@ -325,6 +325,7 @@ fn d484_xargs_fed_by_a_listing_asks() {
         "find . -name '*.txt' | xargs tar cf a.tar",
         "find . -type f | xargs -0 rg data",
         "find . -print0 | xargs tar cf a.tar",
+        "find . -print0 | xargs -E -0 tar cf a.tar",
         "find . -printf '%f\\0' -print0 | xargs -0 tar cf a.tar",
         "ls | xargs -I{} tar rf a.tar {}",
         "ls | xargs -I % tar rf a.tar %",
@@ -343,6 +344,7 @@ fn d484_xargs_fed_by_a_listing_asks() {
 fn d484_other_xargs_input_stays_quiet() {
     let lines = [
         "find . -print0 | xargs -0 tar cf a.tar",
+        "find . -print0 | xargs -n 1 -0 tar cf a.tar",
         "find . -name '*.txt' -print0 | xargs --null rg data",
         "ls | xargs tar cf a.tar --",
         "find . | xargs rg data --",
