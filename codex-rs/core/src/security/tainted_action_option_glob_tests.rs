@@ -185,6 +185,18 @@ fn issue_1910_quoted_value_with_spaces_does_not_hide_the_remote() {
         "git fetch --refmap='x,y' e\"$r\"",
         "git fetch --refmap=x,y e\"$r\"",
         "git fetch --refmap='x(y' e\"$r\"",
+        "git fetch --refmap '}' --depth 1 e\"$r\"",
+        "git fetch origin \\} main \"$v\"",
+        "git fetch --refmap '{' e\"$r\"",
+        "git fetch --refmap='x$' e\"$r\"",
+        "git fetch --refmap=\"x$'\" e\"$r\"",
+        "git fetch --refmap a\u{a0}b e\"$r\"",
+        "git fetch --refmap='x`y' e\"$r\"",
+        "git fetch --refmap='x$(y' e\"$r\"",
+        "git fetch --refmap='x)y' e\"$r\"",
+        "git fetch --refmap='x;y' e\"$r\"",
+        "git fetch --refmap='x|y' e\"$r\"",
+        "git fetch --refmap='x&y' e\"$r\"",
         // Asks on main too (`git_runs_code_after_git`); kept asking.
         "git -C 'a b' \"$s\" *",
     ];
@@ -226,6 +238,8 @@ fn issue_1897_push_hint_names_the_quiet_forms() {
         "echo push \"$b\"",
         "git push \"$r\" main",
         "git push origin main\necho \"$b\"",
+        "git push origin main;echo \"$b\"",
+        "git log push origin \"$b\"",
     ] {
         assert_eq!(hint(line), None, "{line}");
     }

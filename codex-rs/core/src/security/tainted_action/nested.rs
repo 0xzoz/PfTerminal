@@ -1240,11 +1240,13 @@ impl Classifier {
         // knows (`git push . HEAD:$b`, `git fetch --depth=$n .`, `git fetch
         // origin *`).
         if !git_starts.is_empty() {
-            // #1910: the word lexer splits a quoted value at its blanks and
-            // separators (`--refmap='x y'`), and any word at a comma
-            // (`--refmap=x,y`), and reads quoted brackets, backticks and
-            // `$(` as code, so past one `simple_command` may miscount the
-            // operands and not take the remote for one.
+            // #1910: the word lexer may cut words where the shell does not,
+            // so past such a word `simple_command` may miscount the operands
+            // and not take the remote for one: it splits any word at a blank
+            // (any Unicode one), a comma or a bracket (`--refmap='x y'`,
+            // `--refmap=x,y`), ends its command at a word starting with `}`
+            // or a lone `{`, and reads a quoted separator, backtick or `$`
+            // as code (`'x;y'`, `'x$'` starts a `$'…'` string to the end).
             let mut lexer_split = false;
             let marks: Vec<rerun::GitWordMark> = words
                 .iter()
@@ -1254,11 +1256,12 @@ impl Classifier {
                     // unless it may have miscounted (#1910: `git fetch
                     // --refmap='x y' e"$r"`).
                     let seen = !(lexer_split && word.dynamic);
-                    lexer_split |= word.text.contains(',')
-                        || (word.quoted
-                            && word.text.contains([
-                                ' ', '\t', '\n', ';', '|', '&', '<', '>', '(', ')', '`',
-                            ]));
+                    let text = word.text.as_str();
+                    lexer_split |= text.contains(char::is_whitespace)
+                        || text.contains([',', '(', ')'])
+                        || text.starts_with('}')
+                        || text == "{"
+                        || (word.quoted && text.contains([';', '|', '&', '<', '>', '`', '$']));
                     rerun::GitWordMark {
                         seen,
                         loose: (word.dynamic && word.splits)

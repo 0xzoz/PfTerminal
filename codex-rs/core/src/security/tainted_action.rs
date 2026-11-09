@@ -446,9 +446,9 @@ pub(crate) const PUSH_BRANCH_HINT: &str = "Tip: git may read a branch held in a 
      names it as a branch and avoids that check.";
 
 /// [`PUSH_BRANCH_HINT`] for an action judged `kind`, when one of its
-/// command lines has `git`, then `push`, then, after the first operand
-/// (the remote), a word starting with `$` (after quotes) in the same
-/// command.
+/// command lines has `git push` (with git options but no option values
+/// before `push`), then, after the first operand (the remote), a word
+/// starting with `$` (after quotes) in the same command.
 pub(crate) fn approval_hint(
     action: &ApprovalAction,
     kind: ProtectedActionKind,
@@ -476,10 +476,16 @@ pub(crate) fn approval_hint(
                 }
                 Some(_) => {}
                 None if basename(word) == "git" => git = true,
-                None if git && word == "push" => operands = Some(0),
+                // `push` as git's subcommand, its first word.
+                None if git && !word.starts_with('-') => {
+                    git = false;
+                    if word == "push" {
+                        operands = Some(0);
+                    }
+                }
                 None => {}
             }
-            if word.ends_with([';', '&', '|']) || matches!(word, "&&" | "||") {
+            if word.contains([';', '&', '|']) {
                 (git, operands) = (false, None);
             }
         }
