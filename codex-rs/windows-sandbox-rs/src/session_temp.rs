@@ -461,7 +461,7 @@ fn take_leftovers(folder: &Path, codex_home: &Path) {
     });
     let note = match crate::session_temp_leftovers::take_sandbox_leftovers(folder, &accounts) {
         Ok(found) => format!(
-            "D377: in {}: looked at {}, sandbox-owned {}, taken for the user {}, not taken {} (renamed aside {}), unreadable {}, capped {}, code caches {} (renamed aside {})",
+            "D377: in {}: looked at {}, sandbox-owned {}, taken for the user {}, not taken {} (renamed aside {}), unreadable {}, capped {}, code caches {} (renamed aside {}, capped {})",
             folder.display(),
             found.scanned,
             found.sandbox_owned,
@@ -471,7 +471,8 @@ fn take_leftovers(folder: &Path, codex_home: &Path) {
             found.unreadable,
             found.capped,
             found.code_caches,
-            found.code_caches_set_aside
+            found.code_caches_set_aside,
+            found.code_caches_capped
         ),
         Err(err) => format!(
             "D377: could not take the sandbox's leftovers in {}: {err:#}",

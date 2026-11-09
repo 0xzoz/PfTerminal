@@ -19,7 +19,9 @@
 //! renamed in place too, so those programs make new ones. The old grant let
 //! the sandbox write into any of them, whoever owns them, so ownership
 //! doesn't tell which it changed: every folder positively identified as one
-//! (by name, see [`code_cache`]) is renamed. Nothing is deleted.
+//! (by name, see [`code_cache`]) is renamed, and so is a link with such a
+//! name (the link itself), which would still lead those programs to a
+//! folder the sandbox may write. Nothing is deleted.
 
 use crate::acl::file_identity;
 use crate::acl::final_path;
@@ -47,17 +49,20 @@ const SET_ASIDE: &str = "corbanu-sandbox-leftover";
 const CACHE_SET_ASIDE: &str = "corbanu-sandbox-cache";
 /// D456: code caches at the top of the temp folder, by name: Node's
 /// (`module.enableCompileCache()`, `NODE_COMPILE_CACHE` unset), the
-/// `v8-compile-cache` package's, and `jiti`'s transpile cache (v1, v2).
+/// `v8-compile-cache` package's, `jiti`'s transpile cache (v1, v2), and
+/// .NET single-file apps' extracted libraries (reused between runs).
 const TOP_LEVEL_CODE_CACHES: &[&str] = &[
     "node-compile-cache",
     "v8-compile-cache",
     "node-jiti",
     "jiti",
+    ".net",
 ];
-/// Also at the top: `v8-compile-cache` named per user where there are uids.
-const TOP_LEVEL_CODE_CACHE_PREFIXES: &[&str] = &["v8-compile-cache-"];
-/// D456: Python's bytecode folder, anywhere in the temp folder (next to the
-/// sources it was compiled from), holding nothing but `.pyc` files.
+/// Also at the top: `v8-compile-cache` named per user where there are uids,
+/// and `tsx`'s transform cache (`tsx-<user>`).
+const TOP_LEVEL_CODE_CACHE_PREFIXES: &[&str] = &["v8-compile-cache-", "tsx-"];
+/// D456: Python's bytecode folder (a name Python reserves), anywhere in the
+/// temp folder, next to the sources it was compiled from.
 const PYTHON_CODE_CACHE: &str = "__pycache__";
 /// Code caches renamed, at most, in one temp folder.
 const MAX_CODE_CACHES: usize = 10_000;
@@ -96,6 +101,8 @@ pub(crate) struct Leftovers {
     pub code_caches: usize,
     /// Of those, renamed in place.
     pub code_caches_set_aside: usize,
+    /// More were found than [`MAX_CODE_CACHES`]: those weren't renamed.
+    pub code_caches_capped: bool,
 }
 
 /// The SIDs (as strings) of the sandbox's accounts: the members of its
@@ -229,13 +236,18 @@ pub(crate) fn take_sandbox_leftovers(base: &Path, accounts: &[String]) -> Result
                     }
                 }
             }
-            // Taken (and so made the user's) before what is in it.
-            if attributes & FILE_ATTRIBUTE_DIRECTORY != 0
-                && attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
-            {
-                if caches.len() < MAX_CODE_CACHES && code_cache(&path, dir == base) {
+            let is_link = attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0;
+            let is_folder = attributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+            // D456: a link too, by its name only.
+            if (is_folder || is_link) && code_cache(&entry.file_name(), dir == base) {
+                if caches.len() < MAX_CODE_CACHES {
                     caches.push(path.clone());
+                } else {
+                    found.code_caches_capped = true;
                 }
+            }
+            // Taken (and so made the user's) before what is in it.
+            if is_folder && !is_link {
                 stack.push(path);
             }
         }
@@ -246,46 +258,27 @@ pub(crate) fn take_sandbox_leftovers(base: &Path, accounts: &[String]) -> Result
         let Ok(look) = open(cache, READ_CONTROL | FILE_READ_ATTRIBUTES) else {
             continue;
         };
-        let is_folder = look.metadata().is_ok_and(|meta| {
-            meta.file_attributes() & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
-                == FILE_ATTRIBUTE_DIRECTORY
+        // A folder, or a link (opened, and so renamed, itself).
+        let folder_or_link = look.metadata().is_ok_and(|meta| {
+            meta.file_attributes() & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
         });
-        if is_folder && set_aside(cache, &look, &base_key, CACHE_SET_ASIDE) {
+        if folder_or_link && set_aside(cache, &look, &base_key, CACHE_SET_ASIDE) {
             found.code_caches_set_aside += 1;
         }
     }
     Ok(found)
 }
 
-/// D456: whether the folder `path` (`top`: at the top of the temp folder)
-/// is a code cache another program runs code from: by name, and for
-/// Python's, by holding only `.pyc` files.
-fn code_cache(path: &Path, top: bool) -> bool {
-    let Some(name) = path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_ascii_lowercase())
-    else {
-        return false;
-    };
-    if top
-        && (TOP_LEVEL_CODE_CACHES.contains(&name.as_str())
-            || TOP_LEVEL_CODE_CACHE_PREFIXES
-                .iter()
-                .any(|prefix| name.starts_with(prefix)))
-    {
-        return true;
-    }
+/// D456: whether a folder (or link) named `name` (`top`: at the top of the
+/// temp folder) is a code cache another program runs code from, by name.
+fn code_cache(name: &std::ffi::OsStr, top: bool) -> bool {
+    let name = name.to_string_lossy().to_ascii_lowercase();
     name == PYTHON_CODE_CACHE
-        && std::fs::read_dir(path).is_ok_and(|entries| {
-            entries.flatten().all(|entry| {
-                entry.file_type().is_ok_and(|kind| kind.is_file())
-                    && entry
-                        .file_name()
-                        .to_string_lossy()
-                        .to_ascii_lowercase()
-                        .ends_with(".pyc")
-            })
-        })
+        || (top
+            && (TOP_LEVEL_CODE_CACHES.contains(&name.as_str())
+                || TOP_LEVEL_CODE_CACHE_PREFIXES
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))))
 }
 
 enum Take {

@@ -1031,9 +1031,10 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   `%TEMP%` were in Node's `node-compile-cache`.
 - What counts as a code cache, by name: at the top of `%TEMP%`,
   `node-compile-cache`, `v8-compile-cache` (and `v8-compile-cache-*`),
-  `node-jiti` and `jiti`; anywhere in `%TEMP%`, a `__pycache__` folder that
-  holds only `.pyc` files. Each is renamed in place to
-  `<name>.corbanu-sandbox-cache-<random>`. Nothing is deleted. The log of the
-  first command after the upgrade counts them (`code caches N (renamed aside
-  M)`). A cache in use at that moment may fail to rename. It is then left
-  in place and counted.
+  `node-jiti`, `jiti`, `tsx-*` and `.net` (.NET single-file apps' extracted
+  libraries); anywhere in `%TEMP%`, `__pycache__`. Each is renamed in place
+  to `<name>.corbanu-sandbox-cache-<random>`. A link with one of these names
+  is renamed itself, and what it points to is left alone. Nothing is
+  deleted. The log of the first command after the upgrade counts them
+  (`code caches N (renamed aside M, capped …)`). A cache in use at that
+  moment may fail to rename. It is then left in place and counted.
