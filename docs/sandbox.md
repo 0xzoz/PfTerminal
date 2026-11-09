@@ -38,9 +38,16 @@ other folders that let everyone do so (such as the machine key folders under
   different extra folders they may write to) aren't kept apart: one can
   borrow the other's access and write in that project's folders while the
   other runs (#1560), and read the other's memory, such as secrets in its
-  environment or what you type at its prompts (#1838). The default sandbox
-  doesn't prevent borrowing yet either (#1560, #1648), so avoid running
-  commands in several projects at once.
+  environment or what you type at its prompts (#1838). The non-admin sandbox
+  can't stop that read as it is built today: every command it runs carries
+  your own account, and Windows decides who may read a program from that
+  alone. We accept this for now (D433) and will look at it again together
+  with the borrowing (#1560). If you work in several projects at once, use
+  the default sandbox: a change awaiting security sign-off (#1800) stops its
+  commands reading each other's memory (see "Default sandbox: commands can
+  read other projects' running commands" below). The default sandbox
+  doesn't prevent borrowing yet either (#1560, #1648), so until both are
+  closed, avoid running commands in several projects at once.
   In the default sandbox, a command that races another command's start-up
   can also run code with the sandbox account's full access, outside its own
   restrictions (#1721).
@@ -287,6 +294,21 @@ programs through them. A change awaiting security sign-off (#1800), which
 starts each command on a logon of its own, stops the memory read; a
 follow-up built on it, with a test that checks it, will stop the console
 read. Until then, avoid running commands in several projects at once.
+
+**Default sandbox: the temporary folder.** (D377, #304) Each Corbanu
+Terminal session gives its default sandbox commands a temporary folder of
+their own in `%TEMP%` (`corbanu-sandbox-tmp-…`), as `TEMP` and `TMP`, and
+the sandbox may write only there, not in the rest of `%TEMP%`. The folder is
+removed when the session ends. We accept these limits (D444):
+
+- A command can read, but not change, the temporary folder of another
+  session running at the same time, so it can see what that session's
+  commands put there.
+- The non-admin sandbox doesn't get a folder of its own: its commands still
+  use `%TEMP%` itself, as before.
+- Running an older version of Corbanu Terminal puts back the old access to
+  the whole of `%TEMP%`. The next session of this version takes it away
+  again.
 
 **How to switch to the default sandbox.**
 
