@@ -190,9 +190,11 @@ fn apply_no_network_env_vars(env_map: &mut HashMap<String, String>) {
     env_map
         .entry("GIT_SSH_COMMAND".into())
         .or_insert_with(|| "cmd /c exit 1".into());
-    env_map
-        .entry("GIT_ALLOW_PROTOCOLS".into())
-        .or_insert_with(|| "".into());
+    // D475 (#1921): git allows only its local `file` transport, so it refuses
+    // network transports and `ext` before connecting or running anything.
+    // Set over any value the caller passed, in any spelling (names ignore case
+    // on Windows). This was `GIT_ALLOW_PROTOCOLS`, a name git doesn't read.
+    set_env_var(env_map, "GIT_ALLOW_PROTOCOL", "file".into());
 }
 
 #[cfg(test)]
