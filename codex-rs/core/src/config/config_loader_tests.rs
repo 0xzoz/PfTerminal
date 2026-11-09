@@ -3484,14 +3484,18 @@ log_dir = "../logs"
 #[tokio::test]
 async fn project_config_cannot_set_sqlite_home_or_log_dir() -> std::io::Result<()> {
     let tmp = tempdir()?;
-    let (config, dot_codex) = config_with_project_state_locations(tmp.path(), None).await?;
+    let (config, dot_codex) =
+        config_with_project_state_locations(tmp.path(), /*user_locations*/ None).await?;
     let codex_home = config.codex_home.to_path_buf();
 
     // The rest of the project config still applies.
     assert_eq!(config.model.as_deref(), Some("project-model"));
     assert_eq!(config.log_dir, codex_home.join("log"));
     // The project's values would resolve against its `.codex` folder.
-    assert_ne!(config.sqlite.home(), tmp.path().join("project").join("state"));
+    assert_ne!(
+        config.sqlite.home(),
+        tmp.path().join("project").join("state")
+    );
     if std::env::var_os(codex_state::SQLITE_HOME_ENV).is_none() {
         assert_eq!(config.sqlite.home(), codex_home);
     }
@@ -3510,7 +3514,11 @@ async fn project_config_cannot_set_sqlite_home_or_log_dir() -> std::io::Result<(
     );
     for key in ["sqlite_home", "log_dir"] {
         assert!(
-            config.config_layer_stack.effective_config().get(key).is_none(),
+            config
+                .config_layer_stack
+                .effective_config()
+                .get(key)
+                .is_none(),
             "expected the project's {key} to be ignored"
         );
     }
