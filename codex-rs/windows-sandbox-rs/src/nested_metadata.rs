@@ -46,7 +46,7 @@ impl NestedMetadata {
             && self
                 .contents
                 .as_ref()
-                .is_none_or(|before| *before == contents(path))
+                .is_none_or(|before| *before == contents_of(path, identity))
     }
 }
 
@@ -242,6 +242,32 @@ fn open_by_path(path: &Path) -> std::io::Result<crate::acl::walk::Handle> {
     Ok(crate::acl::walk::Handle(file.into_raw_handle() as _))
 }
 
+/// #1909: the folder holding `path` (absolute), reached one folder at a time
+/// from the top of its volume, following no link, and the last name of
+/// `path`; `None` if any folder on the way can't be opened that way.
+fn open_parent_unfollowed(path: &Path) -> Option<(crate::acl::walk::Handle, Vec<u16>)> {
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::path::Component;
+    let mut top = PathBuf::new();
+    let mut names = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir if names.is_empty() => {
+                top.push(component.as_os_str());
+            }
+            Component::Normal(name) => names.push(name.encode_wide().collect::<Vec<u16>>()),
+            _ => return None,
+        }
+    }
+    let last = names.pop()?;
+    let mut dir = open_by_path(&top).ok()?;
+    for name in names {
+        // SAFETY: `dir` is open.
+        dir = unsafe { crate::acl::walk::open_folder_unfollowed(dir.0, &name) }.ok()?;
+    }
+    Some((dir, last))
+}
+
 /// The last component of `path`, as the name to open in its folder.
 fn wide_name(path: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt as _;
@@ -308,6 +334,8 @@ fn list(dir: Pending, top: bool, found: &mut Found, budget: &mut usize, stack: &
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && dir.is_gone() => return,
         Err(err) => Err(err.into()),
     };
+    // A listing that fails partway makes the whole folder unlistable
+    // (#1909: it is listed in full before anything in it is recorded).
     let Ok((handle, entries)) = entries else {
         found.unlistable.push(dir.path);
         return;
@@ -495,47 +523,65 @@ const MAX_CONTENT_BYTES: u64 = 64 * 1024 * 1024;
 /// identified one ([`contents`]), several at a time.
 pub(crate) fn with_contents(entries: Vec<NestedMetadata>) -> Vec<NestedMetadata> {
     crate::par_map::par_map(&entries, |entry| NestedMetadata {
-        contents: entry.identity.map(|_| contents(&entry.path)),
+        contents: entry
+            .identity
+            .map(|_| contents_of(&entry.path, entry.identity)),
         ..entry.clone()
     })
 }
 
-/// What is inside the `.codex`/`.agents` folder `folder`: each entry at any
-/// depth by its path from `folder`, a file by its content
-/// ([`crate::git_watch::unfollowed_file_print`], which marks hard links and
-/// reads only the file itself), a link by its target only (never followed),
-/// a folder as `dir`. A `folder` that is a file is its content (read the
-/// same way). A folder that can't be listed, a name that isn't valid
-/// Unicode, or more than [`MAX_CONTENT_ENTRIES`]
-/// entries or [`MAX_CONTENT_BYTES`] of files make it differ every time.
+/// What is inside the `.codex`/`.agents` folder `folder` (as
+/// [`contents_of`] the file it is now).
+#[cfg(test)]
 pub(crate) fn contents(folder: &Path) -> crate::git_watch::Prints {
+    contents_of(folder, identity(folder))
+}
+
+/// What is inside the `.codex`/`.agents` folder `folder`, the file
+/// `expected`: each entry at any depth by its path from `folder`, a file by
+/// its content ([`crate::git_watch::unfollowed_print_at`], which marks hard
+/// links and reads only the file itself), a link by its target only (never
+/// followed), a folder as `dir`. A `folder` that is a file is its content
+/// (read the same way). A folder that can't be listed, a name that isn't
+/// valid Unicode, or more than [`MAX_CONTENT_ENTRIES`] entries or
+/// [`MAX_CONTENT_BYTES`] of files make it differ every time.
+///
+/// #1909: nothing is looked up by path below the top of the volume:
+/// `folder` is reached one folder at a time from there, following no link
+/// ([`open_parent_unfollowed`]), and must still be the file `expected`;
+/// each folder below it is opened through the folder it was listed in.
+/// Otherwise (a folder on the way swapped for a link, say) it differs
+/// every time.
+fn contents_of(folder: &Path, expected: Option<FileIdentity>) -> crate::git_watch::Prints {
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
     let mut prints = crate::git_watch::Prints::new();
+    let reached = open_parent_unfollowed(folder).and_then(|(parent, name)| {
+        // SAFETY: the parent folder is open.
+        let itself =
+            unsafe { crate::acl::walk::open_itself(parent.0, &name, FILE_READ_ATTRIBUTES) }.ok()?;
+        // SAFETY: the handle is open.
+        let kind = unsafe { itself.kind() }.ok()?.kind();
+        // SAFETY: the handle is open.
+        let (volume, id) = unsafe { itself.identity() }.ok()?;
+        (expected == Some(FileIdentity { volume, id })).then_some((parent, name, kind))
+    });
+    let Some((parent, name, kind)) = reached else {
+        prints.insert(String::new(), crate::git_watch::truncated());
+        return prints;
+    };
     // A `.codex`/`.agents` that is a file: its content.
-    if let Ok(metadata) = std::fs::symlink_metadata(folder)
-        && !metadata.is_dir()
-    {
-        let print = if metadata.len() > MAX_CONTENT_BYTES {
-            crate::git_watch::truncated()
-        } else {
-            crate::git_watch::unfollowed_file_print(folder)
-        };
+    if kind != Kind::Folder {
+        let print = crate::git_watch::unfollowed_print_at(parent.0, &name, folder, |size| {
+            size <= MAX_CONTENT_BYTES
+        });
         prints.insert(String::new(), print);
         return prints;
     }
     let (mut seen, mut bytes) = (0_usize, 0_u64);
-    // #1909: `folder` is opened through its parent, and each folder below it
-    // through the folder it was listed in, following no link.
     let top = Pending {
         path: folder.to_path_buf(),
-        parent: folder
-            .parent()
-            .and_then(|parent| open_by_path(parent).ok())
-            .map(std::sync::Arc::new),
+        parent: Some(std::sync::Arc::new(parent)),
     };
-    if top.parent.is_none() {
-        prints.insert(String::new(), crate::git_watch::truncated());
-        return prints;
-    }
     let mut stack = vec![(top, String::new())];
     while let Some((dir, prefix)) = stack.pop() {
         #[cfg(test)]
@@ -547,7 +593,7 @@ pub(crate) fn contents(folder: &Path) -> crate::git_watch::Prints {
             prints.insert(prefix, crate::git_watch::truncated());
             continue;
         };
-        for (wide, metadata, size) in entries {
+        for (wide, metadata, _size) in entries {
             seen += 1;
             if seen > MAX_CONTENT_ENTRIES {
                 prints.insert(String::new(), crate::git_watch::truncated());
@@ -574,17 +620,19 @@ pub(crate) fn contents(folder: &Path) -> crate::git_watch::Prints {
                 // network share (reading it would send the person's
                 // credentials there) or a device.
                 Ok(Kind::Link) => {
-                    let target = std::fs::read_link(&path)
-                        .map_or_else(|_| "?".to_string(), |target| target.display().to_string());
+                    // SAFETY: the folder is open.
+                    let target = unsafe { crate::acl::walk::link_target_at(handle.0, &wide) }
+                        .unwrap_or_else(|| "?".to_string());
                     prints.insert(child, format!("link to {target}"));
                 }
+                // Counted at the size the open file has (the listing's may
+                // be stale).
                 Ok(Kind::File) => {
-                    bytes = bytes.saturating_add(size);
-                    let print = if bytes > MAX_CONTENT_BYTES {
-                        crate::git_watch::truncated()
-                    } else {
-                        crate::git_watch::unfollowed_print_at(handle.0, &wide, &path)
-                    };
+                    let print =
+                        crate::git_watch::unfollowed_print_at(handle.0, &wide, &path, |size| {
+                            bytes = bytes.saturating_add(size);
+                            bytes <= MAX_CONTENT_BYTES
+                        });
                     prints.insert(child, print);
                 }
                 Err(_) => {

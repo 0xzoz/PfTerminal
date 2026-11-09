@@ -636,23 +636,6 @@ pub(crate) fn file_print(path: &Path) -> String {
     unfollowed_print(path)
 }
 
-/// #1909: [`file_print`], but a link is recorded by its target only and
-/// never read through: `link to <target>`.
-pub(crate) fn unfollowed_file_print(path: &Path) -> String {
-    let Ok(metadata) = std::fs::symlink_metadata(path) else {
-        return "unreadable".to_string();
-    };
-    if metadata.file_type().is_symlink() {
-        let target =
-            std::fs::read_link(path).map_or_else(|_| "?".to_string(), |t| t.display().to_string());
-        return format!("link to {target}");
-    }
-    if metadata.is_dir() {
-        return "dir".to_string();
-    }
-    unfollowed_print(path)
-}
-
 /// The content hash of the file at `path` itself (with ` hard link` when
 /// it has more than one name), or `unreadable`, also when it has become a
 /// link or a folder since the caller looked (#1909): a process a command
@@ -660,25 +643,9 @@ pub(crate) fn unfollowed_file_print(path: &Path) -> String {
 /// reparse point other than a link that can't be read as itself differs
 /// every time, so a change to it is never missed.
 fn unfollowed_print(path: &Path) -> String {
-    unfollowed_print_with(path, || open_unfollowed(path))
-}
-
-/// #1909: [`unfollowed_print`] of the entry `name`, at `path`, of the open
-/// folder `dir`, opened relative to that folder.
-#[cfg(windows)]
-pub(crate) fn unfollowed_print_at(
-    dir: windows_sys::Win32::Foundation::HANDLE,
-    name: &[u16],
-    path: &Path,
-) -> String {
-    unfollowed_print_with(path, || opened(crate::acl::open_unfollowed_at(dir, name)))
-}
-
-/// [`unfollowed_print`] of the file at `path` that `open` opens.
-fn unfollowed_print_with(path: &Path, open: impl FnOnce() -> Opened) -> String {
     #[cfg(test)]
     tests::before_read(path);
-    let (file, links) = match open() {
+    let (file, links) = match open_unfollowed(path) {
         Opened::File(file, links) => (file, links),
         // Marked as before when the name has others (or can't be counted).
         Opened::Refused if link_count(path).is_none_or(|count| count > 1) => {
@@ -692,6 +659,54 @@ fn unfollowed_print_with(path: &Path, open: impl FnOnce() -> Opened) -> String {
         text.push_str(" hard link");
     }
     text
+}
+
+/// #1909: [`unfollowed_print`] of the entry `name`, at `path`, of the open
+/// folder `dir`, with nothing looked up by path: the file is opened (and its
+/// names counted) relative to `dir`. `allow` gets the open file's size and
+/// says whether to read it; if not, or if the file holds more than that
+/// size by the time it is read (it grew), it differs every time.
+#[cfg(windows)]
+pub(crate) fn unfollowed_print_at(
+    dir: windows_sys::Win32::Foundation::HANDLE,
+    name: &[u16],
+    #[cfg_attr(not(test), allow(unused_variables))] path: &Path,
+    allow: impl FnOnce(u64) -> bool,
+) -> String {
+    #[cfg(test)]
+    tests::before_read(path);
+    let (file, links) = match crate::acl::open_unfollowed_at(dir, name) {
+        crate::acl::Unfollowed::File(file, links) => (file, links),
+        // Marked as before when the name has others (or can't be counted).
+        crate::acl::Unfollowed::Refused
+            if crate::acl::link_count_at(dir, name).is_none_or(|count| count > 1) =>
+        {
+            return "unreadable hard link".to_string();
+        }
+        crate::acl::Unfollowed::Refused => return "unreadable".to_string(),
+        crate::acl::Unfollowed::Unsure => return truncated(),
+    };
+    let Ok(size) = file.metadata().map(|metadata| metadata.len()) else {
+        return "unreadable".to_string();
+    };
+    if !allow(size) {
+        return truncated();
+    }
+    let Some(mut text) = hash_at_most(file, size) else {
+        return truncated();
+    };
+    if links > 1 {
+        text.push_str(" hard link");
+    }
+    text
+}
+
+/// [`hash`] of `file`, `None` when it holds more than `size` bytes.
+#[cfg(windows)]
+fn hash_at_most(file: std::fs::File, size: u64) -> Option<String> {
+    let mut limited = file.take(size.saturating_add(1));
+    let text = hash_read(&mut limited);
+    (limited.limit() > 0).then_some(text)
 }
 
 /// What [`open_unfollowed`] found.
@@ -708,12 +723,7 @@ enum Opened {
 /// The file at `path` itself, not followed if it is a link.
 #[cfg(windows)]
 fn open_unfollowed(path: &Path) -> Opened {
-    opened(crate::acl::open_unfollowed(path))
-}
-
-#[cfg(windows)]
-fn opened(unfollowed: crate::acl::Unfollowed) -> Opened {
-    match unfollowed {
+    match crate::acl::open_unfollowed(path) {
         crate::acl::Unfollowed::File(file, links) => Opened::File(file, Some(u64::from(links))),
         crate::acl::Unfollowed::Refused => Opened::Refused,
         crate::acl::Unfollowed::Unsure => Opened::Unsure,
@@ -752,6 +762,11 @@ fn content_print(path: &Path) -> String {
 
 /// The SHA-256 of what `file` holds, or `unreadable`.
 fn hash(mut file: std::fs::File) -> String {
+    hash_read(&mut file)
+}
+
+/// The SHA-256 of what `reader` gives, or `unreadable`.
+fn hash_read(file: &mut impl std::io::Read) -> String {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 8192];
     loop {

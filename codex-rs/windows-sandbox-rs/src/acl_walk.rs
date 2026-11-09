@@ -432,6 +432,64 @@ pub(crate) unsafe fn open_itself(
         .map_err(|status| std::io::Error::from_raw_os_error(RtlNtStatusToDosError(status) as i32))
 }
 
+/// #1909: the target of the link `name` in the open folder `dir`, as
+/// `std::fs::read_link` gives it (an absolute target as `\\?\...`), read
+/// from the link itself opened relative to `dir`; `None` for anything but a
+/// symbolic link or junction.
+pub(crate) unsafe fn link_target_at(dir: HANDLE, name: &[u16]) -> Option<String> {
+    use windows_sys::Win32::System::IO::DeviceIoControl;
+    const FSCTL_GET_REPARSE_POINT: u32 = 0x0009_00A8;
+    const TAG_SYMLINK: u32 = 0xA000_000C;
+    const TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    const SYMLINK_FLAG_RELATIVE: u32 = 1;
+    let link = open_itself(dir, name, 0).ok()?;
+    let mut buffer = vec![0_u8; 16 * 1024];
+    let mut returned = 0_u32;
+    if DeviceIoControl(
+        link.0,
+        FSCTL_GET_REPARSE_POINT,
+        std::ptr::null(),
+        0,
+        buffer.as_mut_ptr().cast(),
+        buffer.len() as u32,
+        &mut returned,
+        std::ptr::null_mut(),
+    ) == 0
+    {
+        return None;
+    }
+    let buffer = buffer.get(..returned as usize)?;
+    let u16_at = |at: usize| Some(u16::from_le_bytes([*buffer.get(at)?, *buffer.get(at + 1)?]));
+    let tag = u32::from_le_bytes(buffer.get(0..4)?.try_into().ok()?);
+    let (path_buffer, relative) = match tag {
+        TAG_SYMLINK => {
+            let flags = u32::from_le_bytes(buffer.get(16..20)?.try_into().ok()?);
+            (20, flags & SYMLINK_FLAG_RELATIVE != 0)
+        }
+        TAG_MOUNT_POINT => (16, false),
+        _ => return None,
+    };
+    let (offset, length) = (usize::from(u16_at(8)?), usize::from(u16_at(10)?));
+    let bytes = buffer.get(path_buffer + offset..path_buffer + offset + length)?;
+    let mut target: Vec<u16> = bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair))
+        .collect();
+    // As `read_link`: an absolute target's `\??\` becomes `\\?\`.
+    let nt_prefix = [
+        u16::from(b'\\'),
+        u16::from(b'?'),
+        u16::from(b'?'),
+        u16::from(b'\\'),
+    ];
+    if !relative && target.starts_with(&nt_prefix) {
+        target[1] = u16::from(b'\\');
+    }
+    Some(String::from_utf16_lossy(&target))
+}
+
 /// `NtOpenFile` of the plain name `name` ([`plain_name`]) in the open folder
 /// `dir` with `access` plus attribute reads and synchronous I/O; the
 /// NTSTATUS when it fails.

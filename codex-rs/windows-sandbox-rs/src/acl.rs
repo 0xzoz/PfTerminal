@@ -1267,6 +1267,18 @@ pub(crate) fn link_count(path: &Path) -> Option<u32> {
         .map(|info| info.nNumberOfLinks)
 }
 
+/// #1909: [`link_count`] of the entry `name` of the open folder `dir`
+/// itself, opened relative to it.
+pub(crate) fn link_count_at(dir: HANDLE, name: &[u16]) -> Option<u32> {
+    const FILE_READ_ATTRIBUTES: u32 = 0x80;
+    // SAFETY: `dir` is an open folder; the entry's handle is open for the
+    // call.
+    unsafe {
+        let entry = walk::open_itself(dir, name, FILE_READ_ATTRIBUTES).ok()?;
+        file_info(entry.0).ok().map(|info| info.nNumberOfLinks)
+    }
+}
+
 /// #1909: what [`open_unfollowed`] found at a path.
 pub(crate) enum Unfollowed {
     /// The file itself, open for reading, with how many names it has.

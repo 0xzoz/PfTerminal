@@ -17,15 +17,27 @@ pub(crate) fn before_list(path: &Path) {
     }
 }
 
-/// Runs `body` with `hook` called on each folder just before it is listed.
+/// Runs `body` with `hook` called on each folder just before it is listed,
+/// one such test at a time.
 fn with_before_list<T>(
     hook: impl Fn(&Path) + Send + Sync + 'static,
     body: impl FnOnce() -> T,
 ) -> T {
+    static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            *BEFORE_LIST
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+    }
+    let _one = ONE_AT_A_TIME
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     *BEFORE_LIST.lock().expect("hook") = Some(std::sync::Arc::new(hook));
-    let result = body();
-    *BEFORE_LIST.lock().expect("hook") = None;
-    result
+    let _clear = Clear;
+    body()
 }
 
 /// Swaps the folder `path` for a junction to `target` once, as a process a
@@ -476,6 +488,37 @@ fn contents_do_not_list_through_a_junction_swapped_in() {
                 .is_some_and(|print| print.starts_with("truncated at")),
         ),
         (vec!["skills", "skills\\"], true)
+    );
+}
+
+/// #1909: a `.codex` folder whose parent was swapped for a junction after
+/// the folder was recorded is not listed through the junction (it is
+/// reached from the top of the volume, following no link); it differs
+/// every time.
+#[test]
+fn contents_do_not_list_through_a_parent_swapped_in() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dunce::canonicalize(dir.path()).expect("canonical");
+    let folder = root.join("a\\.codex");
+    std::fs::create_dir_all(&folder).expect("create");
+    std::fs::write(folder.join("p.md"), "p\n").expect("write");
+    let outside = root.join("outside");
+    std::fs::create_dir_all(outside.join(".codex")).expect("create");
+    std::fs::write(outside.join(".codex\\secret.md"), "s\n").expect("write");
+    let recorded = identity(&folder);
+    std::fs::rename(root.join("a"), root.join("a.aside")).expect("move aside");
+    junction(&root.join("a"), &outside);
+
+    let prints = contents_of(&folder, recorded);
+
+    assert_eq!(
+        (
+            prints.keys().cloned().collect::<Vec<_>>(),
+            prints
+                .get("")
+                .is_some_and(|print| print.starts_with("truncated at")),
+        ),
+        (vec![String::new()], true)
     );
 }
 
