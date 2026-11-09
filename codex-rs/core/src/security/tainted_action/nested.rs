@@ -1234,10 +1234,20 @@ impl Classifier {
         if !git_starts.is_empty() {
             let marks: Vec<rerun::GitWordMark> = words
                 .iter()
-                .map(|word| rerun::GitWordMark {
+                .enumerate()
+                .map(|(at, word)| rerun::GitWordMark {
                     // Other unseen words are `simple_command`'s, which knows
                     // the values the line sets (`r=origin; git fetch "$r"`).
-                    seen: true,
+                    // #1910: but not where quoted text comes before them, which
+                    // the word lexer may split (`--refmap='x y'`), drop (`-o
+                    // ''`) or end the command at (`-o 'a;b'`), so its operands
+                    // do not line up with git's; this reading's do. Unless
+                    // the word lexer resolved every expansion in the line.
+                    seen: !(word.dynamic
+                        && self.lexed_unseen
+                        && at
+                            .checked_sub(1)
+                            .is_some_and(|before| words[before].quoted_before)),
                     loose: (word.dynamic && word.splits)
                         // A glob whose first characters may match `-` (`*`,
                         // `-*`, `"-"*`).

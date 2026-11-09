@@ -707,6 +707,7 @@ impl Classifier {
             stat_builtin: false,
             stat_pending: false,
             quoted_text: false,
+            lexed_unseen: false,
             brace_unsure: false,
             launched: launched_git::Launch::default(),
             substitution_budget: Budget {
@@ -1523,6 +1524,12 @@ struct Classifier {
     /// which the word lexer ignores: it may end a command early there
     /// (`'a; b'`, `'a ( b'`, `a\;b`).
     quoted_text: bool,
+    /// #1910: a word the word lexer read in this line (or one that runs it)
+    /// holds text it does not show. Until then it has resolved every
+    /// expansion (`r=origin; git fetch "$r"`), so the quote-aware reading
+    /// leaves remotes to it. The lines it reads for itself (a script, joined
+    /// literals) do not count.
+    lexed_unseen: bool,
     /// D258: the line (or one that runs it) holds more than plain words,
     /// operators, quotes and well-formed brace groups ([`brace_plain`]). The
     /// word lexer may then cut or misread a command where the quote-aware
@@ -1872,6 +1879,7 @@ impl Classifier {
         }
         let outer_sudo_redefined = self.sudo_redefined;
         let outer_quoted_text = self.quoted_text;
+        let outer_lexed_unseen = self.lexed_unseen;
         self.quoted_text |= command.iter().any(|part| part.contains(['\'', '"', '\\']));
         let outer_brace_unsure = self.brace_unsure;
         self.brace_unsure |= command.iter().any(|part| !brace_plain(part));
@@ -2368,6 +2376,7 @@ impl Classifier {
         self.sed_scope = outer_scope;
         self.sudo_redefined = outer_sudo_redefined;
         self.quoted_text = outer_quoted_text;
+        self.lexed_unseen = outer_lexed_unseen;
         self.brace_unsure = outer_brace_unsure;
         self.visited = outer_visited;
         self.visited_all = outer_visited_all;
@@ -2397,6 +2406,11 @@ impl Classifier {
             || folders.lost
             || self.unknown_folder > 0;
         let lower: Vec<String> = words.iter().map(|word| word.to_lowercase()).collect();
+        self.lexed_unseen = self.lexed_unseen
+            || words.iter().any(|word| {
+                work::step();
+                rerun::git_word_unseen(word)
+            });
         let (hidden, mut unchecked) = self.word_marks(simple, words, variables);
         loops.read(&simple.words);
         let looped = loops.marks(&simple.words);
