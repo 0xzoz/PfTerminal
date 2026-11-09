@@ -351,6 +351,14 @@ impl RmcpClient {
     pub async fn new_in_process_client(
         factory: Arc<dyn InProcessTransportFactory>,
     ) -> io::Result<Self> {
+        Self::new_in_process_client_with_protocol_mode(factory, McpProtocolMode::Legacy).await
+    }
+
+    /// Constructs an in-process client with an explicitly selected compatibility policy.
+    pub async fn new_in_process_client_with_protocol_mode(
+        factory: Arc<dyn InProcessTransportFactory>,
+        protocol_mode: McpProtocolMode,
+    ) -> io::Result<Self> {
         let transport_recipe = TransportRecipe::InProcess { factory };
         let transport = Self::create_pending_transport(&transport_recipe)
             .await
@@ -362,7 +370,7 @@ impl RmcpClient {
             }),
             stdio_process: None,
             transport_recipe,
-            protocol_mode: McpProtocolMode::Legacy,
+            protocol_mode,
             initialize_context: Mutex::new(None),
             session_recovery_lock: Semaphore::new(/*permits*/ 1),
             elicitation_pause_state: ElicitationPauseState::new(),
@@ -1392,6 +1400,10 @@ async fn create_oauth_transport_and_runtime(
 
     Ok((transport, runtime))
 }
+
+#[cfg(test)]
+#[path = "rmcp_client_lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {
