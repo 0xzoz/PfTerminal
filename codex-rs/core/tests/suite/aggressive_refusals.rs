@@ -137,6 +137,7 @@ async fn run_sec_439(aggressive: bool) -> Result<Outcome> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(codex_home)]
 async fn sec_439_no_network_names_the_level_only_under_aggressive() -> Result<()> {
     let aggressive = run_sec_439(/*aggressive*/ true).await?;
     assert!(

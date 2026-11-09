@@ -645,6 +645,7 @@ const PF_30_S03_VAULT: &str = "corbanu vault list";
 /// Moderate only: under Aggressive the vault rule refuses the command
 /// outright, before this prompt (#443; see the Aggressive test below).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(codex_home)]
 async fn pf_30_s03_vault_command_after_untrusted_content_needs_the_human() -> anyhow::Result<()> {
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::ReviewDecision;
@@ -1054,6 +1055,7 @@ async fn pf_30_s03_escalation_retry_is_not_offered_under_moderate() -> anyhow::R
 /// protected action the model takes first thing, before any tool output,
 /// is refused with approvals off; without the memory it runs as before.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(codex_home)]
 async fn pf_30_s03_recalled_memory_gates_a_first_protected_action() -> anyhow::Result<()> {
     use codex_core::config::Constrained;
     use codex_extension_api::ExtensionRegistryBuilder;

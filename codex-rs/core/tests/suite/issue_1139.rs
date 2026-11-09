@@ -167,7 +167,28 @@ fn level_warnings(outcome: &Outcome) -> Vec<&String> {
         .collect()
 }
 
+/// Whether `warning` is Moderate's "blocked writing" warning for `file`,
+/// whose folder exists, by whatever spelling of its path.
+fn names_file(warning: &str, file: &std::path::Path) -> bool {
+    let Some(rest) = warning.strip_prefix("Security level Moderate blocked writing `") else {
+        return false;
+    };
+    let Some((named, tail)) = rest.split_once('`') else {
+        return false;
+    };
+    let named = std::path::Path::new(named);
+    let same_folder = match (named.parent(), file.parent()) {
+        (Some(a), Some(b)) => match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        },
+        _ => false,
+    };
+    same_folder && named.file_name() == file.file_name() && tail.starts_with(": under Moderate")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial_test::serial(codex_home)]
 async fn issue_1139_moderate_git_folder_writes_name_the_level() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
@@ -178,21 +199,19 @@ async fn issue_1139_moderate_git_folder_writes_name_the_level() -> anyhow::Resul
     ] {
         let moderate = run_1139(SecurityLevel::Moderate, command).await?;
         let warnings = level_warnings(&moderate);
-        // PowerShell reports the hook it could not write by its full path,
-        // and the warning names the path the command reported (#1967).
-        let path = match command {
-            Command::Hook if cfg!(windows) => moderate
-                .git
-                .join("hooks")
-                .join("pre-commit")
-                .display()
-                .to_string(),
-            _ => path.to_string(),
-        };
-        let explained = warnings.len() == 1
-            && warnings[0].starts_with(&format!(
-                "Security level Moderate blocked writing `{path}`: under Moderate"
-            ))
+        let named = warnings.len() == 1
+            && match command {
+                // PowerShell reports the hook it could not write by its full
+                // path, which the warning names; compare it as a file, as
+                // TEMP may be spelled with short names (#1967).
+                Command::Hook if cfg!(windows) => {
+                    names_file(warnings[0], &moderate.git.join("hooks").join("pre-commit"))
+                }
+                _ => warnings[0].starts_with(&format!(
+                    "Security level Moderate blocked writing `{path}`: under Moderate"
+                )),
+            };
+        let explained = named
             && warnings[0]
                 .contains("keeps the project's .git folder (git hooks and config) read-only")
             && warnings[0].contains("run the command in their own terminal")

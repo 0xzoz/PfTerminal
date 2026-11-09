@@ -480,7 +480,9 @@ pub fn stdio_server_bin() -> Result<String, CargoBinError> {
 /// #783); without it Windows refuses most commands before any security level
 /// rule is reached. The first sandboxed command runs the elevated setup, so
 /// every test calling this is in the `windows_sandbox_legacy_sessions`
-/// nextest group (#1873). Does nothing elsewhere.
+/// nextest group (#1873) and, for `cargo test`'s threads, marked
+/// `#[serial(codex_home)]` like the other elevated tests. Does nothing
+/// elsewhere.
 pub fn use_elevated_windows_sandbox(config: &mut Config) {
     #[cfg(windows)]
     {
