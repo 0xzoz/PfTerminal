@@ -18,10 +18,10 @@
 //! operands are not judged here.
 
 use super::indirect;
-use super::shell::basename;
 use super::may_be_built;
 use super::quoted::Command;
 use super::quoted::Word;
+use super::shell::basename;
 use super::work;
 
 /// Commands with an option whose value they run as a command line, or as
