@@ -31,9 +31,14 @@ red status noise without testing the code.
   (#1813); `exec-server` (#1813); `utils/pty` and `app-server` (#1839). It
   runs the nightly native Windows Bazel tests (`test-windows-native-main`),
   limited to the changed groups' test targets (`--build_tests_only`). As in
-  nightly, the native lane runs unit tests only: Bazel skips the crates'
-  integration-test targets (`tests/*.rs`) on native Windows as incompatible
-  (#1856), so the `app-server` group runs app-server's unit-test targets.
+  nightly, a crate's integration tests (`tests/*.rs`) run through their
+  `<name>-test-windows-cross` targets; the plain `<name>-test` twins show as
+  `SKIPPED` (incompatible with the gnullvm platform) but test the same files.
+  The exceptions are codex-core, codex-app-server and the code-mode crates:
+  their integration targets depend on codex-code-mode-host / V8, which needs a
+  target-platform Python that Bazel lacks there, so no Bazel job runs them on
+  Windows (#1856). The `app-server` group therefore runs app-server's unit-test
+  targets only; core's and app-server's integration tests run in the job below.
   Other PRs skip it; a change to its workflow
   (`rust-ci-windows-native-tests.yml`) runs every group, but changes to
   `.bazelrc`, other Bazel files or the crates these depend on don't (nightly
@@ -50,6 +55,18 @@ red status noise without testing the code.
   one re-run (`--flaky_test_attempts`) for the intermittent #691 test. If that
   test fails both attempts again, add it to the skip list in `.bazelrc`'s
   `windows-native-tests` config.
+- Windows integration tests for codex-core and codex-app-server
+  (`rust-ci / Windows integration tests (non-blocking) / codex-core` and
+  `... / codex-app-server`, #1856), on PRs that change one of those crates, the
+  job's workflow (`rust-ci-windows-integration-tests.yml`) or its known-failure
+  list. They run `cargo nextest run -p <crate> --test '*'` on windows-2022
+  (msvc). The first native run found 12 codex-core and 19 codex-app-server
+  failures (#1967, #1968, #1969); they are listed in
+  `.github/windows-integration-known-failures.txt`, excluded, and named in the
+  job summary, so any other failure turns the job red. The job is not part of
+  `CI results (required)` until those are fixed. It has no compile cache: about
+  22 minutes to build, then about 5 (core) or 13 (app-server) minutes of tests
+  (60-minute timeout); it runs in parallel with the required jobs.
 - Argument comment lint on changed crates
   (`rust-ci / Argument comment lint - changed crates`, #636): runs the
   `/*param*/` lint, test code included, on every `codex-rs` crate whose `.rs`

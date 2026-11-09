@@ -26,6 +26,9 @@ class PrChangedPathsTest(unittest.TestCase):
         "windows_native_other",
         "windows_native_pty",
         "windows_native_app_server",
+        "windows_integration_tests",
+        "windows_integration_core",
+        "windows_integration_app_server",
         "workflows",
     )
     NAMES = (
@@ -124,6 +127,8 @@ class PrChangedPathsTest(unittest.TestCase):
                 "argument_comment_lint",
                 "windows_native_tests",
                 "windows_native_core",
+                "windows_integration_tests",
+                "windows_integration_core",
             ),
             "codex-rs/windows-sandbox-rs/src": (
                 "codex",
@@ -166,6 +171,8 @@ class PrChangedPathsTest(unittest.TestCase):
                 "argument_comment_lint",
                 "windows_native_tests",
                 "windows_native_app_server",
+                "windows_integration_tests",
+                "windows_integration_app_server",
             ),
             "codex-rs/protocol/src": (
                 "codex",
@@ -205,6 +212,8 @@ class PrChangedPathsTest(unittest.TestCase):
             "argument_comment_lint",
             "windows_native_tests",
             "windows_native_core",
+            "windows_integration_tests",
+            "windows_integration_core",
         )
         self.assertEqual(self.detect([], base=base), expected)
         self.assertEqual(self.detect(["docs/renamed.rs"], base=base), expected)
@@ -233,6 +242,25 @@ class PrChangedPathsTest(unittest.TestCase):
                 "windows_native_app_server",
             ),
         )
+
+    def test_windows_integration_inputs_run_both_packages(self) -> None:
+        # #1856: the job's workflow, its known-failure list and the script
+        # reading it run both packages (and nothing else).
+        for path in (
+            ".github/workflows/rust-ci-windows-integration-tests.yml",
+            ".github/windows-integration-known-failures.txt",
+            ".github/scripts/windows_integration_known_failures.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    self.detect([path]),
+                    self.expected(
+                        "workflows",
+                        "windows_integration_tests",
+                        "windows_integration_core",
+                        "windows_integration_app_server",
+                    ),
+                )
 
     GROUPS = ("core", "sandbox", "other", "pty", "app_server")
 
