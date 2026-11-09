@@ -713,6 +713,18 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
 
 ## Windows sandbox
 
+- **Moderate and Aggressive refuse agent commands and file tools on Windows
+  without a Windows sandbox** (#1976, D491). Commands Windows treats as
+  read-only, such as `Get-Content`, and file tools, such as image viewing,
+  used to run there with no sandbox and could read the files these levels
+  protect. Now each is refused with a message naming the level and how to set
+  the default sandbox up (`/setup-default-sandbox`, or `/permissions` →
+  Default), and a notice says so when the session starts. The session still
+  starts, so you can set the sandbox up or switch to Permissive. This applies
+  however the level was set: any config layer, a level saved with
+  `/security`, or Aggressive enforced because the saved state could not be
+  read. Permissive, the non-admin sandbox's existing refusal and the default
+  sandbox are unchanged.
 - **The default (elevated) sandbox's commands can't break away from their
   job** (#1639, D256, #1507). Cancelling or a timeout now ends every process
   they start in their job; a program that asks to break away gets "access
