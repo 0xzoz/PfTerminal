@@ -80,6 +80,9 @@ fn cancelled_during(step: usize) -> Vec<(u32, u32)> {
     let workspace = test_root.path().join("workspace");
     fs::create_dir_all(&workspace).expect("create workspace");
     let marker = format!("rem corbanu-1909-cancel-{step}");
+    // Made first so that it is dropped last: if this test panics, the
+    // release sender (made below) goes first and the waiting step returns.
+    let runtime = current_thread_runtime();
     let (reached_tx, mut reached_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<HANDLE>>();
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let release_rx = std::sync::Mutex::new(release_rx);
@@ -99,7 +102,6 @@ fn cancelled_during(step: usize) -> Vec<(u32, u32)> {
                 let _ = release_rx.lock().expect("release").recv();
             }));
     }
-    let runtime = current_thread_runtime();
     let copies = runtime.block_on(async {
         let codex_home = sandbox_home("legacy-cancel");
         let profile = PermissionProfile::workspace_write();
@@ -133,7 +135,21 @@ fn cancelled_during(step: usize) -> Vec<(u32, u32)> {
     // Waits for the blocking step to return (its result is dropped).
     drop(runtime);
     *test_hooks::AFTER_BLOCKING_STEP.lock().expect("hook") = None;
-    let after: Vec<u32> = copies.iter().map(|copy| handle_count(*copy)).collect();
+    // Other processes (such as csrss) may hold a started process's handles
+    // until it has fully ended, which a job closing doesn't wait for.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let after: Vec<u32> = copies
+        .iter()
+        .map(|copy| {
+            loop {
+                let count = handle_count(*copy);
+                if count <= 1 || Instant::now() >= deadline {
+                    break count;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+        .collect();
     for copy in copies {
         // SAFETY: a handle this test duplicated.
         unsafe {
