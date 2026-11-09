@@ -71,6 +71,7 @@ async fn http_request_forces_buffered_request_params() -> Result<()> {
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "ignored-stream-id".to_string(),
                 stream_response: false,
+                address_policy: None,
             }
         );
 
@@ -100,6 +101,7 @@ async fn http_request_forces_buffered_request_params() -> Result<()> {
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "ignored-stream-id".to_string(),
             stream_response: true,
+            address_policy: None,
         }),
     )
     .await
@@ -141,6 +143,7 @@ async fn http_response_body_stream_uses_generated_ids_and_receives_ordered_delta
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-1".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
 
@@ -197,6 +200,7 @@ async fn http_response_body_stream_uses_generated_ids_and_receives_ordered_delta
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-2".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         peer.write_response(
@@ -227,6 +231,7 @@ async fn http_response_body_stream_uses_generated_ids_and_receives_ordered_delta
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -266,6 +271,7 @@ async fn http_response_body_stream_uses_generated_ids_and_receives_ordered_delta
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -303,6 +309,7 @@ async fn http_response_body_stream_drops_queued_terminal_before_next_generated_i
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-1".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         peer.write_body_delta(HttpRequestBodyDeltaNotification {
@@ -337,6 +344,7 @@ async fn http_response_body_stream_drops_queued_terminal_before_next_generated_i
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-2".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         peer.write_response(
@@ -364,6 +372,7 @@ async fn http_response_body_stream_drops_queued_terminal_before_next_generated_i
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -389,6 +398,7 @@ async fn http_response_body_stream_drops_queued_terminal_before_next_generated_i
         redirect_policy: HttpRedirectPolicy::Follow,
         request_id: "caller-stream-id".to_string(),
         stream_response: false,
+        address_policy: None,
     };
     let (reuse_response, _reuse_body_stream) =
         timeout(TEST_TIMEOUT, client.http_request_stream(params))
@@ -429,6 +439,7 @@ async fn http_response_body_stream_ignores_late_deltas_after_cancelled_request()
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-1".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         request_seen_tx
@@ -449,6 +460,7 @@ async fn http_response_body_stream_ignores_late_deltas_after_cancelled_request()
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-2".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         peer.write_body_delta(HttpRequestBodyDeltaNotification {
@@ -494,6 +506,7 @@ async fn http_response_body_stream_ignores_late_deltas_after_cancelled_request()
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "caller-stream-id".to_string(),
                 stream_response: false,
+                address_policy: None,
             })
             .await;
     });
@@ -516,6 +529,7 @@ async fn http_response_body_stream_ignores_late_deltas_after_cancelled_request()
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -563,6 +577,7 @@ async fn http_response_body_stream_ignores_late_deltas_after_drop() -> Result<()
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-1".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         peer.write_response(
@@ -603,6 +618,7 @@ async fn http_response_body_stream_ignores_late_deltas_after_drop() -> Result<()
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-2".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         peer.write_response(
@@ -639,6 +655,7 @@ async fn http_response_body_stream_ignores_late_deltas_after_drop() -> Result<()
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -672,6 +689,7 @@ async fn http_response_body_stream_ignores_late_deltas_after_drop() -> Result<()
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -717,6 +735,7 @@ async fn http_response_body_stream_fails_when_transport_disconnects() -> Result<
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-1".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         peer.write_response(
@@ -744,6 +763,7 @@ async fn http_response_body_stream_fails_when_transport_disconnects() -> Result<
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -786,6 +806,7 @@ async fn http_response_body_stream_rejects_oversized_delta() -> Result<()> {
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-1".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         peer.write_body_delta(HttpRequestBodyDeltaNotification {
@@ -811,6 +832,7 @@ async fn http_response_body_stream_rejects_oversized_delta() -> Result<()> {
         redirect_policy: HttpRedirectPolicy::Follow,
         request_id: "caller-stream-id".to_string(),
         stream_response: false,
+        address_policy: None,
     };
     let result = timeout(TEST_TIMEOUT, client.http_request_stream(request))
         .await
@@ -846,6 +868,7 @@ async fn http_response_body_stream_enforces_queued_byte_budget() -> Result<()> {
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-1".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         let frame_count = HTTP_BODY_DELTA_BYTE_BUDGET / MAX_HTTP_BODY_DELTA_BYTES + 1;
@@ -881,6 +904,7 @@ async fn http_response_body_stream_enforces_queued_byte_budget() -> Result<()> {
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-2".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         peer.write_response(
@@ -917,6 +941,7 @@ async fn http_response_body_stream_enforces_queued_byte_budget() -> Result<()> {
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -935,6 +960,7 @@ async fn http_response_body_stream_enforces_queued_byte_budget() -> Result<()> {
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-barrier-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -992,6 +1018,7 @@ async fn http_response_body_streams_share_queued_byte_budget() -> Result<()> {
                     redirect_policy: HttpRedirectPolicy::Follow,
                     request_id: request_id.to_string(),
                     stream_response: true,
+                    address_policy: None,
                 }
             );
             peer.write_response(
@@ -1039,6 +1066,7 @@ async fn http_response_body_streams_share_queued_byte_budget() -> Result<()> {
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-3".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         peer.write_response(
@@ -1081,6 +1109,7 @@ async fn http_response_body_streams_share_queued_byte_budget() -> Result<()> {
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-one".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -1096,6 +1125,7 @@ async fn http_response_body_streams_share_queued_byte_budget() -> Result<()> {
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-two".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -1114,6 +1144,7 @@ async fn http_response_body_streams_share_queued_byte_budget() -> Result<()> {
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-barrier-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -1178,6 +1209,7 @@ async fn http_response_body_stream_reports_disconnect_when_queue_is_full() -> Re
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-1".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         for seq in 1..=HTTP_BODY_DELTA_CHANNEL_CAPACITY {
@@ -1216,6 +1248,7 @@ async fn http_response_body_stream_reports_disconnect_when_queue_is_full() -> Re
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await
@@ -1273,6 +1306,7 @@ async fn http_response_body_stream_reports_backpressure_truncation() -> Result<(
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "http-1".to_string(),
                 stream_response: true,
+                address_policy: None,
             }
         );
         for seq in 1..=OVERFLOWING_BODY_DELTA_FRAMES {
@@ -1316,6 +1350,7 @@ async fn http_response_body_stream_reports_backpressure_truncation() -> Result<(
             redirect_policy: HttpRedirectPolicy::Follow,
             request_id: "caller-stream-id".to_string(),
             stream_response: false,
+            address_policy: None,
         }),
     )
     .await

@@ -229,7 +229,7 @@ impl ExecServerHandler {
         }
         let response = self
             .http_client
-            .runner(params.redirect_policy)
+            .runner(&params)
             .run(params)
             .await;
         if response.is_err() && stream_response {

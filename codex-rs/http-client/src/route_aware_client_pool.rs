@@ -25,6 +25,9 @@ use crate::HttpClientBuilder;
 use crate::HttpClientFactory;
 use crate::OutboundProxyPolicy;
 use crate::OutboundProxyRoute;
+use crate::ResolvedAddressFilter;
+use crate::address_filter::DisallowedAddressError;
+use crate::address_filter::find_disallowed_address;
 use crate::route_aware_redirect::MAX_REDIRECTS;
 use crate::route_aware_redirect::insert_referer;
 use crate::route_aware_redirect::is_redirect;
@@ -52,6 +55,7 @@ pub struct RouteAwareClientPool {
     route_class: ClientRouteClass,
     client_builder: HttpClientBuilder,
     custom_ca_fallback: CustomCaFallback,
+    address_filter: Option<ResolvedAddressFilter>,
     clients: Arc<Mutex<HashMap<OutboundProxyRoute, HttpClient>>>,
 }
 
@@ -89,6 +93,8 @@ pub enum RouteAwareRequestError {
     TooManyRedirects,
     #[error("route-aware request timed out")]
     Timeout,
+    #[error(transparent)]
+    DisallowedAddress(#[from] DisallowedAddressError),
 }
 
 impl RouteAwareRequestError {
@@ -108,7 +114,8 @@ impl RouteAwareRequestError {
             | Self::Build(_)
             | Self::UnsupportedRedirectScheme(_)
             | Self::TooManyRedirects
-            | Self::Timeout => None,
+            | Self::Timeout
+            | Self::DisallowedAddress(_) => None,
         }
     }
 
@@ -330,6 +337,7 @@ impl RouteAwareClientPool {
             route_class,
             client_builder,
             custom_ca_fallback: CustomCaFallback::Disabled,
+            address_filter: None,
             clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -344,6 +352,15 @@ impl RouteAwareClientPool {
             route_class,
             HttpClientBuilder::new().without_request_logging(),
         )
+    }
+
+    /// Restricts every connection, including redirect hops, to addresses `filter` allows.
+    ///
+    /// Redirects are then always followed by the pool so each hop's URL is checked.
+    pub fn with_resolved_address_filter(mut self, filter: ResolvedAddressFilter) -> Self {
+        self.address_filter = Some(filter);
+        self.clients = Arc::new(Mutex::new(HashMap::new()));
+        self
     }
 
     /// Preserves the legacy custom-CA fallback for transport-default proxy routes.
@@ -474,8 +491,9 @@ impl RouteAwareClientPool {
         let request_method = request.method().clone();
         let request_url = request.url().to_string();
         let follows_redirects_manually = self.client_builder.follows_redirects()
-            && self.http_client_factory.outbound_proxy_policy()
-                == OutboundProxyPolicy::RespectSystemProxy;
+            && (self.http_client_factory.outbound_proxy_policy()
+                == OutboundProxyPolicy::RespectSystemProxy
+                || self.address_filter.is_some());
         let timeout_deadline = request
             .timeout()
             .copied()
@@ -484,6 +502,9 @@ impl RouteAwareClientPool {
         let mut previous_route = None;
         loop {
             let current_url = request.url().clone();
+            if let Some(filter) = &self.address_filter {
+                filter.check_url(&current_url)?;
+            }
             let (current_route, client) = match timeout_deadline {
                 Some(timeout_deadline) => tokio::time::timeout_at(
                     timeout_deadline,
@@ -536,6 +557,11 @@ impl RouteAwareClientPool {
                 Err(error) => {
                     if follows_redirects_manually {
                         client.log_error_summary(&request_method, &request_url, &error);
+                    }
+                    if self.address_filter.is_some()
+                        && let Some(disallowed) = find_disallowed_address(&error)
+                    {
+                        return Err(disallowed.into());
                     }
                     return Err(error.into());
                 }
@@ -598,12 +624,24 @@ impl RouteAwareClientPool {
         }
         drop(clients);
 
-        let client_builder = match self.http_client_factory.outbound_proxy_policy() {
-            OutboundProxyPolicy::ReqwestDefault => self.client_builder.clone(),
-            OutboundProxyPolicy::RespectSystemProxy => {
+        let mut client_builder = match self.http_client_factory.outbound_proxy_policy() {
+            OutboundProxyPolicy::ReqwestDefault if self.address_filter.is_none() => {
+                self.client_builder.clone()
+            }
+            OutboundProxyPolicy::ReqwestDefault | OutboundProxyPolicy::RespectSystemProxy => {
                 self.client_builder.clone().without_redirects()
             }
         };
+        if let Some(filter) = &self.address_filter {
+            let filter = match &route {
+                OutboundProxyRoute::Direct => filter.clone(),
+                OutboundProxyRoute::Proxy { url, .. } => {
+                    filter.clone().exempting_proxies([url.clone()])
+                }
+                OutboundProxyRoute::TransportDefault => filter.clone().exempting_env_proxies(),
+            };
+            client_builder = client_builder.resolved_address_filter(filter);
+        }
         #[expect(
             deprecated,
             reason = "explicitly opted-in pools preserve the legacy custom-CA fallback"

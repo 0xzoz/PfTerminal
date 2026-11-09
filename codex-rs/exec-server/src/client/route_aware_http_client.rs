@@ -12,6 +12,7 @@ use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::RouteAwareClientPool;
 use codex_http_client::RouteAwareRequestError;
+use codex_http_client::ResolvedAddressFilter;
 use futures::FutureExt;
 use futures::StreamExt;
 use futures::future::BoxFuture;
@@ -26,6 +27,7 @@ use super::HttpResponseBodyStream;
 use super::response_body_stream::send_body_delta;
 use crate::HttpClient;
 use crate::client::ExecServerError;
+use crate::protocol::HTTP_ADDRESS_POLICY_DENIED_PREFIX;
 use crate::protocol::HttpHeader;
 use crate::protocol::HttpRedirectPolicy;
 use crate::protocol::HttpRequestBodyDeltaNotification;
@@ -39,6 +41,7 @@ use crate::rpc::invalid_params;
 /// HTTP capability implementation backed by the shared route-aware transport.
 #[derive(Clone)]
 pub struct RouteAwareHttpClient {
+    http_client_factory: HttpClientFactory,
     follow_redirects: RouteAwareClientPool,
     stop_redirects: RouteAwareClientPool,
 }
@@ -59,6 +62,7 @@ pub(crate) struct RouteAwareHttpRequestRunner {
 impl RouteAwareHttpClient {
     pub fn new(http_client_factory: HttpClientFactory) -> Self {
         Self {
+            http_client_factory: http_client_factory.clone(),
             follow_redirects: RouteAwareClientPool::with_chatgpt_cloudflare_cookies_without_request_logging(
                 http_client_factory.clone(),
                 // Delegated HTTP targets arbitrary endpoints; route class only labels diagnostics.
@@ -73,15 +77,39 @@ impl RouteAwareHttpClient {
         }
     }
 
-    pub(crate) fn runner(
-        &self,
-        redirect_policy: HttpRedirectPolicy,
-    ) -> RouteAwareHttpRequestRunner {
-        let client = match redirect_policy {
-            HttpRedirectPolicy::Follow => self.follow_redirects.clone(),
-            HttpRedirectPolicy::Stop => self.stop_redirects.clone(),
+    /// Picks the client pool for `params`. A request with an address policy
+    /// gets its own pool whose every connection and redirect hop is checked.
+    pub(crate) fn runner(&self, params: &HttpRequestParams) -> RouteAwareHttpRequestRunner {
+        let Some(policy) = params.address_policy.clone() else {
+            let client = match params.redirect_policy {
+                HttpRedirectPolicy::Follow => self.follow_redirects.clone(),
+                HttpRedirectPolicy::Stop => self.stop_redirects.clone(),
+            };
+            return RouteAwareHttpRequestRunner { client };
         };
-        RouteAwareHttpRequestRunner { client }
+        let factory = self.http_client_factory.clone();
+        let client = match params.redirect_policy {
+            HttpRedirectPolicy::Follow => {
+                RouteAwareClientPool::with_chatgpt_cloudflare_cookies_without_request_logging(
+                    factory,
+                    ClientRouteClass::Other,
+                )
+            }
+            HttpRedirectPolicy::Stop => {
+                RouteAwareClientPool::with_chatgpt_cloudflare_cookies_without_redirects_or_request_logging(
+                    factory,
+                    ClientRouteClass::Other,
+                )
+            }
+        };
+        let resolved_policy = policy.clone();
+        let filter = ResolvedAddressFilter::new(
+            move |addr| resolved_policy.allows_resolved(addr),
+            move |addr| policy.allows_literal(addr),
+        );
+        RouteAwareHttpRequestRunner {
+            client: client.with_resolved_address_filter(filter),
+        }
     }
 }
 
@@ -91,7 +119,7 @@ impl HttpClient for RouteAwareHttpClient {
         params: HttpRequestParams,
     ) -> BoxFuture<'_, Result<HttpRequestResponse, ExecServerError>> {
         async move {
-            let runner = self.runner(params.redirect_policy);
+            let runner = self.runner(&params);
             let (response, _) = runner
                 .run(HttpRequestParams {
                     stream_response: false,
@@ -109,7 +137,7 @@ impl HttpClient for RouteAwareHttpClient {
         params: HttpRequestParams,
     ) -> BoxFuture<'_, Result<(HttpRequestResponse, HttpResponseBodyStream), ExecServerError>> {
         async move {
-            let runner = self.runner(params.redirect_policy);
+            let runner = self.runner(&params);
             let (response, pending_stream) = runner
                 .run(HttpRequestParams {
                     stream_response: true,
@@ -171,6 +199,13 @@ impl RouteAwareHttpRequestRunner {
 
         let response = match request.send().instrument(request_span.clone()).await {
             Ok(response) => response,
+            Err(RouteAwareRequestError::DisallowedAddress(error)) => {
+                request_span.record("error.type", "address_policy");
+                tracing::warn!(http_method = method.as_str(), error = %error, "http/request blocked");
+                return Err(internal_error(format!(
+                    "{HTTP_ADDRESS_POLICY_DENIED_PREFIX}: {error}"
+                )));
+            }
             Err(error) => {
                 request_span.record("error.type", "request");
                 // Shown to users (MCP startup failures); the URL can carry credentials.

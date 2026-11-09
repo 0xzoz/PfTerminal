@@ -14,6 +14,7 @@ use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::HttpAddressPolicy;
 use crate::ProcessId;
 
 pub const INITIALIZE_METHOD: &str = "initialize";
@@ -659,6 +660,10 @@ pub struct HttpRequestParams {
     /// Return after response headers and stream the response body as deltas.
     #[serde(default)]
     pub stream_response: bool,
+    /// Restricts which addresses the request, and each redirect hop, may
+    /// connect to. Omitted means no restriction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address_policy: Option<HttpAddressPolicy>,
 }
 
 /// HTTP response envelope returned from an executor `http/request` call.

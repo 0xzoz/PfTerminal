@@ -70,6 +70,7 @@ async fn exec_server_http_request_buffers_response_body() -> anyhow::Result<()> 
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "buffered-request".to_string(),
                 stream_response: false,
+                address_policy: None,
             })?,
         )
         .await?;
@@ -137,6 +138,7 @@ async fn exec_server_http_request_omits_url_fragment() -> anyhow::Result<()> {
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "fragment-request".to_string(),
                 stream_response: false,
+                address_policy: None,
             })?,
         )
         .await?;
@@ -189,6 +191,7 @@ async fn exec_server_http_request_uses_configured_system_proxy() -> anyhow::Resu
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "system-proxy-request".to_string(),
                 stream_response: false,
+                address_policy: None,
             })?,
         )
         .await?;
@@ -245,6 +248,7 @@ async fn exec_server_http_request_normalizes_unicode_hostname() -> anyhow::Resul
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "unicode-hostname-request".to_string(),
                 stream_response: false,
+                address_policy: None,
             })?,
         )
         .await?;
@@ -293,6 +297,7 @@ async fn exec_server_http_request_can_stop_at_redirects() -> anyhow::Result<()> 
                 redirect_policy: HttpRedirectPolicy::Stop,
                 request_id: "redirect-request".to_string(),
                 stream_response: false,
+                address_policy: None,
             })?,
         )
         .await?;
@@ -348,6 +353,7 @@ async fn exec_server_http_request_can_follow_redirects() -> anyhow::Result<()> {
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "follow-redirect-request".to_string(),
                 stream_response: false,
+                address_policy: None,
             })?,
         )
         .await?;
@@ -417,6 +423,7 @@ async fn exec_server_http_request_streams_response_body_notifications() -> anyho
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "stream-1".to_string(),
                 stream_response: true,
+                address_policy: None,
             })?,
         )
         .await?;
@@ -504,6 +511,7 @@ async fn exec_server_http_request_rejects_duplicate_stream_request_ids() -> anyh
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "stream-dup".to_string(),
                 stream_response: true,
+                address_policy: None,
             })?,
         )
         .await?;
@@ -528,6 +536,7 @@ async fn exec_server_http_request_rejects_duplicate_stream_request_ids() -> anyh
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "stream-dup".to_string(),
                 stream_response: true,
+                address_policy: None,
             })?,
         )
         .await?;
@@ -583,6 +592,7 @@ async fn exec_server_http_request_honors_optional_timeout() -> anyhow::Result<()
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "buffered-request".to_string(),
                 stream_response: false,
+                address_policy: None,
             })?,
         )
         .await?;
@@ -609,6 +619,7 @@ async fn exec_server_http_request_honors_optional_timeout() -> anyhow::Result<()
                 redirect_policy: HttpRedirectPolicy::Follow,
                 request_id: "buffered-request".to_string(),
                 stream_response: false,
+                address_policy: None,
             })?,
         )
         .await?;
