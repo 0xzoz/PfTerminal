@@ -265,7 +265,11 @@ fn open_by_path(path: &Path, access: u32) -> std::io::Result<crate::acl::walk::H
     const SYNCHRONIZE: u32 = 0x0010_0000;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     let file = std::fs::OpenOptions::new()
-        .access_mode(access | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
+        .access_mode(if access == FOLDER_LIST {
+            access | FILE_READ_ATTRIBUTES | SYNCHRONIZE
+        } else {
+            access | SYNCHRONIZE
+        })
         .share_mode(0x7)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
         .open(path)?;

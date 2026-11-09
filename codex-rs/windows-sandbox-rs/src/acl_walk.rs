@@ -381,7 +381,14 @@ const FILE_FULL_DIRECTORY_RESTART_INFO: i32 = 15;
 /// The name is matched exactly, as [`list`] returned it.
 pub(crate) unsafe fn open_relative(dir: HANDLE, name: &[u16], access: u32) -> Result<Handle> {
     plain_name(name)?;
-    nt_open(dir, name, access, 0, FILE_OPEN_REPARSE_POINT).map_err(|status| {
+    nt_open(
+        dir,
+        name,
+        access | FILE_READ_ATTRIBUTES,
+        0,
+        FILE_OPEN_REPARSE_POINT,
+    )
+    .map_err(|status| {
         anyhow!(
             "opening {} failed: {status:#x}",
             String::from_utf16_lossy(name)
@@ -411,8 +418,10 @@ pub(crate) unsafe fn open_folder_unfollowed(
 ) -> std::io::Result<Handle> {
     plain_name(name)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
+    // A folder on the way gets no attribute reads either: nothing reads
+    // them, and a folder may grant traverse alone.
     let access = match access {
-        FolderAccess::List => FILE_LIST_DIRECTORY,
+        FolderAccess::List => FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
         FolderAccess::Traverse => FILE_TRAVERSE,
     };
     nt_open(dir, name, access, OBJ_DONT_REPARSE, FILE_DIRECTORY_FILE)
@@ -440,8 +449,14 @@ pub(crate) unsafe fn open_itself(
 ) -> std::io::Result<Handle> {
     plain_name(name)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidInput, err.to_string()))?;
-    nt_open(dir, name, access, 0, FILE_OPEN_REPARSE_POINT)
-        .map_err(|status| std::io::Error::from_raw_os_error(RtlNtStatusToDosError(status) as i32))
+    nt_open(
+        dir,
+        name,
+        access | FILE_READ_ATTRIBUTES,
+        0,
+        FILE_OPEN_REPARSE_POINT,
+    )
+    .map_err(|status| std::io::Error::from_raw_os_error(RtlNtStatusToDosError(status) as i32))
 }
 
 /// #1909: the target of the link `name` in the open folder `dir`, as
@@ -503,8 +518,7 @@ pub(crate) unsafe fn link_target_at(dir: HANDLE, name: &[u16]) -> Option<String>
 }
 
 /// `NtOpenFile` of the plain name `name` ([`plain_name`]) in the open folder
-/// `dir` with `access` plus attribute reads and synchronous I/O; the
-/// NTSTATUS when it fails.
+/// `dir` with `access` and synchronous I/O; the NTSTATUS when it fails.
 unsafe fn nt_open(
     dir: HANDLE,
     name: &[u16],
@@ -538,7 +552,7 @@ unsafe fn nt_open(
     let mut handle: HANDLE = 0;
     let status = NtOpenFile(
         &mut handle,
-        access | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+        access | SYNCHRONIZE,
         &attributes,
         &mut io,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,

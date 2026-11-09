@@ -522,6 +522,39 @@ fn contents_do_not_list_through_a_parent_swapped_in() {
     );
 }
 
+/// #1909: a `.codex` folder replaced by another plain folder of the same
+/// name after it was checked (just before it is listed) is not listed: it
+/// is no longer the folder recorded, so it differs every time.
+#[test]
+fn contents_do_not_list_a_folder_replaced_after_the_check() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dunce::canonicalize(dir.path()).expect("canonical");
+    let folder = root.join("a\\.codex");
+    std::fs::create_dir_all(&folder).expect("create");
+    std::fs::write(folder.join("p.md"), "p\n").expect("write");
+    let recorded = identity(&folder);
+    let replaced = folder.clone();
+    let swap = move |path: &Path| {
+        if same_path(path, &replaced) && !replaced.with_extension("aside").exists() {
+            std::fs::rename(&replaced, replaced.with_extension("aside")).expect("move aside");
+            std::fs::create_dir(&replaced).expect("replace");
+            std::fs::write(replaced.join("other.md"), "o\n").expect("write");
+        }
+    };
+
+    let prints = with_before_list(swap, || contents_of(&folder, recorded));
+
+    assert_eq!(
+        (
+            prints.keys().cloned().collect::<Vec<_>>(),
+            prints
+                .get("")
+                .is_some_and(|print| print.starts_with("truncated at")),
+        ),
+        (vec![String::new()], true)
+    );
+}
+
 /// #1896 item 3: a legacy entry is written without `contents`, and a record
 /// from before it reads back as one.
 #[test]
