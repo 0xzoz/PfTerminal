@@ -4,6 +4,7 @@
 //! Permissive is unchanged, and so is every level on other platforms.
 
 use codex_core::config::Constrained;
+use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
@@ -60,6 +61,11 @@ async fn run(level: SecurityLevel, call: Call) -> anyhow::Result<Outcome> {
         .with_config(move |config| {
             config.security_level = level;
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::Never);
+            // Moderate and Aggressive need it to send a request at all.
+            config
+                .features
+                .enable(Feature::SourceEnvelopes)
+                .expect("test config should allow feature update");
             config
                 .permissions
                 .set_permission_profile(PermissionProfile::workspace_write_with(
