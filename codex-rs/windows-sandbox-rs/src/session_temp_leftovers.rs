@@ -13,6 +13,13 @@
 //! deleted. One the user may not take (its DACL keeps the user from
 //! changing it) is renamed in place, so what would use it by name makes a
 //! new one, the user's; it is counted.
+//!
+//! D456: the code caches other programs keep in the temp folder and later
+//! run code from (Node's compile cache, Python's bytecode, ...) are then
+//! renamed in place too, so those programs make new ones. The old grant let
+//! the sandbox write into any of them, whoever owns them, so ownership
+//! doesn't tell which it changed: every folder positively identified as one
+//! (by name, see [`code_cache`]) is renamed. Nothing is deleted.
 
 use crate::acl::file_identity;
 use crate::acl::final_path;
@@ -36,6 +43,24 @@ use std::path::PathBuf;
 const MAX_ENTRIES: usize = 500_000;
 /// What a leftover the user may not take is renamed to end with.
 const SET_ASIDE: &str = "corbanu-sandbox-leftover";
+/// What a code cache is renamed to end with (D456).
+const CACHE_SET_ASIDE: &str = "corbanu-sandbox-cache";
+/// D456: code caches at the top of the temp folder, by name: Node's
+/// (`module.enableCompileCache()`, `NODE_COMPILE_CACHE` unset), the
+/// `v8-compile-cache` package's, and `jiti`'s transpile cache (v1, v2).
+const TOP_LEVEL_CODE_CACHES: &[&str] = &[
+    "node-compile-cache",
+    "v8-compile-cache",
+    "node-jiti",
+    "jiti",
+];
+/// Also at the top: `v8-compile-cache` named per user where there are uids.
+const TOP_LEVEL_CODE_CACHE_PREFIXES: &[&str] = &["v8-compile-cache-"];
+/// D456: Python's bytecode folder, anywhere in the temp folder (next to the
+/// sources it was compiled from), holding nothing but `.pyc` files.
+const PYTHON_CODE_CACHE: &str = "__pycache__";
+/// Code caches renamed, at most, in one temp folder.
+const MAX_CODE_CACHES: usize = 10_000;
 const DELETE: u32 = 0x1_0000;
 const READ_CONTROL: u32 = 0x2_0000;
 const WRITE_DAC: u32 = 0x4_0000;
@@ -67,6 +92,10 @@ pub(crate) struct Leftovers {
     pub unreadable: usize,
     /// Stopped at [`MAX_ENTRIES`].
     pub capped: bool,
+    /// D456: code caches found ([`code_cache`]).
+    pub code_caches: usize,
+    /// Of those, renamed in place.
+    pub code_caches_set_aside: usize,
 }
 
 /// The SIDs (as strings) of the sandbox's accounts: the members of its
@@ -134,9 +163,7 @@ pub(crate) fn take_sandbox_leftovers(base: &Path, accounts: &[String]) -> Result
         .iter()
         .filter(|sid| !sid.eq_ignore_ascii_case(&user))
         .collect();
-    if accounts.is_empty() {
-        return Ok(found);
-    }
+    // Even with none (accounts since removed), the code caches (D456).
     let user_sid = LocalSid::from_string(&user)?;
     // The user, SYSTEM, Administrators and OWNER RIGHTS (the user, once the
     // owner).
@@ -149,14 +176,15 @@ pub(crate) fn take_sandbox_leftovers(base: &Path, accounts: &[String]) -> Result
     // SAFETY: the handle is open.
     let base_key = comparable(&unsafe { final_path(base_dir.as_raw_handle() as _) }?);
     let mut stack: Vec<PathBuf> = vec![base.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let mut caches: Vec<PathBuf> = Vec::new();
+    'walk: while let Some(dir) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
             if found.scanned >= MAX_ENTRIES {
                 found.capped = true;
-                return Ok(found);
+                break 'walk;
             }
             found.scanned += 1;
             let path = entry.path();
@@ -193,7 +221,7 @@ pub(crate) fn take_sandbox_leftovers(base: &Path, accounts: &[String]) -> Result
                     Take::Changed => found.not_taken += 1,
                     Take::Refused => {
                         found.not_taken += 1;
-                        if set_aside(&path, &look, &base_key) {
+                        if set_aside(&path, &look, &base_key, SET_ASIDE) {
                             found.set_aside += 1;
                         }
                         // Not walked: not the user's.
@@ -205,11 +233,59 @@ pub(crate) fn take_sandbox_leftovers(base: &Path, accounts: &[String]) -> Result
             if attributes & FILE_ATTRIBUTE_DIRECTORY != 0
                 && attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
             {
+                if caches.len() < MAX_CODE_CACHES && code_cache(&path, dir == base) {
+                    caches.push(path.clone());
+                }
                 stack.push(path);
             }
         }
     }
+    // Once what is in them is taken; one inside another first.
+    found.code_caches = caches.len();
+    for cache in caches.iter().rev() {
+        let Ok(look) = open(cache, READ_CONTROL | FILE_READ_ATTRIBUTES) else {
+            continue;
+        };
+        let is_folder = look.metadata().is_ok_and(|meta| {
+            meta.file_attributes() & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                == FILE_ATTRIBUTE_DIRECTORY
+        });
+        if is_folder && set_aside(cache, &look, &base_key, CACHE_SET_ASIDE) {
+            found.code_caches_set_aside += 1;
+        }
+    }
     Ok(found)
+}
+
+/// D456: whether the folder `path` (`top`: at the top of the temp folder)
+/// is a code cache another program runs code from: by name, and for
+/// Python's, by holding only `.pyc` files.
+fn code_cache(path: &Path, top: bool) -> bool {
+    let Some(name) = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+    else {
+        return false;
+    };
+    if top
+        && (TOP_LEVEL_CODE_CACHES.contains(&name.as_str())
+            || TOP_LEVEL_CODE_CACHE_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix)))
+    {
+        return true;
+    }
+    name == PYTHON_CODE_CACHE
+        && std::fs::read_dir(path).is_ok_and(|entries| {
+            entries.flatten().all(|entry| {
+                entry.file_type().is_ok_and(|kind| kind.is_file())
+                    && entry
+                        .file_name()
+                        .to_string_lossy()
+                        .to_ascii_lowercase()
+                        .ends_with(".pyc")
+            })
+        })
 }
 
 enum Take {
@@ -260,11 +336,12 @@ fn take_one(
     }
 }
 
-/// Renames `path` in its folder if it still is the object `look` is open to
-/// and lies in the temp folder whose final path is `base_key` (the user may:
-/// the folder is the user's or was taken first). While the rename's handle
-/// is open, neither it nor a folder on the way can be renamed or replaced.
-fn set_aside(path: &Path, look: &File, base_key: &str) -> bool {
+/// Renames `path` in its folder, to end with `.{suffix}-` and a random
+/// number, if it still is the object `look` is open to and lies in the temp
+/// folder whose final path is `base_key` (the user may: the folder is the
+/// user's or was taken first). While the rename's handle is open, neither it
+/// nor a folder on the way can be renamed or replaced.
+fn set_aside(path: &Path, look: &File, base_key: &str, suffix: &str) -> bool {
     use windows_sys::Win32::Storage::FileSystem::FILE_RENAME_INFO;
     use windows_sys::Win32::Storage::FileSystem::FileRenameInfo;
     use windows_sys::Win32::Storage::FileSystem::SetFileInformationByHandle;
@@ -301,7 +378,7 @@ fn set_aside(path: &Path, look: &File, base_key: &str) -> bool {
         None => format!(r"\\?\{found}"),
     };
     let target: Vec<u16> = format!(
-        "{verbatim}.{SET_ASIDE}-{:08x}",
+        "{verbatim}.{suffix}-{:08x}",
         SmallRng::from_entropy().next_u32()
     )
     .encode_utf16()
@@ -340,3 +417,7 @@ fn open(path: &Path, access: u32) -> std::io::Result<File> {
 fn comparable(path: &str) -> String {
     path.trim_end_matches('\\').to_ascii_lowercase()
 }
+
+#[cfg(test)]
+#[path = "session_temp_leftovers_tests.rs"]
+mod tests;
