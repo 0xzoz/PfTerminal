@@ -67,29 +67,48 @@ class ReleaseNotesTest(unittest.TestCase):
         self.assertEqual(self.run_cli("check"), 1)
 
     def test_assemble_writes_the_version_file_and_removes_fragments(self) -> None:
-        self.write(
-            "1-a.md", "## A\n\n- x\n\n```shell\n# a comment\n## not a heading\n```\n"
-        )
+        fenced = "## A\n\n- x (#1796)\n\n````shell\n# a comment\n```\n## not a heading\n````\n"
+        self.write("1-a.md", fenced)
         self.assertEqual(self.run_cli("check"), 0)
-        (self.notes / "1-a.md").write_text("## A\n\n- x\n")
         self.assertEqual(self.run_cli("assemble", "--version", "0.1.49"), 0)
         target = self.root / "qa/release/0.1.49/RELEASE_NOTES.md"
-        self.assertEqual(
-            target.read_text(), "# Corbanu Terminal 0.1.49\n\n## A\n\n- x\n"
-        )
+        self.assertEqual(target.read_text(), f"# Corbanu Terminal 0.1.49\n\n{fenced}")
         self.assertEqual(list(self.notes.iterdir()), [])
         # A second assembly appends after the notes already there.
         self.write("2-b.md", "## B\n\n- y\n")
         self.assertEqual(self.run_cli("assemble", "--version", "0.1.49"), 0)
         self.assertEqual(
             target.read_text(),
-            "# Corbanu Terminal 0.1.49\n\n## A\n\n- x\n\n## B\n\n- y\n",
+            f"# Corbanu Terminal 0.1.49\n\n{fenced}\n## B\n\n- y\n",
+        )
+        # A section the file already has is not appended twice.
+        self.write("3-b.md", "## B\n\n- z\n")
+        self.assertEqual(self.run_cli("assemble", "--version", "0.1.49"), 1)
+        self.assertTrue((self.notes / "3-b.md").exists())
+
+    def test_assemble_refuses_a_bad_version_or_fragment_and_keeps_fragments(
+        self,
+    ) -> None:
+        self.write("1-a.md", "## A\n\n- x\n")
+        for version in ["../x", "0.1.49\n", "0.1.49-rc1"]:
+            self.assertEqual(self.run_cli("assemble", "--version", version), 1)
+        self.write("2-bad.md", "- no heading\n")
+        self.assertEqual(self.run_cli("assemble", "--version", "0.1.49"), 1)
+        self.assertTrue((self.notes / "1-a.md").exists())
+        self.assertFalse((self.root / "qa/release/0.1.49").exists())
+
+    def test_a_paragraph_after_a_list_keeps_a_blank_line(self) -> None:
+        self.write("1-a.md", "## A\n\n- x\n")
+        self.write("2-a.md", "## A\n\nA paragraph.\n")
+        fragments, _ = release_notes.load(self.root)
+        self.assertEqual(
+            release_notes.assemble(fragments), "## A\n\n- x\n\nA paragraph.\n"
         )
 
-    def test_assemble_refuses_a_bad_version_and_keeps_fragments(self) -> None:
-        self.write("1-a.md", "## A\n\n- x\n")
-        self.assertEqual(self.run_cli("assemble", "--version", "../x"), 1)
-        self.assertTrue((self.notes / "1-a.md").exists())
+    def test_line_numbers_count_leading_blank_lines(self) -> None:
+        self.write("a.md", "\n\n## A\n\n- x\n## B\n")
+        _, errors = release_notes.load(self.root)
+        self.assertIn("a.md:6: one '## ' section", "\n".join(errors))
 
 
 if __name__ == "__main__":

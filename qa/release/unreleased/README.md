@@ -22,7 +22,9 @@ Create `notes/<pr-or-issue-number>-<short-slug>.md`, for example
   appended to that section when the notes are assembled. Run
   `python3 scripts/release/release_notes.py preview` to see the headings in use.
 - One `## ` section per fragment. `###` subsections are fine; a `# ` title is
-  added at release time.
+  added at release time. Entries added to a section that ends in a `###`
+  subsection land under that subsection, so start yours with its own `###`
+  heading if it doesn't belong there.
 - To change an entry that is already on `main`, edit the fragment that holds it.
 
 Check your fragment with:
@@ -39,7 +41,9 @@ python3 scripts/release/release_notes.py assemble --version <version>
 ```
 
 This writes `qa/release/<version>/RELEASE_NOTES.md` (appending after any notes
-already there), and deletes the fragments it used. Sections appear in the order
+already there), and deletes the fragments it used. It refuses a section heading
+that file already has; merge those by hand. The version must be `x.y.z`,
+`x.y.z-alpha.N` or `x.y.z-beta.N`, as the release workflow requires. Sections appear in the order
 of the first fragment, by file name, that uses each heading; entries within a
 section follow file-name order. The `0000-NN-*` fragments hold the notes that
 were in the old shared file, in their original order.

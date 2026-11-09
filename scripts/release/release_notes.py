@@ -50,23 +50,27 @@ def parse(path: Path, root: Path) -> tuple[Fragment | None, list[str]]:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return None, errors + [f"{shown}: not UTF-8"]
-    lines = text.strip("\n").splitlines()
+    raw = text.splitlines()
+    first = next((i for i, line in enumerate(raw) if line.strip()), len(raw))
+    lines = raw[first:]
     if not lines or not lines[0].startswith("## ") or not lines[0][3:].strip():
         return None, errors + [f"{shown}: must start with a '## Section' heading"]
     body = "\n".join(lines[1:]).strip("\n")
     if not body.strip():
         errors.append(f"{shown}: has a heading but no entries")
-    in_fence = False
-    for number, line in enumerate(lines, start=1):
-        if line.lstrip().startswith("```"):
-            in_fence = not in_fence
+    fence = ""
+    for number, line in enumerate(raw, start=1):
         if line != line.rstrip():
             errors.append(f"{shown}:{number}: trailing whitespace")
-        if in_fence:
+        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+        if marker and (not fence or marker.group(1).startswith(fence)):
+            fence = "" if fence else marker.group(1)
             continue
-        if re.match(r"^#(?!#)", line):
+        if fence:
+            continue
+        if line.startswith("# "):
             errors.append(f"{shown}:{number}: '# ' titles are added at release time")
-        if number > 1 and line.startswith("## "):
+        if number > first + 1 and line.startswith("## "):
             errors.append(f"{shown}:{number}: one '## ' section per fragment")
     if errors:
         return None, errors
@@ -140,13 +144,28 @@ def main(argv: list[str] | None = None) -> int:
     if not fragments:
         print("error: no fragments to assemble", file=sys.stderr)
         return 1
-    if not re.match(r"^\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$", args.version):
+    # The release workflow's forms: x.y.z, x.y.z-alpha.N, x.y.z-beta.N.
+    if not re.fullmatch(r"\d+\.\d+\.\d+(-(alpha|beta)\.\d+)?", args.version):
         print(f"error: bad version {args.version!r}", file=sys.stderr)
         return 1
     target = args.root / "qa/release" / args.version / "RELEASE_NOTES.md"
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists():
         existing = target.read_text(encoding="utf-8").rstrip("\n")
+        # Appending a section the file already has would list it twice (and a
+        # repeated run would duplicate entries): merge those by hand.
+        already = sorted(
+            {f.heading for f in fragments}
+            & set(re.findall(r"(?m)^## (.+?)\s*$", existing))
+        )
+        if already:
+            print(
+                f"error: {target.relative_to(args.root)} already has: "
+                + "; ".join(already)
+                + ". Merge by hand or rename the fragment headings.",
+                file=sys.stderr,
+            )
+            return 1
         target.write_text(f"{existing}\n\n{notes}", encoding="utf-8")
     else:
         target.write_text(
