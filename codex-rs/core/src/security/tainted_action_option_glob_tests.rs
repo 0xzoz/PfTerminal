@@ -144,11 +144,9 @@ fn issue_1912_globs_that_cannot_name_an_option_stay_quiet() {
         "tar cf a.tar -- *",
         "tar cf a.tar ./*",
         "tar cf a.tar src/*",
-        "tar cf a.tar \"$PWD\"/*",
         "tar cf a.tar a.txt",
         "tar cf a.tar '*'",
         "tar cf a.tar \"*\"",
-        "tar cf a.tar \\*",
         "tar --exclude=*.log -cf a.tar dir",
         "tar --exclude='*.log' -cf a.tar dir",
         "tar tf a.tar",
@@ -172,6 +170,14 @@ fn issue_1912_globs_that_cannot_name_an_option_stay_quiet() {
         "echo tar cf a.tar *",
     ];
     assert_eq!(wrong(&lines, /*expected*/ None), Vec::<String>::new());
+    // Under Windows path rules these may ask for credential access (a
+    // path the Windows view reads); only this rule's verdict is pinned.
+    for line in ["tar cf a.tar \"$PWD\"/*", "tar cf a.tar \\*"] {
+        assert!(
+            !verdicts(line).contains(&Some(ProtectedActionKind::UnseenCode)),
+            "{line}"
+        );
+    }
 }
 
 #[test]
