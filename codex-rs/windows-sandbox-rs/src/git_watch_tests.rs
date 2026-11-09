@@ -27,15 +27,16 @@ pub(crate) fn with_before_read<T>(hook: impl Fn(&Path) + 'static, body: impl FnO
 }
 
 thread_local! {
-    static BEFORE_REOPEN: RefCell<Option<Hook>> = const { RefCell::new(None) };
+    static BEFORE_REOPEN: RefCell<Option<Box<dyn Fn()>>> = const { RefCell::new(None) };
 }
 
-/// #1909: called with a reparse point other than a link after its tag was
-/// checked, just before it is reopened to be read as itself.
-pub(crate) fn before_reopen(path: &Path) {
+/// #1909: called for a reparse point other than a link after its tag was
+/// checked, just before it is reopened to be read as itself (the hook knows
+/// which file it set up: since #1935 the reopen is reached from a handle).
+pub(crate) fn before_reopen() {
     BEFORE_REOPEN.with(|hook| {
         if let Some(hook) = hook.borrow().as_ref() {
-            hook(path);
+            hook();
         }
     });
 }
@@ -270,9 +271,10 @@ fn file_print_does_not_follow_a_link_tagged_before_the_reopen() {
     let retagged = std::rc::Rc::new(std::cell::Cell::new(false));
     let print = {
         let retagged = std::rc::Rc::clone(&retagged);
+        let path = file.clone();
         BEFORE_REOPEN.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move |path: &Path| {
-                retag_as_link(path, TAG_HSM, &target);
+            *slot.borrow_mut() = Some(Box::new(move || {
+                retag_as_link(&path, TAG_HSM, &target);
                 retagged.set(true);
             }))
         });

@@ -1354,7 +1354,7 @@ fn unfollowed_from(file: std::fs::File) -> Unfollowed {
         return Unfollowed::Refused;
     }
     #[cfg(test)]
-    crate::git_watch::tests::before_reopen(path);
+    crate::git_watch::tests::before_reopen();
     // SAFETY: the handle is open for the call.
     let reopened = unsafe {
         ReOpenFile(
