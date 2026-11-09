@@ -453,7 +453,7 @@ async fn modern_http_rejects_oversized_discovery_and_tool_json_responses() -> an
 }
 
 #[tokio::test]
-async fn legacy_http_keeps_existing_large_json_response_behavior() -> anyhow::Result<()> {
+async fn legacy_http_rejects_oversized_json_response() -> anyhow::Result<()> {
     let server = MockServer::start().await;
     let padding = Arc::new("x".repeat(MAX_MCP_MESSAGE_BYTES + 1));
     Mock::given(method("POST"))
@@ -482,13 +482,11 @@ async fn legacy_http_keeps_existing_large_json_response_behavior() -> anyhow::Re
 
     let client = create_client(&server, McpProtocolMode::Legacy).await?;
     initialize_client(&client).await?;
-    let tools = client
+    let error = client
         .list_tools(/*params*/ None, Some(Duration::from_secs(15)))
-        .await?;
-    assert_eq!(
-        tools.tools[0].description.as_deref().map(str::len),
-        Some(MAX_MCP_MESSAGE_BYTES + 1)
-    );
+        .await
+        .expect_err("legacy oversized JSON response must be rejected");
+    assert!(format!("{error:#}").contains("8388608 bytes"));
     client.shutdown().await;
     Ok(())
 }
