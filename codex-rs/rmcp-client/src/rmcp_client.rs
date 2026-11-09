@@ -351,9 +351,18 @@ pub struct RmcpClient {
     initialize_context: Mutex<Option<InitializeContext>>,
     session_recovery_lock: Semaphore,
     elicitation_pause_state: ElicitationPauseState,
+    discover_timeout: Option<Duration>,
 }
 
 impl RmcpClient {
+    /// Bounds how long an opted-in 2026-07-28 stdio server may take to answer
+    /// `server/discover` before it is started again with legacy `initialize`. Without it,
+    /// the `initialize` timeout bounds the discover wait.
+    pub fn with_discover_timeout(mut self, discover_timeout: Option<Duration>) -> Self {
+        self.discover_timeout = discover_timeout;
+        self
+    }
+
     /// Returns the protocol compatibility policy captured when this client was created.
     pub fn protocol_mode(&self) -> McpProtocolMode {
         self.protocol_mode
@@ -385,6 +394,7 @@ impl RmcpClient {
             initialize_context: Mutex::new(None),
             session_recovery_lock: Semaphore::new(/*permits*/ 1),
             elicitation_pause_state: ElicitationPauseState::new(),
+            discover_timeout: None,
         })
     }
 
@@ -457,6 +467,7 @@ impl RmcpClient {
             initialize_context: Mutex::new(None),
             session_recovery_lock: Semaphore::new(/*permits*/ 1),
             elicitation_pause_state: ElicitationPauseState::new(),
+            discover_timeout: None,
         })
     }
 
@@ -524,6 +535,7 @@ impl RmcpClient {
             initialize_context: Mutex::new(None),
             session_recovery_lock: Semaphore::new(/*permits*/ 1),
             elicitation_pause_state: ElicitationPauseState::new(),
+            discover_timeout: None,
         })
     }
 
@@ -1165,9 +1177,10 @@ impl RmcpClient {
         }
     }
 
-    /// `Auto` without its fixed discover timeout: the caller's startup timeout bounds the
-    /// discover wait, and a server that rejects discover as legacy gets `initialize` on a
-    /// fresh transport, so no discover reply can arrive during the legacy handshake.
+    /// `Auto` without its fixed 10 s discover timeout: the discover wait is the configured
+    /// `discover_timeout_sec`, else the caller's startup timeout. A server that rejects
+    /// discover as legacy, or does not answer in time, gets `initialize` on a fresh transport,
+    /// so no discover reply can arrive during the legacy handshake.
     async fn discover_or_initialize_fresh(
         &self,
         pending_transport: PendingTransport,
@@ -1178,38 +1191,47 @@ impl RmcpClient {
         };
         let (transport, _) =
             Self::serve_pending_transport(pending_transport, client_service.clone(), discover);
-        let discover_error = match transport.await {
-            Ok(service) => return Ok(service),
-            Err(error) if is_legacy_discover_rejection(&error) => error,
-            Err(source) => return Err(HandshakeError { source }.into()),
+        // Dropping the discover future on timeout drops its transport, so no late reply can
+        // reach the fresh one.
+        let discover_result = match self.discover_timeout {
+            Some(wait) => time::timeout(wait, transport).await.ok(),
+            None => Some(transport.await),
+        };
+        let discover_error = match discover_result {
+            Some(Ok(service)) => return Ok(service),
+            Some(Err(error)) if is_legacy_discover_rejection(&error) => Some(error),
+            Some(Err(source)) => return Err(HandshakeError { source }.into()),
+            None => None,
         };
 
+        // Stop the first server process before starting the one that gets `initialize`.
+        let previous_process = self.stdio_process.lock().await.take();
+        if let Some(previous) = previous_process
+            && let Err(error) = previous.terminate().await
+        {
+            warn!("failed to terminate MCP stdio server process after discover: {error}");
+        }
         let fresh_transport = Self::create_pending_transport(&self.transport_recipe).await?;
         if let PendingTransport::Stdio { transport } = &fresh_transport {
-            let previous = self
-                .stdio_process
-                .lock()
-                .await
-                .replace(transport.process_handle());
-            if let Some(previous) = previous
-                && let Err(error) = previous.terminate().await
-            {
-                warn!("failed to terminate MCP stdio server process after discover: {error}");
-            }
+            *self.stdio_process.lock().await = Some(transport.process_handle());
         }
         let (transport, _) = Self::serve_pending_transport(
             fresh_transport,
             client_service,
             ClientLifecycleMode::Initialize,
         );
-        transport.await.map_err(|fallback| {
-            HandshakeError {
+        transport.await.map_err(|fallback| match discover_error {
+            Some(discover_error) => HandshakeError {
                 source: ClientInitializeError::LegacyFallbackFailed {
                     discover: Box::new(discover_error),
                     fallback: Box::new(fallback),
                 },
             }
-            .into()
+            .into(),
+            None => anyhow::Error::from(HandshakeError { source: fallback }).context(format!(
+                "MCP server did not answer server/discover within {:?}; legacy initialize failed",
+                self.discover_timeout.unwrap_or_default()
+            )),
         })
     }
 
