@@ -171,7 +171,7 @@ fn issue_1912_globs_that_cannot_name_an_option_stay_quiet() {
         "wc -l *",
         "echo tar cf a.tar *",
     ];
-    assert_eq!(wrong(&lines, None), Vec::<String>::new());
+    assert_eq!(wrong(&lines, /*expected*/ None), Vec::<String>::new());
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn issue_1910_quoted_value_with_spaces_does_not_hide_the_remote() {
         "git push origin refs/heads/\"$b\"",
         "git commit -m 'a b' && git push origin HEAD:\"$b\"",
     ];
-    assert_eq!(wrong(&quiet, None), Vec::<String>::new());
+    assert_eq!(wrong(&quiet, /*expected*/ None), Vec::<String>::new());
 }
 
 #[test]
