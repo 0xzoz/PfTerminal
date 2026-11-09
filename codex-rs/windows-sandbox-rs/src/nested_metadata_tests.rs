@@ -434,7 +434,7 @@ fn nested_folders_over_the_total_are_flagged() {
     }
     let found = find(std::slice::from_ref(&root));
     assert_eq!(found.entries.len(), 5);
-    let before = with_contents(found.entries.clone());
+    let before = with_contents(found.entries);
 
     let flagged = appeared(&before, find(std::slice::from_ref(&root)).entries);
 
