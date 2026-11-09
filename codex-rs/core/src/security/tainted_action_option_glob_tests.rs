@@ -277,6 +277,12 @@ fn d484_glob_loop_variables_that_may_name_an_option_ask() {
         "for f in src/*; do tar rf a.tar \"${f##*/}\"; done",
         "for f in ./*; do tar rf a.tar $f; done",
         "for f in ./*.rs; do rg data x$f; done",
+        "for f in *.txt; do rg data \"${f%.txt}\"; done",
+        // Past eight loop names, any variable may be one.
+        "for a in *; do :; done; for b in *; do :; done; for c in *; do :; done; \
+         for d in *; do :; done; for e in *; do :; done; for g in *; do :; done; \
+         for h in *; do :; done; for i in *; do :; done; for j in *; do :; done; \
+         tar rf a.tar \"$q\"",
     ];
     assert_eq!(
         wrong(&lines, Some(ProtectedActionKind::UnseenCode)),
@@ -310,6 +316,7 @@ fn d484_other_loop_variables_stay_quiet() {
         "for f in a b; do tar rf a.tar \"$f\"; done",
         "for f in *; do echo \"$f\"; done; tar rf a.tar \"$g\"",
         "for f; do tar rf a.tar \"$ff\"; done",
+        "for f in *; do tar rf a.tar -- \"${f%.txt}\"; done",
     ];
     assert_eq!(wrong(&lines, None), Vec::<String>::new());
 }
@@ -333,6 +340,20 @@ fn d484_xargs_fed_by_a_listing_asks() {
         "ls | xargs --replace={} tar rf a.tar {}",
         "ls | xargs -i rsync -a {} /tmp/dst/",
         "ls | sudo xargs sed -i s/a/b/",
+        // Options after the command xargs runs are that command's.
+        "ls | xargs env -i tar cf a.tar",
+        "ls | xargs -I% env -i tar rf a.tar %",
+        "find . -print0 | xargs env -0 tar cf a.tar",
+        // xargs' own options, read as xargs reads them.
+        "ls | xargs -J % tar rf a.tar %",
+        "ls | xargs -R 1 -J % rsync -a % /tmp/dst/",
+        "ls | xargs --replace tar rf a.tar {}",
+        "ls | xargs --repl=% tar rf a.tar %",
+        "ls | gxargs tar cf a.tar",
+        "find . -print0 | xargs -eX0 tar cf a.tar",
+        // find's names changed or joined by other output.
+        "find . -print0 -exec basename {} \\; | xargs -0 tar cf a.tar",
+        "find . -print0 | xargs -0 basename -z | xargs -0 tar cf a.tar",
     ];
     assert_eq!(
         wrong(&lines, Some(ProtectedActionKind::UnseenCode)),
@@ -345,6 +366,8 @@ fn d484_other_xargs_input_stays_quiet() {
     let lines = [
         "find . -print0 | xargs -0 tar cf a.tar",
         "find . -print0 | xargs -n 1 -0 tar cf a.tar",
+        "find . -print0 | grep -z x | xargs -0 tar cf a.tar",
+        "find . -print0 | xargs --nu tar cf a.tar",
         "find . -name '*.txt' -print0 | xargs --null rg data",
         "ls | xargs tar cf a.tar --",
         "find . | xargs rg data --",

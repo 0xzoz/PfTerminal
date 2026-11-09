@@ -408,10 +408,11 @@ impl Classifier {
             // (`tar cf a.tar *` with `--checkpoint-action=exec=sh x`), or
             // (D484) a loop variable or `xargs` input taken from one.
             glob_loops.read(command);
-            if let Some((index, name)) = &command_at
-                && option_globs::runs_option_glob(
-                    name,
-                    *index,
+            let option_glob = command_at.as_ref().is_some_and(|(index, name)| {
+                option_globs::runs_option_glob(name, *index, &texts, &command.words, &glob_loops)
+            });
+            if option_glob
+                || option_globs::xargs_runs_option(
                     &texts,
                     &command.words,
                     &glob_loops,

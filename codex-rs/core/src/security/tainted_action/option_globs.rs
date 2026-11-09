@@ -63,16 +63,68 @@ const TAR_VALUE_LETTERS: &str = "bCfFgHIKLNTVXsW";
 /// Whether the command whose command word is at `at` (lowercase basename
 /// `name`) is a [`LINE_RUNNERS`] or [`PROGRAM_RUNNERS`] command given a
 /// word that may name one of its options: a glob that may match a file
-/// named so, a [`GlobLoops`] variable holding one, or, when `xargs` runs
-/// it, input from `feed`. `words` is the quote-aware reading of the
-/// command, `texts` their texts.
+/// named so, or a [`GlobLoops`] variable holding one. `words` is the
+/// quote-aware reading of the command, `texts` their texts.
 pub(super) fn runs_option_glob(
     name: &str,
     at: usize,
     texts: &[String],
     words: &[Word],
     loops: &GlobLoops,
+) -> bool {
+    runs_option(name, at, texts, words, loops, /*fed*/ None)
+}
+
+/// D484 (b): whether `xargs`, given names by `feed`, runs a
+/// [`LINE_RUNNERS`] or [`PROGRAM_RUNNERS`] command with them where they
+/// may name an option (`ls | xargs tar cf a.tar`, `ls | xargs -I{} rg x
+/// {}`), or with a word that may otherwise (as [`runs_option_glob`]).
+/// `xargs`' own options are read here, not by `indirect`'s wrapper table
+/// (BSD `-J %`, GNU `--replace` without a value).
+pub(super) fn xargs_runs_option(
+    texts: &[String],
+    words: &[Word],
+    loops: &GlobLoops,
     feed: Feed,
+) -> bool {
+    if feed == Feed::Other {
+        return false;
+    }
+    // The first `xargs` the command runs reads the pipeline.
+    let Some(start) = indirect::programs(texts).into_iter().find(|&index| {
+        work::step();
+        XARGS.contains(&basename(&texts[index]).to_lowercase().as_str())
+    }) else {
+        return false;
+    };
+    let Some(input) = xargs_input(texts, start + 1) else {
+        return false;
+    };
+    if feed == Feed::FindNul && input.nul {
+        return false;
+    }
+    let Some((offset, name)) = indirect::command_word(&texts[input.command..]) else {
+        return false;
+    };
+    runs_option(
+        &name,
+        input.command + offset,
+        texts,
+        words,
+        loops,
+        Some(input.replace),
+    )
+}
+
+/// The scan of [`runs_option_glob`]; `fed`: `xargs`' input, added after the
+/// last word (`Some(None)`) or put where its replacement string is.
+fn runs_option(
+    name: &str,
+    at: usize,
+    texts: &[String],
+    words: &[Word],
+    loops: &GlobLoops,
+    fed: Option<Option<String>>,
 ) -> bool {
     let program_only = if LINE_RUNNERS.contains(&name) {
         false
@@ -81,9 +133,6 @@ pub(super) fn runs_option_glob(
     } else {
         return false;
     };
-    // `xargs`' input: added at the end, or put where its replacement
-    // string is (`-I{}`), when it may name an option.
-    let fed = fed_input(texts, at, feed);
     let tar = matches!(name, "tar" | "gtar" | "bsdtar");
     // Old-style tar's first word holds letters whose values follow it.
     let old_end = match texts.get(at + 1) {
@@ -130,8 +179,9 @@ pub(super) enum Feed {
     /// Nothing judged here.
     #[default]
     Other,
-    /// `find … -print0` (without `-printf`): its names start with a
-    /// start point and are split only at NULs, read so by `xargs -0`.
+    /// `find … -print0` (without `-printf` or a command of its own),
+    /// through filters only: its names start with a start point and are
+    /// split only at NULs, read so by `xargs -0`.
     FindNul,
     /// `ls`, or `find` otherwise: bare names (`ls`), or names `xargs`
     /// splits at blanks (`./a --checkpoint=1`).
@@ -141,6 +191,19 @@ pub(super) enum Feed {
 /// Commands that list file names.
 const LISTERS: &[&str] = &["ls", "gls"];
 const FINDERS: &[&str] = &["find", "gfind"];
+const XARGS: &[&str] = &["xargs", "gxargs"];
+
+/// Stages that pass on `find -print0`'s names unchanged or drop some.
+const NUL_FILTERS: &[&str] = &[
+    "grep", "egrep", "fgrep", "ggrep", "sort", "gsort", "head", "ghead", "tail", "gtail", "uniq",
+    "guniq", "tee",
+];
+
+/// `find` words that print other text or run a command whose output joins
+/// the names (`-exec basename {} ;`).
+const FIND_OUTPUTS: &[&str] = &[
+    "printf", "-exec", "-execdir", "-ok", "-okdir", "-ls", "-fls", "-print",
+];
 
 /// What each of `commands` gets from the pipeline stages before it: the
 /// most open [`Feed`] of any of them.
@@ -152,88 +215,147 @@ pub(super) fn feeds(commands: &[Command]) -> Vec<Feed> {
             continue;
         };
         let texts: Vec<String> = command.words.iter().map(|word| word.text.clone()).collect();
-        let own = match indirect::command_word(&texts) {
+        let command_at = indirect::command_word(&texts);
+        let name = command_at.as_ref().map(|(_, name)| name.as_str());
+        let own = match &command_at {
             Some((_, name)) if LISTERS.contains(&name.as_str()) => Feed::Listing,
             Some((at, name)) if FINDERS.contains(&name.as_str()) => {
                 let nul = texts[at + 1..].iter().any(|text| text == "-print0")
                     && !texts[at + 1..].iter().any(|text| {
                         work::step();
-                        text.contains("printf")
+                        FIND_OUTPUTS
+                            .iter()
+                            .any(|output| text.contains(output) && !text.contains("-print0"))
                     });
                 if nul { Feed::FindNul } else { Feed::Listing }
             }
             _ => Feed::Other,
         };
-        feeds[to] = feeds[to].max(feeds[index]).max(own);
+        // A stage other than a filter may change `find`'s names
+        // (`xargs -0 basename -z`).
+        let passed = match feeds[index] {
+            Feed::FindNul if !name.is_some_and(|name| NUL_FILTERS.contains(&name)) => Feed::Listing,
+            feed => feed,
+        };
+        feeds[to] = feeds[to].max(passed).max(own);
     }
     feeds
 }
 
-/// When `xargs` runs the command at `at` and `feed` may name an option
-/// through it: `Some(Some(replace))` puts the input where `replace` is
-/// (`-I{}`, `-i`, `--replace`, BSD `-J`), `Some(None)` adds it at the end.
-fn fed_input(texts: &[String], at: usize, feed: Feed) -> Option<Option<String>> {
-    if feed == Feed::Other {
-        return None;
-    }
-    let start = indirect::programs(texts)
-        .into_iter()
-        .rev()
-        .find(|&index| index < at && basename(&texts[index]).eq_ignore_ascii_case("xargs"))?;
+/// How `xargs` passes on its input.
+struct XargsInput {
+    /// Where the command it runs starts.
+    command: usize,
+    /// Where it puts its input: at the end (`None`), or where this string is
+    /// (`-I{}`, `-i`, `--replace`, BSD `-J`).
+    replace: Option<String>,
+    /// It splits its input at NULs only (`-0`, `--null`).
+    nul: bool,
+}
+
+/// `xargs` letters (GNU and BSD) whose value is the rest of the word or,
+/// when that is empty, the next one.
+const XARGS_VALUE_LETTERS: &str = "adEILJnPRSs";
+
+/// GNU `xargs`' long options, and whether each takes a value (`None`: only
+/// after `=`). getopt takes an unambiguous abbreviation.
+const XARGS_LONG: &[(&str, Option<bool>)] = &[
+    ("arg-file", Some(true)),
+    ("delimiter", Some(true)),
+    ("eof", None),
+    ("exit", Some(false)),
+    ("help", Some(false)),
+    ("interactive", Some(false)),
+    ("max-args", Some(true)),
+    ("max-chars", Some(true)),
+    ("max-lines", None),
+    ("max-procs", Some(true)),
+    ("no-run-if-empty", Some(false)),
+    ("null", Some(false)),
+    ("open-tty", Some(false)),
+    ("process-slot-var", Some(true)),
+    ("replace", None),
+    ("show-limits", Some(false)),
+    ("verbose", Some(false)),
+    ("version", Some(false)),
+];
+
+/// Reads `xargs`' options from `texts[from..]`, up to the first word that
+/// is not one or its value (as `xargs` does; later options are the
+/// command's: `xargs env -i tar`).
+fn xargs_input(texts: &[String], from: usize) -> Option<XargsInput> {
     let (mut replace, mut nul) = (None, false);
-    let mut index = start + 1;
-    while index < at {
+    let mut index = from;
+    while let Some(word) = texts.get(index) {
         work::step();
-        let word = texts[index].as_str();
         index += 1;
-        if word == "--null" {
-            nul = true;
-        } else if word == "--replace" {
-            replace = Some("{}".to_string());
-        } else if let Some(value) = word.strip_prefix("--replace=") {
-            replace = Some(value.to_string());
-        } else if let Some(letters) = word.strip_prefix('-').filter(|rest| !rest.starts_with('-')) {
-            for (offset, letter) in letters.char_indices() {
+        if word == "--" {
+            break;
+        }
+        if let Some(long) = word.strip_prefix("--") {
+            let (name, value) = match long.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (long, None),
+            };
+            let exact = XARGS_LONG.iter().find(|(option, _)| *option == name);
+            let mut prefixed = XARGS_LONG.iter().filter(|(option, _)| {
                 work::step();
-                let rest = &letters[offset + letter.len_utf8()..];
-                match letter {
-                    '0' => nul = true,
-                    'i' => {
-                        replace = Some(if rest.is_empty() { "{}" } else { rest }.to_string());
-                        break;
-                    }
-                    'I' | 'J' => {
-                        let value = if rest.is_empty() {
-                            index += 1;
-                            texts.get(index - 1).map_or("", String::as_str)
-                        } else {
-                            rest
-                        };
-                        replace = Some(value.to_string());
-                        break;
-                    }
-                    // A value, in the rest of the word or the next one
-                    // (`-n 1`, `-d '\n'`, `-E -0`).
-                    _ if XARGS_VALUE_LETTERS.contains(letter) => {
-                        index += usize::from(rest.is_empty());
-                        break;
-                    }
-                    _ => {}
+                !name.is_empty() && option.starts_with(name)
+            });
+            let found = exact.or_else(|| match (prefixed.next(), prefixed.next()) {
+                (Some(only), None) => Some(only),
+                _ => None,
+            });
+            match found {
+                Some(("null", _)) => nul = true,
+                Some(("replace", _)) => {
+                    replace = Some(value.unwrap_or("{}").to_string());
                 }
+                Some((_, Some(true))) if value.is_none() => index += 1,
+                _ => {}
+            }
+            continue;
+        }
+        let Some(letters) = word.strip_prefix('-').filter(|rest| !rest.is_empty()) else {
+            index -= 1;
+            break;
+        };
+        for (offset, letter) in letters.char_indices() {
+            work::step();
+            let rest = &letters[offset + letter.len_utf8()..];
+            match letter {
+                '0' => nul = true,
+                // Optional values, in the rest of the word only.
+                'i' => {
+                    replace = Some(if rest.is_empty() { "{}" } else { rest }.to_string());
+                    break;
+                }
+                'e' | 'l' => break,
+                _ if XARGS_VALUE_LETTERS.contains(letter) => {
+                    let value = if rest.is_empty() {
+                        index += 1;
+                        texts.get(index - 1).map_or("", String::as_str)
+                    } else {
+                        rest
+                    };
+                    if matches!(letter, 'I' | 'J') {
+                        replace = Some(value.to_string());
+                    }
+                    break;
+                }
+                _ => {}
             }
         }
     }
-    if feed == Feed::FindNul && nul {
-        return None;
-    }
-    // An empty replacement string would match every word: read it as
-    // added at the end, which asks as well.
-    Some(replace.filter(|replace| !replace.is_empty()))
+    // An empty replacement string would match every word: read it as added
+    // at the end, which asks as well.
+    let replace = replace.filter(|replace: &String| !replace.is_empty());
+    (index < texts.len()).then_some(XargsInput {
+        command: index,
+        replace,
+        nul,
+    })
 }
-
-/// `xargs` letters (GNU and BSD) whose value is the next word when the
-/// rest of theirs is empty.
-const XARGS_VALUE_LETTERS: &str = "adELnPsRS";
 
 /// A loop variable taken from a glob, and what that glob may give it.
 struct GlobLoop {
@@ -345,7 +467,8 @@ impl GlobLoops {
             } else if at > 0 {
                 None
             } else if kept {
-                dash.then_some(open)
+                // `${f%.txt}` may end anywhere in the value.
+                dash.then_some(open || rest.starts_with('%'))
             } else {
                 Some(true)
             };
