@@ -874,6 +874,10 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   38,000-file repository, 0.5–0.7 s on a `repo` client with 100 projects) and
   the credential watch's first scan, ran on the thread that drives other
   tasks; it now runs on its own. What is flagged is unchanged.
+- **Default (elevated) sandbox: a test now covers a runner that can't
+  start** (#1909). It checks that the error is reported and that the
+  planted-folder watch ends on its own thread, not on the one that drives
+  other tasks. No behaviour change.
 - **Non-admin sandbox: starting a command no longer holds up other work**
   (#1909). Its preparation (the command's token, the folder permissions
   and labels, and the planted-folder walk) and the start of the command
