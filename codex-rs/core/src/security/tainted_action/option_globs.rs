@@ -254,12 +254,19 @@ impl GlobLoops {
     pub(super) fn read(&mut self, command: &Command) {
         let words = &command.words;
         let keyword = words.first().is_some_and(|word| {
-            matches!(word.text.to_lowercase().as_str(), "for" | "select" | "foreach")
+            matches!(
+                word.text.to_lowercase().as_str(),
+                "for" | "select" | "foreach"
+            )
         });
         let Some(name) = words.get(1).filter(|_| keyword).map(|word| &word.text) else {
             return;
         };
-        if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
             return;
         }
         let (mut glob, mut dash, mut open) = (false, false, false);

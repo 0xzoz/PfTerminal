@@ -267,7 +267,7 @@ fn d484_glob_loop_variables_that_may_name_an_option_ask() {
         "for f in *; do rg data \"$f\"; done",
         "for f in *; do sed -i s/a/b/ \"$f\"; done",
         "for f in *; do sort -o out \"$f\"; done",
-        "for f in *; do rsync -a \"$f\" host:dst/; done",
+        "for f in *; do rsync -a \"$f\" /tmp/dst/; done",
         "for f in *.md; do sed -i '' s/a/b/ \"${f%.md}.md\"; done",
         "select f in *; do tar rf a.tar \"$f\"; done",
         "for f in *; do :; done; tar rf a.tar \"$f\"",
@@ -282,7 +282,10 @@ fn d484_glob_loop_variables_that_may_name_an_option_ask() {
         wrong(&lines, Some(ProtectedActionKind::UnseenCode)),
         Vec::<String>::new()
     );
-    for line in ["for f (*) tar rf a.tar $f", "foreach f (*)\ntar rf a.tar \"$f\"\nend"] {
+    for line in [
+        "for f (*) tar rf a.tar $f",
+        "foreach f (*)\ntar rf a.tar \"$f\"\nend",
+    ] {
         assert_eq!(
             classify_with(
                 &action("zsh", line),
@@ -327,7 +330,7 @@ fn d484_xargs_fed_by_a_listing_asks() {
         "ls | xargs -I % tar rf a.tar %",
         "ls | xargs -0I{} tar rf a.tar {}.bak",
         "ls | xargs --replace={} tar rf a.tar {}",
-        "ls | xargs -i rsync -a {} host:dst/",
+        "ls | xargs -i rsync -a {} /tmp/dst/",
         "ls | sudo xargs sed -i s/a/b/",
     ];
     assert_eq!(
@@ -361,9 +364,21 @@ fn issue_1912_and_1910_scans_are_linear() {
         ("tar-plain", "tar cf a.tar {} *", "a.txt "),
         ("sed-dashes", "sed -i s/a/b/ {} -- *", "-- "),
         ("git-refmap", "git fetch {} e\"$r\"", "--refmap='x y' "),
-        ("loop-words", "for f in * ./*; do tar rf a.tar {} -- \"$f\"; done", "\"$f$g$f\" "),
-        ("loop-names", "{}tar rf a.tar -- x", "for f in *; do :; done; "),
-        ("xargs-options", "ls | xargs {} tar rf a.tar -- x", "-0 -n 1 "),
+        (
+            "loop-words",
+            "for f in * ./*; do tar rf a.tar {} -- \"$f\"; done",
+            "\"$f$g$f\" ",
+        ),
+        (
+            "loop-names",
+            "{}tar rf a.tar -- x",
+            "for f in *; do :; done; ",
+        ),
+        (
+            "xargs-options",
+            "ls | xargs {} tar rf a.tar -- x",
+            "-0 -n 1 ",
+        ),
         ("feeds", "ls {}| xargs tar cf a.tar --", "| grep x "),
     ] {
         work::assert_linear(label, |scale| {
