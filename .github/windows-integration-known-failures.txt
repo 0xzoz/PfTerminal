@@ -1,7 +1,7 @@
 # Integration tests (tests/*.rs) that fail on native Windows, excluded from the
-# non-blocking `rust-ci / Windows integration tests` job (#1856,
-# rust-ci-windows-integration-tests.yml). Each one failed both nextest attempts
-# on windows-2022 (scratch run 42626867876) and still runs on Linux.
+# non-blocking windows-integration-tests.yml workflow (#1856). Each one failed
+# both nextest attempts on windows-2022 (scratch run 42626867876) and still
+# runs on Linux.
 # Format: <cargo package> <exact nextest test name> #<issue>
 # Remove a line once its test passes on Windows; a line naming a test that no
 # longer exists fails .github/scripts/test_windows_integration_known_failures.py.

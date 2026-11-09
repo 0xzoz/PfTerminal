@@ -29,8 +29,6 @@ jobs:
       codex: ${{ steps.detect.outputs.codex }}
       windows_native_tests: ${{ steps.detect.outputs.windows_native_tests }}
       windows_native_targets: ${{ steps.detect.outputs.windows_native_targets }}
-      windows_integration_tests: ${{ steps.detect.outputs.windows_integration_tests }}
-      windows_integration_packages: ${{ steps.detect.outputs.windows_integration_packages }}
       workflows: ${{ steps.detect.outputs.workflows }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -77,12 +75,6 @@ jobs:
           windows_native_other=false
           windows_native_pty=false
           windows_native_app_server=false
-          # Cargo integration tests (tests/*.rs) on native Windows for the
-          # crates whose integration tests Bazel skips there (#1856):
-          # codex-core and codex-app-server. Non-blocking; PRs only.
-          windows_integration_tests=false
-          windows_integration_core=false
-          windows_integration_app_server=false
           # Schema fixture tests run on PRs that change the protocol crates,
           # a crate whose types they export (security-policy, absolute-path,
           # path-uri, ext/items), the experimental API macros, the workspace
@@ -100,9 +92,6 @@ jobs:
             [[ $f == codex-rs/exec-server/* ]] && windows_native_other=true windows_native_tests=true
             [[ $f == codex-rs/utils/pty/* ]] && windows_native_pty=true windows_native_tests=true
             [[ $f == codex-rs/app-server/* ]] && windows_native_app_server=true windows_native_tests=true
-            [[ $f == codex-rs/core/* ]] && windows_integration_core=true windows_integration_tests=true
-            [[ $f == codex-rs/app-server/* ]] && windows_integration_app_server=true windows_integration_tests=true
-            [[ $f == .github/workflows/rust-ci-windows-integration-tests.yml || $f == .github/windows-integration-known-failures.txt || $f == .github/scripts/windows_integration_known_failures.py ]] && windows_integration_core=true windows_integration_app_server=true windows_integration_tests=true
             [[ $f == .github/workflows/rust-ci-windows-native-tests.yml ]] && windows_native_core=true windows_native_sandbox=true windows_native_other=true windows_native_pty=true windows_native_app_server=true windows_native_tests=true
             [[ $f == codex-rs/protocol/* || $f == codex-rs/app-server-protocol/* || $f == .github/workflows/rust-ci.yml ]] && app_server_schema=true
             [[ $f == codex-rs/security-policy/* || $f == codex-rs/utils/absolute-path/* || $f == codex-rs/utils/path-uri/* || $f == codex-rs/ext/items/* ]] && app_server_schema=true
@@ -141,13 +130,6 @@ jobs:
           windows_native_targets="${windows_native_targets# }"
           echo "Windows native test targets: ${windows_native_targets:-none}"
           echo "windows_native_targets=$windows_native_targets" >> "$GITHUB_OUTPUT"
-          echo "windows_integration_tests=$windows_integration_tests" >> "$GITHUB_OUTPUT"
-          integration_packages=()
-          [[ $windows_integration_core == true ]] && integration_packages+=('"codex-core"')
-          [[ $windows_integration_app_server == true ]] && integration_packages+=('"codex-app-server"')
-          windows_integration_packages="[$(IFS=,; echo "${integration_packages[*]}")]"
-          echo "Windows integration test packages: $windows_integration_packages"
-          echo "windows_integration_packages=$windows_integration_packages" >> "$GITHUB_OUTPUT"
           echo "workflows=$workflows" >> "$GITHUB_OUTPUT"
 
       - name: Check for a clean worktree
@@ -278,18 +260,6 @@ jobs:
     with:
       targets: ${{ needs.changed.outputs.windows_native_targets }}
     secrets: inherit
-
-  # #1856: codex-core's and codex-app-server's integration tests on native
-  # Windows, built with Cargo, on PRs that change those crates. Deliberately
-  # NOT in `results` below: known Windows failures are excluded and tracked
-  # (#1967, #1968, #1969); make it required once they are fixed.
-  windows_integration_tests:
-    name: Windows integration tests (non-blocking)
-    needs: changed
-    if: ${{ needs.changed.outputs.windows_integration_tests == 'true' }}
-    uses: ./.github/workflows/rust-ci-windows-integration-tests.yml
-    with:
-      packages: ${{ needs.changed.outputs.windows_integration_packages }}
 
   # codex-app-server-protocol schema fixture tests on PRs that change
   # codex-protocol, codex-app-server-protocol or a crate whose types they

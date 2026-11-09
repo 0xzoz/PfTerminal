@@ -1,41 +1,83 @@
-name: rust-ci Windows integration tests
+name: windows-integration-tests
 
 # #1856 (owner decision D443): codex-core's and codex-app-server's integration
 # tests (tests/*.rs) run in no Bazel job on Windows. On the native lane
 # (x86_64-pc-windows-gnullvm) they depend on codex-code-mode-host / V8, which
 # needs a target-platform Python that rules_python does not provide there, so
-# Bazel skips them as incompatible. Other crates' integration tests already run
-# natively through their `-windows-cross` targets (rust-ci-windows-native-tests.yml
-# on PRs, bazel.yml nightly).
+# Bazel skips them as incompatible. Other crates' integration tests run natively
+# through their `-windows-cross` targets (nightly in bazel.yml; on PRs, the
+# changed groups in rust-ci-windows-native-tests.yml).
 #
-# This job runs them with Cargo and nextest on windows-2022 (msvc), one package
-# per matrix leg. It is NOT part of `CI results (required)`: the first native
-# run found 31 failures, listed with their issues in
-# .github/windows-integration-known-failures.txt and excluded here so a new
-# failure stands out. Trial (scratch run 42626867876, cold, no compile cache):
-# about 22 minutes to build, then 4.5 minutes of tests for codex-core and 12.5
-# for codex-app-server.
+# This workflow runs them with Cargo and nextest on windows-2022 (msvc), one
+# package per matrix leg, on PRs that change the package (or this job's files).
+# It is NOT called from blocking-ci.yml, so `CI required` neither waits for it
+# nor fails with it: the first native run found 31 failures, listed with their
+# issues in .github/windows-integration-known-failures.txt and excluded here so
+# a new failure stands out. Trial (scratch run 42626867876, cold, no compile
+# cache): about 22 minutes to build, then 4.5 minutes of tests for codex-core
+# and 12.5 for codex-app-server.
 on:
-  workflow_call:
-    inputs:
-      packages:
-        description: JSON array of Cargo packages whose integration tests run.
-        required: false
-        type: string
-        default: '["codex-core", "codex-app-server"]'
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-integration-tests.yml"
+      - ".github/windows-integration-known-failures.txt"
+      - ".github/scripts/windows_integration_known_failures.py"
+      - "codex-rs/.config/nextest.toml"
+      - "codex-rs/core/**"
+      - "codex-rs/app-server/**"
+
+concurrency:
+  group: windows-integration-tests::${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
+  packages:
+    name: Select packages
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      packages: ${{ steps.select.outputs.packages }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select packages
+        id: select
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          select=.github/scripts/windows_integration_known_failures.py
+          if [[ "$EVENT" == "pull_request" ]]; then
+            # NUL-separated: Git quotes unusual path names otherwise.
+            git diff --name-only -z --no-renames "$BASE_SHA...$HEAD_SHA" \
+              | python3 "$select" packages >> "$GITHUB_OUTPUT"
+          else
+            # Manual runs test every package.
+            printf '%s\0' .github/workflows/windows-integration-tests.yml \
+              | python3 "$select" packages >> "$GITHUB_OUTPUT"
+          fi
+          grep '^packages=' "$GITHUB_OUTPUT"
+
   test:
     name: ${{ matrix.package }}
+    needs: packages
+    if: ${{ needs.packages.outputs.packages != '[]' }}
     runs-on: windows-2022
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        package: ${{ fromJSON(inputs.packages) }}
+        package: ${{ fromJSON(needs.packages.outputs.packages) }}
     defaults:
       run:
         working-directory: codex-rs
@@ -105,9 +147,12 @@ jobs:
           NEXTEST_STATUS_LEVEL: fail
         run: |
           set -euo pipefail
+          python="$(command -v python3 || command -v python)"
           known=../.github/scripts/windows_integration_known_failures.py
-          python3 "$known" summary "$PACKAGE" >> "$GITHUB_STEP_SUMMARY"
-          filter="$(python3 "$known" filter "$PACKAGE")"
+          "$python" "$known" summary "$PACKAGE" >> "$GITHUB_STEP_SUMMARY"
+          filter="$("$python" "$known" filter "$PACKAGE")"
+          filter="${filter%$'\r'}"
+          echo "nextest filter: $filter"
           helpers="${CARGO_TARGET_DIR}/ci-test"
           env \
             "CARGO_BIN_EXE_codex_windows_sandbox_setup=$(cygpath -w "${helpers}/codex-windows-sandbox-setup.exe")" \
