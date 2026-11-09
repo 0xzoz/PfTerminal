@@ -476,6 +476,8 @@ async fn pf_30_s02_taint_survives_a_one_off_approval() -> anyhow::Result<()> {
     .await;
     if cfg!(windows) {
         assert!(matches!(event, EventMsg::TurnComplete(_)), "{event:?}");
+        // The mock expects the next turn too.
+        test.submit_turn("and what next?").await?;
         assert_windows_refusal(&captured, &[call_id]);
         return Ok(());
     }
