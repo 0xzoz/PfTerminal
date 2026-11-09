@@ -74,13 +74,15 @@ doesn't change (through a dependency) shows up on `main`.
   (`.github/scripts/changed_crate_test_packages.py`). It does not add the
   crates that depend on them. It first builds the helper binaries some suites
   start from other crates (`codex`, the code-mode host, the Linux sandbox, the
-  rmcp-client test servers, the wallet daemon). A change to the job itself or
-  to `rust-ci.yml` runs `codex-rmcp-client`'s tests. It uses postmerge's
+  rmcp-client test servers, the wallet daemon) and installs the packaged
+  ripgrep. A change to the job itself or to `rust-ci.yml` runs
+  `codex-rmcp-client`'s tests. It uses postmerge's
   `ci-test` profile and restores its sccache (saves nothing). Before this no
   Linux or macOS PR job ran most crates' tests: #1963 went green while
   breaking two rmcp-client tests. Part of `CI results (required)` whenever it
-  runs; 85-minute timeout. Measured: rmcp-client TIMING_RMCP, codex-core
-  TIMING_CORE, every crate at once (an upstream sync) TIMING_ALL.
+  runs; 85-minute timeout. Measured on the #1972 trials: about 15 minutes for
+  rmcp-client, 24 for codex-core and 46 for every crate at once (an upstream
+  sync), against the roughly 35 minutes `CI required` already takes.
 - Core security tests (`rust-ci / Core security tests — ubuntu-24.04` and
   `— macos-15`, #512, #553, #902): codex-core's `security::` unit tests and
   selected integration suites on Linux and macOS, on every `codex-rs` change.
