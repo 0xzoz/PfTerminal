@@ -365,7 +365,31 @@ together with decision 1.
    `safe.directory = *` it refused none. D425 (the elevated-sandbox row
    above) flags all of them anyway.
 3. The added cost of gap 1 B and gap 2 B on this repository (38k files)
-   and on a `repo` client with about 100 projects.
+   and on a `repo` client with about 100 projects. Measured for the
+   elevated sandbox's watch (#1896, native Windows CI, windows-2022, debug
+   build, median of 9, two runs of two rounds each; #1902's nested
+   `.codex`/`.agents` contents included): on 38,000 files in one
+   repository the start takes 56–79 ms (the walk 46–77 ms, the contents of
+   15 nested folders 1.6–2.2 ms) and the end 57–79 ms; on a `repo` client
+   (`.repo` with 100 project git folders, 100 work trees of 350 files with
+   `gitdir:` files, 201 repositories found) the start takes 516–709 ms (the
+   walk 386–541 ms) and the end 520–704 ms. Until #1896 the elevated
+   session ran its preparation, this start included, on the async thread:
+   a current-thread runtime's other tasks stalled for 152–279 ms (38k
+   files) and 612–835 ms (`repo` client) per command; with it moved off,
+   16–22 ms (the timer's resolution). What is flagged is byte-identical
+   either way.
+   Profiled (#1909, same runner type): the `repo` client's walk is slow
+   because the fixture has 47,141 folders (the 38k-file tree has 3,946),
+   not because it is a `repo` client. The walk takes 0.39–0.56 s
+   (runners vary); in one run it took 0.39 s against 0.37 s for only
+   opening and listing each folder on 4 threads. More threads don't help,
+   and listing through handles instead of paths isn't faster. Of the rest, the repositories took
+   46 ms because each `.repo\projects` git folder was looked through
+   twice (as a repository and through its work tree's `.git` file); one
+   look per folder brings that to 29.5 ms and the start and end to about
+   0.49–0.50 s. Going much faster would mean listing fewer folders,
+   which changes what is watched.
 4. Whether `npm install` with Husky v9 inside the sandbox rewrites
    `.husky\_` with identical content (gap 3 silence).
 5. Warnings per start in a `repo` client after `repo sync` in the sandbox,
