@@ -55,7 +55,7 @@ pub struct RouteAwareClientPool {
     route_class: ClientRouteClass,
     client_builder: HttpClientBuilder,
     custom_ca_fallback: CustomCaFallback,
-    address_filter: Option<ResolvedAddressFilter>,
+    address_filter: Option<Arc<ResolvedAddressFilter>>,
     clients: Arc<Mutex<HashMap<OutboundProxyRoute, HttpClient>>>,
 }
 
@@ -358,7 +358,7 @@ impl RouteAwareClientPool {
     ///
     /// Redirects are then always followed by the pool so each hop's URL is checked.
     pub fn with_resolved_address_filter(mut self, filter: ResolvedAddressFilter) -> Self {
-        self.address_filter = Some(filter);
+        self.address_filter = Some(Arc::new(filter));
         self.clients = Arc::new(Mutex::new(HashMap::new()));
         self
     }
@@ -632,11 +632,10 @@ impl RouteAwareClientPool {
             }
         };
         if let Some(filter) = &self.address_filter {
+            let filter = ResolvedAddressFilter::clone(filter);
             let filter = match &route {
-                OutboundProxyRoute::Direct => filter.clone(),
-                OutboundProxyRoute::Proxy { url, .. } => {
-                    filter.clone().exempting_proxies([url.clone()])
-                }
+                OutboundProxyRoute::Direct => filter,
+                OutboundProxyRoute::Proxy { url, .. } => filter.exempting_proxies([url.clone()]),
                 OutboundProxyRoute::TransportDefault => {
                     // The transport may also use the platform's system proxy, whose
                     // name it resolves through the filter; exempt it as resolved here.
@@ -649,7 +648,6 @@ impl RouteAwareClientPool {
                         _ => None,
                     };
                     filter
-                        .clone()
                         .exempting_env_proxies()
                         .exempting_proxies(system_proxy)
                 }

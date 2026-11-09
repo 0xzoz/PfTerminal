@@ -357,12 +357,12 @@ OAuth sign-in for a Streamable HTTP MCP server (discovery, client
 registration, token and refresh requests, and every redirect they follow) may
 connect only to public addresses, unless the server's own URL is local:
 
-| MCP server `url` | OAuth requests may also reach |
-| --- | --- |
-| `localhost`, `*.localhost` or a loopback IP (`127.0.0.1`, `[::1]`) | loopback addresses |
-| a private IP (`10.x`, `172.16-31.x`, `192.168.x`, `100.64.0.0/10`, `fc00::/7`) | private addresses |
-| any IP literal | that one address |
-| any other host name | public addresses only, whatever the name resolves to |
+| MCP server `url`                                                               | OAuth requests may also reach                        |
+| ------------------------------------------------------------------------------ | ---------------------------------------------------- |
+| `localhost`, `*.localhost` or a loopback IP (`127.0.0.1`, `[::1]`)             | loopback addresses                                   |
+| a private IP (`10.x`, `172.16-31.x`, `192.168.x`, `100.64.0.0/10`, `fc00::/7`) | private addresses                                    |
+| any IP literal                                                                 | that one address                                     |
+| any other host name                                                            | public addresses only, whatever the name resolves to |
 
 Link-local and cloud metadata addresses (`169.254.169.254`, `fd00:ec2::254`,
 `fd20:ce::254`), metadata host names (`metadata.google.internal`), `0.0.0.0`,
