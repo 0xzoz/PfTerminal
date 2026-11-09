@@ -11,8 +11,8 @@ fn issue1901_disguised_zsh_stat_loads_keep_table_checks_enabled() {
     for sh in ["bash", "zsh"] {
         let line = |script: &str| kind(&[sh, "-lc", script]);
 
-        // This load does not itself write a code table, but makes the later
-        // `stat` command a possible zsh/stat table writer.
+        // This load does not itself write a code table, but `may_load_stat`
+        // makes the later `stat` command a possible zsh/stat table writer.
         let glob_alternation = "zmod(l|)oad zsh/st(a|)t";
         assert_eq!(line(glob_alternation), None, "{sh}: {glob_alternation}");
         let glob_then_stat = format!("{glob_alternation}; stat -A functions x");
@@ -36,11 +36,16 @@ fn issue1901_disguised_zsh_stat_loads_keep_table_checks_enabled() {
             Some(UnseenCode),
             "{sh}: {substitution_then_stat}"
         );
+        let literal_substitution_then_stat = "value=${ zmodload zsh/stat; }; stat -A functions x";
+        assert_eq!(
+            line(literal_substitution_then_stat),
+            Some(UnseenCode),
+            "{sh}: {literal_substitution_then_stat}"
+        );
 
-        // zstyle -e values are deferred code and stay fail-closed, including
-        // when the hidden load precedes a zsh/stat table write.
-        let deferred_load =
-            "zstyle -e :x y 'zmod(l|)oad zsh/st(a|)t; reply=(ok)'; zstyle -s :x y value";
+        // The `(` pattern in the stored value keeps these lines asking; the
+        // zstyle -e code itself is not read yet (#2001).
+        let deferred_load = "zstyle -e :x y 'zmod(l|)oad zsh/st(a|)t'; zstyle -s :x y value";
         assert_eq!(
             line(deferred_load),
             Some(UnseenCode),
