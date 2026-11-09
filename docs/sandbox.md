@@ -2,6 +2,36 @@
 
 For information about Codex sandboxing and approvals, see [this documentation](https://developers.openai.com/codex/security).
 
+## Windows: Moderate and Aggressive need a Windows sandbox
+
+Moderate and Aggressive keep agent commands and file tools away from protected
+files through the Windows sandbox. Without any Windows sandbox (no
+`[windows] sandbox` setting and no sandbox feature), commands Windows treats as
+read-only, such as `Get-Content`, and file tools, such as image viewing,
+would run with no sandbox and could read those files. So under Moderate or
+Aggressive on such a computer, Corbanu Terminal refuses every agent command
+(read-only ones included, before anyone is asked) and every file tool access
+(#1976, D491). The refusal names the level and says how to set the sandbox
+up; the person also sees it when the session starts. The session still
+starts, so you can set the sandbox up or change the level:
+
+- In the TUI, open `/permissions`, choose a mode that uses the sandbox (such
+  as "Ask for approval") and pick "Set up default sandbox" (it needs
+  Administrator permission). A session keeps the Windows sandbox it started
+  with, so start a new session with `/new` afterwards.
+- Or set `[windows] sandbox = "elevated"` as below; it applies from the next
+  session.
+- Or switch to Permissive in `/security` (it applies after a restart).
+
+This covers every way a level arrives: a `[security]` level in any config
+layer (your own `config.toml`, a managed config or a trusted project's), a
+level saved with `/security`, and Aggressive enforced because the saved
+security state could not be read. Permissive is unchanged. With the
+non-admin sandbox selected, commands under these levels keep failing as
+described below, because that sandbox can't block reads. With the default
+sandbox selected, nothing changes: if its setup hasn't run yet, the first
+sandboxed command runs it.
+
 ## Windows non-admin sandbox
 
 On Windows, Corbanu Terminal can sandbox commands in two ways. The **default

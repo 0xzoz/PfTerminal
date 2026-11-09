@@ -185,6 +185,9 @@ The kill switch (`/security` → `g`) works under every level.
 
 ## Limits
 
+- On Windows, Moderate needs a Windows sandbox: without one, every agent
+  command and file tool access is refused, with the steps to set the default
+  sandbox up (#1976; see `docs/sandbox.md`).
 - If your own settings turn the sandbox off (full access), commands that the
   protected-file rules don't cover run without one. Choose a sandbox in your
   settings to keep every command in it.

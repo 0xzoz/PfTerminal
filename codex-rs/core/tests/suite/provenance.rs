@@ -475,14 +475,21 @@ async fn pf_30_s02_taint_survives_a_one_off_approval() -> anyhow::Result<()> {
             thread_settings: Default::default(),
         })
         .await?;
-    let approval = match wait_for_event(&test.codex, |event| {
+    let event = wait_for_event(&test.codex, |event| {
         matches!(
             event,
             EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
         )
     })
-    .await
-    {
+    .await;
+    if cfg!(windows) {
+        assert!(matches!(event, EventMsg::TurnComplete(_)), "{event:?}");
+        // The mock expects the next turn too.
+        test.submit_turn("and what next?").await?;
+        assert_windows_refusal(&captured, &[call_id]);
+        return Ok(());
+    }
+    let approval = match event {
         EventMsg::ExecApprovalRequest(approval) => approval,
         other => panic!("expected an approval request, got {other:?}"),
     };
@@ -528,6 +535,25 @@ async fn pf_30_s02_taint_survives_a_one_off_approval() -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+/// #1976 (D491): on Windows without its sandbox, as in these tests,
+/// Moderate refuses each command before anyone is asked.
+fn assert_windows_refusal(
+    captured: &core_test_support::responses::ResponseMock,
+    call_ids: &[&str],
+) {
+    let requests = captured.requests();
+    for call_id in call_ids {
+        assert!(
+            requests.iter().any(
+                |request| request.function_call_output_text(call_id).is_some_and(
+                    |output| output.contains("Security level Moderate refused this command")
+                )
+            ),
+            "{call_id}"
+        );
+    }
 }
 
 /// PF-30-S03 fixture: one turn whose model calls `first`, then `second`.
@@ -819,13 +845,18 @@ async fn pf_30_s03_session_approval_does_not_cover_a_tainted_repeat() -> anyhow:
         (SecurityLevel::Moderate, true),
         (SecurityLevel::Permissive, false),
     ] {
-        let (test, _captured) = pf_30_s03_two_call_turn(
+        let (test, captured) = pf_30_s03_two_call_turn(
             level,
             AskForApproval::UnlessTrusted,
             PF_30_S03_VAULT,
             PF_30_S03_VAULT,
         )
         .await?;
+        if cfg!(windows) && level != SecurityLevel::Permissive {
+            assert!(pf_30_s03_next_approval(&test).await.is_none());
+            assert_windows_refusal(&captured, &["call-first", "call-second"]);
+            continue;
+        }
         let first = pf_30_s03_next_approval(&test)
             .await
             .expect("first vault call asks (untrusted command)");
@@ -879,6 +910,11 @@ async fn pf_30_s03_automatic_reviewer_cannot_approve_a_tainted_protected_action(
         |_| {},
     )
     .await?;
+    if cfg!(windows) {
+        assert!(pf_30_s03_next_approval(&test).await.is_none());
+        assert_windows_refusal(&captured, &["call-first", "call-second"]);
+        return Ok(());
+    }
     let approval = pf_30_s03_next_approval(&test)
         .await
         .expect("the human is asked, not the automatic reviewer");
