@@ -31,6 +31,7 @@ use rmcp::model::CustomRequest;
 use rmcp::model::ElicitRequestParams;
 use rmcp::model::ElicitResult;
 use rmcp::model::ElicitationAction;
+use rmcp::model::ErrorCode;
 use rmcp::model::Extensions;
 use rmcp::model::InitializeRequestParams;
 use rmcp::model::ListResourceTemplatesResult;
@@ -47,6 +48,8 @@ use rmcp::model::ServerPeerInfo;
 use rmcp::model::ServerResult;
 use rmcp::model::Tool;
 use rmcp::service::ClientCacheConfig;
+use rmcp::service::ClientInitializeError;
+use rmcp::service::ClientLifecycleMode;
 use rmcp::service::ClientServiceExt;
 use rmcp::service::RoleClient;
 use rmcp::service::RunningService;
@@ -334,7 +337,7 @@ pub struct ListToolsWithConnectorIdResult {
 /// https://github.com/modelcontextprotocol/rust-sdk
 pub struct RmcpClient {
     state: Mutex<ClientState>,
-    stdio_process: Option<StdioServerProcessHandle>,
+    stdio_process: Mutex<Option<StdioServerProcessHandle>>,
     transport_recipe: TransportRecipe,
     protocol_mode: McpProtocolMode,
     initialize_context: Mutex<Option<InitializeContext>>,
@@ -368,7 +371,7 @@ impl RmcpClient {
             state: Mutex::new(ClientState::Connecting {
                 transport: Some(transport),
             }),
-            stdio_process: None,
+            stdio_process: Mutex::new(None),
             transport_recipe,
             protocol_mode,
             initialize_context: Mutex::new(None),
@@ -440,7 +443,7 @@ impl RmcpClient {
             state: Mutex::new(ClientState::Connecting {
                 transport: Some(transport),
             }),
-            stdio_process,
+            stdio_process: Mutex::new(stdio_process),
             transport_recipe,
             protocol_mode,
             initialize_context: Mutex::new(None),
@@ -507,7 +510,7 @@ impl RmcpClient {
             state: Mutex::new(ClientState::Connecting {
                 transport: Some(transport),
             }),
-            stdio_process: None,
+            stdio_process: Mutex::new(None),
             transport_recipe,
             protocol_mode,
             initialize_context: Mutex::new(None),
@@ -871,7 +874,8 @@ impl RmcpClient {
             std::mem::replace(&mut *guard, ClientState::Closed)
         };
 
-        if let Some(process) = &self.stdio_process
+        let stdio_process = self.stdio_process.lock().await.clone();
+        if let Some(process) = stdio_process
             && let Err(error) = process.terminate().await
         {
             warn!("failed to terminate MCP stdio server process: {error}");
@@ -1053,8 +1057,85 @@ impl RmcpClient {
         Arc<RunningService<RoleClient, ElicitationClientService>>,
         Option<OAuthPersistor>,
     )> {
-        let lifecycle = self.protocol_mode.client_lifecycle();
-        let (transport, oauth_persistor) = match pending_transport {
+        // rmcp's `Auto` lifecycle stops waiting for `server/discover` after a fixed 10 s and
+        // sends `initialize` on the same transport, where a late discover reply fails the
+        // handshake (#1950). Transports that can be relaunched wait for discover within the
+        // startup timeout instead, and send a legacy `initialize` on a fresh transport.
+        let discover_then_initialize = self.protocol_mode == McpProtocolMode::V20260728
+            && matches!(
+                pending_transport,
+                PendingTransport::InProcess { .. } | PendingTransport::Stdio { .. }
+            );
+        let (transport, oauth_persistor) = if discover_then_initialize {
+            (
+                self.discover_or_initialize_fresh(pending_transport, client_service)
+                    .boxed(),
+                None,
+            )
+        } else {
+            let (transport, oauth_persistor) = Self::serve_pending_transport(
+                pending_transport,
+                client_service,
+                self.protocol_mode.client_lifecycle(),
+            );
+            (
+                transport
+                    .map(|result| {
+                        result.map_err(|source| anyhow::Error::from(HandshakeError { source }))
+                    })
+                    .boxed(),
+                oauth_persistor,
+            )
+        };
+
+        let service_result = match timeout {
+            Some(duration) => match time::timeout(duration, transport).await {
+                Ok(result) => result,
+                Err(_elapsed) => Err(anyhow!(
+                    "timed out handshaking with MCP server after {duration:?}"
+                )),
+            },
+            None => transport.await,
+        };
+        let service = match service_result {
+            Ok(service) => service,
+            Err(error) => {
+                if let Some(runtime) = oauth_persistor.as_ref()
+                    && let Err(persist_error) = runtime.persist_if_needed().await
+                {
+                    warn!(
+                        "failed to persist OAuth tokens after failed initialize: {persist_error}"
+                    );
+                }
+                return Err(error);
+            }
+        };
+
+        // Preserve Codex's existing snapshot and request-freshness behavior. rmcp 3
+        // enables response caching and stale-on-error fallback by default.
+        service
+            .peer()
+            .set_response_cache_config(ClientCacheConfig::disabled())
+            .await;
+
+        Ok((Arc::new(service), oauth_persistor))
+    }
+
+    fn serve_pending_transport(
+        pending_transport: PendingTransport,
+        client_service: ElicitationClientService,
+        lifecycle: ClientLifecycleMode,
+    ) -> (
+        BoxFuture<
+            'static,
+            std::result::Result<
+                RunningService<RoleClient, ElicitationClientService>,
+                ClientInitializeError,
+            >,
+        >,
+        Option<OAuthPersistor>,
+    ) {
+        match pending_transport {
             PendingTransport::InProcess { transport } => (
                 client_service
                     .serve_with_lifecycle(transport, lifecycle)
@@ -1082,43 +1163,55 @@ impl RmcpClient {
                     .boxed(),
                 Some(oauth_persistor),
             ),
+        }
+    }
+
+    /// `Auto` without its fixed discover timeout: the caller's startup timeout bounds the
+    /// discover wait, and a server that rejects discover as legacy gets `initialize` on a
+    /// fresh transport, so no discover reply can arrive during the legacy handshake.
+    async fn discover_or_initialize_fresh(
+        &self,
+        pending_transport: PendingTransport,
+        client_service: ElicitationClientService,
+    ) -> Result<RunningService<RoleClient, ElicitationClientService>> {
+        let discover = ClientLifecycleMode::Discover {
+            preferred_versions: vec![self.protocol_mode.preferred_protocol_version()],
+        };
+        let (transport, _) =
+            Self::serve_pending_transport(pending_transport, client_service.clone(), discover);
+        let discover_error = match transport.await {
+            Ok(service) => return Ok(service),
+            Err(error) if is_legacy_discover_rejection(&error) => error,
+            Err(source) => return Err(HandshakeError { source }.into()),
         };
 
-        let service_result = match timeout {
-            Some(duration) => match time::timeout(duration, transport).await {
-                Ok(result) => {
-                    result.map_err(|source| anyhow::Error::from(HandshakeError { source }))
-                }
-                Err(_elapsed) => Err(anyhow!(
-                    "timed out handshaking with MCP server after {duration:?}"
-                )),
-            },
-            None => transport
+        let fresh_transport = Self::create_pending_transport(&self.transport_recipe).await?;
+        if let PendingTransport::Stdio { transport } = &fresh_transport {
+            let previous = self
+                .stdio_process
+                .lock()
                 .await
-                .map_err(|source| anyhow::Error::from(HandshakeError { source })),
-        };
-        let service = match service_result {
-            Ok(service) => service,
-            Err(error) => {
-                if let Some(runtime) = oauth_persistor.as_ref()
-                    && let Err(persist_error) = runtime.persist_if_needed().await
-                {
-                    warn!(
-                        "failed to persist OAuth tokens after failed initialize: {persist_error}"
-                    );
-                }
-                return Err(error);
+                .replace(transport.process_handle());
+            if let Some(previous) = previous
+                && let Err(error) = previous.terminate().await
+            {
+                warn!("failed to terminate MCP stdio server process after discover: {error}");
             }
-        };
-
-        // Preserve Codex's existing snapshot and request-freshness behavior. rmcp 3
-        // enables response caching and stale-on-error fallback by default.
-        service
-            .peer()
-            .set_response_cache_config(ClientCacheConfig::disabled())
-            .await;
-
-        Ok((Arc::new(service), oauth_persistor))
+        }
+        let (transport, _) = Self::serve_pending_transport(
+            fresh_transport,
+            client_service,
+            ClientLifecycleMode::Initialize,
+        );
+        transport.await.map_err(|fallback| {
+            HandshakeError {
+                source: ClientInitializeError::LegacyFallbackFailed {
+                    discover: Box::new(discover_error),
+                    fallback: Box::new(fallback),
+                },
+            }
+            .into()
+        })
     }
 
     async fn run_service_operation<T, F, Fut>(
@@ -1399,6 +1492,17 @@ async fn create_oauth_transport_and_runtime(
     );
 
     Ok((transport, runtime))
+}
+
+/// Mirrors rmcp's `Auto` classification: a correlated JSON-RPC error from `server/discover`
+/// that is not a 2026-07-28 rejection identifies a legacy server.
+fn is_legacy_discover_rejection(error: &ClientInitializeError) -> bool {
+    matches!(
+        error,
+        ClientInitializeError::JsonRpcError(error)
+            if error.code != ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY
+                && error.code != ErrorCode::HEADER_MISMATCH
+    )
 }
 
 #[cfg(test)]

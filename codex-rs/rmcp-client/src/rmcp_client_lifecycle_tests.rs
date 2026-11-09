@@ -56,10 +56,7 @@ impl InProcessTransportFactory for TestServerFactory {
     fn open(&self) -> BoxFuture<'static, io::Result<DuplexStream>> {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let requests = Arc::new(StdMutex::new(Vec::new()));
-        self.connections
-            .lock()
-            .unwrap()
-            .push(Arc::clone(&requests));
+        self.connections.lock().unwrap().push(Arc::clone(&requests));
         tokio::spawn(serve(server, self.server, requests));
         async move { Ok(client) }.boxed()
     }
@@ -92,10 +89,12 @@ async fn serve(stream: DuplexStream, server: TestServer, requests: Arc<StdMutex<
                     "cacheScope": "private",
                 }})
             }
-            (TestServer::Legacy, "server/discover") => json!({"jsonrpc": "2.0", "id": id, "error": {
-                "code": -32601,
-                "message": "Method not found: server/discover",
-            }}),
+            (TestServer::Legacy, "server/discover") => {
+                json!({"jsonrpc": "2.0", "id": id, "error": {
+                    "code": -32601,
+                    "message": "Method not found: server/discover",
+                }})
+            }
             (_, "initialize") => json!({"jsonrpc": "2.0", "id": id, "result": {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {},
@@ -194,5 +193,19 @@ async fn legacy_server_rejecting_discover_falls_back_to_initialize() {
     assert_eq!(
         requests.concat(),
         vec!["server/discover".to_string(), "initialize".to_string()]
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn legacy_fallback_initializes_on_a_fresh_transport() {
+    let (result, requests) = start(TestServer::Legacy).await;
+
+    result.expect("a legacy server must start through the initialize fallback");
+    assert_eq!(
+        requests,
+        vec![
+            vec!["server/discover".to_string()],
+            vec!["initialize".to_string()],
+        ]
     );
 }
