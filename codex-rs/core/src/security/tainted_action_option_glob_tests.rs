@@ -279,6 +279,10 @@ fn d484_glob_loop_variables_that_may_name_an_option_ask() {
         "for f in ./*.rs; do rg data x$f; done",
         "for f in *.txt; do rg data \"${f%.txt}\"; done",
         "for f in *; do tar rf a.tar \"$p$f\"; done",
+        // Loops inside other loops and conditionals.
+        "for d in a b; do for f in *; do tar rf a.tar \"$f\"; done; done",
+        "if [ -d x ]; then for f in *; do rg data \"$f\"; done; fi",
+        "while :; do for f in *; do sort -o out \"$f\"; done; break; done",
         // Past eight loop names, any variable may be one.
         "for a in *; do :; done; for b in *; do :; done; for c in *; do :; done; \
          for d in *; do :; done; for e in *; do :; done; for g in *; do :; done; \
@@ -292,6 +296,7 @@ fn d484_glob_loop_variables_that_may_name_an_option_ask() {
     for line in [
         "for f (*) tar rf a.tar $f",
         "foreach f (*)\ntar rf a.tar \"$f\"\nend",
+        "for d in a; do for f (*) tar rf a.tar $f; done",
     ] {
         assert_eq!(
             classify_with(
@@ -364,6 +369,8 @@ fn d484_xargs_fed_by_a_listing_asks() {
         "find . -print0 | tail -zc 100 | xargs -0 tar cf a.tar",
         "find . -print0 | grep -e -z x | xargs -0 tar cf a.tar",
         "find . -fprint /dev/stdout -print0 | xargs -0 tar cf a.tar",
+        "find . -print0 | uniq -u | xargs -0 rg data",
+        "find . -print0 | xargs -0 -d '\\n' rg data",
         // xargs' own reading of its options, without a listing.
         "xargs -J % tar rf a.tar % * < list",
     ];
@@ -382,6 +389,8 @@ fn d484_other_xargs_input_stays_quiet() {
         "find . -print0 | sort -z | head -n 3 | xargs -0 tar cf a.tar",
         "find . -print0 | gsort --zero-terminated -k 1 | uniq | xargs -0 tar cf a.tar",
         "find . -print0 | tail -z -n 3 | tee l | xargs -0 tar cf a.tar",
+        "find . -print0 | uniq -zu | xargs -0 rg data",
+        "find . -print0 | xargs -d '\\n' -0 rg data",
         "find . -print0 | xargs --nu tar cf a.tar",
         "find . -name '*.txt' -print0 | xargs --null rg data",
         "ls | xargs tar cf a.tar --",

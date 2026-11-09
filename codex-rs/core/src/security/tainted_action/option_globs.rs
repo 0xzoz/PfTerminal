@@ -244,13 +244,15 @@ const NUL_FILTERS: &[(&str, &str, &[&str])] = &[
             "max-unchanged-stats",
         ],
     ),
+    ("uniq", "fsw", &["skip-fields", "skip-chars", "check-chars"]),
 ];
 
 /// Whether a pipeline stage passes on `find -print0`'s names with each
-/// still starting where find started it: `tee`, `head` and `uniq` (which
-/// keep or drop whole lines or a tail), or `grep`, `sort` and `tail` that
-/// read NUL-ended records (`-z`, `--zero-terminated`, `--null-data`) and
-/// keep them whole (not `grep -o`, `tail -c`). Line-based ones may start
+/// still starting where find started it: `tee` and `head` (which keep
+/// whole lines or cut a tail), `uniq` unless it drops every copy of a line
+/// (`-u`, `-d`, `-D` without `-z`), or `grep`, `sort` and `tail` that read
+/// NUL-ended records (`-z`, `--zero-terminated`, `--null-data`) and keep
+/// them whole (not `grep -o`, `tail -c`). Line-based ones may start
 /// an item at a newline in a name (`./x<newline>--checkpoint-action=…`).
 fn keeps_nul_names(name: &str, args: &[String]) -> bool {
     // GNU tools as Homebrew installs them (`gsort`); `grep` itself starts
@@ -263,7 +265,7 @@ fn keeps_nul_names(name: &str, args: &[String]) -> bool {
     };
     let name = match name {
         "egrep" | "fgrep" => "grep",
-        "tee" | "head" | "uniq" => return true,
+        "tee" | "head" => return true,
         name => name,
     };
     let Some((_, value_letters, value_longs)) =
@@ -289,7 +291,11 @@ fn keeps_nul_names(name: &str, args: &[String]) -> bool {
             zero |= option == "zero-terminated" || (name == "grep" && option == "null-data");
             let abbreviates = |full: &str| !option.is_empty() && full.starts_with(option);
             cut |= (name == "grep" && abbreviates("only-matching"))
-                || (name == "tail" && abbreviates("bytes"));
+                || (name == "tail" && abbreviates("bytes"))
+                || (name == "uniq"
+                    && ["unique", "repeated", "all-repeated"]
+                        .iter()
+                        .any(|full| abbreviates(full)));
             if value.is_none() && value_longs.iter().any(|long| abbreviates(long)) {
                 index += 1;
             }
@@ -304,6 +310,7 @@ fn keeps_nul_names(name: &str, args: &[String]) -> bool {
                 'z' => zero = true,
                 'o' if name == "grep" => cut = true,
                 'c' if name == "tail" => cut = true,
+                'u' | 'd' | 'D' if name == "uniq" => cut = true,
                 _ => {}
             }
             if value_letters.contains(letter) {
@@ -312,7 +319,13 @@ fn keeps_nul_names(name: &str, args: &[String]) -> bool {
             }
         }
     }
-    zero && !cut
+    // `uniq` keeps a line's first copy, so line by line it keeps each
+    // record's start unless it drops all copies (`-u`, `-d`, `-D`).
+    if name == "uniq" {
+        zero || !cut
+    } else {
+        zero && !cut
+    }
 }
 
 /// What each of `commands` gets from the pipeline stages before it: the
@@ -420,6 +433,11 @@ fn xargs_input(texts: &[String], from: usize) -> Option<XargsInput> {
             });
             match found {
                 Some(("null", _)) => nul = true,
+                // The last of `-0` and `-d` sets the delimiter.
+                Some(("delimiter", _)) => {
+                    nul = false;
+                    index += usize::from(value.is_none());
+                }
                 Some(("replace", _)) => {
                     replace = Some(value.unwrap_or("{}").to_string());
                 }
@@ -443,6 +461,11 @@ fn xargs_input(texts: &[String], from: usize) -> Option<XargsInput> {
                     break;
                 }
                 'e' | 'l' => break,
+                'd' => {
+                    nul = false;
+                    index += usize::from(rest.is_empty());
+                    break;
+                }
                 _ if XARGS_VALUE_LETTERS.contains(letter) => {
                     let value = if rest.is_empty() {
                         index += 1;
@@ -489,11 +512,26 @@ pub(super) struct GlobLoops {
 
 const MAX_GLOB_LOOPS: usize = 8;
 
+/// Reserved words the reading keeps before a loop in the same command.
+const LOOP_PREFIXES: &[&str] = &[
+    "!", "if", "then", "elif", "else", "do", "while", "until", "time", "{",
+];
+
 impl GlobLoops {
     /// Takes in a simple command (`for f in *`). zsh's `for f (*)` and
     /// `foreach f (*)`, which this reading cuts at `(`, count as `*`.
     pub(super) fn read(&mut self, command: &Command) {
-        let words = &command.words;
+        // Past reserved words that may start it (`do for f in *`, `then
+        // for …`).
+        let skipped = command
+            .words
+            .iter()
+            .take_while(|word| {
+                work::step();
+                LOOP_PREFIXES.contains(&word.text.as_str())
+            })
+            .count();
+        let words = &command.words[skipped..];
         let keyword = words.first().is_some_and(|word| {
             matches!(
                 word.text.to_lowercase().as_str(),
