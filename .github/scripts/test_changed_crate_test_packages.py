@@ -4,11 +4,10 @@ import re
 import unittest
 
 from changed_crate_test_packages import CANARY_PACKAGE
-from changed_crate_test_packages import EXCLUDED_PACKAGES
 from changed_crate_test_packages import HELPER_BINARIES
 from changed_crate_test_packages import ROOT
 from changed_crate_test_packages import helper_build_args
-from changed_crate_test_packages import test_packages
+from changed_crate_test_packages import selected_packages
 from changed_crate_test_packages import workspace_packages
 
 PACKAGES = {
@@ -22,34 +21,33 @@ PACKAGES = {
 class ChangedCrateTestPackagesTest(unittest.TestCase):
     def test_any_file_under_a_crate_selects_it(self) -> None:
         self.assertEqual(
-            test_packages(
+            selected_packages(
                 [
                     "codex-rs/rmcp-client/tests/fixtures/response.json",
                     "codex-rs/utils/string/Cargo.toml",
+                    "codex-rs/core/src/lib.rs",
                     "codex-rs/Cargo.lock",
                     "docs/ci.md",
                 ],
                 PACKAGES,
             ),
-            ["codex-rmcp-client", "codex-utils-string"],
+            ["codex-core", "codex-rmcp-client", "codex-utils-string"],
         )
 
-    def test_nested_package_wins_and_excluded_packages_are_dropped(self) -> None:
+    def test_nested_package_wins(self) -> None:
         self.assertEqual(
-            test_packages(
-                ["codex-rs/core/src/lib.rs", "codex-rs/core/tests/common/lib.rs"],
-                PACKAGES,
-            ),
+            selected_packages(["codex-rs/core/tests/common/lib.rs"], PACKAGES),
             ["core_test_support"],
         )
 
     def test_job_changes_select_the_canary(self) -> None:
-        self.assertEqual(
-            test_packages(
-                [".github/workflows/rust-ci-changed-crate-tests.yml"], PACKAGES
-            ),
-            [CANARY_PACKAGE],
-        )
+        for path in (
+            ".github/workflows/rust-ci-changed-crate-tests.yml",
+            ".github/workflows/rust-ci.yml",
+            ".github/scripts/changed_crate_test_packages.py",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(selected_packages([path], PACKAGES), [CANARY_PACKAGE])
 
     def test_helpers(self) -> None:
         self.assertEqual(
@@ -57,10 +55,18 @@ class ChangedCrateTestPackagesTest(unittest.TestCase):
             ["-p", "codex-cli", "--bin", "codex"],
         )
         self.assertEqual(helper_build_args(["codex-utils-string"]), [])
+        # Shared helpers are built once.
+        self.assertEqual(
+            helper_build_args(["codex-rmcp-client", "codex-tui"]),
+            [
+                *("-p", "codex-cli", "--bin", "codex"),
+                *("-p", "codex-wallet-daemon", "--bin", "corbanu-walletd"),
+            ],
+        )
 
     def test_named_packages_exist(self) -> None:
         names = set(workspace_packages(ROOT).values())
-        named = {CANARY_PACKAGE} | EXCLUDED_PACKAGES | set(HELPER_BINARIES)
+        named = {CANARY_PACKAGE} | set(HELPER_BINARIES)
         named |= {
             package for helpers in HELPER_BINARIES.values() for package, _ in helpers
         }
@@ -99,24 +105,34 @@ class ChangedCrateTestsWorkflowTest(unittest.TestCase):
 
     def test_job_runs_nextest_within_budget_and_saves_no_cache(self) -> None:
         job = self.workflow("rust-ci-changed-crate-tests.yml")
-        self.assertIn("timeout-minutes: 75", job)
+        self.assertIn("timeout-minutes: 85", job)
+        # Postmerge's profile: the dev profile's debug info filled the disk.
+        self.assertIn("PROFILE: ci-test", job)
         self.assertRegex(
-            job, r"cargo nextest run --locked .*--no-fail-fast --no-tests=pass"
+            job,
+            r'cargo nextest run --locked --target "\$TARGET" --cargo-profile "\$PROFILE" '
+            r".*--no-fail-fast --no-tests=pass",
         )
         self.assertIn("actions/cache/restore@", job)
         self.assertNotIn("actions/cache/save@", job)
         self.assertNotRegex(job, r"uses: actions/cache@")
 
-    def test_job_restores_the_core_security_linux_sccache(self) -> None:
-        def keys(text: str) -> list[str]:
-            return re.findall(r"(?m)^ +key: (sccache-core-security-.+)$", text)
+    def test_job_restores_the_postmerge_nextest_sccache(self) -> None:
+        def key(text: str) -> str:
+            match = re.search(r"(?m)^ +key: (sccache-.+)$", text)
+            self.assertIsNotNone(match)
+            return match.group(1)
 
-        saved = keys(self.workflow("rust-ci-core-security.yml"))[0]
-        restored = keys(self.workflow("rust-ci-changed-crate-tests.yml"))[0]
+        platform = self.workflow("rust-ci-full-nextest-platform.yml")
+        self.assertIn("echo \"hash=$(sha256sum Cargo.lock | cut -d' ' -f1)\"", platform)
         self.assertEqual(
-            restored,
-            saved.replace("${{ inputs.runner }}", "ubuntu-24.04").replace(
-                "${{ inputs.target }}", "${{ env.TARGET }}"
+            key(self.workflow("rust-ci-changed-crate-tests.yml")),
+            key(platform)
+            .replace("${{ env.ARCHIVE_CACHE_RUNNER }}", "ubuntu-24.04")
+            .replace("${{ inputs.target }}", "${{ env.TARGET }}")
+            .replace("${{ inputs.profile }}", "${{ env.PROFILE }}")
+            .replace(
+                "steps.lockhash.outputs.hash", "steps.sccache_config.outputs.lockhash"
             ),
         )
 

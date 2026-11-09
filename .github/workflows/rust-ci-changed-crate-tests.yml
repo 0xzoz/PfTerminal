@@ -6,9 +6,11 @@ name: rust-ci changed crate tests
 # its own crate's tests (#1963 broke two codex-rmcp-client tests) went green.
 # `.github/scripts/changed_crate_test_packages.py` picks the crates (any file
 # under the crate; not the crates depending on it, which postmerge covers)
-# and leaves out the slowest suites: codex-core, codex-app-server and
-# codex-tui. Restore-only: it reuses main's Linux core-security sccache (same
-# target and dev profile) and saves nothing (#636).
+# and the helper binaries their tests start. It builds with postmerge's
+# `ci-test` profile (no debug info): with the dev profile, a PR changing most
+# crates filled the runner's disk in the #1972 trials. Restore-only: it reuses
+# postmerge's Linux nextest sccache (same target and profile) and saves
+# nothing (#636).
 on:
   workflow_call:
     inputs:
@@ -30,7 +32,7 @@ jobs:
   test:
     name: cargo nextest (changed crates)
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 85
     defaults:
       run:
         working-directory: codex-rs
@@ -38,6 +40,7 @@ jobs:
       # sccache cannot cache incremental compilations.
       CARGO_INCREMENTAL: "0"
       SCCACHE_CACHE_SIZE: 2G
+      PROFILE: ci-test
       # Tests must never reach the runner's OS keyring.
       CORBANU_TEST_NO_NATIVE_KEYRING: "1"
       RUST_BACKTRACE: "1"
@@ -52,8 +55,8 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
       # A PR changing most crates (an upstream sync) builds nearly the whole
-      # workspace with debug info; that filled the runner's disk in the #1972
-      # trial. Drop preinstalled SDKs this job never uses, as bazel.yml does.
+      # workspace. Drop preinstalled SDKs this job never uses, as bazel.yml
+      # does.
       - name: Free runner disk space
         working-directory: .
         run: |
@@ -94,16 +97,16 @@ jobs:
             echo "SCCACHE_DIR=${CI_BUILD_ROOT}/sccache"
             echo "RUSTC_WRAPPER=$(command -v sccache)"
           } >> "$GITHUB_ENV"
-          echo "lockhash=$(cat Cargo.lock rust-toolchain.toml | shasum -a 256 | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      # rust-ci-core-security.yml's Linux cache, saved on main.
+          echo "lockhash=$(sha256sum Cargo.lock | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      # rust-ci-full-nextest-platform.yml's Linux cache, saved on main.
       - name: Restore sccache cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: sccache-core-security-ubuntu-24.04-${{ env.TARGET }}-${{ steps.sccache_config.outputs.lockhash }}-${{ github.run_id }}
+          key: sccache-ubuntu-24.04-${{ env.TARGET }}-${{ env.PROFILE }}-${{ steps.sccache_config.outputs.lockhash }}-${{ github.run_id }}
           restore-keys: |
-            sccache-core-security-ubuntu-24.04-${{ env.TARGET }}-${{ steps.sccache_config.outputs.lockhash }}-
-            sccache-core-security-ubuntu-24.04-${{ env.TARGET }}-
+            sccache-ubuntu-24.04-${{ env.TARGET }}-${{ env.PROFILE }}-${{ steps.sccache_config.outputs.lockhash }}-
+            sccache-ubuntu-24.04-${{ env.TARGET }}-${{ env.PROFILE }}-
 
       # Binaries from other crates that these tests start (found next to the
       # test binaries by `cargo_bin`).
@@ -115,7 +118,7 @@ jobs:
             echo "No helpers needed."
             exit 0
           fi
-          cargo build --locked --target "$TARGET" "${helpers[@]}"
+          cargo build --locked --target "$TARGET" --profile "$PROFILE" "${helpers[@]}"
 
       - name: cargo nextest run
         run: |
@@ -125,7 +128,7 @@ jobs:
             args+=(-p "$package")
           done
           echo "Packages: $PACKAGES"
-          cargo nextest run --locked --target "$TARGET" "${args[@]}" --no-fail-fast --no-tests=pass
+          cargo nextest run --locked --target "$TARGET" --cargo-profile "$PROFILE" "${args[@]}" --no-fail-fast --no-tests=pass
 
       - name: sccache stats
         if: always()
