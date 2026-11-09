@@ -118,6 +118,15 @@ fn issue_1910_remote_after_other_quoted_text_asks() {
         // Review round 1: an empty ANSI-C value, a wrapper's empty value.
         "git fetch -o $'' e\"$r\"",
         "env -u '' git fetch e\"$r\"",
+        // #1920's condition, joined by OR to this one: past a word the word
+        // lexer may cut differently, even a value the line sets asks, since
+        // that reading may have miscounted it (`-o 'a;r=o;'` hides an
+        // assignment from the lexer the other way).
+        "git fetch -o 'a;r=o;' e\"$r\"",
+        "r=origin; git fetch --refmap='x y' \"$r\"",
+        "r=origin; git fetch --refmap='x y' e\"$r\"",
+        "r=origin; git pull --shallow-since='2 days ago' \"$r\" main",
+        "r=origin; git fetch -o 'a;b' \"$r\"",
         "git fetch --refmap '' e\"$r\"",
         "git fetch -o 'a;b' e\"$r\"",
         "git fetch -o 'a|b' e\"$r\"",
@@ -140,11 +149,7 @@ fn issue_1910_shown_remotes_after_quoted_values_stay_quiet() {
         // Review round 1: no quoted text before `$r`, so the word lexer's
         // value for it counts, whatever comes after.
         "r=origin; git fetch \"$r\" HEAD:\"$b\"",
-        "r=origin; git fetch --refmap='x y' \"$r\"",
-        "r=origin; git fetch --refmap='x y' e\"$r\"",
-        "r=origin; git pull --shallow-since='2 days ago' \"$r\" main",
         "r=origin; git fetch -o '' \"$r\"",
-        "r=origin; git fetch -o 'a;b' \"$r\"",
         "git fetch --refmap='x y' origin",
         "git fetch --refmap='x y' origin main",
         "git fetch --shallow-since='2 days ago' origin",
