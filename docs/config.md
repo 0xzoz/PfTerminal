@@ -349,6 +349,30 @@ reaches one only if you list it there. A shell profile that exports a key
 itself (for example a login shell reading `~/.zprofile`) is outside this
 filter.
 
+<a id="mcp-oauth-addresses"></a>
+
+## MCP OAuth Address Policy
+
+OAuth sign-in for a Streamable HTTP MCP server (discovery, client
+registration, token and refresh requests, and every redirect they follow) may
+connect only to public addresses, unless the server's own URL is local:
+
+| MCP server `url` | OAuth requests may also reach |
+| --- | --- |
+| `localhost` or a loopback IP (`127.0.0.1`, `[::1]`) | loopback addresses |
+| a private IP (`10.x`, `172.16-31.x`, `192.168.x`, `100.64.0.0/10`, `fd00::/8`) | private addresses |
+| any other IP literal | that one address |
+| a host name | public addresses only, whatever the name resolves to |
+
+Link-local and cloud metadata addresses (`169.254.169.254`, `fd00:ec2::254`),
+`0.0.0.0`, multicast and reserved addresses are never reached, except as the
+server URL's own IP literal. Host names are checked after DNS resolution and
+the request connects only to the checked address. A blocked request fails with
+`MCP OAuth request blocked: ...`. An MCP server named by a host name that resolves to
+a private address can't use OAuth endpoints on private addresses; use its IP
+address in `url` if its certificate allows that. With an HTTP
+proxy, the proxy resolves host names, so only IP-literal URLs are checked.
+
 <a id="telegram"></a>
 
 ## Telegram Connector

@@ -52,10 +52,7 @@ fn redirect_to(location: &str) -> String {
 }
 
 fn loopback_literal_only() -> ResolvedAddressFilter {
-    ResolvedAddressFilter::new(
-        |_| false,
-        |ip: IpAddr| ip == IpAddr::from([127, 0, 0, 1]),
-    )
+    ResolvedAddressFilter::new(|_| false, |ip: IpAddr| ip == IpAddr::from([127, 0, 0, 1]))
 }
 
 fn pool(filter: ResolvedAddressFilter) -> RouteAwareClientPool {
@@ -86,7 +83,13 @@ async fn literal_address_is_checked_before_connecting() {
     let pool = pool(ResolvedAddressFilter::new(|_| false, |_| false));
 
     assert_disallowed(get(&pool, &format!("http://{addr}/")).await);
-    assert_disallowed(get(&pool, &format!("http://[::ffff:127.0.0.1]:{}/", addr.port())).await);
+    assert_disallowed(
+        get(
+            &pool,
+            &format!("http://[::ffff:127.0.0.1]:{}/", addr.port()),
+        )
+        .await,
+    );
     assert_eq!(connections.load(Ordering::SeqCst), 0);
 }
 
@@ -104,9 +107,12 @@ async fn host_name_resolving_to_disallowed_address_is_refused() {
     let (addr, connections) = spawn_server(OK.to_string());
     let filter = loopback_literal_only().with_lookup(|_| vec![IpAddr::from([127, 0, 0, 1])]);
 
-    let error = get(&pool(filter), &format!("http://rebind.test:{}/", addr.port()))
-        .await
-        .expect_err("loopback answer should be refused");
+    let error = get(
+        &pool(filter),
+        &format!("http://rebind.test:{}/", addr.port()),
+    )
+    .await
+    .expect_err("loopback answer should be refused");
     assert!(
         error.to_string().contains("`rebind.test` resolves only to"),
         "{error}"
@@ -120,12 +126,20 @@ async fn host_name_resolving_to_disallowed_address_is_refused() {
 #[tokio::test]
 async fn connects_only_to_checked_addresses() {
     let (addr, connections) = spawn_server(OK.to_string());
-    let filter = ResolvedAddressFilter::new(|ip: IpAddr| ip.is_loopback(), |_| false)
-        .with_lookup(|_| vec![IpAddr::from([10, 255, 255, 1]), IpAddr::from([127, 0, 0, 1])]);
+    let filter =
+        ResolvedAddressFilter::new(|ip: IpAddr| ip.is_loopback(), |_| false).with_lookup(|_| {
+            vec![
+                IpAddr::from([10, 255, 255, 1]),
+                IpAddr::from([127, 0, 0, 1]),
+            ]
+        });
 
-    let body = get(&pool(filter), &format!("http://pinned.test:{}/", addr.port()))
-        .await
-        .unwrap();
+    let body = get(
+        &pool(filter),
+        &format!("http://pinned.test:{}/", addr.port()),
+    )
+    .await
+    .unwrap();
     assert_eq!(body, "ok");
     assert_eq!(connections.load(Ordering::SeqCst), 1);
 }
@@ -141,8 +155,10 @@ async fn redirect_to_disallowed_literal_is_refused() {
 #[tokio::test]
 async fn redirect_to_host_resolving_to_disallowed_address_is_refused() {
     let (addr, connections) = spawn_server(String::new());
-    let (redirect_addr, _) =
-        spawn_server(redirect_to(&format!("http://internal.test:{}/", addr.port())));
+    let (redirect_addr, _) = spawn_server(redirect_to(&format!(
+        "http://internal.test:{}/",
+        addr.port()
+    )));
     let filter = loopback_literal_only().with_lookup(|_| vec![IpAddr::from([127, 0, 0, 1])]);
 
     assert_disallowed(get(&pool(filter), &format!("http://{redirect_addr}/")).await);

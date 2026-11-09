@@ -214,14 +214,12 @@ async fn discover_streamable_http_oauth_with_headers_and_http_client(
         OAuthDiscoveryTimeout::Requested => {
             OAuthHttpClientAdapter::new(http_client, default_headers, url)
         }
-        OAuthDiscoveryTimeout::Capped(max_timeout) => {
-            OAuthHttpClientAdapter::new_with_max_timeout(
-                http_client,
-                default_headers,
-                url,
-                max_timeout,
-            )
-        }
+        OAuthDiscoveryTimeout::Capped(max_timeout) => OAuthHttpClientAdapter::new_with_max_timeout(
+            http_client,
+            default_headers,
+            url,
+            max_timeout,
+        ),
     };
     let mut authorization_manager =
         AuthorizationManager::new_with_oauth_http_client(url, Arc::new(oauth_http_client)).await?;

@@ -178,7 +178,15 @@ async fn public_server_cannot_reach_loopback_literal() {
 async fn public_server_cannot_reach_host_name_resolving_to_loopback() {
     let (addr, connections) = spawn_server(OK.to_string());
     let url = format!("http://localhost:{}/token", addr.port());
-    assert_blocked(send(&adapter(PUBLIC_SERVER), "POST", &url, OAuthHttpRedirectPolicy::Follow).await);
+    assert_blocked(
+        send(
+            &adapter(PUBLIC_SERVER),
+            "POST",
+            &url,
+            OAuthHttpRedirectPolicy::Follow,
+        )
+        .await,
+    );
     assert_eq!(connections.load(Ordering::SeqCst), 0);
 }
 

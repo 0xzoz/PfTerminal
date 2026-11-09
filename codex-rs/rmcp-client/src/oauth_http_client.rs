@@ -176,14 +176,14 @@ impl OAuthHttpClientAdapter {
             .map_err(|error| {
                 let message = error.to_string();
                 match message.find(HTTP_ADDRESS_POLICY_DENIED_PREFIX) {
-                    Some(start) => oauth_http_client_error(
-                        OAuthHttpClientAdapterError::AddressPolicy(
+                    Some(start) => {
+                        oauth_http_client_error(OAuthHttpClientAdapterError::AddressPolicy(
                             message[start + HTTP_ADDRESS_POLICY_DENIED_PREFIX.len()..]
                                 .trim_start_matches(':')
                                 .trim()
                                 .to_string(),
-                        ),
-                    ),
+                        ))
+                    }
                     None => oauth_http_client_error(error),
                 }
             })?;

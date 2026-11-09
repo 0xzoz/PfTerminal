@@ -13,11 +13,11 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
+use reqwest::Url;
 use reqwest::dns::Addrs;
 use reqwest::dns::Name;
 use reqwest::dns::Resolve;
 use reqwest::dns::Resolving;
-use reqwest::Url;
 
 type AddressPredicate = Arc<dyn Fn(IpAddr) -> bool + Send + Sync>;
 type Lookup = Arc<dyn Fn(String) -> Resolving + Send + Sync>;

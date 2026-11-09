@@ -1027,3 +1027,22 @@ count as one unknown file, the cautious reading (#1587, #1132, thanks to
   `icacls "%TEMP%" /remove:g *S-1-5-21-…` (with the `*`) removes one. Remove
   only such bare-SID entries. If one was your Corbanu home's, the sandbox adds
   it back the next time it runs.
+
+## MCP OAuth requests no longer reach internal addresses (#1947)
+
+- **A remote MCP server can no longer make Corbanu send OAuth requests to
+  your local machine, private network or cloud metadata service.** OAuth
+  discovery, client registration, token and refresh requests (and each
+  redirect) now go only to public addresses, unless the MCP server's own URL
+  is `localhost` or a loopback or private IP; then those addresses are
+  allowed too. Link-local and cloud metadata addresses (`169.254.169.254`,
+  `fd00:ec2::254`) are always refused. Host names are checked after DNS
+  resolution, and the request connects only to the address that was checked.
+  Before, an MCP server could point these requests at a host name that
+  resolves to an internal address (blind SSRF; RUSTSEC-2026-0457 residual).
+- Not changed: public MCP servers and local ones named by `localhost` or an
+  IP address sign in as before. **Changed:** an MCP server configured by a host
+  name that resolves to a private address (for example a company intranet
+  name) can no longer use OAuth endpoints on private addresses; the sign-in
+  fails with `MCP OAuth request blocked: ...`. Using the server's IP address
+  in `url` works where its certificate allows that. Details: `docs/config.md#mcp-oauth-addresses`.
