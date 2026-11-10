@@ -2773,6 +2773,11 @@
           },
           "type": "array"
         },
+        "discover_timeout_sec": {
+          "default": null,
+          "format": "double",
+          "type": "number"
+        },
         "enabled": {
           "default": null,
           "type": "boolean"
