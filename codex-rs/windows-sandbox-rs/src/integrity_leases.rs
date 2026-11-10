@@ -185,9 +185,16 @@ struct PlantedMetadata {
 }
 
 impl PlantedMetadata {
-    /// #1877 item 5: `path` was recorded (again) just now.
+    /// #1877 item 5: `path` was recorded (again) just now. Stamps count up
+    /// from the clock, so a file an older version saved without them can't
+    /// hand out one a prompt already showed.
     fn stamp(&mut self, path: &Path) {
-        self.last_stamp += 1;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                u64::try_from(since.as_nanos()).unwrap_or(u64::MAX)
+            });
+        self.last_stamp = self.last_stamp.max(now).saturating_add(1);
         self.stamps.insert(path.to_path_buf(), self.last_stamp);
     }
 }
@@ -1150,7 +1157,10 @@ pub fn confirm_planted_project_metadata(path: &Path, shown: Option<u64>) -> Resu
         }
     }
     let mut planted = load_planted(&registry)?;
-    if planted.stamps.get(path).copied() != shown {
+    // One no longer recorded (confirmed meanwhile, or gone) has nothing
+    // unseen.
+    let recorded = planted.entries.contains(path) || planted.git_changes.contains_key(path);
+    if recorded && planted.stamps.get(path).copied() != shown {
         anyhow::bail!(
             "{} was recorded again after Corbanu Terminal asked about it; check it again, and Corbanu Terminal will ask again",
             path.display()

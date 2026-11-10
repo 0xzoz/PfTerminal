@@ -619,6 +619,9 @@ impl ChatWidget {
         });
         // Confirming covers the changed repositories too.
         paths.extend(git_changes.into_iter().map(|change| change.path));
+        // #1877 item 5: each once (a folder can be both).
+        paths.sort();
+        paths.dedup();
         let mut header = ColumnRenderable::new();
         header.push(*Box::new(Paragraph::new(lines).wrap(Wrap { trim: false })));
 
@@ -648,9 +651,13 @@ impl ChatWidget {
                 name: confirm.to_string(),
                 description: Some(confirm_description.to_string()),
                 actions: vec![Box::new(move |tx| {
-                    let message = match confirm_planted_project_metadata(&paths, &stamps) {
-                        Ok(()) => confirmed.to_string(),
-                        Err(err) => format!("Couldn't confirm them: {err}"),
+                    let refused = confirm_planted_project_metadata(&paths, &stamps);
+                    let message = if refused.is_empty() {
+                        confirmed.to_string()
+                    } else if refused.len() < paths.len() {
+                        format!("{confirmed} Except: {}", refused.join("; "))
+                    } else {
+                        format!("Couldn't confirm them: {}", refused.join("; "))
                     };
                     tx.send(AppEvent::InsertHistoryCell(Box::new(
                         crate::history_cell::new_info_event(message, /*hint*/ None),
@@ -713,33 +720,28 @@ pub(super) fn planted_to_ask_about(planted: Vec<PathBuf>, config: &Config) -> Ve
 }
 
 /// Confirms each of `paths` as shown (#1877 item 5: with its stamp from
-/// `stamps`); one that can't be confirmed (recorded again since, or a
-/// command that may change it still runs) stays recorded and is asked about
-/// again, and the others are still confirmed.
+/// `stamps`) and says why each that can't be (recorded again since, or a
+/// command that may change it still runs) wasn't; those stay recorded and
+/// are asked about again, and the others are still confirmed.
 #[cfg(target_os = "windows")]
 fn confirm_planted_project_metadata(
     paths: &[PathBuf],
     stamps: &std::collections::BTreeMap<PathBuf, u64>,
-) -> anyhow::Result<()> {
-    let refused: Vec<String> = paths
+) -> Vec<String> {
+    paths
         .iter()
         .filter_map(|path| {
             codex_windows_sandbox::confirm_planted_project_metadata(path, stamps.get(path).copied())
                 .err()
                 .map(|err| format!("{err:#}"))
         })
-        .collect();
-    if refused.is_empty() {
-        Ok(())
-    } else {
-        Err(anyhow::anyhow!(refused.join("; ")))
-    }
+        .collect()
 }
 
 #[cfg(not(target_os = "windows"))]
 fn confirm_planted_project_metadata(
     _paths: &[PathBuf],
     _stamps: &std::collections::BTreeMap<PathBuf, u64>,
-) -> anyhow::Result<()> {
-    Ok(())
+) -> Vec<String> {
+    Vec::new()
 }
