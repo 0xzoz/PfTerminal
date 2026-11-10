@@ -330,7 +330,7 @@ fn d484_other_loop_variables_stay_quiet() {
         "for f\nin ./*\ndo tar rf a.tar \"$f\"; done",
         "for f\ndo tar rf a.tar \"$f\"; done",
     ];
-    assert_eq!(wrong(&lines, None), Vec::<String>::new());
+    assert_eq!(wrong(&lines, /*expected*/ None), Vec::<String>::new());
 }
 
 #[test]
@@ -415,7 +415,7 @@ fn d484_other_xargs_input_stays_quiet() {
         "ls; xargs tar cf a.tar < list",
         "ls | xargs -I{} echo tar {}",
     ];
-    assert_eq!(wrong(&lines, None), Vec::<String>::new());
+    assert_eq!(wrong(&lines, /*expected*/ None), Vec::<String>::new());
 }
 
 #[test]
