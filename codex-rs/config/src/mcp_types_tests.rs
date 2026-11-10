@@ -231,6 +231,39 @@ fn deserialize_required_server_config() {
 }
 
 #[test]
+fn deserialize_stdio_server_config_with_discover_timeout() {
+    let cfg: McpServerConfig = toml::from_str(
+        r#"
+            command = "echo"
+            discover_timeout_sec = 45.5
+        "#,
+    )
+    .expect("should deserialize discover_timeout_sec for stdio");
+
+    assert_eq!(
+        cfg.discover_timeout_sec,
+        Some(Duration::from_secs_f64(45.5))
+    );
+}
+
+#[test]
+fn deserialize_streamable_http_server_config_rejects_discover_timeout() {
+    let err = toml::from_str::<McpServerConfig>(
+        r#"
+            url = "https://example.com/mcp"
+            discover_timeout_sec = 45
+        "#,
+    )
+    .expect_err("should reject discover_timeout_sec for streamable_http");
+
+    assert!(
+        err.to_string()
+            .contains("discover_timeout_sec is not supported for streamable_http"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn deserialize_streamable_http_server_config() {
     let cfg: McpServerConfig = toml::from_str(
         r#"
@@ -440,6 +473,7 @@ fn deserialize_ignores_unknown_server_fields() {
             supports_parallel_tool_calls: false,
             disabled_reason: None,
             startup_timeout_sec: None,
+            discover_timeout_sec: None,
             tool_timeout_sec: None,
             default_tools_approval_mode: None,
             enabled_tools: None,
