@@ -494,14 +494,14 @@ fn verbatim_drive_paths_are_read_as_plain_ones() {
 }
 
 /// #1877 item 6: configs that are each under 1 MiB but together over
-/// 16 MiB count as changed after every look.
+/// 16 MiB count as changed after every look, and none is read past that.
 #[test]
 fn configs_too_large_together_count_every_time() {
     let (_dir, base) = tempdir();
     let roots = [base.clone()];
     let global = base.join("global.cfg");
     let mut includes = String::from("[include]\n");
-    for n in 0..17 {
+    for n in 0..20 {
         let part = base.join(format!("part{n}.cfg"));
         fs::write(&part, format!("# {}\n", "x".repeat(1_000_000))).expect("part");
         includes.push_str(&format!(
@@ -513,6 +513,9 @@ fn configs_too_large_together_count_every_time() {
     let look = || target_states_with(&[], &roots, std::slice::from_ref(&global), &[]);
     let first = look();
     let again = target_changes(&first, look());
+    // Nothing more is read once over: the global config and 17 parts.
+    let mut budget = ConfigBudget::default();
+    read_configs(std::slice::from_ref(&global), &[], &mut budget);
     assert_eq!(
         (
             first
@@ -523,7 +526,36 @@ fn configs_too_large_together_count_every_time() {
             again
                 .iter()
                 .any(|(path, _)| *path == base.join("part16.cfg")),
+            budget.files,
+            budget.bytes <= MAX_CONFIG_TOTAL_BYTES,
         ),
-        (vec![base.join("part16.cfg")], true)
+        (vec![base.join("part16.cfg")], true, 18, true)
+    );
+}
+
+/// #1877 item 7(b): only a `\\?\` drive-letter path from the top of the
+/// drive is simplified; the volume itself (`\\?\C:`, which would become
+/// the relative `C:`), network paths and names `\\?\` takes literally stay
+/// as they are (and are never opened).
+#[test]
+fn local_simplifies_only_rooted_drive_paths() {
+    let local = |path: &str| local(Path::new(path)).display().to_string();
+    assert_eq!(
+        [
+            local(r"\\?\C:\proj\x.sh"),
+            local(r"\\?\C:"),
+            local(r"\\?\UNC\server\share\x"),
+            local(r"\\.\C:\x"),
+            local(r"\\?\C:\proj\x."),
+            local(r"\\?\C:\proj/x"),
+        ],
+        [
+            r"C:\proj\x.sh",
+            r"\\?\C:",
+            r"\\?\UNC\server\share\x",
+            r"\\.\C:\x",
+            r"\\?\C:\proj\x.",
+            r"\\?\C:\proj/x",
+        ]
     );
 }

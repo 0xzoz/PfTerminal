@@ -93,8 +93,8 @@ const MAX_CONFIG_ENTRIES: usize = 100_000;
 const MAX_BASES: usize = 8;
 const MAX_TARGETS: usize = 4_096;
 
-/// How much one look at the configs may still read, the files it read, and
-/// where it stopped.
+/// How much one look at the configs may still read, the files and bytes it
+/// read, and where it stopped (it reads nothing more after that).
 #[derive(Default)]
 pub(crate) struct ConfigBudget {
     files: usize,
@@ -388,6 +388,10 @@ fn read_config(
     each: &mut dyn FnMut(Entry, &Path),
 ) {
     use std::io::Read as _;
+    // #1877 item 6: past a limit, nothing more is read.
+    if budget.overflow.is_some() {
+        return;
+    }
     let path = &local(path);
     if crate::git_watch::is_remote_or_device(path) {
         return;
@@ -404,23 +408,17 @@ fn read_config(
         budget.over(path);
         return;
     }
+    // #1877 item 6: no more than what is left of the total either.
+    let limit = MAX_CONFIG_BYTES.min(MAX_CONFIG_TOTAL_BYTES.saturating_sub(budget.bytes));
     let mut bytes = Vec::new();
-    if file
-        .take(MAX_CONFIG_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .is_err()
-    {
+    if file.take(limit + 1).read_to_end(&mut bytes).is_err() {
         return;
     }
-    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+    if bytes.len() as u64 > limit {
         budget.over(path);
         return;
     }
     budget.bytes += bytes.len() as u64;
-    if budget.bytes > MAX_CONFIG_TOTAL_BYTES {
-        budget.over(path);
-        return;
-    }
     for entry in parse(&String::from_utf8_lossy(&bytes)) {
         budget.entries += 1;
         if budget.entries > MAX_CONFIG_ENTRIES {
@@ -602,10 +600,17 @@ fn resolve_all(base: &Path, value: &str, homes: &[PathBuf]) -> Vec<PathBuf> {
 /// #1877 item 7(b): `path` with a `\\?\` drive-letter prefix (`\\?\C:\x`)
 /// written as Windows would read it without one (`C:\x`), when that names
 /// the same file (`dunce`'s rule: no `..`, reserved or trailing-dot names,
-/// not too long); any other path as it is. A network path (`\\?\UNC\...`)
-/// keeps its prefix, so it is still never opened.
+/// not too long) from the top of the drive (not `\\?\C:`, the volume,
+/// which would become `C:`, a folder relative to the current one); any
+/// other path as it is. A network path (`\\?\UNC\...`) keeps its prefix,
+/// so it is still never opened.
 fn local(path: &Path) -> PathBuf {
-    dunce::simplified(path).to_path_buf()
+    let simple = dunce::simplified(path);
+    if simple.has_root() {
+        simple.to_path_buf()
+    } else {
+        path.to_path_buf()
+    }
 }
 
 /// The entries of a config file's text: `[section]`, `[section "sub"]` and

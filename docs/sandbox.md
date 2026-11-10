@@ -161,7 +161,8 @@ valid Unicode, counts as changed after every command. The warning names
 what changed. Nested repositories in the temporary folder (`%TEMP%`) aren't
 checked, and a nested `.git` link is flagged after every command, as at the
 top. A link to a folder of the project itself isn't looked through again,
-even when the project lies in `%TEMP%` (the project is checked anyway).
+even when the project lies in `%TEMP%`: the walk of the project covers that
+folder, as it does for a project anywhere else.
 
 **Hooks folders and files a git config names.** Many projects point
 `core.hooksPath` at a folder in the project (Husky's `.husky` or
@@ -177,11 +178,13 @@ folder, each included config file, and each file a program setting names
 in the project: a first word that looks like a path, and every later word),
 when it lies in a folder commands may write to. A path a config or a
 `.git` file names on a network share or a device (`\\server\share`,
-`\\?\UNC\`, `CON` ...) is never opened (a local path written with a
-`\\?\` prefix, such as `\\?\C:\proj\.githooks`, is read as
-`C:\proj\.githooks` when that names the same file; a link in the project is still
-followed; a device name written with a superscript digit, such as `COM¹`,
-isn't recognized as one). For the same reason, in a writable folder that is
+`\\?\UNC\`, `CON` ...) is never opened (a path a config names with a
+`\\?\` drive-letter prefix, such as `\\?\C:\proj\.githooks`, is read as
+`C:\proj\.githooks` when that names the same file; one that doesn't, such as
+a name ending in a dot or a path over 260 characters, isn't, and nor is a
+`\\?\` path in a `.git` file; a link in the project is still followed;
+a device name written with a superscript digit, such as `COM¹`, isn't
+recognized as one). For the same reason, in a writable folder that is
 itself on a network share or written with a `\\?\` prefix, the config of
 a repository whose git folder lies there isn't read and paths relative to
 that folder aren't recorded, and no warning says so; only a path a config
