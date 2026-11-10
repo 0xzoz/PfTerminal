@@ -71,6 +71,11 @@
 /codex-rs/config/src/security_state.rs @corbanu-security
 # Network proxy policy, MITM and credential injection.
 /codex-rs/network-proxy/ @corbanu-security
+# MCP OAuth resolved-address (SSRF) policy (D487, #2004) and its tests.
+/codex-rs/http-client/src/address_filter* @corbanu-security
+/codex-rs/exec-server-protocol/src/address_policy* @corbanu-security
+/codex-rs/exec-server/src/client/route_aware_http_client* @corbanu-security
+/codex-rs/rmcp-client/src/oauth_http_client* @corbanu-security
 # Security levels, policy, audit and untrusted-content boundaries.
 /codex-rs/core/src/security/ @corbanu-security
 /codex-rs/security-level/ @corbanu-security

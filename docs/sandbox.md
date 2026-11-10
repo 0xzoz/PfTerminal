@@ -107,7 +107,10 @@ doesn't load its config, hooks or skills, warns you at startup, and asks in
 the TUI whether to load it (once the command, and anything it left running,
 has ended); a warning follows the command too (or a later command, if it
 left processes running). Check its
-contents before you choose to load it. Such folders
+contents before you choose to load it. Your choice covers what the prompt
+showed: if another command plants or changes it again while the prompt is
+on screen, loading it is refused and you're asked again (the same holds for
+the `.git` folders and repositories below). Such folders
 deeper in your workspace are covered too. One that is new, or was replaced,
 when the command ends is treated the same way. A read-only `.codex` or
 `.agents` folder your permission profile names that doesn't exist yet (or
