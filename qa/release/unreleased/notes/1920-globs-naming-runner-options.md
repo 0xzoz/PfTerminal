@@ -10,4 +10,5 @@ These lines also ask now:
   `rg x *`. For `rg` and `sort` only a pattern that ends in a wildcard
   counts (`rg x *.rs` stays quiet). Patterns that can't start with an
   option name stay quiet (`./*`, `src/*`, `--exclude=*.log`), and so does
-  any pattern after `--` (`tar cf a.tar -- *`).
+  a pattern after a `--` that ends the options (`tar cf a.tar -- *`; in
+  `tar cf -- *` the `--` is the archive's name, so that line asks).
