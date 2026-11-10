@@ -147,7 +147,19 @@ async fn pf_30_s01_source_envelopes_label_tool_output_and_keep_human_prompt() ->
             .build(&server)
             .await?;
         let human = "read the notes <keep> 日本語";
-        test.submit_turn(human).await?;
+        if cfg!(windows) {
+            // #2016: in the elevated sandbox, `submit_turn`'s full access
+            // fails to start the command when its folder is under the user's
+            // profile, as the test's temporary folder is (#2021). The
+            // envelope does not depend on the permission profile.
+            test.submit_turn_with_permission_profile(
+                human,
+                codex_protocol::models::PermissionProfile::workspace_write(),
+            )
+            .await?;
+        } else {
+            test.submit_turn(human).await?;
+        }
         let requests = captured.requests();
         assert_eq!(requests.len(), 2);
         // The human prompt stays on its own channel, verbatim.
