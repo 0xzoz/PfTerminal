@@ -189,6 +189,20 @@ pub struct McpServerConfig {
     )]
     pub startup_timeout_sec: Option<Duration>,
 
+    /// How long a stdio server that opted in to MCP 2026-07-28
+    /// (`CODEX_MCP_PROTOCOL_VERSION=2026-07-28`) may take to answer `server/discover`.
+    /// A server that doesn't answer in time is stopped and started again with legacy
+    /// `initialize`, which gets the startup timeout of its own, so a server that never
+    /// answers `server/discover` can take up to about twice the startup timeout to start.
+    /// Defaults to, and is capped at, the startup timeout. Ignored for servers that haven't
+    /// opted in.
+    #[serde(
+        default,
+        with = "option_duration_secs",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub discover_timeout_sec: Option<Duration>,
+
     /// Default timeout for MCP tool calls initiated via this server.
     #[serde(default, with = "option_duration_secs")]
     pub tool_timeout_sec: Option<Duration>,
@@ -277,6 +291,9 @@ pub struct RawMcpServerConfig {
     pub startup_timeout_ms: Option<u64>,
     #[serde(default, with = "option_duration_secs")]
     #[schemars(with = "Option<f64>")]
+    pub discover_timeout_sec: Option<Duration>,
+    #[serde(default, with = "option_duration_secs")]
+    #[schemars(with = "Option<f64>")]
     pub tool_timeout_sec: Option<Duration>,
     #[serde(default)]
     pub enabled: Option<bool>,
@@ -322,6 +339,7 @@ impl TryFrom<RawMcpServerConfig> for McpServerConfig {
             auth,
             startup_timeout_sec,
             startup_timeout_ms,
+            discover_timeout_sec,
             tool_timeout_sec,
             enabled,
             required,
@@ -381,6 +399,11 @@ impl TryFrom<RawMcpServerConfig> for McpServerConfig {
             throw_if_set("streamable_http", "env_vars", env_vars.as_ref())?;
             throw_if_set("streamable_http", "cwd", cwd.as_ref())?;
             throw_if_set("streamable_http", "bearer_token", bearer_token.as_ref())?;
+            throw_if_set(
+                "streamable_http",
+                "discover_timeout_sec",
+                discover_timeout_sec.as_ref(),
+            )?;
             McpServerTransportConfig::StreamableHttp {
                 url,
                 bearer_token_env_var,
@@ -399,6 +422,7 @@ impl TryFrom<RawMcpServerConfig> for McpServerConfig {
             auth: auth.unwrap_or_default(),
             environment_id,
             startup_timeout_sec,
+            discover_timeout_sec,
             tool_timeout_sec,
             enabled: enabled.unwrap_or_else(default_enabled),
             required: required.unwrap_or_default(),

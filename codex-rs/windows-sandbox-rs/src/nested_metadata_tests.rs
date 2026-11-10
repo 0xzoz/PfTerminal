@@ -634,3 +634,45 @@ fn entries_without_contents_serialize_as_before() {
         (r#"{"path":"C:\\w\\a\\.codex","identity":null}"#, entry)
     );
 }
+
+/// #1877 item 4: a folder with exactly as many entries as the budget is
+/// listed whole; one with more isn't listed past it, and the walk is
+/// exhausted.
+#[test]
+fn find_bounded_stops_inside_a_folder_at_the_budget() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dunce::canonicalize(dir.path()).expect("canonical");
+    for name in ["a", "b", "c"] {
+        std::fs::write(root.join(name), "").expect("file");
+    }
+    let walk = |budget: usize| {
+        let mut left = budget;
+        let found = find_bounded(std::slice::from_ref(&root), &mut left);
+        (found.exhausted, left)
+    };
+    assert_eq!((walk(3), walk(2)), ((false, 0), (true, 2)));
+}
+
+/// #1877 item 3: a link into a walked root (a project in `%TEMP%`) isn't
+/// walked again; one into the rest of an unwalked root still is.
+#[test]
+fn repos_behind_links_skip_walked_roots() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let scratch = dunce::canonicalize(dir.path()).expect("canonical");
+    let project = scratch.join("project");
+    for path in ["project\\x\\y\\.git", "sibling\\lib\\.git"] {
+        std::fs::create_dir_all(scratch.join(path)).expect("create");
+    }
+    junction(&project.join("out"), &scratch.join("sibling"));
+    junction(&project.join("back"), &project.join("x"));
+
+    let (repos, notes) = repos_behind_links(
+        &[project.join("out"), project.join("back")],
+        std::slice::from_ref(&scratch),
+        std::slice::from_ref(&project),
+    );
+    assert_eq!(
+        (repos, notes),
+        (vec![project.join("out\\lib\\.git")], Vec::new())
+    );
+}

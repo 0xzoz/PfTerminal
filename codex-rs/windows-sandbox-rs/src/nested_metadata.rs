@@ -183,6 +183,9 @@ fn find_bounded(roots: &[PathBuf], budget: &mut usize) -> Found {
             }
             let top = dir.parent.is_none();
             list(dir, top, &mut found, budget, &mut stack);
+            if found.exhausted {
+                return found;
+            }
         }
     }
     found
@@ -350,13 +353,17 @@ unsafe fn identity_at(
 /// An entry of a listed folder: its name and its kind.
 type Entry = (Vec<u16>, std::io::Result<crate::acl::walk::Attributes>);
 
-/// The entries of `dir` (open for listing); a reparse
-/// point's attributes and tag are asked of the entry itself, since a listing
-/// that shows one may not carry its tag (#1672).
-fn entries_of(dir: &crate::acl::walk::Handle) -> anyhow::Result<Vec<Entry>> {
+/// The entries of `dir` (open for listing), no more than `at_most` of them
+/// (#1877 item 4: the flag says it holds more, and isn't listed past
+/// that); a reparse point's attributes and tag are asked of the entry
+/// itself, since a listing that shows one may not carry its tag (#1672).
+fn entries_of(
+    dir: &crate::acl::walk::Handle,
+    at_most: usize,
+) -> anyhow::Result<(Vec<Entry>, bool)> {
     // SAFETY: the folder is open for listing.
-    let listed = unsafe { crate::acl::walk::list(dir.0) }?;
-    Ok(listed
+    let (listed, more) = unsafe { crate::acl::walk::list_at_most(dir.0, at_most) }?;
+    let entries = listed
         .into_iter()
         .map(|(name, attributes)| {
             let attributes = if attributes.attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -367,16 +374,21 @@ fn entries_of(dir: &crate::acl::walk::Handle) -> anyhow::Result<Vec<Entry>> {
             };
             (name, attributes)
         })
-        .collect())
+        .collect();
+    Ok((entries, more))
 }
 
 /// Records what `dir` (`top`: one of the roots) holds in `found`, and adds
-/// the folders to walk next to `stack`, in the order listed.
+/// the folders to walk next to `stack`, in the order listed. #1877 item 4:
+/// a folder holding more entries than are left in `budget` isn't listed
+/// past that, and the walk is exhausted.
 fn list(dir: Pending, top: bool, found: &mut Found, budget: &mut usize, stack: &mut Vec<Pending>) {
     #[cfg(test)]
     tests::before_list(&dir.path);
     let entries = match dir.open() {
-        Ok(handle) => entries_of(&handle).map(|entries| (std::sync::Arc::new(handle), entries)),
+        Ok(handle) => {
+            entries_of(&handle, *budget).map(|entries| (std::sync::Arc::new(handle), entries))
+        }
         // Gone. A folder that is still there but says "not found"
         // (a ProjFS or Cloud Files provider can) is unlistable.
         Err(err) if err.kind() == std::io::ErrorKind::NotFound && dir.is_gone() => return,
@@ -384,10 +396,14 @@ fn list(dir: Pending, top: bool, found: &mut Found, budget: &mut usize, stack: &
     };
     // A listing that fails partway makes the whole folder unlistable
     // (#1909: it is listed in full before anything in it is recorded).
-    let Ok((handle, entries)) = entries else {
+    let Ok((handle, (entries, more))) = entries else {
         found.unlistable.push(dir.path);
         return;
     };
+    if more {
+        found.exhausted = true;
+        return;
+    }
     let dir = dir.path;
     // D420: a `HEAD` or `commondir` makes this folder a candidate
     // bare repository.
@@ -707,7 +723,8 @@ fn contents_of(
         #[cfg(test)]
         tests::before_list(&dir.path);
         let listed = dir.open().map_err(anyhow::Error::from).and_then(|handle| {
-            entries_of(&handle).map(|entries| (std::sync::Arc::new(handle), entries))
+            entries_of(&handle, usize::MAX)
+                .map(|(entries, _)| (std::sync::Arc::new(handle), entries))
         });
         let Ok((handle, entries)) = listed else {
             prints.insert(prefix, crate::git_watch::truncated());
@@ -814,10 +831,13 @@ pub(crate) fn git_appeared_in_session(
 /// doesn't cover, such as `%TEMP%`): a command could build one there and
 /// link it in. Each such link is walked by its own path, its links in turn,
 /// up to 20,000 entries in all; past that the link is a note (it counts as
-/// changed after every session).
+/// changed after every session). #1877 item 3: a link whose target lies in
+/// one of `walked` (the roots the walk covers, which may lie inside an
+/// unwalked one: a project in `%TEMP%`) isn't walked again.
 pub(crate) fn repos_behind_links(
     links: &[PathBuf],
     unwalked: &[PathBuf],
+    walked: &[PathBuf],
 ) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
     let mut budget = 20_000_usize;
     let mut repos = Vec::new();
@@ -828,7 +848,10 @@ pub(crate) fn repos_behind_links(
         let Ok(target) = dunce::canonicalize(&link) else {
             continue;
         };
-        if !unwalked.iter().any(|root| starts_with(&target, root)) || !visited.insert(target) {
+        if !unwalked.iter().any(|root| starts_with(&target, root))
+            || walked.iter().any(|root| starts_with(&target, root))
+            || !visited.insert(target)
+        {
             continue;
         }
         let found = find_bounded(std::slice::from_ref(&link), &mut budget);
