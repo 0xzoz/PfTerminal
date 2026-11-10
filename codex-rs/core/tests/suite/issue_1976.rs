@@ -237,7 +237,10 @@ async fn issue_1976_refused_typing_is_listed_in_the_inspector() -> anyhow::Resul
         let ok = if refused {
             typed.output.contains(&expected) && listed
         } else {
-            !typed.output.contains("Security level") && !listed
+            // The typing reached the process lookup (no process 1000 runs).
+            typed.output.contains("Unknown process id 1000")
+                && !typed.output.contains("Security level")
+                && !listed
         };
         if !ok {
             wrong.push(format!(
