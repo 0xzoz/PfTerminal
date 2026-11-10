@@ -998,7 +998,8 @@ async fn make_rmcp_client(
     let resolved_environment =
         resolved_environment.map_err(|err| StartupOutcomeError::from(anyhow!(err)))?;
     let is_local_environment = config.is_local_environment();
-    // A discover wait can't outlast startup itself.
+    // The discover wait is capped at the startup timeout; a legacy fallback after it gets
+    // the startup timeout again.
     let discover_timeout = config.discover_timeout_sec.map(|discover_timeout| {
         discover_timeout.min(
             config

@@ -40,6 +40,8 @@ enum TestServer {
 #[derive(Default)]
 struct Connection {
     requests: StdMutex<Vec<String>>,
+    /// `protocolVersion` of each `initialize` request.
+    initialize_versions: StdMutex<Vec<String>>,
     closed: AtomicBool,
 }
 
@@ -57,6 +59,19 @@ impl TestServerFactory {
             .iter()
             .map(|connection| connection.requests.lock().unwrap().clone())
             .collect()
+    }
+
+    fn initialize_versions(&self) -> Vec<String> {
+        self.connections
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|connection| connection.initialize_versions.lock().unwrap().clone())
+            .collect()
+    }
+
+    fn opened_connections(&self) -> usize {
+        self.connections.lock().unwrap().len()
     }
 
     fn open_connections(&self) -> usize {
@@ -104,6 +119,14 @@ async fn serve(stream: DuplexStream, server: TestServer, connection: &Connection
             continue;
         };
         connection.requests.lock().unwrap().push(method.to_string());
+        if method == "initialize" {
+            connection.initialize_versions.lock().unwrap().push(
+                message["params"]["protocolVersion"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+        }
         let reply = match (server, method) {
             (TestServer::Modern { discover_delay }, "server/discover") => {
                 let delay = tokio::time::sleep(discover_delay);
@@ -161,30 +184,46 @@ async fn serve(stream: DuplexStream, server: TestServer, connection: &Connection
 struct Started {
     result: anyhow::Result<ServerPeerInfo>,
     requests: Vec<Vec<String>>,
+    initialize_versions: Vec<String>,
     /// Test servers still connected once the handshake settled.
     open_connections: usize,
 }
 
-/// Starts an opted-in 2026-07-28 client against `server`.
-async fn start(server: TestServer, discover_timeout: Option<Duration>) -> Started {
-    let factory = Arc::new(TestServerFactory {
+fn test_server_factory(server: TestServer) -> Arc<TestServerFactory> {
+    Arc::new(TestServerFactory {
         server,
         connections: StdMutex::new(Vec::new()),
-    });
-    let client = RmcpClient::new_in_process_client_with_protocol_mode(
-        Arc::clone(&factory) as Arc<dyn InProcessTransportFactory>,
+    })
+}
+
+async fn opted_in_client(
+    factory: &Arc<TestServerFactory>,
+    discover_timeout: Option<Duration>,
+) -> RmcpClient {
+    RmcpClient::new_in_process_client_with_protocol_mode(
+        Arc::clone(factory) as Arc<dyn InProcessTransportFactory>,
         McpProtocolMode::V20260728,
     )
     .await
     .expect("in-process client")
-    .with_discover_timeout(discover_timeout);
-    let result = client
+    .with_discover_timeout(discover_timeout)
+}
+
+/// Client params without an explicit `protocolVersion`, so rmcp's default applies.
+fn default_init_params() -> InitializeRequestParams {
+    InitializeRequestParams::new(
+        ClientCapabilities::default(),
+        Implementation::new("lifecycle-test", "1.0.0"),
+    )
+}
+
+async fn initialize(
+    client: &RmcpClient,
+    params: InitializeRequestParams,
+) -> anyhow::Result<ServerPeerInfo> {
+    client
         .initialize(
-            InitializeRequestParams::new(
-                ClientCapabilities::default(),
-                Implementation::new("lifecycle-test", "1.0.0"),
-            )
-            .with_protocol_version(ProtocolVersion::V_2025_06_18),
+            params,
             Some(STARTUP_TIMEOUT),
             Box::new(|_, _| {
                 async {
@@ -197,7 +236,27 @@ async fn start(server: TestServer, discover_timeout: Option<Duration>) -> Starte
                 .boxed()
             }),
         )
-        .await;
+        .await
+}
+
+/// Starts an opted-in 2026-07-28 client against `server`, with the params Codex sends.
+async fn start(server: TestServer, discover_timeout: Option<Duration>) -> Started {
+    start_with_params(
+        server,
+        discover_timeout,
+        default_init_params().with_protocol_version(ProtocolVersion::V_2025_06_18),
+    )
+    .await
+}
+
+async fn start_with_params(
+    server: TestServer,
+    discover_timeout: Option<Duration>,
+    params: InitializeRequestParams,
+) -> Started {
+    let factory = test_server_factory(server);
+    let client = opted_in_client(&factory, discover_timeout).await;
+    let result = initialize(&client, params).await;
     // Let the test servers observe any transport the client dropped.
     tokio::time::sleep(Duration::from_millis(1)).await;
     let open_connections = factory.open_connections();
@@ -205,6 +264,7 @@ async fn start(server: TestServer, discover_timeout: Option<Duration>) -> Starte
     Started {
         result,
         requests: factory.requests_per_connection(),
+        initialize_versions: factory.initialize_versions(),
         open_connections,
     }
 }
@@ -305,4 +365,87 @@ async fn discover_timeout_falls_back_on_a_fresh_transport() {
         requests(&[&["server/discover"], &["initialize"]])
     );
     assert_eq!(started.open_connections, 1);
+}
+
+/// A server that accepts the transport but never answers `server/discover`.
+const SILENT_MODERN: TestServer = TestServer::Modern {
+    discover_delay: Duration::from_secs(3600),
+};
+
+// #1978 review round 1: the discover wait and the legacy `initialize` each get the
+// startup timeout, so a silent server still falls back with the default wait.
+#[tokio::test(start_paused = true)]
+async fn server_never_answering_discover_falls_back_with_the_default_wait() {
+    let started = start(SILENT_MODERN, /*discover_timeout*/ None).await;
+
+    let info = started
+        .result
+        .expect("a server that never answers discover must start through initialize");
+    assert_eq!(info.protocol_version, ProtocolVersion::V_2025_06_18);
+    assert_eq!(
+        started.requests,
+        requests(&[&["server/discover"], &["initialize"]])
+    );
+    assert_eq!(started.open_connections, 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn server_never_answering_discover_falls_back_with_the_wait_at_the_startup_timeout() {
+    let started = start(SILENT_MODERN, Some(STARTUP_TIMEOUT)).await;
+
+    let info = started
+        .result
+        .expect("a discover wait equal to the startup timeout must still leave time to fall back");
+    assert_eq!(info.protocol_version, ProtocolVersion::V_2025_06_18);
+    assert_eq!(
+        started.requests,
+        requests(&[&["server/discover"], &["initialize"]])
+    );
+    assert_eq!(started.open_connections, 1);
+}
+
+// `Auto` sends its fallback `initialize` with the legacy 2025-06-18 version whatever the
+// caller passed; the fresh-transport fallback must do the same.
+#[tokio::test(start_paused = true)]
+async fn legacy_fallback_sends_the_legacy_protocol_version() {
+    let started = start_with_params(
+        TestServer::Legacy,
+        /*discover_timeout*/ None,
+        default_init_params(),
+    )
+    .await;
+
+    started
+        .result
+        .expect("a legacy server must start through the initialize fallback");
+    assert_eq!(started.initialize_versions, vec!["2025-06-18".to_string()]);
+}
+
+// A `shutdown()` during the discover wait must not let the fallback start another server.
+#[tokio::test(start_paused = true)]
+async fn shutdown_during_the_discover_wait_starts_no_fallback_server() {
+    let factory = test_server_factory(SILENT_MODERN);
+    let client = Arc::new(opted_in_client(&factory, Some(Duration::from_secs(5))).await);
+    let initializing = tokio::spawn({
+        let client = Arc::clone(&client);
+        async move {
+            initialize(
+                &client,
+                default_init_params().with_protocol_version(ProtocolVersion::V_2025_06_18),
+            )
+            .await
+        }
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    client.shutdown().await;
+
+    let error = initializing
+        .await
+        .expect("initialize task")
+        .expect_err("initialize must fail once the client is shut down");
+    assert!(
+        error.to_string().contains("MCP client is shut down"),
+        "unexpected error: {error:#}"
+    );
+    assert_eq!(factory.opened_connections(), 1);
 }

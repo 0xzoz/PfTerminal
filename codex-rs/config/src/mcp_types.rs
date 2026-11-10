@@ -189,9 +189,13 @@ pub struct McpServerConfig {
     )]
     pub startup_timeout_sec: Option<Duration>,
 
-    /// How long a stdio server that opted in to MCP 2026-07-28 may take to answer
-    /// `server/discover` before Codex starts it again with legacy `initialize`.
-    /// Defaults to, and is capped at, the startup timeout.
+    /// How long a stdio server that opted in to MCP 2026-07-28
+    /// (`CODEX_MCP_PROTOCOL_VERSION=2026-07-28`) may take to answer `server/discover`.
+    /// A server that doesn't answer in time is stopped and started again with legacy
+    /// `initialize`, which gets the startup timeout of its own, so a server that never
+    /// answers `server/discover` can take up to about twice the startup timeout to start.
+    /// Defaults to, and is capped at, the startup timeout. Ignored for servers that haven't
+    /// opted in.
     #[serde(
         default,
         with = "option_duration_secs",

@@ -184,13 +184,18 @@ async fn shutdown_kills_initialized_stdio_server_with_in_flight_operation() -> R
 async fn opted_in_legacy_fallback_leaves_one_stdio_server_process() -> Result<()> {
     let temp_dir = tempfile::tempdir()?;
     let pid_log = temp_dir.path().join("server.pids");
+    let overlap_log = temp_dir.path().join("overlap.pids");
     let server = codex_utils_cargo_bin::cargo_bin("test_mcp_2026_stdio_server")?;
 
     let client = RmcpClient::new_stdio_client_with_protocol_mode(
         OsString::from("/bin/sh"),
         vec![
             OsString::from("-c"),
-            OsString::from("echo $$ >> \"$PID_LOG\"; exec \"$SERVER\" legacy-fallback"),
+            OsString::from(
+                "if [ -s \"$PID_LOG\" ] && kill -0 \"$(head -n 1 \"$PID_LOG\")\" 2>/dev/null; \
+                 then head -n 1 \"$PID_LOG\" >> \"$OVERLAP_LOG\"; fi; \
+                 echo $$ >> \"$PID_LOG\"; exec \"$SERVER\" legacy-fallback",
+            ),
         ],
         Some(HashMap::from([
             (
@@ -198,6 +203,10 @@ async fn opted_in_legacy_fallback_leaves_one_stdio_server_process() -> Result<()
                 OsString::from("2026-07-28"),
             ),
             (OsString::from("PID_LOG"), pid_log.clone().into_os_string()),
+            (
+                OsString::from("OVERLAP_LOG"),
+                overlap_log.clone().into_os_string(),
+            ),
             (OsString::from("SERVER"), server.into_os_string()),
         ])),
         &[],
@@ -232,6 +241,11 @@ async fn opted_in_legacy_fallback_leaves_one_stdio_server_process() -> Result<()
         pids.len(),
         2,
         "discover and the legacy initialize each start one server: {pids:?}"
+    );
+    assert!(
+        !overlap_log.exists(),
+        "the fallback server started while the first server was still running: {:?}",
+        fs::read_to_string(&overlap_log)
     );
     wait_for_process_exit(pids[0]).await?;
     assert!(

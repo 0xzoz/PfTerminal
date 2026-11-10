@@ -10,6 +10,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::anyhow;
 use codex_api::SharedAuthProvider;
@@ -80,12 +81,14 @@ use crate::oauth::ResolvedOAuthTokens;
 use crate::oauth::StoredOAuthTokens;
 use crate::oauth::resolve_oauth_tokens_from_store_policy;
 use crate::oauth_http_client::OAuthHttpClientAdapter;
+use crate::protocol_mode::LEGACY_FALLBACK_PROTOCOL_VERSION;
 use crate::protocol_mode::McpProtocolMode;
 use crate::startup_error::auth_error_with_reason;
 use crate::stdio_server_launcher::StdioServerCommand;
 use crate::stdio_server_launcher::StdioServerLauncher;
 use crate::stdio_server_launcher::StdioServerProcessHandle;
 use crate::stdio_server_launcher::StdioServerTransport;
+use crate::stdio_server_launcher::TERMINATED_SERVER_EXIT_WAIT;
 use crate::utils::build_default_headers;
 use codex_config::types::OAuthCredentialsStoreMode;
 
@@ -357,7 +360,8 @@ pub struct RmcpClient {
 impl RmcpClient {
     /// Bounds how long an opted-in 2026-07-28 stdio server may take to answer
     /// `server/discover` before it is started again with legacy `initialize`. Without it,
-    /// the `initialize` timeout bounds the discover wait.
+    /// the startup timeout passed to `initialize` bounds the discover wait. The legacy
+    /// `initialize` then gets that startup timeout again, on its own.
     pub fn with_discover_timeout(mut self, discover_timeout: Option<Duration>) -> Self {
         self.discover_timeout = discover_timeout;
         self
@@ -1079,17 +1083,17 @@ impl RmcpClient {
     )> {
         // rmcp's `Auto` lifecycle stops waiting for `server/discover` after a fixed 10 s and
         // sends `initialize` on the same transport, where a late discover reply fails the
-        // handshake (#1950). Transports that can be relaunched wait for discover within the
-        // startup timeout instead, and send a legacy `initialize` on a fresh transport.
+        // handshake (#1950). Transports that can be relaunched instead wait for discover and,
+        // if needed, send a legacy `initialize` on a fresh transport; each phase gets `timeout`.
         let discover_then_initialize = self.protocol_mode == McpProtocolMode::V20260728
             && matches!(
                 pending_transport,
                 PendingTransport::InProcess { .. } | PendingTransport::Stdio { .. }
             );
-        let (transport, oauth_persistor) = if discover_then_initialize {
+        let (service_result, oauth_persistor) = if discover_then_initialize {
             (
-                self.discover_or_initialize_fresh(pending_transport, client_service)
-                    .boxed(),
+                self.discover_or_initialize_fresh(pending_transport, client_service, timeout)
+                    .await,
                 None,
             )
         } else {
@@ -1098,24 +1102,13 @@ impl RmcpClient {
                 client_service,
                 self.protocol_mode.client_lifecycle(),
             );
+            let transport = transport.map(|result| {
+                result.map_err(|source| anyhow::Error::from(HandshakeError { source }))
+            });
             (
-                transport
-                    .map(|result| {
-                        result.map_err(|source| anyhow::Error::from(HandshakeError { source }))
-                    })
-                    .boxed(),
+                handshake_within(timeout, transport, "").await,
                 oauth_persistor,
             )
-        };
-
-        let service_result = match timeout {
-            Some(duration) => match time::timeout(duration, transport).await {
-                Ok(result) => result,
-                Err(_elapsed) => Err(anyhow!(
-                    "timed out handshaking with MCP server after {duration:?}"
-                )),
-            },
-            None => transport.await,
         };
         let service = match service_result {
             Ok(service) => service,
@@ -1177,62 +1170,87 @@ impl RmcpClient {
         }
     }
 
-    /// `Auto` without its fixed 10 s discover timeout: the discover wait is the configured
-    /// `discover_timeout_sec`, else the caller's startup timeout. A server that rejects
-    /// discover as legacy, or does not answer in time, gets `initialize` on a fresh transport,
-    /// so no discover reply can arrive during the legacy handshake.
+    /// `Auto` without its fixed 10 s discover timeout, in two phases that each get
+    /// `startup_timeout`. The discover wait is `discover_timeout_sec` when set, else the
+    /// startup timeout. A server that rejects discover as legacy, or does not answer in time,
+    /// is stopped and gets a legacy `initialize` on a fresh transport, so no discover reply can
+    /// arrive during that handshake. A server that never answers discover can therefore take
+    /// up to about twice the startup timeout to start.
     async fn discover_or_initialize_fresh(
         &self,
         pending_transport: PendingTransport,
         client_service: ElicitationClientService,
+        startup_timeout: Option<Duration>,
     ) -> Result<RunningService<RoleClient, ElicitationClientService>> {
         let discover = ClientLifecycleMode::Discover {
             preferred_versions: vec![self.protocol_mode.preferred_protocol_version()],
         };
         let (transport, _) =
             Self::serve_pending_transport(pending_transport, client_service.clone(), discover);
+        let discover_wait = self.discover_timeout.or(startup_timeout);
         // Dropping the discover future on timeout drops its transport, so no late reply can
         // reach the fresh one.
-        let discover_result = match self.discover_timeout {
-            Some(wait) => time::timeout(wait, transport).await.ok(),
-            None => Some(transport.await),
+        let discover_result = match discover_wait {
+            Some(wait) => time::timeout(wait, transport)
+                .await
+                .map_err(|_elapsed| wait),
+            None => Ok(transport.await),
         };
-        let discover_error = match discover_result {
-            Some(Ok(service)) => return Ok(service),
-            Some(Err(error)) if is_legacy_discover_rejection(&error) => Some(error),
-            Some(Err(source)) => return Err(HandshakeError { source }.into()),
-            None => None,
+        let fallback = match discover_result {
+            Ok(Ok(service)) => return Ok(service),
+            Ok(Err(error)) if is_legacy_discover_rejection(&error) => {
+                LegacyFallback::Rejected(Box::new(error))
+            }
+            Ok(Err(source)) => return Err(HandshakeError { source }.into()),
+            Err(wait) => LegacyFallback::NoDiscoverReply { wait },
         };
 
-        // Stop the first server process before starting the one that gets `initialize`.
+        // Stop the first server process, and give it a moment to exit, before starting the
+        // one that gets `initialize`, so the two never hold the same lock file or port.
         let previous_process = self.stdio_process.lock().await.take();
-        if let Some(previous) = previous_process
-            && let Err(error) = previous.terminate().await
-        {
-            warn!("failed to terminate MCP stdio server process after discover: {error}");
+        if let Some(previous) = previous_process {
+            if let Err(error) = previous.terminate().await {
+                warn!("failed to terminate MCP stdio server process after discover: {error}");
+            }
+            previous.wait_for_exit(TERMINATED_SERVER_EXIT_WAIT).await;
         }
-        let fresh_transport = Self::create_pending_transport(&self.transport_recipe).await?;
+        // A `shutdown()` that already ran must not leave a fallback server behind.
+        self.ensure_not_shut_down().await?;
+        let fresh_transport = Self::create_pending_transport(&self.transport_recipe)
+            .await
+            .context("failed to start the MCP server again for the legacy initialize fallback")?;
         if let PendingTransport::Stdio { transport } = &fresh_transport {
-            *self.stdio_process.lock().await = Some(transport.process_handle());
+            let process = transport.process_handle();
+            *self.stdio_process.lock().await = Some(process.clone());
+            // `shutdown()` closes the state before it reads the process handle, so it either
+            // terminates this process itself or this check sees the client closed.
+            if let Err(error) = self.ensure_not_shut_down().await {
+                if let Err(terminate_error) = process.terminate().await {
+                    warn!("failed to terminate MCP stdio server process: {terminate_error}");
+                }
+                return Err(error);
+            }
         }
+        // Match `Auto`: its legacy `initialize` uses 2025-06-18 whatever the caller passed.
         let (transport, _) = Self::serve_pending_transport(
             fresh_transport,
-            client_service,
+            client_service.with_protocol_version(LEGACY_FALLBACK_PROTOCOL_VERSION),
             ClientLifecycleMode::Initialize,
         );
-        transport.await.map_err(|fallback| match discover_error {
-            Some(discover_error) => HandshakeError {
-                source: ClientInitializeError::LegacyFallbackFailed {
-                    discover: Box::new(discover_error),
-                    fallback: Box::new(fallback),
-                },
-            }
-            .into(),
-            None => anyhow::Error::from(HandshakeError { source: fallback }).context(format!(
-                "MCP server did not answer server/discover within {:?}; legacy initialize failed",
-                self.discover_timeout.unwrap_or_default()
-            )),
-        })
+        let transport = transport.map(|result| result.map_err(|error| fallback.into_error(error)));
+        handshake_within(
+            startup_timeout,
+            transport,
+            " during the legacy initialize fallback",
+        )
+        .await
+    }
+
+    async fn ensure_not_shut_down(&self) -> Result<()> {
+        if matches!(*self.state.lock().await, ClientState::Closed) {
+            return Err(anyhow!("MCP client is shut down"));
+        }
+        Ok(())
     }
 
     async fn run_service_operation<T, F, Fut>(
@@ -1524,6 +1542,51 @@ fn is_legacy_discover_rejection(error: &ClientInitializeError) -> bool {
             if error.code != ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY
                 && error.code != ErrorCode::HEADER_MISMATCH
     )
+}
+
+/// Why an opted-in server is started again with legacy `initialize`.
+enum LegacyFallback {
+    /// The server rejected `server/discover` the way `Auto` treats as legacy.
+    Rejected(Box<ClientInitializeError>),
+    /// The server did not answer `server/discover` within `wait`.
+    NoDiscoverReply { wait: Duration },
+}
+
+impl LegacyFallback {
+    fn into_error(self, fallback: ClientInitializeError) -> anyhow::Error {
+        match self {
+            Self::Rejected(discover) => HandshakeError {
+                source: ClientInitializeError::LegacyFallbackFailed {
+                    discover,
+                    fallback: Box::new(fallback),
+                },
+            }
+            .into(),
+            Self::NoDiscoverReply { wait } => anyhow::Error::from(HandshakeError {
+                source: fallback,
+            })
+            .context(format!(
+                "MCP server did not answer server/discover within {wait:?}; legacy initialize failed"
+            )),
+        }
+    }
+}
+
+/// Runs one handshake phase within `timeout`; `phase` is appended to the timeout message.
+async fn handshake_within<T>(
+    timeout: Option<Duration>,
+    handshake: impl Future<Output = Result<T>>,
+    phase: &str,
+) -> Result<T> {
+    match timeout {
+        Some(duration) => match time::timeout(duration, handshake).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(anyhow!(
+                "timed out handshaking with MCP server after {duration:?}{phase}"
+            )),
+        },
+        None => handshake.await,
+    }
 }
 
 #[cfg(test)]
