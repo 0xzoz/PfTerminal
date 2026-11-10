@@ -1348,6 +1348,7 @@ async fn create_oauth_transport_and_runtime(
     let oauth_http_client = Arc::new(OAuthHttpClientAdapter::new(
         http_client.clone(),
         default_headers.clone(),
+        url,
     ));
     let mut manager =
         AuthorizationManager::new_with_oauth_http_client(url.to_string(), oauth_http_client)

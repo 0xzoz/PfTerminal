@@ -52,7 +52,8 @@ without them Corbanu refuses every model request under Moderate, so
   first turn hasn't begun gets the interrupt, which stops that first turn,
   but no notice that would start another (D435). A first turn held back by
   the agent limit, the kill switch or a signed-out account is not cancelled
-  and runs later.
+  and runs later; the interrupt can also cancel that agent's MCP server
+  startup, so that turn may run without its MCP tools.
   Where approving can't unlock a file, the prompt names it and says what it
   is: under `secretless_agent_launch`, Corbanu's own
   files (such as its sign-in, vault, config and history), CLI tokens (`~/.aws/credentials`, `~/.netrc`,
