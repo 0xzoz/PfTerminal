@@ -151,7 +151,7 @@ pub fn terminate_process_group(_process_group_id: u32) -> io::Result<bool> {
 #[cfg(unix)]
 /// Whether any process, including an unreaped zombie, is still in `process_group_id`.
 pub fn process_group_exists(process_group_id: u32) -> io::Result<bool> {
-    signal_process_group_id(process_group_id as libc::pid_t, 0)
+    signal_process_group_id(process_group_id as libc::pid_t, /*signal*/ 0)
 }
 
 #[cfg(not(unix))]
