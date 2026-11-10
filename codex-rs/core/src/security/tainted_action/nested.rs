@@ -1250,12 +1250,21 @@ impl Classifier {
             let mut lexer_split = false;
             let marks: Vec<rerun::GitWordMark> = words
                 .iter()
-                .map(|word| {
+                .enumerate()
+                .map(|(at, word)| {
                     // Other unseen words are `simple_command`'s, which knows
                     // the values the line sets (`r=origin; git fetch "$r"`),
                     // unless it may have miscounted (#1910: `git fetch
                     // --refmap='x y' e"$r"`).
-                    let seen = !(lexer_split && word.dynamic);
+                    // #1910, either of two conditions, never one gating the
+                    // other: past a word the word lexer may cut differently
+                    // (`lexer_split`), or right after quoted text, which it
+                    // may also drop (`-o '' e"$r"`), when the line holds text
+                    // it does not show (`lexed_unseen`: else it gave every
+                    // expansion a value from the assignments it read).
+                    let seen = !(word.dynamic
+                        && (lexer_split
+                            || (self.lexed_unseen && at > 0 && words[at - 1].quoted_before)));
                     let text = word.text.as_str();
                     lexer_split |= text.contains(char::is_whitespace)
                         || text.contains([',', '(', ')'])
